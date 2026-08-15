@@ -17,13 +17,13 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
-    ExecutionMutationReceipt, ExecutionMutationSink, ExecutionRequest as ProviderExecutionRequest,
-    ProviderCapability, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderExecutionConcurrency, ProviderExecutionLog, ProviderProgress,
-    ProviderQuestionMaterialization, ProviderRegistry, ProviderSubmissionStepOutcome,
-    ResolvedProviderQuestionSessionContinuation, ResolvedProviderRuntimeSettings,
-    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
-    TaskProgressCapability,
+    ExecutionMutationReceipt, ExecutionMutationSink, ExecutionMutationVerification,
+    ExecutionRequest as ProviderExecutionRequest, ProviderCapability, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
+    ProviderProgress, ProviderQuestionMaterialization, ProviderRegistry,
+    ProviderSubmissionStepOutcome, ResolvedProviderQuestionSessionContinuation,
+    ResolvedProviderRuntimeSettings, SubmissionExecuteCapability, SubmissionVerifyCapability,
+    TaskExecutionCapability, TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
@@ -33,6 +33,7 @@ use asterism_storage::{
     CompletionWorkflowRepository, ExecutionAtomicMutationIssueOutcome,
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
     ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
+    ExecutionAtomicMutationVerificationOutcome, ExecutionAtomicMutationVerificationRequest,
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionCapabilityCallMutation,
     ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
     ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
@@ -4180,6 +4181,35 @@ impl<E: ExecutionAtomicMutationRepository> ExecutionMutationSink
             Err(error) => Err(self.map_mutation_storage_error(&error, true)),
         }
     }
+
+    async fn record_verification(
+        &self,
+        verification: ExecutionMutationVerification,
+    ) -> Result<(), ProviderError> {
+        match self
+            .executions
+            .record_execution_atomic_mutation_verification(
+                ExecutionAtomicMutationVerificationRequest {
+                    execution_id: self.execution_id,
+                    attempt_id: self.attempt_id,
+                    ordinal: verification.ordinal(),
+                    scheduler_job_id: self.scheduler_job_id,
+                    worker_id: self.worker_id,
+                    observation_digest: verification.observation_digest(),
+                    verified: verification.verified(),
+                    correlation_id: self.correlation_id,
+                    at: Utc::now(),
+                },
+            )
+            .await
+        {
+            Ok(ExecutionAtomicMutationVerificationOutcome::Recorded(_)) => Ok(()),
+            Ok(ExecutionAtomicMutationVerificationOutcome::AlreadyRecorded(_)) => {
+                Err(ambiguous_mutation_error())
+            }
+            Err(error) => Err(self.map_mutation_storage_error(&error, true)),
+        }
+    }
 }
 
 impl<E> PersistedExecutionEventSink<'_, E> {
@@ -5009,6 +5039,9 @@ mod tests {
             .await?;
         mutations
             .record_receipt(ExecutionMutationReceipt::new(1, [42; 32], true).unwrap())
+            .await?;
+        mutations
+            .record_verification(ExecutionMutationVerification::new(1, [43; 32], true).unwrap())
             .await
     }
 
@@ -5372,8 +5405,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(live_log, 1);
-        let mutation: (i64, String, Vec<u8>, Vec<u8>, bool) = sqlx::query_as(
-            "SELECT ordinal, operation_type, request_digest, response_digest, accepted \
+        let mutation: (i64, String, Vec<u8>, Vec<u8>, bool, Vec<u8>, bool) = sqlx::query_as(
+            "SELECT ordinal, operation_type, request_digest, response_digest, accepted, \
+                    verification_digest, verified \
              FROM execution_atomic_mutations WHERE execution_id = ?",
         )
         .bind(fixture.execution_id.to_string())
@@ -5385,6 +5419,8 @@ mod tests {
         assert_eq!(mutation.2, vec![41; 32]);
         assert_eq!(mutation.3, vec![42; 32]);
         assert!(mutation.4);
+        assert_eq!(mutation.5, vec![43; 32]);
+        assert!(mutation.6);
         let completion: (String, i64, Option<String>, Option<String>) = sqlx::query_as(
             "SELECT workflow.state, json_extract(workflow.workflow_json, '$.attempts_started'), \
                     observation.completion_outcome, \

@@ -2119,8 +2119,11 @@ pub struct ExecutionAtomicMutation {
     pub request_digest: [u8; 32],
     pub response_digest: Option<[u8; 32]>,
     pub accepted: Option<bool>,
+    pub verification_digest: Option<[u8; 32]>,
+    pub verified: Option<bool>,
     pub issued_at: Timestamp,
     pub received_at: Option<Timestamp>,
+    pub verified_at: Option<Timestamp>,
 }
 
 #[derive(Clone, Debug)]
@@ -2161,6 +2164,25 @@ pub enum ExecutionAtomicMutationReceiptOutcome {
     AlreadyRecorded(ExecutionAtomicMutation),
 }
 
+#[derive(Clone, Debug)]
+pub struct ExecutionAtomicMutationVerificationRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub ordinal: u32,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub observation_digest: [u8; 32],
+    pub verified: bool,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionAtomicMutationVerificationOutcome {
+    Recorded(ExecutionAtomicMutation),
+    AlreadyRecorded(ExecutionAtomicMutation),
+}
+
 /// Durable, ordered issue/receipt ledger for the individual remote mutations
 /// inside one Provider-owned atomic operation. An issued row without a receipt
 /// is intentionally not replayable and prevents issuing the next ordinal.
@@ -2181,6 +2203,11 @@ pub trait ExecutionAtomicMutationRepository: Send + Sync {
         &self,
         request: ExecutionAtomicMutationReceiptRequest<'_>,
     ) -> Result<ExecutionAtomicMutationReceiptOutcome, StorageError>;
+
+    async fn record_execution_atomic_mutation_verification(
+        &self,
+        request: ExecutionAtomicMutationVerificationRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationVerificationOutcome, StorageError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

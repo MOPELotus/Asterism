@@ -86,6 +86,7 @@ pub use repository::{
     DispatchedBrowserBridgeCommand, ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
     ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
+    ExecutionAtomicMutationVerificationOutcome, ExecutionAtomicMutationVerificationRequest,
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,
     ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
     ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,

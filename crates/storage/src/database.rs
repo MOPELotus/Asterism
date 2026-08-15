@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 66);
+        assert_eq!(migration_count, 67);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -239,6 +239,71 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(protocol_tables, 2);
+    }
+
+    #[tokio::test]
+    async fn atomic_mutation_verification_migration_preserves_legacy_receipts() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            r"
+            CREATE TABLE scheduled_jobs (id TEXT PRIMARY KEY NOT NULL) STRICT;
+            CREATE TABLE execution_attempts (
+                execution_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                PRIMARY KEY (execution_id, id)
+            ) STRICT;
+            CREATE TABLE execution_atomic_mutations (
+                execution_id TEXT NOT NULL,
+                execution_attempt_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND 100000),
+                scheduler_job_id TEXT NOT NULL REFERENCES scheduled_jobs(id) ON DELETE RESTRICT,
+                worker_id TEXT NOT NULL CHECK (length(worker_id) BETWEEN 1 AND 256),
+                operation_type TEXT NOT NULL CHECK (length(operation_type) BETWEEN 1 AND 96),
+                request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                response_digest BLOB CHECK (
+                    response_digest IS NULL OR length(response_digest) = 32
+                ),
+                accepted INTEGER CHECK (accepted IS NULL OR accepted IN (0, 1)),
+                issued_at TEXT NOT NULL,
+                received_at TEXT,
+                PRIMARY KEY (execution_id, execution_attempt_id, ordinal),
+                FOREIGN KEY (execution_id, execution_attempt_id)
+                    REFERENCES execution_attempts(execution_id, id) ON DELETE RESTRICT,
+                CHECK (
+                    (response_digest IS NULL AND accepted IS NULL AND received_at IS NULL)
+                    OR (response_digest IS NOT NULL AND accepted IS NOT NULL
+                        AND received_at IS NOT NULL AND received_at >= issued_at)
+                )
+            ) STRICT;
+            CREATE INDEX idx_execution_atomic_mutations_sequence
+                ON execution_atomic_mutations (execution_id, execution_attempt_id, ordinal);
+            INSERT INTO scheduled_jobs VALUES ('job-a');
+            INSERT INTO execution_attempts VALUES ('execution-a', 'attempt-a');
+            INSERT INTO execution_atomic_mutations VALUES (
+                'execution-a', 'attempt-a', 1, 'job-a', 'worker-a',
+                'provider-a.save', randomblob(32), randomblob(32), 1,
+                '2026-08-15T10:00:00+00:00', '2026-08-15T10:00:01+00:00'
+            );
+            ",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/067_execution_atomic_mutation_verification.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let row: (i64, bool, Option<Vec<u8>>, Option<bool>, Option<String>) = sqlx::query_as(
+            "SELECT ordinal, accepted, verification_digest, verified, verified_at \
+             FROM execution_atomic_mutations",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(row, (1, true, None, None, None));
     }
 
     #[tokio::test]

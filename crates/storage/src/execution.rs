@@ -28,6 +28,7 @@ use crate::{
     Database, ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
     ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
+    ExecutionAtomicMutationVerificationOutcome, ExecutionAtomicMutationVerificationRequest,
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,
     ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
     ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
@@ -894,7 +895,8 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
     ) -> Result<Vec<ExecutionAtomicMutation>, StorageError> {
         let rows = sqlx::query(
             "SELECT execution_id, execution_attempt_id, ordinal, scheduler_job_id, worker_id, \
-                    operation_type, request_digest, response_digest, accepted, issued_at, received_at \
+                    operation_type, request_digest, response_digest, accepted, verification_digest, \
+                    verified, issued_at, received_at, verified_at \
              FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ? \
              ORDER BY ordinal",
         )
@@ -998,8 +1000,11 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
             request_digest: request.request_digest,
             response_digest: None,
             accepted: None,
+            verification_digest: None,
+            verified: None,
             issued_at: request.at,
             received_at: None,
+            verified_at: None,
         };
         transaction.commit().await?;
         Ok(ExecutionAtomicMutationIssueOutcome::Issued(mutation))
@@ -1093,6 +1098,104 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
         mutation.received_at = Some(request.at);
         transaction.commit().await?;
         Ok(ExecutionAtomicMutationReceiptOutcome::Recorded(mutation))
+    }
+
+    async fn record_execution_atomic_mutation_verification(
+        &self,
+        request: ExecutionAtomicMutationVerificationRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationVerificationOutcome, StorageError> {
+        validate_atomic_mutation_verification(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let active = find_active_attempt(&mut transaction, request.execution_id).await?;
+        if active.id != request.attempt_id {
+            return Err(StorageError::ExecutionAttemptNotActive);
+        }
+        let Some(mut mutation) = select_atomic_mutation(
+            &mut transaction,
+            request.execution_id,
+            request.attempt_id,
+            request.ordinal,
+        )
+        .await?
+        else {
+            return Err(StorageError::ExecutionStateConflict);
+        };
+        if mutation.scheduler_job_id != request.scheduler_job_id
+            || mutation.worker_id != request.worker_id
+            || mutation.accepted != Some(true)
+        {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        if mutation.verified_at.is_some() {
+            let identical = mutation.verification_digest == Some(request.observation_digest)
+                && mutation.verified == Some(request.verified);
+            transaction.rollback().await?;
+            return if identical {
+                Ok(ExecutionAtomicMutationVerificationOutcome::AlreadyRecorded(
+                    mutation,
+                ))
+            } else {
+                Err(StorageError::ExecutionStateConflict)
+            };
+        }
+        if mutation
+            .received_at
+            .is_none_or(|received_at| request.at < received_at)
+        {
+            return Err(StorageError::InvalidData(
+                "execution atomic mutation verification predates its receipt".to_owned(),
+            ));
+        }
+        let changed = sqlx::query(
+            "UPDATE execution_atomic_mutations \
+             SET verification_digest = ?, verified = ?, verified_at = ? \
+             WHERE execution_id = ? AND execution_attempt_id = ? AND ordinal = ? \
+               AND accepted = 1 AND verification_digest IS NULL \
+               AND verified IS NULL AND verified_at IS NULL",
+        )
+        .bind(request.observation_digest.as_slice())
+        .bind(request.verified)
+        .bind(encode_timestamp(request.at))
+        .bind(request.execution_id.to_string())
+        .bind(request.attempt_id.to_string())
+        .bind(i64::from(request.ordinal))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        insert_worker_audit(
+            &mut transaction,
+            request.execution_id,
+            request.worker_id,
+            "execution_atomic_mutation_verification_recorded",
+            request.at,
+            request.correlation_id,
+            serde_json::json!({
+                "attempt_id": request.attempt_id,
+                "ordinal": request.ordinal,
+                "observation_digest": "[HASHED]",
+                "verified": request.verified,
+            }),
+        )
+        .await?;
+        mutation.verification_digest = Some(request.observation_digest);
+        mutation.verified = Some(request.verified);
+        mutation.verified_at = Some(request.at);
+        transaction.commit().await?;
+        Ok(ExecutionAtomicMutationVerificationOutcome::Recorded(
+            mutation,
+        ))
     }
 }
 
@@ -3397,7 +3500,8 @@ async fn select_atomic_mutation(
 ) -> Result<Option<ExecutionAtomicMutation>, StorageError> {
     sqlx::query(
         "SELECT execution_id, execution_attempt_id, ordinal, scheduler_job_id, worker_id, \
-                operation_type, request_digest, response_digest, accepted, issued_at, received_at \
+                operation_type, request_digest, response_digest, accepted, verification_digest, \
+                verified, issued_at, received_at, verified_at \
          FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ? \
            AND ordinal = ?",
     )
@@ -3441,8 +3545,23 @@ fn decode_atomic_mutation(
             .map(decode_execution_digest)
             .transpose()?,
         accepted,
+        verification_digest: row
+            .try_get::<Option<Vec<u8>>, _>("verification_digest")?
+            .map(decode_execution_digest)
+            .transpose()?,
+        verified: row
+            .try_get::<Option<i64>, _>("verified")?
+            .map(|value| match value {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(StorageError::InvalidData(
+                    "persisted execution mutation verification is invalid".to_owned(),
+                )),
+            })
+            .transpose()?,
         issued_at: decode_timestamp(row.try_get("issued_at")?)?,
         received_at: decode_optional_timestamp(row.try_get("received_at")?)?,
+        verified_at: decode_optional_timestamp(row.try_get("verified_at")?)?,
     })
 }
 
@@ -3474,6 +3593,18 @@ fn validate_atomic_mutation_receipt(
     if !(1..=100_000).contains(&request.ordinal) || request.response_digest == [0; 32] {
         return Err(StorageError::InvalidData(
             "execution atomic mutation receipt is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_atomic_mutation_verification(
+    request: &ExecutionAtomicMutationVerificationRequest<'_>,
+) -> Result<(), StorageError> {
+    validate_worker_token(request.worker_id, request.correlation_id)?;
+    if !(1..=100_000).contains(&request.ordinal) || request.observation_digest == [0; 32] {
+        return Err(StorageError::InvalidData(
+            "execution atomic mutation verification is invalid".to_owned(),
         ));
     }
     Ok(())
@@ -4112,6 +4243,7 @@ mod tests {
         };
         assert_eq!(first.ordinal, 1);
         assert_eq!(first.response_digest, None);
+        assert_eq!(first.verification_digest, None);
         assert!(
             repository
                 .issue_execution_atomic_mutation(issue(2, 2, 3))
@@ -4143,6 +4275,24 @@ mod tests {
             correlation_id: "atomic-receipt",
             at: now + chrono::Duration::seconds(seconds),
         };
+        let verification =
+            |ordinal, digest, verified, seconds| ExecutionAtomicMutationVerificationRequest {
+                execution_id: execution.id,
+                attempt_id: attempt.id,
+                ordinal,
+                scheduler_job_id: job_id,
+                worker_id: "atomic-worker",
+                observation_digest: [digest; 32],
+                verified,
+                correlation_id: "atomic-verification",
+                at: now + chrono::Duration::seconds(seconds),
+            };
+        assert!(
+            repository
+                .record_execution_atomic_mutation_verification(verification(1, 21, true, 3))
+                .await
+                .is_err()
+        );
         let received = match repository
             .record_execution_atomic_mutation_receipt(receipt(1, 11, true, 4))
             .await
@@ -4160,11 +4310,42 @@ mod tests {
                 .record_execution_atomic_mutation_receipt(receipt(1, 11, true, 5))
                 .await
                 .unwrap(),
-            ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(received)
+            ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(received.clone())
         );
         assert!(
             repository
                 .record_execution_atomic_mutation_receipt(receipt(1, 12, true, 5))
+                .await
+                .is_err()
+        );
+        assert!(
+            repository
+                .record_execution_atomic_mutation_verification(verification(1, 21, true, 3))
+                .await
+                .is_err()
+        );
+        let verified = match repository
+            .record_execution_atomic_mutation_verification(verification(1, 21, true, 5))
+            .await
+            .unwrap()
+        {
+            ExecutionAtomicMutationVerificationOutcome::Recorded(mutation) => mutation,
+            ExecutionAtomicMutationVerificationOutcome::AlreadyRecorded(_) => {
+                panic!("first verification repeated")
+            }
+        };
+        assert_eq!(verified.verification_digest, Some([21; 32]));
+        assert_eq!(verified.verified, Some(true));
+        assert_eq!(
+            repository
+                .record_execution_atomic_mutation_verification(verification(1, 21, true, 6))
+                .await
+                .unwrap(),
+            ExecutionAtomicMutationVerificationOutcome::AlreadyRecorded(verified)
+        );
+        assert!(
+            repository
+                .record_execution_atomic_mutation_verification(verification(1, 23, true, 6))
                 .await
                 .is_err()
         );
@@ -4177,6 +4358,12 @@ mod tests {
             .record_execution_atomic_mutation_receipt(receipt(2, 22, false, 7))
             .await
             .unwrap();
+        assert!(
+            repository
+                .record_execution_atomic_mutation_verification(verification(2, 24, true, 8))
+                .await
+                .is_err()
+        );
         repository
             .issue_execution_atomic_mutation(issue(3, 3, 8))
             .await
@@ -4197,10 +4384,11 @@ mod tests {
         .fetch_all(database.pool())
         .await
         .unwrap();
-        assert_eq!(audit_metadata.len(), 5);
+        assert_eq!(audit_metadata.len(), 6);
         assert!(audit_metadata.iter().all(|metadata| {
             !metadata.contains(&"01".repeat(32))
                 && !metadata.contains(&"0b".repeat(32))
+                && !metadata.contains(&"15".repeat(32))
                 && metadata.contains("[HASHED]")
         }));
     }

@@ -1888,6 +1888,58 @@ impl ExecutionMutationReceipt {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ExecutionMutationVerification {
+    ordinal: u32,
+    observation_digest: [u8; 32],
+    verified: bool,
+}
+
+impl fmt::Debug for ExecutionMutationVerification {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationVerification")
+            .field("ordinal", &self.ordinal)
+            .field("observation_digest", &"[HASHED]")
+            .field("verified", &self.verified)
+            .finish()
+    }
+}
+
+impl ExecutionMutationVerification {
+    /// Creates one read-only verification observation for an accepted remote
+    /// mutation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty ordinal or observation digest.
+    pub fn new(ordinal: u32, observation_digest: [u8; 32], verified: bool) -> ProviderResult<Self> {
+        if !(1..=100_000).contains(&ordinal) || observation_digest == [0; 32] {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation verification is invalid",
+            ));
+        }
+        Ok(Self {
+            ordinal,
+            observation_digest,
+            verified,
+        })
+    }
+
+    pub const fn ordinal(self) -> u32 {
+        self.ordinal
+    }
+
+    pub const fn observation_digest(self) -> [u8; 32] {
+        self.observation_digest
+    }
+
+    pub const fn verified(self) -> bool {
+        self.verified
+    }
+}
+
 #[async_trait]
 pub trait ExecutionMutationSink {
     /// Persists the exact request identity before the Provider performs the
@@ -1897,6 +1949,19 @@ pub trait ExecutionMutationSink {
     /// Persists a definite, parsed remote response before another ordinal may
     /// be issued. Missing or ambiguous responses must not call this method.
     async fn record_receipt(&self, receipt: ExecutionMutationReceipt) -> ProviderResult<()>;
+
+    /// Persists an independent read-only observation after an accepted receipt.
+    /// Legacy fixture sinks may omit this until their Provider adopts compound
+    /// step verification; Core's execution sink always overrides it.
+    async fn record_verification(
+        &self,
+        _verification: ExecutionMutationVerification,
+    ) -> ProviderResult<()> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Execution mutation verification is not available for this sink",
+        ))
+    }
 }
 
 fn valid_execution_mutation_operation_type(value: &str) -> bool {
@@ -1931,11 +1996,21 @@ mod execution_mutation_tests {
         assert!(debug.contains("[HASHED]"));
         assert!(!debug.contains("9, 9"));
 
+        let verification = ExecutionMutationVerification::new(1, [11; 32], true).unwrap();
+        assert_eq!(verification.ordinal(), 1);
+        assert_eq!(verification.observation_digest(), [11; 32]);
+        assert!(verification.verified());
+        let debug = format!("{verification:?}");
+        assert!(debug.contains("[HASHED]"));
+        assert!(!debug.contains("11, 11"));
+
         assert!(ExecutionMutationIssue::new(0, "welearn.atomic.start", [7; 32]).is_err());
         assert!(ExecutionMutationIssue::new(1, "foreign operation", [7; 32]).is_err());
         assert!(ExecutionMutationIssue::new(1, "welearn.atomic.start", [0; 32]).is_err());
         assert!(ExecutionMutationReceipt::new(100_001, [9; 32], true).is_err());
         assert!(ExecutionMutationReceipt::new(1, [0; 32], true).is_err());
+        assert!(ExecutionMutationVerification::new(0, [11; 32], true).is_err());
+        assert!(ExecutionMutationVerification::new(1, [0; 32], true).is_err());
     }
 }
 
