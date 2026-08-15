@@ -310,3 +310,8 @@ shape may enter the diagnostic Inbox, but the failing page cannot advance its
 watermark or scanned count and cannot create a QuestionSnapshot, Candidate,
 private evidence, global corpus entry or import receipt. Observation never
 counts as a successful bootstrap import.
+Observation kind and recovery disposition are independent. In particular, an
+unknown result after a mutation has started may retain its sanitized shape while
+the Provider returns typed HumanRequired to prevent replay. The observation
+does not make the mutation successful or verified and cannot relax the required
+manual/recovery workflow.

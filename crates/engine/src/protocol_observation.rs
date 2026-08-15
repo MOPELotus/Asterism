@@ -18,10 +18,13 @@ pub(crate) async fn record_provider_protocol_observation(
     let Some(observation) = error.protocol_observation.as_ref() else {
         return Ok(());
     };
-    if !matches!(
+    let observation_kind_allowed = matches!(
         error.kind,
         ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
-    ) || occurrence_scope.is_empty()
+    ) || error.kind == ProviderErrorKind::HumanRequired
+        && error.human_required_reason.is_some();
+    if !observation_kind_allowed
+        || occurrence_scope.is_empty()
         || occurrence_scope.len() > MAX_OCCURRENCE_SCOPE_BYTES
         || occurrence_scope.trim() != occurrence_scope
         || occurrence_scope.chars().any(char::is_control)
@@ -67,4 +70,56 @@ pub(crate) enum ProviderProtocolObservationRecordError {
     Invalid,
     #[error(transparent)]
     Storage(#[from] StorageError),
+}
+
+#[cfg(test)]
+mod tests {
+    use asterism_domain::{
+        HumanRequiredReason, ProtocolObservationKind, ProtocolSurface, ProviderId,
+    };
+    use chrono::Utc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn typed_human_required_may_retain_protocol_shape_without_a_repository() {
+        let provider_id = ProviderId::new("provider-alpha").unwrap();
+        let error = ProviderError::human_required(
+            "mutation outcome needs review",
+            HumanRequiredReason::ManualIntervention,
+        )
+        .try_with_protocol_observation(
+            ProtocolSurface::SubmissionExecute,
+            ProtocolObservationKind::UnknownResultShape,
+            serde_json::json!({"document": "mutation_receipt", "ret_kind": "string"}),
+        )
+        .unwrap();
+        assert!(
+            record_provider_protocol_observation(
+                None,
+                &provider_id,
+                None,
+                "execution:test:mutation",
+                &error,
+                Utc::now(),
+            )
+            .await
+            .is_ok()
+        );
+
+        let mut missing_reason = error;
+        missing_reason.human_required_reason = None;
+        assert!(matches!(
+            record_provider_protocol_observation(
+                None,
+                &provider_id,
+                None,
+                "execution:test:mutation",
+                &missing_reason,
+                Utc::now(),
+            )
+            .await,
+            Err(ProviderProtocolObservationRecordError::Invalid)
+        ));
+    }
 }

@@ -4718,3 +4718,16 @@ same `ProviderScanService`, account/correlation occurrence identity, failure
 classification and all-or-nothing inventory ingestion boundary. This closes an
 API composition omission; it does not add another scan protocol or duplicate
 observation path.
+
+## Two-hundred-and-fifty-sixth Phase 0 slice
+
+Protocol observation is now explicitly orthogonal to recovery disposition.
+`ProtocolDrift` and `InvalidResponse` remain valid observation-bearing errors;
+`HumanRequired` is also accepted only when it retains a typed
+`HumanRequiredReason`. This lets a Provider preserve an already-known sanitized
+shape after a non-idempotent mutation has begun while still forcing manual
+review and prohibiting automatic replay.
+
+An untyped `HumanRequired` observation remains invalid. Coverage proves a typed
+manual-intervention error can carry a SubmissionExecute result shape through
+the Core recorder and that removing its reason fails closed.
