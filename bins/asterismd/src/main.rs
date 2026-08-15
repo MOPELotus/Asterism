@@ -8,6 +8,7 @@ use asterism_config::{
 };
 use asterism_domain::ProviderId;
 use asterism_engine::{
+    AnswerHistoryHarvestTickReport, AnswerHistoryHarvestWorker, AnswerHistoryHarvestWorkerConfig,
     BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorConfig,
     BrowserBridgeCredentialTickReport, BrowserBridgeWorkflowProcessor,
     BrowserBridgeWorkflowProcessorConfig, BrowserBridgeWorkflowTickReport, DispatchConfig,
@@ -17,7 +18,7 @@ use asterism_engine::{
 };
 use asterism_events::EventBus;
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
-use asterism_provider_api::ProviderRegistry;
+use asterism_provider_api::{ProviderCapability, ProviderRegistry};
 use asterism_provider_chaoxing::build_development_provider_with_renewal;
 use asterism_provider_cidaren::build_development_provider_with_stored_session as build_cidaren_with_stored_session;
 use asterism_provider_uai::build_development_provider_with_renewal as build_uai_with_renewal;
@@ -25,7 +26,8 @@ use asterism_provider_welearn::build_development_provider_with_renewal as build_
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
-    Database, RecoveryReport, SecretKeyring, SqliteBrowserBridgeSessionRepository,
+    Database, RecoveryReport, SecretKeyring, SqliteAnswerBootstrapHarvestRepository,
+    SqliteAnswerHistoryIngestionRepository, SqliteBrowserBridgeSessionRepository,
     SqliteExecutionLeaseRepository, SqliteExecutionRepository, SqliteOutboxRepository,
     SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
     SqliteProviderScanRepository, SqliteSchedulerRepository, SqliteSecretStore,
@@ -48,6 +50,13 @@ type DaemonExecutionWorker = ExecutionSchedulerWorker<
     SqliteSchedulerRepository,
     SqliteProviderAccountRepository,
     SqliteTaskQueryRepository,
+>;
+
+type DaemonAnswerHistoryWorker = AnswerHistoryHarvestWorker<
+    SqliteAnswerBootstrapHarvestRepository,
+    SqliteProviderAccountRepository,
+    SqliteTaskQueryRepository,
+    SqliteAnswerHistoryIngestionRepository,
 >;
 
 type DaemonOutboxDispatcher = OutboxDispatcher<SqliteOutboxRepository, EventBus>;
@@ -218,6 +227,12 @@ async fn main() -> anyhow::Result<()> {
         &config,
         shutdown_receiver.clone(),
     )?;
+    let answer_history_handle = start_answer_history_worker(
+        &database,
+        providers.clone(),
+        &config,
+        shutdown_receiver.clone(),
+    )?;
     let browser_bridge_credential_handle = start_browser_bridge_credential_processor(
         &database,
         providers.clone(),
@@ -249,6 +264,11 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(handle) = execution_scheduler_handle {
         handle.await.context("execution scheduler task panicked")?;
+    }
+    if let Some(handle) = answer_history_handle {
+        handle
+            .await
+            .context("answer history worker task panicked")?;
     }
     if let Some(handle) = browser_bridge_credential_handle {
         handle
@@ -565,6 +585,42 @@ fn start_execution_scheduler(
     Ok(handle)
 }
 
+fn start_answer_history_worker(
+    database: &Database,
+    providers: Arc<ProviderRegistry>,
+    config: &Config,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    let has_history_provider = providers
+        .metadata()
+        .any(|metadata| metadata.advertises(ProviderCapability::AnswerHistoryHarvest));
+    if !config.scheduler.enabled || !has_history_provider {
+        return Ok(None);
+    }
+    let worker = AnswerHistoryHarvestWorker::new(
+        providers,
+        SqliteAnswerBootstrapHarvestRepository::new(database.clone()),
+        SqliteProviderAccountRepository::new(database.clone()),
+        SqliteTaskQueryRepository::new(database.clone()),
+        SqliteAnswerHistoryIngestionRepository::new(database.clone()),
+        AnswerHistoryHarvestWorkerConfig {
+            worker_id: format!("asterismd-answer-history-{}", std::process::id()),
+            claim_limit: config.scheduler.claim_limit.min(100),
+            claim_ttl_seconds: config.scheduler.claim_ttl_seconds,
+            page_yield_delay_seconds: config.scheduler.tick_interval_seconds,
+            retry_delay_seconds: config.scheduler.retry_initial_delay_seconds,
+            max_provider_retry_delay_seconds: config.scheduler.retry_max_delay_seconds,
+        },
+    )
+    .context("failed to configure the answer history worker")?;
+    let tick_interval = std::time::Duration::from_secs(config.scheduler.tick_interval_seconds);
+    Ok(Some(tokio::spawn(run_answer_history_worker(
+        worker,
+        tick_interval,
+        shutdown,
+    ))))
+}
+
 fn start_browser_bridge_credential_processor(
     database: &Database,
     providers: Arc<ProviderRegistry>,
@@ -862,6 +918,48 @@ async fn run_scan_scheduler(
         }
     }
     tracing::info!("scan scheduler stopped");
+}
+
+async fn run_answer_history_worker(
+    worker: DaemonAnswerHistoryWorker,
+    tick_interval: std::time::Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(tick_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        let should_tick = tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                false
+            }
+            _ = interval.tick() => true,
+        };
+        if !should_tick {
+            continue;
+        }
+        match worker.tick_once(chrono::Utc::now()).await {
+            Ok(report) if report != AnswerHistoryHarvestTickReport::default() => {
+                tracing::info!(
+                    claimed = report.claimed,
+                    completed = report.completed,
+                    yielded = report.yielded,
+                    retry_scheduled = report.retry_scheduled,
+                    dead_lettered = report.dead_lettered,
+                    imported_tasks = report.imported_tasks,
+                    "answer history worker tick completed"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "answer history worker tick failed");
+            }
+        }
+    }
+    tracing::info!("answer history worker stopped");
 }
 
 async fn run_execution_scheduler(

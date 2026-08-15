@@ -4130,3 +4130,19 @@ daemon activation safe before every Provider has a real transport: unsupported
 accounts retain their one durable first-auth job for a future implementation,
 while a Provider becomes executable only when metadata and the exact history
 capability slot register together.
+
+## Two-hundred-and-twenty-eighth Phase 0 slice
+
+`asterismd` now owns the Answer History worker lifecycle alongside scan,
+execution, BrowserBridge and outbox workers. It reuses the scheduler enable
+switch, tick interval, claim lifetime and bounded retry delays, participates in
+the same watch-channel shutdown, and emits logs only for non-empty tick reports
+or failures. The history batch is capped at Core's 100-claim boundary even when
+the shared scheduler permits a larger scan batch.
+
+The daemon starts this worker only when the integrity-checked registry contains
+at least one advertised and implemented `AnswerHistoryHarvest` slot. With the
+current native Provider entries the worker is therefore absent, not polling in
+an idle loop. Once a real Native HTTP, BrowserBridge or Capture-backed adapter
+is registered, the same daemon path becomes active and Storage's Provider
+filter ensures it claims only that adapter's durable first-auth harvests.
