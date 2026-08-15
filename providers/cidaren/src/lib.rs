@@ -145,8 +145,9 @@ pub use question_artifact::{
 };
 pub use question_inventory::CidarenQuestionInventory;
 pub use question_parser::{
-    CidarenAttemptProgress, CidarenCurrentQuestionState, ParsedCidarenAttemptQuestion,
-    ParsedCidarenAttemptStep, ParsedCidarenReadingCard, parse_attempt_question, parse_attempt_step,
+    CidarenAttemptProgress, CidarenAttemptResponseIdentity, CidarenCurrentQuestionState,
+    ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep, ParsedCidarenReadingCard,
+    parse_attempt_question, parse_attempt_step,
 };
 pub use response_decode::{decode_legacy_response_data, decode_response_data};
 pub use runtime_settings::CidarenRuntimeSettings;

@@ -67,6 +67,26 @@ pub struct CidarenCurrentQuestionState {
     answer_state: u32,
 }
 
+/// Optional dynamic Task identity echoed by a current attempt payload.
+///
+/// This observation is checked against a fresh assessment binding before the
+/// payload is accepted. It never replaces stable release/course/list identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CidarenAttemptResponseIdentity {
+    task_id: i64,
+    task_type: u8,
+}
+
+impl CidarenAttemptResponseIdentity {
+    pub const fn task_id(self) -> i64 {
+        self.task_id
+    }
+
+    pub const fn task_type(self) -> u8 {
+        self.task_type
+    }
+}
+
 impl CidarenCurrentQuestionState {
     pub const fn chance_num(self) -> u32 {
         self.chance_num
@@ -107,6 +127,7 @@ pub struct ParsedCidarenAttemptQuestion {
     position: u32,
     remote_progress: Option<CidarenAttemptProgress>,
     current_question_state: Option<CidarenCurrentQuestionState>,
+    response_identity: Option<CidarenAttemptResponseIdentity>,
 }
 
 /// One decoded donor attempt step. Reading cards are executable advance stages
@@ -134,6 +155,7 @@ pub struct ParsedCidarenReadingCard {
     stem_sanitized: String,
     position: u32,
     remote_progress: Option<CidarenAttemptProgress>,
+    response_identity: Option<CidarenAttemptResponseIdentity>,
 }
 
 impl ParsedCidarenReadingCard {
@@ -170,6 +192,10 @@ impl ParsedCidarenReadingCard {
         self.remote_progress
     }
 
+    pub const fn response_identity(&self) -> Option<CidarenAttemptResponseIdentity> {
+        self.response_identity
+    }
+
     pub(crate) fn from_artifact(
         topic_code: String,
         remote_id: String,
@@ -197,6 +223,7 @@ impl ParsedCidarenReadingCard {
             stem_sanitized: std::mem::take(&mut *stem_sanitized),
             position,
             remote_progress,
+            response_identity: None,
         })
     }
 }
@@ -209,6 +236,7 @@ impl fmt::Debug for ParsedCidarenReadingCard {
             .field("remote_id", &self.remote_id)
             .field("position", &self.position)
             .field("remote_progress", &self.remote_progress)
+            .field("response_identity", &self.response_identity)
             .finish_non_exhaustive()
     }
 }
@@ -298,6 +326,7 @@ impl ParsedCidarenAttemptQuestion {
             position: question.position,
             remote_progress,
             current_question_state,
+            response_identity: None,
         };
         let rebuilt = parsed.to_question(question.task_id)?;
         let rebuilt_fingerprint = rebuilt
@@ -385,6 +414,10 @@ impl ParsedCidarenAttemptQuestion {
     pub const fn current_question_state(&self) -> Option<CidarenCurrentQuestionState> {
         self.current_question_state
     }
+
+    pub const fn response_identity(&self) -> Option<CidarenAttemptResponseIdentity> {
+        self.response_identity
+    }
 }
 
 impl fmt::Debug for ParsedCidarenAttemptQuestion {
@@ -397,6 +430,7 @@ impl fmt::Debug for ParsedCidarenAttemptQuestion {
             .field("position", &self.position)
             .field("remote_progress", &self.remote_progress)
             .field("current_question_state", &self.current_question_state)
+            .field("response_identity", &self.response_identity)
             .finish_non_exhaustive()
     }
 }
@@ -439,6 +473,7 @@ pub fn parse_attempt_question(
             .as_object()
             .ok_or_else(|| protocol_drift("Cidaren attempt payload is not an object"))?;
         let remote_progress = parse_remote_progress(object)?;
+        let response_identity = parse_attempt_response_identity(object)?;
         let topic_code = Zeroizing::new(required_text(
             object.get("topic_code"),
             MAX_TOPIC_CODE_BYTES,
@@ -482,6 +517,7 @@ pub fn parse_attempt_question(
             position,
             remote_progress,
             current_question_state,
+            response_identity,
         };
         // Validate through both public contracts before handing the ephemeral
         // attempt material to a caller.
@@ -505,6 +541,7 @@ fn parse_reading_card(
             .as_object()
             .ok_or_else(|| protocol_drift("Cidaren reading-card payload is not an object"))?;
         let remote_progress = parse_remote_progress(object)?;
+        let response_identity = parse_attempt_response_identity(object)?;
         if object.get("topic_mode").and_then(Value::as_i64) != Some(0) {
             return Err(protocol_drift(
                 "Cidaren reading-card parser received another topic mode",
@@ -546,6 +583,7 @@ fn parse_reading_card(
             stem_sanitized: std::mem::take(&mut *stem_sanitized),
             position,
             remote_progress,
+            response_identity,
         };
         card.route_context()?;
         Ok(card)
@@ -589,6 +627,12 @@ fn question_payload_observation(error: ProviderError, payload: &Value) -> Provid
             ),
             "topic_total_kind": json_value_kind(
                 object.and_then(|object| object.get("topic_total"))
+            ),
+            "task_id_kind": json_value_kind(
+                object.and_then(|object| object.get("task_id"))
+            ),
+            "task_type_kind": json_value_kind(
+                object.and_then(|object| object.get("task_type"))
             ),
             "chance_num_kind": json_value_kind(
                 object.and_then(|object| object.get("chance_num"))
@@ -706,6 +750,47 @@ fn optional_remote_counter(
         _ => Err(protocol_drift(format!(
             "Cidaren attempt {label}-topic count is invalid"
         ))),
+    }
+}
+
+fn parse_attempt_response_identity(
+    object: &Map<String, Value>,
+) -> ProviderResult<Option<CidarenAttemptResponseIdentity>> {
+    let task_id = match object.get("task_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => value
+            .as_i64()
+            .filter(|value| *value == -1 || *value > 0)
+            .map(Some)
+            .ok_or_else(|| protocol_drift("Cidaren attempt response task ID is invalid"))?,
+        _ => {
+            return Err(protocol_drift(
+                "Cidaren attempt response task ID is invalid",
+            ));
+        }
+    };
+    let task_type = match object.get("task_type") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| (1..=3).contains(value))
+            .map(Some)
+            .ok_or_else(|| protocol_drift("Cidaren attempt response task type is invalid"))?,
+        _ => {
+            return Err(protocol_drift(
+                "Cidaren attempt response task type is invalid",
+            ));
+        }
+    };
+    match (task_id, task_type) {
+        (None, None) => Ok(None),
+        (Some(task_id), Some(task_type)) => {
+            Ok(Some(CidarenAttemptResponseIdentity { task_id, task_type }))
+        }
+        _ => Err(protocol_drift(
+            "Cidaren attempt response identity is incomplete",
+        )),
     }
 }
 
@@ -1282,6 +1367,7 @@ mod tests {
     fn single_choice_is_sanitized_and_topic_code_stays_ephemeral() {
         let payload: Value = serde_json::from_str(SINGLE).unwrap();
         let parsed = parse_attempt_question(&payload, "class-task:2002", 1).unwrap();
+        assert_eq!(parsed.response_identity(), None);
         let progress = parsed.remote_progress().unwrap();
         assert_eq!(progress.completed(), 1);
         assert_eq!(progress.total(), 127);
@@ -1396,6 +1482,9 @@ mod tests {
         let current_state = parsed.current_question_state().unwrap();
         assert_eq!(current_state.chance_num(), 2);
         assert_eq!(current_state.answer_state(), 1);
+        let response_identity = parsed.response_identity().unwrap();
+        assert_eq!(response_identity.task_id(), 92002);
+        assert_eq!(response_identity.task_type(), 2);
         let question = parsed.to_question(TaskId::new()).unwrap();
         assert_eq!(question.kind, QuestionKind::FillBlank);
         assert!(question.options.is_empty());
@@ -1521,6 +1610,41 @@ mod tests {
             "unexpected": true,
         });
         assert!(restore(&question).is_err());
+    }
+
+    #[test]
+    fn attempt_response_identity_is_optional_bounded_and_pair_complete() {
+        let mut payload: Value = serde_json::from_str(SINGLE).unwrap();
+        payload["task_id"] = json!(92002);
+        let error = parse_attempt_question(&payload, "class-task:2002", 1).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["task_id_kind"], "number");
+        assert_eq!(observation.shape_sanitized["task_type_kind"], "missing");
+
+        payload["task_type"] = json!(2);
+        let identity = parse_attempt_question(&payload, "class-task:2002", 1)
+            .unwrap()
+            .response_identity()
+            .unwrap();
+        assert_eq!(identity.task_id(), 92002);
+        assert_eq!(identity.task_type(), 2);
+
+        payload["task_id"] = json!(0);
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 1)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        payload["task_id"] = json!(92002);
+        payload["task_type"] = json!(4);
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 1)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 
     #[test]

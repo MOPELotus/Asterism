@@ -1287,12 +1287,18 @@ impl CidarenAttemptFlow {
             CidarenAssessmentResponse::Payload(payload) => {
                 match parse_attempt_step(payload.as_value(), &self.remote_task_id, position)? {
                     ParsedCidarenAttemptStep::Question(parsed) => {
+                        if let Some(identity) = parsed.response_identity() {
+                            self.binding.validate_attempt_response_identity(identity)?;
+                        }
                         let question = parsed.to_question(self.task_id)?;
                         self.phase = Some(CidarenAttemptPhase::CurrentQuestion(Box::new(
                             CidarenCurrentQuestion { parsed, question },
                         )));
                     }
                     ParsedCidarenAttemptStep::ReadingCard(card) => {
+                        if let Some(identity) = card.response_identity() {
+                            self.binding.validate_attempt_response_identity(identity)?;
+                        }
                         self.phase = Some(CidarenAttemptPhase::CurrentReadingCard(card));
                     }
                 }
@@ -2401,6 +2407,47 @@ mod tests {
                 CidarenAttemptOperation::SkipAnswer,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn echoed_attempt_identity_must_match_the_fresh_positive_task() {
+        let mut bound_detail = detail();
+        bound_detail.task.normalized["task_id"] = json!(92002);
+        bound_detail.normalized_detail["task"]["task_id"] = json!(92002);
+        let mut wrong_task = mode_73_payload();
+        wrong_task["task_id"] = json!(92003);
+        let mut wrong_type = mode_73_payload();
+        wrong_type["task_type"] = json!(1);
+
+        for payload in [wrong_task, wrong_type] {
+            let transport = Arc::new(FixtureTransport {
+                responses: Mutex::new(VecDeque::from([response(&payload)])),
+                operations: Mutex::new(Vec::new()),
+            });
+            let context = context();
+            let mut flow = CidarenAttemptFlow::try_new(
+                &context,
+                TaskId::new(),
+                "class-task:2002",
+                &bound_detail,
+                None,
+            )
+            .unwrap();
+            let outcome = flow
+                .issue_start(request_at())
+                .unwrap()
+                .execute(transport, &context)
+                .await
+                .unwrap();
+            assert_eq!(
+                flow.accept(outcome).unwrap_err().kind,
+                ProviderErrorKind::RemoteChanged
+            );
+            assert_eq!(
+                flow.status(),
+                CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::StartAnswer)
+            );
+        }
     }
 
     #[tokio::test]

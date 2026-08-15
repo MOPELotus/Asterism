@@ -52,8 +52,9 @@ not credentials or executable request material:
   handler still expresses a truthy-data success condition;
 - [issue 99](https://github.com/ularch/Easy_Cidaren/issues/99) and its public
   diagnostic attachment establish an unimplemented `topic_mode=73` shape:
-  two answers, two bounded word lengths and no options. Only structural,
-  redacted facts were extracted; no raw log or topic code is retained;
+  paired integer Task row identity, two answers, two bounded word lengths and
+  no options. Only structural, redacted facts were extracted; no raw log,
+  account content, real Task identity or topic code is retained;
 - [issue 106](https://github.com/ularch/Easy_Cidaren/issues/106) records the
   identity hazard around `task_id=-1`, so a class task must be rebound through
   its release identity before later operations;

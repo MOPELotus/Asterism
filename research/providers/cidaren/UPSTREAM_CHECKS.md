@@ -912,6 +912,24 @@ progress and state-code helpers also use their own named bounds rather than
 cross-referencing equal-valued constants. Neither code is interpreted as
 correctness, history, Task-retake authority or mode-73 answer encoding.
 
+### 2026-08-15 attempt-response identity follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged before and after this unit. Re-reading
+the public issue-99 diagnostic confirmed a paired integer `task_id/task_type`
+echo on the decoded current-Question payload; no stable response release/list
+identity or new route was observed.
+
+`CidarenAttemptResponseIdentity` now parses the pair only when both fields are
+present. Task ID must be `-1` or positive and Task type must be the audited row
+family 1/2/3. Before accepting a Question or reading card, the flow checks the
+echoed row type against its fresh assessment binding and requires an already-
+positive fresh Task ID to match. A fresh `-1` may receive a positive dynamic
+allocation, but it is not persisted or substituted for class release or study
+course/list identity. Malformed/partial shapes attach only value kinds;
+mismatches are `RemoteChanged` and leave the issued non-idempotent operation
+FailedClosed without replay.
+
 ## Check procedure
 
 For the next checkpoint:

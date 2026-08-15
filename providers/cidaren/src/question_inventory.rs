@@ -1165,6 +1165,11 @@ mod tests {
         reason = "the fixture keeps every persisted selection/start boundary visible"
     )]
     async fn mid_attempt_word_reselection_preserves_the_next_question_position() {
+        let mut first_question: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+        ))
+        .unwrap();
+        first_question["task_type"] = json!(1);
         let mut next_question = question_payload();
         next_question["topic_code"] = json!("after-reselection-topic-code");
         let boundaries = Arc::new(FixtureBoundaries::new(
@@ -1174,10 +1179,7 @@ mod tests {
                     kind: crate::CidarenAssessmentReceiptKind::Accepted,
                     message_sanitized: None,
                 },
-                response(&serde_json::from_str(include_str!(
-                    "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
-                ))
-                .unwrap()),
+                response(&first_question),
                 CidarenAssessmentResponse::Receipt {
                     kind: crate::CidarenAssessmentReceiptKind::WordSelectionRequired,
                     message_sanitized: None,

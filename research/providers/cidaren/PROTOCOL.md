@@ -653,7 +653,8 @@ The current clean-room protocol layer additionally freezes:
 
 Public issue 99 contains a current `topic_mode=73` payload which the donor
 explicitly does not implement. Its redacted structure has `answer_num=2`, two
-positive `w_lens`, no options and one ordinary rotating `topic_code`.
+positive `w_lens`, no options, one ordinary rotating `topic_code` and a
+paired integer `task_id/task_type` echo.
 Asterism parses this as `QuestionKind::FillBlank`, requires the answer count to
 equal the bounded word-length count and keeps the token ephemeral. The same
 payload's paired integer `chance_num`/`answer_state` fields are retained under
@@ -683,6 +684,19 @@ The Provider preserves it across both pre-Question reading-card and real-
 Question encrypted continuations, then exposes it again through
 `current_remote_progress` after recovery. It remains separate from the
 one-shot attempt position.
+
+The optional echoed Task pair is a response cross-check, not stable identity.
+`CidarenAttemptResponseIdentity` accepts only `task_id=-1` or a positive
+integer and the audited row families 1 (class learning), 2 (class test) and 3
+(ordinary study). Both fields must be present together. Before materialization,
+the attempt flow requires the echoed type to match the freshly rebound Task
+row; when the fresh row already has a positive `task_id`, the echo must match
+it exactly. A fresh `task_id=-1` may legitimately receive a newly allocated
+positive echo, but that value is not promoted to release/course/list identity
+or persisted in the Question/artifact. Missing pairs remain compatible because
+not every sanitized fixture establishes the field; malformed pairs fail
+closed with field-kind-only observation, and mismatches fail the issued
+operation closed as `RemoteChanged` without replay.
 
 `SubmitChoseWord` is acknowledgement-only in the donor: it validates the
 success envelope but does not decode a next Question. Asterism therefore uses

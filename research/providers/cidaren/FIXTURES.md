@@ -74,8 +74,8 @@ completed/total observation separate from local attempt position and reject
 inconsistent or unbounded values.
 
 The synthetic mode-73 fixture retains only the public issue 99 structural
-facts: two answers, two positive word lengths, no options and placeholder
-text/token values. Parser tests require `FillBlank`, answer-count/length
+facts: paired Task row identity, two answers, two positive word lengths, no
+options and placeholder text/token values. Parser tests require `FillBlank`, answer-count/length
 agreement, paired bounded `chance_num`/`answer_state` projection and token
 omission from serialized Questions. State-only changes do not change the
 stable remote Question identity; malformed/partial state fails closed and its
@@ -86,6 +86,12 @@ malformed restored metadata. The state pair remains current-Question metadata,
 not correctness, history or retake authority. It is not answer-wire evidence;
 AnswerResolve and ordinary answer Build/Verify stay fail-closed,
 while the distinct explicit Skip Draft/execution path is available.
+The same fixture freezes only the integer `task_id/task_type` echo shape.
+Attempt-flow tests accept its positive allocation when the fresh Task ID is
+`-1`, require an already-positive fresh ID and row type to match, and enter
+FailedClosed without replay on conflict. Missing pairs remain compatible with
+the other sanitized payload fixtures; partial or invalid pairs expose only
+field kinds through the existing Question shape observation.
 
 The BrowserBridge fixtures are synthetic result transport documents generated
 from the Provider typed boundary; tests pair each one with a constructor-built

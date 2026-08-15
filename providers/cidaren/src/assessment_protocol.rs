@@ -5,6 +5,8 @@ use serde_json::{Number, Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::CidarenAttemptResponseIdentity;
+
 const START_VERSION: &str = "2.6.1.240122";
 const VERIFY_VERSION: &str = "2.6.1.231204";
 const ADVANCE_VERSION: &str = "2.6.2.24031302";
@@ -23,6 +25,7 @@ const MAX_TIME_SPENT_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 pub struct CidarenAssessmentBinding {
     family: CidarenTaskFamily,
     task_id: i64,
+    response_task_type: u8,
     stable_binding: String,
 }
 
@@ -54,6 +57,15 @@ impl CidarenAssessmentBinding {
             .ok_or_else(|| protocol_drift("Cidaren fresh Task detail has an invalid task ID"))?;
 
         if let Some(release_id) = remote_task_id.strip_prefix("class-task:") {
+            let response_task_type = match task.get("task_type").and_then(Value::as_str) {
+                Some("learning") => 1,
+                Some("test") => 2,
+                _ => {
+                    return Err(protocol_drift(
+                        "Cidaren fresh class Task binding has an unknown task type",
+                    ));
+                }
+            };
             if detail
                 .normalized_detail
                 .get("schema")
@@ -66,10 +78,6 @@ impl CidarenAssessmentBinding {
                     != Some(release_id)
                 || task.get("release_id").and_then(Value::as_str) != Some(release_id)
                 || !valid_positive_decimal(release_id)
-                || !matches!(
-                    task.get("task_type").and_then(Value::as_str),
-                    Some("learning" | "test")
-                )
             {
                 return Err(protocol_drift(
                     "Cidaren fresh class Task binding is inconsistent",
@@ -78,6 +86,7 @@ impl CidarenAssessmentBinding {
             return Ok(Self {
                 family: CidarenTaskFamily::Class,
                 task_id,
+                response_task_type,
                 stable_binding: release_id.to_owned(),
             });
         }
@@ -113,8 +122,23 @@ impl CidarenAssessmentBinding {
         Ok(Self {
             family: CidarenTaskFamily::Study,
             task_id,
+            response_task_type: 3,
             stable_binding: identity.0.to_owned(),
         })
+    }
+
+    pub(crate) fn validate_attempt_response_identity(
+        &self,
+        identity: CidarenAttemptResponseIdentity,
+    ) -> ProviderResult<()> {
+        if identity.task_type() != self.response_task_type
+            || (self.task_id != -1 && identity.task_id() != self.task_id)
+        {
+            return Err(remote_changed(
+                "Cidaren attempt response belongs to another Task",
+            ));
+        }
+        Ok(())
     }
 
     fn endpoint(&self, operation: &str) -> String {
