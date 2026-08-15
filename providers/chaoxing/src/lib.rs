@@ -23,6 +23,7 @@ mod resource_inventory;
 mod runtime_settings;
 mod sign_in;
 mod sign_in_prepare;
+mod sign_in_receipt;
 mod stored_session;
 mod submission_build;
 mod submission_execute;
@@ -79,6 +80,11 @@ pub use sign_in::{
     ChaoxingSignDetailRequest, ChaoxingSignVariant, parse_sign_activity_list, parse_sign_detail,
 };
 pub use sign_in_prepare::ChaoxingNormalSignPreparation;
+pub use sign_in_receipt::{
+    ChaoxingPreSignDocument, ChaoxingPreSignEvidence, ChaoxingPreSignEvidenceKind,
+    ChaoxingSignReceipt, ChaoxingSignReceiptDocument, ChaoxingSignReceiptKind,
+    parse_pre_sign_evidence, parse_sign_receipt,
+};
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use submission_build::ChaoxingSubmissionBuild;
 pub use submission_execute::{ChaoxingSubmissionExecute, ChaoxingSubmissionTransport};

@@ -757,6 +757,25 @@ preparation. Photo upload/object identity, location fields, gesture/code
 prerequisites and QR `enc` differ or require extra dynamic evidence across the
 donors, so every non-normal variant remains unsupported at preparation time.
 
+Bounded pure parsers cover the donor-observed responses without adding a
+transport. The pre-sign HTML must contain exactly one structural
+`#statuscontent`: empty text becomes `NoCompletionMarker` and exact `签到成功`
+becomes `AlreadySigned`; missing, duplicate or any other non-empty text is
+protocol drift. The separately preparation-bound `stuSignajax` body recognizes
+only:
+
+```text
+success        -> Accepted Receipt
+您已签到过了    -> AlreadySigned Receipt
+success2       -> WindowClosed Receipt
+```
+
+Response documents are bounded, zeroized and represented outside the parser
+only by the preparation binding, response digest and controlled enum. These
+classifications are not a send path. `Accepted` is not verified completion,
+and even `AlreadySigned` remains an endpoint/preflight response rather than the
+required independent fresh account-result readback.
+
 Samueli commit `38a269811c9bb4a44bb31beaf02c552168c50864` implements
 post-task learning-count traffic by loading `studentstudyAjax`, extracting one
 absolute `fystat-ans.chaoxing.com/log/setlog` script URL, sending it, sending two

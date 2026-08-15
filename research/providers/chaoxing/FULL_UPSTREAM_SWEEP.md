@@ -230,3 +230,9 @@ single digest. Gesture has conflicting code-validation prerequisites, location
 has conflicting field sets, photo requires an uploaded `objectId`, and QR
 requires dynamic `enc`; none is prepared. The preparation has no HTTP consumer
 and does not weaken the durable-authority/readback gate.
+
+The same parameter follow-up extracted only Ylim's exact response vocabulary:
+`success`, `您已签到过了`, `success2`, plus pre-sign `#statuscontent` text.
+Preparation-bound pure parsers now preserve those as controlled preflight or
+Receipt facts with response digests; they reject all other text. No Receipt is
+called completion, and no parser provides dispatch, retry or recovery.

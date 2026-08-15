@@ -28,6 +28,11 @@ fixtures/providers/chaoxing/
   sign/
     activities-mixed.json
     detail-normal.json
+    pre-sign-no-completion.html
+    pre-sign-completed.html
+    receipt-accepted.txt
+    receipt-already-signed.txt
+    receipt-window-closed.txt
   work/
     course-page-with-work-iframe.html
     list-mixed.html
@@ -359,6 +364,11 @@ every fixture before staging it.
   from these fixtures, assert its exact two query field sets and actor-bound
   digest, redact UID/name, and reject foreign snapshots, non-normal variants
   and malformed actor inputs without issuing HTTP.
+  Separate bounded documents bind both pre-sign pages and all three exact
+  donor-observed response strings to that preparation digest. Regressions reject
+  missing/duplicate/unknown `#statuscontent`, unknown opaque mutation text and
+  oversized bodies, while keeping preflight evidence, mutation Receipt and
+  independent completion verification as three distinct concepts.
 - Learning-count fixtures must expose a fresh server-visible count before and
   after one visit. `studentstudyAjax`, `setlog` and monitor responses alone are
   insufficient, and a synthetic local target counter is not verification.

@@ -11,7 +11,7 @@ source modules even when their assessments share field names or HTML shapes.
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
 | ResourceExecution | `Samueli924/chaoxing` | OCS, CxKitty | Reference | Document/Read native calls, structurally distinguished signed interval-based Video/Audio progress and Live `liveinfo` -> durable `saveTimePc` heartbeats -> fresh ProgressRead verification are offline-covered; every Live heartbeat is issue/receipt ledgered and ambiguous outcomes are never replayed |
-| Sign-in activity read / preparation | `Ylim314/chaoxing-sign` | `mini-hbut`, Samueli | PortSource / Reference | Unregistered Provider-local Native GET boundary for exact course-bound `activelist` and activity-bound `signDetail`; bounded/zeroizing documents, numeric-or-string identities, nested/direct time shapes, duplicate rejection and fresh identity/type/variant/time rebinding are offline-covered. A separate immutable ordinary-sign preparation freezes the corroborated `preSign` plus `stuSignajax` query shapes and actor-bound digest without exposing a send method. Conflicting donor meanings for `status=1` and `otherId=5` remain raw/ambiguous; neither reads nor preparation prove account sign-in completion |
+| Sign-in activity read / preparation / receipt | `Ylim314/chaoxing-sign` | `mini-hbut`, Samueli | PortSource / Reference | Unregistered Provider-local Native GET boundary for exact course-bound `activelist` and activity-bound `signDetail`; bounded/zeroizing documents, numeric-or-string identities, nested/direct time shapes, duplicate rejection and fresh identity/type/variant/time rebinding are offline-covered. A separate immutable ordinary-sign preparation freezes the corroborated `preSign` plus `stuSignajax` query shapes and actor-bound digest without exposing a send method. Bound pure parsers classify only an empty/exact-completed `#statuscontent` and exact `success`/already-signed/expired response strings as preflight evidence or Receipts. Conflicting donor meanings for `status=1` and `otherId=5` remain raw/ambiguous; no read, preparation or Receipt proves independent account completion |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text is parsed after removing scripts, while bounded score and structural `reTest(...)` availability remain read-only facts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, while completed Exams with a strictly bound preview entry add fresh result score/retake provenance without enabling retake execution |
@@ -101,6 +101,12 @@ policy and remains independently guarded.
   plaintext query getter. Photo, location, gesture, QR and conflicted/unknown
   variants fail before preparation because their upload/input/prerequisite
   semantics are not consistently evidenced.
+- Preparation-bound, bounded/zeroizing pure parsers now distinguish preflight
+  evidence from mutation Receipts. `#statuscontent` may be structurally empty
+  (`NoCompletionMarker`) or exactly `签到成功` (`AlreadySigned`); the exact
+  `stuSignajax` bodies map to `Accepted`, `AlreadySigned` or `WindowClosed`.
+  Unknown/missing/duplicate values fail closed. These types have no transport
+  implementation and none is an independent completion verification.
 - Independent Work and Exam list parsers are covered by synthetic sanitized
   fixtures and compose behind `TaskInventoryCapability`.
 - Exam rows retain an optional 0-100 score and structural `reTest(...)`

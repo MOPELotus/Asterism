@@ -81,6 +81,12 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-15: retained Ylim's exact `#statuscontent` and `stuSignajax` response
+  vocabulary in bounded, zeroizing, preparation-bound pure parsers. Empty
+  pre-sign status, exact completed text, `success`, already-signed text and
+  `success2` remain controlled preflight/Receipt facts with response digests;
+  unknown text fails closed. This adds no send path and deliberately does not
+  treat an endpoint response as independent account completion readback.
 - 2026-08-15: compared Samueli `741d5c1884aa84ea50c650897c870229c1de812e`
   with both newly pinned sign-in sources at the parameter level. The ordinary
   `preSign`/`stuSignajax` field core is now frozen into an actor- and
