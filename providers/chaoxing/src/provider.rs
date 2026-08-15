@@ -9,8 +9,8 @@ use crate::{
     ChaoxingResourceExecution, ChaoxingSessionResolver, ChaoxingSubmissionBuild,
     ChaoxingSubmissionExecute, ChaoxingSubmissionVerify, ChaoxingTaskDetail, ChaoxingTaskInventory,
     ChaoxingTaskProgress, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
-    StoredChaoxingSessionResolver, metadata::development_metadata,
-    runtime_settings::runtime_settings_schema,
+    NativeChaoxingQrAuthenticationTransport, StoredChaoxingSessionResolver,
+    metadata::development_metadata, runtime_settings::runtime_settings_schema,
 };
 
 /// Composes the complete development-level Chaoxing Provider around one Core
@@ -61,8 +61,10 @@ fn compose_development_provider(
         network,
         sessions.clone(),
     )?);
-    let authentication = Arc::new(ChaoxingAuthentication::try_new(
+    let qr_transport = Arc::new(NativeChaoxingQrAuthenticationTransport::try_new(network)?);
+    let authentication = Arc::new(ChaoxingAuthentication::try_new_with_qr(
         authentication_transport,
+        qr_transport,
         sessions,
     )?);
     let course_inventory = Arc::new(ChaoxingCourseInventory::try_new(
@@ -176,6 +178,13 @@ mod tests {
         let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
             .expect("built-in network profile");
         let entry = build_development_provider(&network, Arc::new(FixtureSessions)).unwrap();
+        assert!(
+            entry
+                .authentication
+                .as_ref()
+                .unwrap()
+                .supports_durable_interactive_authentication()
+        );
         assert_registry_consistent(entry);
         let credentials = Arc::new(FixtureCredentials);
         let renewing =
@@ -185,7 +194,7 @@ mod tests {
     }
 
     fn assert_registry_consistent(entry: ProviderEntry) {
-        assert!(!entry.metadata.auth_methods.contains(&AuthMethod::QrCode));
+        assert!(entry.metadata.auth_methods.contains(&AuthMethod::QrCode));
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());

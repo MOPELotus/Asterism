@@ -6,7 +6,7 @@ source modules even when their assessments share field names or HTML shapes.
 | Asterism capability | Primary source | Secondary source | Planned use | Current evidence |
 |---|---|---|---|---|
 | Authentication / Password | `Samueli924/chaoxing` | CxKitty | PortSource | AES-CBC `fanyalogin`, derived Composite credential and Cookie revalidation are offline-covered; live validation pending |
-| Authentication / QR | CxKitty | BrowserBridge capture | Reference | Clean-room Native begin/poll boundary is offline-covered: exact Web `uuid`/`enc`, `createqr`, secret `toauthlogin` payload, typed one-request `getauthstatus`, scoped zeroizing Cookie jar and fresh Course-list validation. It remains unregistered because Core has no durable interactive-auth continuation/poll/atomic credential-commit lifecycle; current browser/session fallback and live validation remain first-batch work |
+| Authentication / QR | CxKitty | BrowserBridge capture | Reference | The Development factory advertises `QrCode` through Core's encrypted CAS continuation lifecycle. Exact Web `uuid`/`enc`, `createqr`, authorized `toauthlogin` action, one-request `getauthstatus`, scoped zeroizing Cookies, typed wait/reject/expire outcomes and fresh Course-list success validation are offline-covered. `status=true` first persists an identity-validation continuation; a later read-only Course-list poll persists the terminal continuation and deterministically finalizes one Cookie bundle. Live validation and BrowserBridge fallback remain open |
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
@@ -21,7 +21,7 @@ source modules even when their assessments share field names or HTML shapes.
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work, Chapter Work and Exam execute Core-frozen partial coverage without inventing answers. Work forms preserve the complete current control order and rebuild unanswered values empty. Chapter/Exam fill mutation requires a parsed `blank_count=1` and exactly one Draft text; ambiguous multi-blank concatenation fails closed. Exam's encrypted v3 continuation retains the complete ordered Question identity/fingerprint set plus the frozen selected original positions; saves traverse only selected Draft Questions and send each donor `start` as its original zero-based paper index. No Exam mutation is routed through Work payloads or replayed after ambiguity |
 | SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, requires the full result Question count and unique identities, and confirms/rejects only selected Draft Questions at their original positions from exact type/value evidence. Exact single-blank submitted text is supported only when the Question binds one blank; pending placeholders are not evidence. Unselected or unsupported result Questions are not answer evidence. The independent bounded result score remains fixed thousandths. A fresh explicit Expired state maps to `WindowClosed`; all less specific incomplete states remain conservatively undiagnosed |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream. Unknown numeric Question kinds, unknown Chapter resource structures and unknown Work result shapes now attach bounded protocol observations containing only controlled enums, counts and field-presence facts |
-| BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
+| BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Fallback for a live-drifted QR/session route, captcha/face gates and any donor capability Native HTTP cannot express reliably |
 
 ## Required Asterism separations
 
@@ -48,9 +48,9 @@ policy and remains independently guarded.
 1. Add sanitized HTML fixture contracts for Work and Exam lists.
 2. Implement deterministic Work/Exam inventory parsers and state mapping.
 3. Implement the authenticated transport with Native HTTP first.
-4. Implement bounded BrowserBridge/Capture recipes for QR, session binding and
-   the donor-observed captcha/face/browser gates; live-test which routes require
-   them when accounts become available.
+4. Implement bounded BrowserBridge/Capture recipes for any live-drifted QR
+   route and the donor-observed captcha/face/browser gates; live-test which
+   routes require them when accounts become available.
 5. Route only the affected capability through BrowserBridge when Native HTTP is
    incomplete or unreliable; do not move unrelated capabilities into a browser
    runtime.
@@ -66,16 +66,22 @@ policy and remains independently guarded.
 - Password and ImportedCookie now compose behind `AuthenticationCapability`.
   Password derives username/password/Cookie as a Core-revalidated Composite;
   captcha and SMS outcomes stop with typed `HumanRequired` reasons.
-- A separate unregistered QR transport implements the pinned CxKitty session
-  chain without placing challenge values in metadata or diagnostics. Begin and
-  every single poll require the same ProviderAccount/AuthSession/correlation
-  binding; scanned identity text is ignored, terminal states cannot be polled
-  again, response bodies and Cookie values are zeroized, and host-only Passport
-  Cookies never cross to Course hosts. `status=true` is provisional until the
-  resulting `_uid` Cookie passes a fresh Course-list read. The development
-  factory still advertises only Password/ImportedCookie because process-local
-  challenge ownership cannot replace Main's missing durable interactive-auth
-  continuation and atomic SecretStore commit.
+- QR now composes behind `AuthenticationCapability` and the Development factory
+  advertises `QrCode`. A canonical `chaoxing.qr.v1` secret continuation binds
+  ProviderAccount/AuthSession/correlation, exact challenge material, scoped
+  Cookies, absolute expiry, poll count and phase. Core encrypts it, claims one
+  poll revision at a time and atomically rotates waiting states. Provider
+  revision is modeled separately from Core's consumed poll sequence, so a
+  retryable released claim may advance the bounded sequence without invalidating
+  the unchanged encrypted continuation. Scanned
+  identity text is ignored, response bodies and Cookie values are zeroized,
+  and host-only Passport Cookies never cross to Course hosts. `status=true`
+  first rotates to a durable identity-validation phase after checking that the
+  resulting Cookie exposes `_uid`/`UID`; the next poll performs only a fresh
+  Course-list read. A transient validation failure can therefore retry that
+  read without replaying `getauthstatus`. Only a successful read persists the
+  authenticated terminal continuation used for deterministic Cookie-bundle
+  finalization without another remote poll.
 - The Native HTTP adapter fetches the root list, discovers bounded folder IDs
   from the interaction page, and fetches every folder using one short-lived
   resolved session. Any request or parse failure aborts the entire inventory.
@@ -256,7 +262,7 @@ policy and remains independently guarded.
 
 Chaoxing is complete only when all audited donor abilities—including remaining
 Chapter Work result-route/answer-resolution/retake wiring, Exam detail/result
-variants, Live account validation, QR, captcha/face handling
+variants, Live/QR account validation, captcha/face handling
 and required BrowserBridge/Capture fallbacks—have code and all currently
 executable verification. A native or parser milestone may be reported but does
 not stop development. Immutable Drafts, exact attempt binding, receipt/readback

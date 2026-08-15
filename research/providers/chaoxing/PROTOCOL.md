@@ -372,33 +372,60 @@ Chapter Work or Exam donor exposes a Chaoxing-native standard-answer endpoint.
 External Tiku/searcher/wrapper/model results and random/fuzzer guesses are never
 reported as `ProviderNative`.
 
-CxKitty's QR path is independently actionable after this checkpoint. One Web
+CxKitty's QR path is independently actionable. One Web
 Cookie jar loads `passport2.chaoxing.com/login`, extracts bounded `uuid`/`enc`,
 activates `createqr?uuid=...&fid=-1`, presents the exact
 `toauthlogin?uuid=...&enc=...` payload, and polls `getauthstatus` with the same
-two values. A clean-room Provider command can own parsing and polling semantics,
-but shared challenge presentation and atomic owner-bound credential commit are
-required before the authentication method can be advertised.
+two values. Core presents the challenge only to the authorized owner and owns
+the encrypted continuation, serialized polling and atomic owner-bound
+credential commit.
 
 The Provider-owned boundary now implements that chain. `begin_qr` requires a
 Core account/AuthSession/correlation binding, uses the donor Web User-Agent,
 parses exactly one `uuid` and `enc`, activates one QR and returns the
-`toauthlogin` payload only through a secret wrapper. `poll_qr` repeats the same
+`toauthlogin` payload only through a secret wrapper. The Authentication adapter
+then exposes only that exact HTTPS Passport action to the current authorized
+AuthSession. `poll_qr` repeats the same
 binding and performs exactly one `getauthstatus` POST; no Provider loop, sleep or
 automatic retry exists. Missing type means awaiting scan, type `4` means scanned
 and awaiting confirmation, `1` is rejected, `2` is expired, and unknown states
 fail as protocol drift. Nickname/UID/message fields are ignored and the bounded
-body is zeroized.
+body is zeroized. Each definite result receives a domain-separated digest over
+the consumed continuation digest/revision facts, normalized state, exact
+bounded response digest, canonical scoped-Cookie digest and, after validation,
+the fresh identity document digest.
 
 The manual Cookie jar validates Chaoxing-only HTTPS domain/path scope, keeps
 host-only Passport Cookies off Course hosts, applies replacement/deletion and
-zeroizes both stored values and assembled headers. A terminal success must yield
-an `_uid`/`UID` Cookie applicable to the Course host and pass one fresh
-`courselistdata` read before the transport returns an authenticated session.
-Rejected, expired and authenticated challenges become terminal and cannot be
-polled again. This remains an offline/native-boundary implementation: Core still
-needs an encrypted restart-safe interactive continuation plus atomic AuthSession
-and SecretStore commit before `AuthMethod::QrCode` can be registered.
+zeroizes both stored values and assembled headers. `status=true` must yield an
+`_uid`/`UID` Cookie applicable to the Course host and then rotates to a durable
+identity-validation continuation. Its next poll does not call `getauthstatus`;
+it performs one fresh `courselistdata` read before the transport returns an
+authenticated session. If that read fails transiently, Core releases the same
+continuation so a retry repeats only the read-only identity validation.
+
+The canonical `chaoxing.qr.v1` continuation contains schema, exact
+ProviderAccount/AuthSession/correlation binding, `uuid`/`enc`, sorted scoped
+Cookie entries, continuation revision, last consumed Core poll sequence, phase,
+absolute challenge expiry, begin-evidence digest and optional authenticated
+identity digest/time. Its digest covers the exact plaintext which Core
+encrypts. Revision and poll sequence are deliberately separate: a released
+retryable Core claim consumes its bounded sequence without rotating Provider
+state, so the next claim may have a greater sequence at the same revision. The
+Provider accepts only that monotonic bounded gap, writes the claimed sequence
+into the next continuation, and rejects stale/repeated sequences. Every
+definite poll then either rotates to AwaitingScan/
+AwaitingConfirmation/IdentityValidation or closes as Rejected/Expired. Remote
+success rotates first to IdentityValidation before any fallible Course read;
+verified success then rotates to an Authenticated terminal continuation. Thus a
+crash or transient read failure after `getauthstatus` success cannot replay that
+status request. `finalize_interactive_authentication` performs no network
+request and deterministically derives the same `QrCode` Cookie bundle from that
+terminal value. Non-terminal values cannot be finalized; authenticated values
+cannot be polled. Waiting expiry closes the challenge, while an already
+persisted authenticated terminal can still finalize after the QR display
+window expires. The Development factory now advertises `AuthMethod::QrCode`;
+the 2024 route remains Development-level until sanitized live validation.
 
 ## Native independent Work submission
 

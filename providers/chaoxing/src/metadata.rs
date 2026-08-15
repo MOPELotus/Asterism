@@ -34,7 +34,11 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::SubmissionVerify,
             ProviderCapability::ResourceExecution,
         ]),
-        auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie]),
+        auth_methods: BTreeSet::from([
+            AuthMethod::Password,
+            AuthMethod::ImportedCookie,
+            AuthMethod::QrCode,
+        ]),
         session_kinds: BTreeSet::from([
             SessionKind::Cookie,
             SessionKind::Composite,

@@ -74,8 +74,15 @@ strict login-page `uuid`/`enc` pair and the donor-observed awaiting, scanned,
 authenticated, rejected and expired JSON states. Nickname, UID and message text
 use deliberate `PRIVATE_*` sentinels which tests never retain. Separate Cookie
 tests prove Chaoxing-only domain/path scope, host-only isolation, replacement,
-deletion and zeroized header assembly. No fixture claims a durable Core poll
-lifecycle or live QR compatibility.
+deletion and zeroized header assembly. Provider tests additionally encode and
+decode the canonical continuation, reject foreign account/session/correlation,
+phase/digest/revision/sequence drift, accept a monotonic sequence gap left by a
+released retryable Core claim while rejecting stale reuse, rotate scan to
+confirmation and then to durable identity validation, persist an authenticated
+terminal only after the separate read-only validation step, deterministically
+finalize the same Cookie bundle, and classify rejected/expired terminal
+outcomes. Core repository/workflow tests cover encrypted CAS persistence
+separately. No fixture claims live QR compatibility.
 
 The Course fixtures cover bounded
 folder discovery, class-scoped identity,

@@ -6,7 +6,8 @@ use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
     AuthChallenge, AuthenticationCapability, CredentialReplacement, CredentialValidation,
     ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, SessionStatus,
+    ProviderInteractiveAuthBegin, ProviderInteractiveAuthPollOutcome, ProviderMetadata,
+    ProviderResult, ResolvedProviderInteractiveAuthContinuation, SessionStatus,
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, CredentialField, SecretPurpose, SecretString,
@@ -23,7 +24,8 @@ use serde::Deserialize;
 use zeroize::Zeroize;
 
 use crate::{
-    ChaoxingCookieSession, ChaoxingSessionResolver,
+    ChaoxingCookieSession, ChaoxingQrAuthenticationTransport, ChaoxingQrChallenge,
+    ChaoxingQrPollOutcome, ChaoxingSessionResolver,
     metadata::development_metadata,
     native_http::{classify_reqwest_error, fetch_course_list_html, validate_response_status},
 };
@@ -120,6 +122,7 @@ impl ChaoxingAuthenticationTransport for NativeChaoxingAuthenticationTransport {
 pub struct ChaoxingAuthentication {
     metadata: ProviderMetadata,
     transport: Arc<dyn ChaoxingAuthenticationTransport>,
+    qr_transport: Option<Arc<dyn ChaoxingQrAuthenticationTransport>>,
     sessions: Arc<dyn ChaoxingSessionResolver>,
 }
 
@@ -134,9 +137,30 @@ impl ChaoxingAuthentication {
         transport: Arc<dyn ChaoxingAuthenticationTransport>,
         sessions: Arc<dyn ChaoxingSessionResolver>,
     ) -> ProviderResult<Self> {
+        let mut metadata = development_metadata()?;
+        metadata.auth_methods.remove(&AuthMethod::QrCode);
+        Ok(Self {
+            metadata,
+            transport,
+            qr_transport: None,
+            sessions,
+        })
+    }
+
+    /// Creates the capability with the bounded native QR transport enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if compile-time Provider metadata is invalid.
+    pub fn try_new_with_qr(
+        transport: Arc<dyn ChaoxingAuthenticationTransport>,
+        qr_transport: Arc<dyn ChaoxingQrAuthenticationTransport>,
+        sessions: Arc<dyn ChaoxingSessionResolver>,
+    ) -> ProviderResult<Self> {
         Ok(Self {
             metadata: development_metadata()?,
             transport,
+            qr_transport: Some(qr_transport),
             sessions,
         })
     }
@@ -158,6 +182,10 @@ impl fmt::Debug for ChaoxingAuthentication {
             .debug_struct("ChaoxingAuthentication")
             .field("metadata", &self.metadata)
             .field("transport", &"configured")
+            .field(
+                "qr_transport",
+                &self.qr_transport.as_ref().map(|_| "configured"),
+            )
             .field("sessions", &"configured")
             .finish()
     }
@@ -171,6 +199,10 @@ impl ProviderIdentity for ChaoxingAuthentication {
 
 #[async_trait]
 impl AuthenticationCapability for ChaoxingAuthentication {
+    fn supports_durable_interactive_authentication(&self) -> bool {
+        self.qr_transport.is_some()
+    }
+
     async fn begin_authentication(
         &self,
         context: &ProviderAuthContext,
@@ -198,6 +230,127 @@ impl AuthenticationCapability for ChaoxingAuthentication {
         })
     }
 
+    async fn begin_interactive_authentication(
+        &self,
+        context: &ProviderAuthContext,
+        method: AuthMethod,
+    ) -> ProviderResult<ProviderInteractiveAuthBegin> {
+        self.validate_context(&context.provider_id)?;
+        if method != AuthMethod::QrCode {
+            return Err(unsupported_auth_method());
+        }
+        let session_id = context.auth_session_id.ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Chaoxing QR authentication requires a Core AuthSession",
+            )
+        })?;
+        let transport = self.qr_transport.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Chaoxing QR authentication transport is not configured",
+            )
+        })?;
+        let challenge = transport.begin_qr(context).await?;
+        let user_action = challenge.challenge_url().expose_secret().to_owned();
+        validate_qr_user_action(&user_action)?;
+        let expires_at = challenge.expires_at();
+        let continuation = challenge.to_provider_continuation()?;
+        Ok(ProviderInteractiveAuthBegin {
+            challenge: AuthChallenge {
+                session_id,
+                method,
+                waiting_for: WaitingUserState::QrScan,
+                user_action: Some(user_action),
+                expires_at: Some(expires_at),
+                external_oauth: None,
+            },
+            continuation,
+        })
+    }
+
+    async fn poll_interactive_authentication(
+        &self,
+        context: &ProviderAuthContext,
+        continuation: ResolvedProviderInteractiveAuthContinuation<'_>,
+    ) -> ProviderResult<ProviderInteractiveAuthPollOutcome> {
+        self.validate_context(&context.provider_id)?;
+        let transport = self.qr_transport.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Chaoxing QR authentication transport is not configured",
+            )
+        })?;
+        let mut challenge = ChaoxingQrChallenge::decode_bound(context, &continuation)?;
+        let outcome = transport.poll_qr(context, &mut challenge).await?;
+        let result = match outcome {
+            ChaoxingQrPollOutcome::AwaitingScan { result_digest } => {
+                let user_action = challenge.challenge_url().expose_secret().to_owned();
+                validate_qr_user_action(&user_action)?;
+                ProviderInteractiveAuthPollOutcome::Waiting {
+                    waiting_for: WaitingUserState::QrScan,
+                    user_action: Some(user_action),
+                    continuation: challenge.to_provider_continuation()?,
+                    result_digest,
+                }
+            }
+            ChaoxingQrPollOutcome::AwaitingConfirmation { result_digest }
+            | ChaoxingQrPollOutcome::IdentityValidation { result_digest } => {
+                ProviderInteractiveAuthPollOutcome::Waiting {
+                    waiting_for: WaitingUserState::QrConfirm,
+                    user_action: None,
+                    continuation: challenge.to_provider_continuation()?,
+                    result_digest,
+                }
+            }
+            ChaoxingQrPollOutcome::Authenticated { result_digest, .. } => {
+                ProviderInteractiveAuthPollOutcome::Authenticated {
+                    continuation: challenge.to_provider_continuation()?,
+                    result_digest,
+                }
+            }
+            ChaoxingQrPollOutcome::Rejected { result_digest } => {
+                ProviderInteractiveAuthPollOutcome::Rejected { result_digest }
+            }
+            ChaoxingQrPollOutcome::Expired { result_digest } => {
+                ProviderInteractiveAuthPollOutcome::Expired { result_digest }
+            }
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
+    async fn finalize_interactive_authentication(
+        &self,
+        context: &ProviderAuthContext,
+        continuation: ResolvedProviderInteractiveAuthContinuation<'_>,
+    ) -> ProviderResult<CredentialBundle> {
+        self.validate_context(&context.provider_id)?;
+        let challenge = ChaoxingQrChallenge::decode_bound(context, &continuation)?;
+        let session = challenge.authenticated_session()?;
+        let bundle = CredentialBundle {
+            provider_id: self.metadata.id.clone(),
+            tenant: None,
+            auth_method: AuthMethod::QrCode,
+            acquired_via: CredentialAcquisition::NativeProviderLogin,
+            captured_at: challenge.authenticated_at()?,
+            expires_at: None,
+            session_kind: SessionKind::Cookie,
+            fields: vec![CredentialField {
+                purpose: SecretPurpose::ProviderCookie,
+                value: SecretValue::new(session.expose_secret().as_bytes().to_vec()),
+            }],
+            user_id_hint: None,
+        };
+        bundle.validate().map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing QR terminal credential is invalid",
+            )
+        })?;
+        Ok(bundle)
+    }
+
     async fn validate_credential(
         &self,
         context: &ProviderAuthContext,
@@ -213,6 +366,11 @@ impl AuthenticationCapability for ChaoxingAuthentication {
         match credential.auth_method {
             AuthMethod::Password => self.validate_password(credential).await,
             AuthMethod::ImportedCookie => self.validate_imported_cookie(credential).await,
+            AuthMethod::QrCode
+                if credential.acquired_via == CredentialAcquisition::NativeProviderLogin =>
+            {
+                self.validate_imported_cookie(credential).await
+            }
             _ => Err(unsupported_auth_method()),
         }
     }
@@ -538,6 +696,49 @@ fn static_login_url() -> ProviderResult<Url> {
     })
 }
 
+fn validate_qr_user_action(value: &str) -> ProviderResult<()> {
+    let url = Url::parse(value).map_err(|_| invalid_qr_action())?;
+    if value.len() > 4_096
+        || value.trim() != value
+        || url.scheme() != "https"
+        || url.host_str() != Some("passport2.chaoxing.com")
+        || url.path() != "/toauthlogin"
+        || url.username() != ""
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid_qr_action());
+    }
+    let mut fields = BTreeMap::new();
+    for (name, value) in url.query_pairs() {
+        if fields
+            .insert(name.into_owned(), value.into_owned())
+            .is_some()
+        {
+            return Err(invalid_qr_action());
+        }
+    }
+    if fields.len() != 5
+        || fields.get("uuid").is_none_or(String::is_empty)
+        || fields.get("enc").is_none_or(String::is_empty)
+        || fields.get("xxtrefer").is_none_or(|value| !value.is_empty())
+        || fields.get("clientid").is_none_or(|value| !value.is_empty())
+        || fields
+            .get("mobiletip")
+            .is_none_or(|value| !value.is_empty())
+    {
+        return Err(invalid_qr_action());
+    }
+    Ok(())
+}
+
+fn invalid_qr_action() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "Chaoxing QR user action is outside the allowlisted origin or shape",
+    )
+}
+
 fn unsupported_auth_method() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
@@ -605,6 +806,48 @@ mod tests {
         async fn validate_cookie(&self, _session: &ChaoxingCookieSession) -> ProviderResult<()> {
             self.validations.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FixtureQrTransport {
+        polls: AtomicUsize,
+        mode: FixtureQrMode,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum FixtureQrMode {
+        RotateThenAuthenticate,
+        Reject,
+        Expire,
+    }
+
+    #[async_trait]
+    impl ChaoxingQrAuthenticationTransport for FixtureQrTransport {
+        async fn begin_qr(
+            &self,
+            context: &ProviderAuthContext,
+        ) -> ProviderResult<ChaoxingQrChallenge> {
+            Ok(ChaoxingQrChallenge::fixture(context))
+        }
+
+        async fn poll_qr(
+            &self,
+            context: &ProviderAuthContext,
+            challenge: &mut ChaoxingQrChallenge,
+        ) -> ProviderResult<ChaoxingQrPollOutcome> {
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst);
+            Ok(match self.mode {
+                FixtureQrMode::RotateThenAuthenticate if poll == 0 => {
+                    challenge.fixture_awaiting_confirmation(context)
+                }
+                FixtureQrMode::RotateThenAuthenticate if poll == 1 => {
+                    challenge.fixture_identity_validation(context)
+                }
+                FixtureQrMode::RotateThenAuthenticate => challenge.fixture_authenticated(context),
+                FixtureQrMode::Reject => challenge.fixture_rejected(context),
+                FixtureQrMode::Expire => challenge.fixture_expired(context),
+            })
         }
     }
 
@@ -711,6 +954,227 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn qr_continuations_rotate_then_finalize_without_repolling() {
+        let credential_transport = Arc::new(FixtureTransport {
+            exchanges: AtomicUsize::new(0),
+            validations: AtomicUsize::new(0),
+        });
+        let qr_transport = Arc::new(FixtureQrTransport {
+            polls: AtomicUsize::new(0),
+            mode: FixtureQrMode::RotateThenAuthenticate,
+        });
+        let authentication = ChaoxingAuthentication::try_new_with_qr(
+            credential_transport.clone(),
+            qr_transport.clone(),
+            Arc::new(FixtureSessions),
+        )
+        .unwrap();
+        let context = auth_context();
+        let begin = authentication
+            .begin_interactive_authentication(&context, AuthMethod::QrCode)
+            .await
+            .unwrap();
+        assert_eq!(begin.challenge.method, AuthMethod::QrCode);
+        assert_eq!(begin.challenge.waiting_for, WaitingUserState::QrScan);
+        validate_qr_user_action(begin.challenge.user_action.as_deref().unwrap()).unwrap();
+        let digest = begin.continuation.continuation_digest();
+        let (continuation_type, phase, value, _, _) = begin.continuation.into_parts();
+
+        let waiting = authentication
+            .poll_interactive_authentication(
+                &context,
+                ResolvedProviderInteractiveAuthContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest: digest,
+                    phase: &phase,
+                    revision: 1,
+                    poll_sequence: 1,
+                    value: &value,
+                },
+            )
+            .await
+            .unwrap();
+        let ProviderInteractiveAuthPollOutcome::Waiting {
+            waiting_for,
+            user_action,
+            continuation,
+            result_digest,
+        } = waiting
+        else {
+            panic!("first QR poll did not preserve the waiting continuation");
+        };
+        assert_eq!(waiting_for, WaitingUserState::QrConfirm);
+        assert!(user_action.is_none());
+        assert_ne!(result_digest, [0; 32]);
+        let digest = continuation.continuation_digest();
+        let (continuation_type, phase, value, _, _) = continuation.into_parts();
+
+        let identity_validation = authentication
+            .poll_interactive_authentication(
+                &context,
+                ResolvedProviderInteractiveAuthContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest: digest,
+                    phase: &phase,
+                    revision: 2,
+                    poll_sequence: 2,
+                    value: &value,
+                },
+            )
+            .await
+            .unwrap();
+        let ProviderInteractiveAuthPollOutcome::Waiting {
+            waiting_for,
+            user_action,
+            continuation,
+            result_digest,
+        } = identity_validation
+        else {
+            panic!("successful QR status did not persist identity validation state");
+        };
+        assert_eq!(waiting_for, WaitingUserState::QrConfirm);
+        assert!(user_action.is_none());
+        assert_ne!(result_digest, [0; 32]);
+        let digest = continuation.continuation_digest();
+        let (continuation_type, phase, value, _, _) = continuation.into_parts();
+
+        let authenticated = authentication
+            .poll_interactive_authentication(
+                &context,
+                ResolvedProviderInteractiveAuthContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest: digest,
+                    phase: &phase,
+                    revision: 3,
+                    poll_sequence: 3,
+                    value: &value,
+                },
+            )
+            .await
+            .unwrap();
+        let ProviderInteractiveAuthPollOutcome::Authenticated {
+            continuation,
+            result_digest,
+        } = authenticated
+        else {
+            panic!("identity validation did not produce a terminal continuation");
+        };
+        assert_ne!(result_digest, [0; 32]);
+        let digest = continuation.continuation_digest();
+        let (continuation_type, phase, value, _, _) = continuation.into_parts();
+        let finalized = authentication
+            .finalize_interactive_authentication(
+                &context,
+                ResolvedProviderInteractiveAuthContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest: digest,
+                    phase: &phase,
+                    revision: 4,
+                    poll_sequence: 3,
+                    value: &value,
+                },
+            )
+            .await
+            .unwrap();
+        let repeated = authentication
+            .finalize_interactive_authentication(
+                &context,
+                ResolvedProviderInteractiveAuthContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest: digest,
+                    phase: &phase,
+                    revision: 4,
+                    poll_sequence: 3,
+                    value: &value,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(finalized.auth_method, AuthMethod::QrCode);
+        assert_eq!(finalized.session_kind, SessionKind::Cookie);
+        assert_eq!(finalized.captured_at, repeated.captured_at);
+        assert_eq!(
+            finalized.fields[0].value.expose_secret(),
+            repeated.fields[0].value.expose_secret()
+        );
+        assert!(
+            std::str::from_utf8(finalized.fields[0].value.expose_secret())
+                .unwrap()
+                .contains("_uid=SAFE_QR_UID")
+        );
+        assert_eq!(qr_transport.polls.load(Ordering::SeqCst), 3);
+
+        let validated = authentication
+            .validate_credential(&context, &finalized)
+            .await
+            .unwrap();
+        assert!(validated.status.valid);
+        assert_eq!(credential_transport.validations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn qr_rejection_and_expiry_are_persistable_terminal_outcomes() {
+        for mode in [FixtureQrMode::Reject, FixtureQrMode::Expire] {
+            let authentication = ChaoxingAuthentication::try_new_with_qr(
+                Arc::new(FixtureTransport {
+                    exchanges: AtomicUsize::new(0),
+                    validations: AtomicUsize::new(0),
+                }),
+                Arc::new(FixtureQrTransport {
+                    polls: AtomicUsize::new(0),
+                    mode,
+                }),
+                Arc::new(FixtureSessions),
+            )
+            .unwrap();
+            let context = auth_context();
+            let begin = authentication
+                .begin_interactive_authentication(&context, AuthMethod::QrCode)
+                .await
+                .unwrap();
+            let digest = begin.continuation.continuation_digest();
+            let (continuation_type, phase, value, _, _) = begin.continuation.into_parts();
+            let outcome = authentication
+                .poll_interactive_authentication(
+                    &context,
+                    ResolvedProviderInteractiveAuthContinuation {
+                        continuation_type: &continuation_type,
+                        continuation_digest: digest,
+                        phase: &phase,
+                        revision: 1,
+                        poll_sequence: 1,
+                        value: &value,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                (mode, outcome),
+                (
+                    FixtureQrMode::Reject,
+                    ProviderInteractiveAuthPollOutcome::Rejected { .. }
+                ) | (
+                    FixtureQrMode::Expire,
+                    ProviderInteractiveAuthPollOutcome::Expired { .. }
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn qr_user_action_rejects_foreign_or_ambiguous_urls() {
+        for action in [
+            "http://passport2.chaoxing.com/toauthlogin?uuid=a&enc=b&xxtrefer=&clientid=&mobiletip=",
+            "https://foreign.example/toauthlogin?uuid=a&enc=b&xxtrefer=&clientid=&mobiletip=",
+            "https://passport2.chaoxing.com/toauthlogin?uuid=a&uuid=b&enc=c&xxtrefer=&clientid=&mobiletip=",
+            "https://passport2.chaoxing.com/toauthlogin?uuid=a&enc=b",
+        ] {
+            assert!(validate_qr_user_action(action).is_err());
+        }
     }
 
     #[tokio::test]

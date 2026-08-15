@@ -59,16 +59,27 @@ distinguish post-result evidence from pre-submission resolution.
 
 The same audit confirmed CxKitty's separate QR session sequence: read `uuid` and
 `enc` from the Web login page under one Cookie jar, activate `createqr`, display
-the `toauthlogin` URL, and poll `getauthstatus`. Asterism now implements this as
-an unregistered Provider-owned bounded Native transport. Its challenge binds the
-Core account/AuthSession/correlation, every call performs exactly one poll, the
-Cookie jar enforces Chaoxing domain/path scope and zeroization, and a reported
-success must pass a fresh Course-list read. Challenge presentation, durable
-encrypted continuation polling and atomic credential commit remain shared
-runtime responsibilities, so metadata does not advertise `QrCode` yet.
+the `toauthlogin` URL, and poll `getauthstatus`. Asterism implements this as a
+bounded Native transport behind Core's durable interactive-auth workflow. Its
+canonical secret continuation binds the Core account/AuthSession/correlation,
+every claim performs one phase-specific remote read, and the Cookie jar enforces
+Chaoxing domain/path scope and zeroization. A reported success first persists
+the Cookie in an identity-validation continuation; its next claim performs only
+a fresh Course-list read before a terminal continuation can finalize the Cookie
+bundle. This prevents a transient validation failure from repeating
+`getauthstatus`. Metadata now advertises `QrCode` at Development; sanitized live
+validation is still required.
 
 ## Refresh log
 
+- 2026-08-15: no CxKitty revision changed while the shared durable
+  interactive-auth contract landed. Wired the existing QR transport into the
+  Development factory with canonical encrypted continuation state, exact
+  revision/sequence binding, result digests, typed waiting/rejected/expired
+  outcomes, an intermediate identity-validation phase which never re-polls
+  remote success, separate Provider revision/Core poll-sequence recovery after
+  released retryable claims, and crash-recoverable deterministic terminal
+  Cookie finalization.
 - 2026-08-15: re-read the pinned CxKitty/OCS/agent/`chaoxing-exam` type-2
   paths without a donor revision change. Added explicit page-derived blank
   cardinality, limited Chapter/Exam mutation to one bound blank/value, and
@@ -84,9 +95,8 @@ runtime responsibilities, so metadata does not advertise `QrCode` yet.
   in `FIXTURES.md`.
 - 2026-08-15: re-read the complete pinned CxKitty QR call chain after the
   workspace checkpoint. No donor revision changed. Added a clean-room bounded
-  Native QR begin/poll boundary and synthetic state/Cookie fixtures; it remains
-  unregistered pending a shared durable interactive-auth continuation and live
-  validation of the 2024 route.
+  Native QR begin/poll boundary and synthetic state/Cookie fixtures; live
+  validation of the 2024 route remained pending.
 - 2026-08-15: refreshed all six donor default branches, tag counts, latest
   Releases and issue updates after the partial-coverage Core checkpoint. Every
   recorded revision remains unchanged; tag counts remain 45/0/0/321/0/29,

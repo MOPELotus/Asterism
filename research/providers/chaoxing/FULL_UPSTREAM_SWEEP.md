@@ -30,7 +30,7 @@ The refreshed symbolic revisions are unchanged:
 
 | Donor behavior | Asterism mapping | Classification |
 |---|---|---|
-| Password/Cookie login, session validation, Course/folder/Chapter inventory | Authentication, CourseInventory and TaskInventory | Implemented; QR remains a shared interactive-auth gap |
+| Password/Cookie/QR login, session validation, Course/folder/Chapter inventory | Authentication, CourseInventory and TaskInventory | Password/imported Cookie are implemented; QR now uses Core's encrypted CAS continuation and atomic terminal credential lifecycle, with live validation still pending |
 | Video, Document, Read, Live, Audio and hyperlink cards | Resource inventory/execution families | Video, Audio, Document, Read and Live checkpoints implemented with fresh-card verification; hyperlink still requires a Browser fixture and bounded execution verification |
 | Chapter Work, independent Work and formal Exam discovery | Distinct Task source/assessment facts | Implemented for audited inventory routes |
 | Work/Exam question read and mutation | QuestionInventory/Parse and Submission capabilities | Native subsets implemented; rendered long-tail controls require BrowserBridge |
@@ -159,13 +159,17 @@ the selected original positions, advances only selected saves and verifies
 selected result evidence against the complete remote Question count. The other
 shared gaps above remain independently tracked.
 
-The same checkpoint closes the Provider-owned portion of the recovered CxKitty
-QR chain: bounded Native login/create/single-poll parsing, Chaoxing-scoped
-zeroizing Cookies, exact account/AuthSession/correlation binding and fresh
-Course validation now have code and synthetic regression coverage. Registration
-still waits for Main's encrypted restart-safe interactive-auth continuation and
-atomic terminal credential commit, plus a sanitized live validation of the 2024
-route. An in-memory challenge is not treated as completion of that shared gap.
+The same checkpoint first closed the Provider-owned portion of the recovered
+CxKitty QR chain: bounded Native login/create/single-poll parsing,
+Chaoxing-scoped zeroizing Cookies, exact account/AuthSession/correlation binding
+and fresh Course validation. Core's encrypted restart-safe interactive-auth
+continuation and atomic terminal credential lifecycle have since landed, and
+the Development factory now advertises `QrCode`. Canonical continuation,
+revision/sequence/result-digest and crash-recovery tests cover the integrated
+boundary. In particular, a reported remote success first persists an
+identity-validation continuation, so retries of the subsequent fresh Course
+read cannot repeat `getauthstatus`; a sanitized live validation of the 2024
+route remains open.
 
 ## Re-audit outcome
 
