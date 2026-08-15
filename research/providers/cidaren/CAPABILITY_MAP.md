@@ -242,6 +242,12 @@ The current checkpoint (not a completion boundary):
     row content, Course/Task identities, titles, score/progress values and
     authentication material remain excluded. The complete inventory still
     fails atomically before any stale Task can reach terminal readback.
+48. observes malformed successful `Student/Main` account envelopes and selected
+    Course field drift without observing ordinary rejected/expired tokens.
+    Only root/code/data/user-info/Course field kinds, numeric success code and
+    profile field count are retained; profile keys/values, student identity,
+    Course ID and credential material remain excluded. Imported, Capture and
+    native OAuth sessions continue through the same fresh account validation.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

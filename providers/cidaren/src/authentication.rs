@@ -1,6 +1,8 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{AuthMethod, SessionKind, WaitingUserState};
+use asterism_domain::{
+    AuthMethod, ProtocolObservationKind, ProtocolSurface, SessionKind, WaitingUserState,
+};
 use asterism_provider_api::{
     AuthChallenge, AuthenticationCapability, CaptureRecipe, CredentialReplacement,
     CredentialValidation, ExternalOauthCallbackBinding, ProviderAuthContext, ProviderContext,
@@ -10,12 +12,14 @@ use asterism_provider_api::{
 use asterism_secrets::{CredentialAcquisition, CredentialBundle, SecretPurpose, SecretString};
 use async_trait::async_trait;
 use http::HeaderValue;
-use serde_json::Value;
+use serde_json::{Value, json};
 use zeroize::Zeroize;
 
 use crate::{
     CidarenCryptoContext, cidaren_capture_recipe_v2, cidaren_token_capture_recipe_v1,
-    metadata::development_metadata, oauth_authorization::CidarenOauthAuthorization,
+    metadata::development_metadata,
+    oauth_authorization::CidarenOauthAuthorization,
+    protocol_observation::{error_with_protocol_observation, json_value_kind},
 };
 
 const MAX_TOKEN_BYTES: usize = 64 * 1_024;
@@ -419,27 +423,38 @@ pub fn classify_token_validation_response(document: &[u8]) -> ProviderResult<()>
     let root = ZeroizingValidationJson::new(
         serde_json::from_slice(document).map_err(|_| invalid_validation_response())?,
     );
-    let object = root
-        .as_value()
-        .as_object()
-        .ok_or_else(invalid_validation_response)?;
-    let code = object
-        .get("code")
-        .and_then(Value::as_i64)
-        .ok_or_else(invalid_validation_response)?;
+    let Some(object) = root.as_value().as_object() else {
+        return Err(account_validation_observation(
+            invalid_validation_response(),
+            root.as_value(),
+            ProtocolObservationKind::UnknownResultShape,
+        ));
+    };
+    let Some(code) = object.get("code").and_then(Value::as_i64) else {
+        return Err(account_validation_observation(
+            invalid_validation_response(),
+            root.as_value(),
+            ProtocolObservationKind::UnknownResultShape,
+        ));
+    };
     if code != 1 {
         return Err(ProviderError::new(
             ProviderErrorKind::Authentication,
             "Cidaren rejected or expired the imported token",
         ));
     }
-    object
+    let profile = object
         .get("data")
         .and_then(Value::as_object)
         .and_then(|data| data.get("user_info"))
-        .and_then(Value::as_object)
-        .filter(|profile| !profile.is_empty())
-        .ok_or_else(invalid_validation_response)?;
+        .and_then(Value::as_object);
+    if profile.is_none_or(serde_json::Map::is_empty) {
+        return Err(account_validation_observation(
+            invalid_validation_response(),
+            root.as_value(),
+            ProtocolObservationKind::UnknownResultShape,
+        ));
+    }
     Ok(())
 }
 
@@ -465,12 +480,48 @@ pub(crate) fn selected_course_id(document: &[u8]) -> ProviderResult<String> {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         })
         .ok_or_else(|| {
-            ProviderError::new(
-                ProviderErrorKind::ProtocolDrift,
-                "Cidaren account response has no valid selected Course identity",
+            account_validation_observation(
+                ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "Cidaren account response has no valid selected Course identity",
+                ),
+                root.as_value(),
+                ProtocolObservationKind::FieldDrift,
             )
         })?;
     Ok(course_id.to_owned())
+}
+
+fn account_validation_observation(
+    error: ProviderError,
+    root: &Value,
+    kind: ProtocolObservationKind,
+) -> ProviderError {
+    let object = root.as_object();
+    let data = object.and_then(|object| object.get("data"));
+    let user_info = data
+        .and_then(Value::as_object)
+        .and_then(|data| data.get("user_info"));
+    let profile = user_info.and_then(Value::as_object);
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::Authentication,
+        kind,
+        json!({
+            "schema": "cidaren.account-validation-observation.v1",
+            "root_kind": json_value_kind(Some(root)),
+            "code_kind": json_value_kind(object.and_then(|object| object.get("code"))),
+            "code_value": object
+                .and_then(|object| object.get("code"))
+                .and_then(Value::as_i64),
+            "data_kind": json_value_kind(data),
+            "user_info_kind": json_value_kind(user_info),
+            "user_info_fields": profile.map(serde_json::Map::len),
+            "course_id_kind": json_value_kind(
+                profile.and_then(|profile| profile.get("course_id"))
+            ),
+        }),
+    )
 }
 
 struct ZeroizingValidationJson(Value);
@@ -644,12 +695,65 @@ mod tests {
         assert_eq!(selected_course_id(TOKEN_SUCCESS).unwrap(), "course-a");
         let rejected = classify_token_validation_response(TOKEN_REJECTED).unwrap_err();
         assert_eq!(rejected.kind, ProviderErrorKind::Authentication);
+        assert!(rejected.protocol_observation.is_none());
         assert!(!rejected.message.contains("synthetic detail"));
         assert!(classify_token_validation_response(br#"{"code":1,"data":{}}"#).is_err());
         assert!(classify_token_validation_response(b"not-json").is_err());
         assert!(
             selected_course_id(br#"{"code":1,"data":{"user_info":{"course_id":"unsafe/course"}}}"#)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn account_shape_drift_excludes_profile_and_course_values() {
+        let error = classify_token_validation_response(
+            br#"{"code":1,"data":{"user_info":"must-not-cross-profile"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::Authentication);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "cidaren.account-validation-observation.v1",
+                "root_kind": "object",
+                "code_kind": "number",
+                "code_value": 1,
+                "data_kind": "object",
+                "user_info_kind": "string",
+                "user_info_fields": null,
+                "course_id_kind": "missing",
+            })
+        );
+
+        let error = selected_course_id(
+            br#"{"code":1,"data":{"user_info":{"course_id":"unsafe/course","student_name":"must-not-cross-student"}}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.kind, ProtocolObservationKind::FieldDrift);
+        assert_eq!(observation.shape_sanitized["course_id_kind"], "string");
+        assert_eq!(observation.shape_sanitized["user_info_fields"], 2);
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("unsafe/course"));
+        assert!(!sanitized.contains("must-not-cross"));
+        assert!(!sanitized.contains("student_name"));
+
+        let error = classify_token_validation_response(
+            br#"{"code":"must-not-cross-code","data":{"user_info":{}}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        assert_eq!(
+            error.protocol_observation.unwrap().shape_sanitized["code_kind"],
+            "string"
         );
     }
 

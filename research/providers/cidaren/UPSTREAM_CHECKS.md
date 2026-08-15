@@ -726,6 +726,23 @@ score/progress/time value, answer material or credential. Existing
 identity rebinding remain unchanged, so terminal verification cannot continue
 from a partial or newly guessed inventory.
 
+### 2026-08-15 account-validation observation follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth handoff manifest remained unchanged after the inventory-envelope
+unit. No account route, result code or profile field family entered scope.
+
+The shared `Student/Main` classifier now distinguishes expected credential
+rejection from protocol drift at the observation boundary. A well-formed
+non-success code remains ordinary `Authentication` with no observation.
+Malformed root/code shape, `code=1` without a non-empty `data.user_info`
+object, and invalid selected-Course shape attach only account-envelope value
+kinds, numeric success code and profile-field count as `Authentication /
+UnknownResultShape` or `FieldDrift`. The zeroizing response owner still clears
+student name/code, school, class and Course ID values; none enters the shape.
+ImportedToken, captured token/Composite and native OAuth Composite validation
+all continue through this same fresh account readback before use or commit.
+
 ## Check procedure
 
 For the next checkpoint:

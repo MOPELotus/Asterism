@@ -66,6 +66,14 @@ does not turn that optional, unused observation into a required JSON field;
 this avoids stalling a valid capture and avoids persisting excess browser
 state.
 
+A well-formed non-success code is an ordinary rejected/expired credential and
+does not generate a drift observation. A non-object or non-numeric envelope,
+`code=1` without a non-empty `data.user_info` object, or an invalid selected
+`course_id` remains fail-closed and attaches only root/code/data/user-info/
+Course value kinds, numeric success code and profile-field count on
+`Authentication / UnknownResultShape` or `FieldDrift`. No profile key/value,
+student identity or Course ID value crosses the observation boundary.
+
 The native transport now uses the shared non-redirecting HTTPS client. It sends
 the token as a sensitive `UserToken` header, preserves the audited mobile
 User-Agent plus derived `Abc`/read `Authorization-V` headers, requires JSON
@@ -567,6 +575,10 @@ retaining response or user data:
   root/code/data/records/list field kinds, an optional numeric code and bounded
   structural counts on `TaskInventory / UnknownResultShape`; no row, identity,
   title, score or progress value is retained.
+- malformed successful `Student/Main` envelopes and selected-Course field drift
+  record only account-envelope value kinds, numeric success code and profile
+  field count on `Authentication / UnknownResultShape` or `FieldDrift`;
+  well-formed rejected credentials remain unobserved ordinary Authentication.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting

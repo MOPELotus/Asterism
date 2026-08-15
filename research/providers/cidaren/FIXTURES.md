@@ -233,6 +233,11 @@ placeholder identities, result codes, status values and pagination shape.
   kinds. Synthetic row answers, Course IDs/titles and task-list string values
   do not cross the observation; every malformed envelope still rejects the
   complete inventory.
+- `Student/Main` shape tests distinguish an ordinary well-formed rejected token
+  (Authentication with no observation) from malformed success/profile and
+  selected-Course drift. Observations retain only field kinds, numeric success
+  code and profile-field count; student name/code/school/class and Course ID
+  values remain inside the zeroizing response owner.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.
