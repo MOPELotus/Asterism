@@ -33,6 +33,9 @@ fixtures/providers/chaoxing/
     receipt-accepted.txt
     receipt-already-signed.txt
     receipt-window-closed.txt
+    webim-me.html
+    webim-sign-event.json
+    webim-non-sign-event.json
   work/
     course-page-with-work-iframe.html
     list-mixed.html
@@ -369,6 +372,12 @@ every fixture before staging it.
   missing/duplicate/unknown `#statuscontent`, unknown opaque mutation text and
   oversized bodies, while keeping preflight evidence, mutation Receipt and
   independent completion verification as three distinct concepts.
+  WebIM fixtures separately cover the exact three bootstrap selectors, one
+  `atype=2` `att_chat_course` identity and one non-sign activity. Tests bind
+  credentials to account/correlation without exposing token/UID/name, retain
+  only course/class/activity IDs from a sign event, ignore non-sign events and
+  reject malformed sign identities. They do not simulate a WebSocket session,
+  reconnect, acknowledgement, mutation or completion readback.
 - Learning-count fixtures must expose a fresh server-visible count before and
   after one visit. `studentstudyAjax`, `setlog` and monitor responses alone are
   insufficient, and a synthetic local target counter is not verification.

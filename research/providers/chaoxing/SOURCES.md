@@ -1,6 +1,6 @@
 # chaoxing upstream sources
 
-Audit date: 2026-08-14
+Audit date: 2026-08-15
 
 This is a static source audit. No donor or Asterism implementation was live-tested
 against a real account during this audit, so every live-validation claim remains
@@ -10,7 +10,7 @@ pending.
 |---|---|---|---|---|---|
 | [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `9699e632b492cdc55ea35a1ab05b6dfcbfb7cf70` | 2026-08-14 | Reference | Password/Cookie login, course/folder inventory, Chapter cards, Video/Audio fallback, Document, Live, Read, Chapter Work, sign-in and learning-count behavior | Pending |
 | [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c4bab71f79d762b45210643dd537d` | 2024-09-29 | Reference | Password/QR login, SSO validation, mobile course/Chapter APIs, Video/Document, Work/Exam export/save/submit, retake facts, face/captcha branches | Pending; protocol age is a risk |
-| [`Ylim314/chaoxing-sign`](https://github.com/Ylim314/chaoxing-sign) | `7ed64ff547d352708066ff61f1b1dc1fb1be32f1` | 2026-03-09 | PortSource | Current `activelist`/`signDetail` reads, sign activity/status codes, structured time fields and normal/QR/gesture/location/code dispatch | Pending |
+| [`Ylim314/chaoxing-sign`](https://github.com/Ylim314/chaoxing-sign) | `7ed64ff547d352708066ff61f1b1dc1fb1be32f1` | 2026-03-09 | PortSource | Current `activelist`/`signDetail` reads, sign activity/status codes, structured time fields, normal/QR/gesture/location/code dispatch, WebIM event monitoring and application-local sign logs | Pending |
 | [`superdaobo/mini-hbut`](https://github.com/superdaobo/mini-hbut) | `64fb2f06e10c95a77a39f17d45c6e2b573ad63a2` | 2026-08-14 | Reference | Independent current activity-list/detail routes, numeric-or-string identities/times, variant normalization and sign-state heuristics | Pending |
 | [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b36996d27d00577015663ec39e782500` | 2026-06-17 | PortSource | Browser Work/Exam inventory, rich editor filling, result inspection, retry/retake policy and current DOM reliability rules | Donor reports real use; Asterism validation pending |
 | [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f9a6d52d1169bae9ea5971e0863c7` | 2026-07-01 | Reference | Current media/PPT/Read/Chapter-test/Work/Exam lifecycle, thresholded save/submit, extended Question types and browser controls | Pending |
@@ -33,6 +33,9 @@ pending.
   Asterism therefore retains raw status codes and models `otherId=5` as
   ambiguous instead of inferring account completion, eligibility or a mutation
   variant.
+- Ylim's WebIM path is event discovery, not completion verification. Its
+  `sign_history` endpoint reads the donor application's own Prisma `SignLog`
+  rows written after local execution and contains no Chaoxing remote readback.
 - Use `chaoxing-exam` only as a Browser/DOM reference for non-formal Chapter tests.
 - Use `cxmooc-tools` only to diagnose historical route variants.
 
@@ -81,6 +84,22 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-15: refreshed all eight recorded donor default branches, tags and
+  latest Releases. Revisions remain
+  `9699e632b492`/`1589eac9c07c`/`7ed64ff547d3`/`64fb2f06e10c`/
+  `f72619a0b369`/`890686a5e54f`/`14e1dfd9cf11`/`2b81f7b55a68`;
+  tag counts are 45/0/0/62/0/321/0/29 and latest Releases remain
+  `v3.1.4`/none/none/`v1.4.6`/none/`4.15.3`/none/`v2.5.0`.
+  The latest `mini-hbut` issue concerns branding/Android build files, not the
+  sign protocol.
+- 2026-08-15: audited Ylim's complete WebIM path. The read-only
+  `im.chaoxing.com/webim/me` page supplies `#myToken`, `#myTuid`, and `#myName`;
+  delivered Easemob text messages carry `ext.attachment.att_chat_course`, with
+  `atype=2`, `aid`, `courseInfo.courseid` and `courseInfo.classid` identifying
+  a sign event. Asterism now has an unregistered, context-bound Native
+  bootstrap GET plus zeroizing credential and event-identity parsers. It does
+  not open the Easemob connection. Ylim's `sign_history` was separately traced
+  to local Prisma rows and is explicitly excluded as remote verification.
 - 2026-08-15: retained Ylim's exact `#statuscontent` and `stuSignajax` response
   vocabulary in bounded, zeroizing, preparation-bound pure parsers. Empty
   pre-sign status, exact completed text, `success`, already-signed text and

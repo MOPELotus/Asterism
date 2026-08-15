@@ -21,6 +21,7 @@ mod question_read;
 mod resource_execution;
 mod resource_inventory;
 mod runtime_settings;
+mod sign_event;
 mod sign_in;
 mod sign_in_prepare;
 mod sign_in_receipt;
@@ -74,6 +75,11 @@ pub use question_parser::{
 pub use question_read::{ChaoxingQuestionRead, ChaoxingQuestionTransport};
 pub use resource_execution::ChaoxingResourceExecution;
 pub use resource_inventory::{ChaoxingChapterWorkTarget, parse_chapter_resource_inventory};
+pub use sign_event::{
+    ChaoxingSignEvent, ChaoxingSignEventBootstrap, ChaoxingSignEventBootstrapDocument,
+    ChaoxingSignEventDocument, ChaoxingSignEventRead, ChaoxingSignEventReadTransport,
+    parse_sign_event, parse_sign_event_bootstrap,
+};
 pub use sign_in::{
     ChaoxingSignActivity, ChaoxingSignActivityListDocument, ChaoxingSignActivityRead,
     ChaoxingSignActivityReadTransport, ChaoxingSignDetail, ChaoxingSignDetailDocument,

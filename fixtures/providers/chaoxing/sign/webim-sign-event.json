@@ -1,0 +1,24 @@
+{
+  "type": "txt",
+  "from": "PRIVATE_SENDER_NOT_RETAINED",
+  "ext": {
+    "attachment": {
+      "att_chat_course": {
+        "aid": 7001,
+        "atype": 2,
+        "atypeName": "sign",
+        "courseInfo": {
+          "bbsid": "PRIVATE_BBS_NOT_RETAINED",
+          "classid": 2001,
+          "courseid": "1001",
+          "coursename": "Calculus",
+          "imageUrl": "https://example.invalid/course.png",
+          "isthirdaq": "0",
+          "teacherfactor": "PRIVATE_TEACHER_NOT_RETAINED"
+        },
+        "title": "Attendance",
+        "type": 2
+      }
+    }
+  }
+}

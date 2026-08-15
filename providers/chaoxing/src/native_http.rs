@@ -26,10 +26,10 @@ use crate::{
     ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
     ChaoxingExamVerificationDocument, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
     ChaoxingQuestionTransport, ChaoxingSignActivityListDocument, ChaoxingSignActivityReadTransport,
-    ChaoxingSignDetailDocument, ChaoxingSignDetailRequest, ChaoxingSubmissionPlan,
-    ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
-    ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
-    ChaoxingWorkVerificationRoute, classify_work_detail,
+    ChaoxingSignDetailDocument, ChaoxingSignDetailRequest, ChaoxingSignEventBootstrapDocument,
+    ChaoxingSignEventReadTransport, ChaoxingSubmissionPlan, ChaoxingSubmissionTransport,
+    ChaoxingSubmissionVerificationTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
+    ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute, classify_work_detail,
     exam_attempt::{
         ChaoxingExamStartCommand, ChaoxingExamStartOutcome, parse_exam_attempt, parse_exam_cover,
     },
@@ -86,6 +86,7 @@ const WORK_SUBMISSION_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/work/add
 const SIGN_ACTIVITY_LIST_BASE: &str =
     "https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist";
 const SIGN_DETAIL_BASE: &str = "https://mobilelearn.chaoxing.com/newsign/signDetail";
+const SIGN_EVENT_BOOTSTRAP_BASE: &str = "https://im.chaoxing.com/webim/me";
 const MAX_COOKIE_BYTES: usize = 64 * 1_024;
 const MAX_HTML_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_COURSE_FOLDERS: usize = 256;
@@ -329,6 +330,18 @@ impl NativeChaoxingInventoryTransport {
         self.get_sign_json(session, sign_detail_url(request)?)
             .await
             .and_then(|document| ChaoxingSignDetailDocument::try_new(document.into_string()))
+    }
+
+    async fn fetch_sign_event_bootstrap_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        context: &ProviderContext,
+    ) -> ProviderResult<ChaoxingSignEventBootstrapDocument> {
+        self.get_html(session, static_url(SIGN_EVENT_BOOTSTRAP_BASE)?)
+            .await
+            .and_then(|document| {
+                ChaoxingSignEventBootstrapDocument::for_context(context, document.into_string())
+            })
     }
 
     async fn fetch_chapter_resource_inventories_once(
@@ -1508,6 +1521,27 @@ impl ChaoxingSignActivityReadTransport for NativeChaoxingInventoryTransport {
             Err(error) if should_renew_after(&error, renewed) => {
                 let session = self.sessions.renew_session(context).await?;
                 self.fetch_sign_detail_once(&session, request).await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
+impl ChaoxingSignEventReadTransport for NativeChaoxingInventoryTransport {
+    async fn fetch_sign_event_bootstrap(
+        &self,
+        context: &ProviderContext,
+    ) -> ProviderResult<ChaoxingSignEventBootstrapDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_sign_event_bootstrap_once(&session, context)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_sign_event_bootstrap_once(&session, context)
+                    .await
             }
             result => result,
         }
@@ -2764,6 +2798,14 @@ mod tests {
             Some("7001")
         );
         assert_eq!(query(&detail_url, "type").as_deref(), Some("1"));
+
+        let event_bootstrap = static_url(SIGN_EVENT_BOOTSTRAP_BASE).unwrap();
+        assert_eq!(
+            event_bootstrap.origin().ascii_serialization(),
+            "https://im.chaoxing.com"
+        );
+        assert_eq!(event_bootstrap.path(), "/webim/me");
+        assert!(event_bootstrap.query().is_none());
     }
 
     #[test]

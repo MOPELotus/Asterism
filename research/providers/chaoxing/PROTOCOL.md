@@ -776,6 +776,39 @@ classifications are not a send path. `Accepted` is not verified completion,
 and even `AlreadySigned` remains an endpoint/preflight response rather than the
 required independent fresh account-result readback.
 
+Ylim also implements event-driven discovery through a distinct WebIM path:
+
+```text
+GET https://im.chaoxing.com/webim/me
+HTML: #myToken, #myTuid, #myName
+
+Easemob connection:
+  appKey = cx-dev#cxstudy
+  ws     = https://im-api-vip6-v2.easecdn.com/ws
+  api    = https://a1-vip6.easecdn.com
+
+delivered text message:
+  ext.attachment.att_chat_course.atype = 2
+  ext.attachment.att_chat_course.aid
+  ext.attachment.att_chat_course.courseInfo.courseid
+  ext.attachment.att_chat_course.courseInfo.classid
+```
+
+Asterism implements only the first GET and pure parsing of an already-delivered
+message. The bootstrap document is bound to Provider account and correlation;
+token, IM UID and name remain zeroizing secrets with only binding/credential
+digests exposed. A sign event retains the course/class/activity identity and
+message digest, then still requires fresh course/activity/detail rebinding.
+Other `atype` values are ignored and malformed sign events fail atomically.
+
+Opening and maintaining the Easemob connection is not implemented. It requires
+a shared durable subscription owner, encrypted credential handoff, lease and
+reconnect/backoff policy, ordered event de-duplication/recovery and a separate
+durable mutation workflow. No WebIM event is authorization or completion.
+Ylim's `sign_history` cannot close the verification gap: the endpoint reads
+only its own Prisma `SignLog`, populated locally after the same opaque mutation,
+and never reads a Chaoxing account result.
+
 Samueli commit `38a269811c9bb4a44bb31beaf02c552168c50864` implements
 post-task learning-count traffic by loading `studentstudyAjax`, extracting one
 absolute `fystat-ans.chaoxing.com/log/setlog` script URL, sending it, sending two

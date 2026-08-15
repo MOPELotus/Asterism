@@ -12,6 +12,7 @@ source modules even when their assessments share field names or HTML shapes.
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
 | ResourceExecution | `Samueli924/chaoxing` | OCS, CxKitty | Reference | Document/Read native calls, structurally distinguished signed interval-based Video/Audio progress and Live `liveinfo` -> durable `saveTimePc` heartbeats -> fresh ProgressRead verification are offline-covered; every Live heartbeat is issue/receipt ledgered and ambiguous outcomes are never replayed |
 | Sign-in activity read / preparation / receipt | `Ylim314/chaoxing-sign` | `mini-hbut`, Samueli | PortSource / Reference | Unregistered Provider-local Native GET boundary for exact course-bound `activelist` and activity-bound `signDetail`; bounded/zeroizing documents, numeric-or-string identities, nested/direct time shapes, duplicate rejection and fresh identity/type/variant/time rebinding are offline-covered. A separate immutable ordinary-sign preparation freezes the corroborated `preSign` plus `stuSignajax` query shapes and actor-bound digest without exposing a send method. Bound pure parsers classify only an empty/exact-completed `#statuscontent` and exact `success`/already-signed/expired response strings as preflight evidence or Receipts. Conflicting donor meanings for `status=1` and `otherId=5` remain raw/ambiguous; no read, preparation or Receipt proves independent account completion |
+| Sign-in event discovery | `Ylim314/chaoxing-sign` WebIM monitor | Easemob SDK behavior in the same pin | PortSource | Unregistered Native GET reads only `im.chaoxing.com/webim/me`; exact `#myToken/#myTuid/#myName` are account/correlation-bound, zeroized and exposed only by digests/completeness. A separate bounded parser accepts delivered `ext.attachment.att_chat_course` only when `atype=2`, retaining course/class/activity identity for later `signDetail` rebinding. No WebSocket, subscription, acknowledgement, reconnect or mutation is implemented |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text is parsed after removing scripts, while bounded score and structural `reTest(...)` availability remain read-only facts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, while completed Exams with a strictly bound preview entry add fresh result score/retake provenance without enabling retake execution |
@@ -107,6 +108,13 @@ policy and remains independently guarded.
   `stuSignajax` bodies map to `Accepted`, `AlreadySigned` or `WindowClosed`.
   Unknown/missing/duplicate values fail closed. These types have no transport
   implementation and none is an independent completion verification.
+- WebIM bootstrap discovery is independently read-only and unregistered. IM
+  credentials are bound to Provider account/correlation and have no public
+  plaintext accessor; a delivered sign event retains only rebindable
+  course/class/activity IDs plus binding/credential/message digests. Shared
+  durable subscription ownership, encrypted credential handoff, leases,
+  reconnect/backoff, ordered de-duplication and event recovery are a Core Gap.
+  Event discovery never authorizes or verifies sign-in.
 - Independent Work and Exam list parsers are covered by synthetic sanitized
   fixtures and compose behind `TaskInventoryCapability`.
 - Exam rows retain an optional 0-100 score and structural `reTest(...)`

@@ -236,3 +236,12 @@ The same parameter follow-up extracted only Ylim's exact response vocabulary:
 Preparation-bound pure parsers now preserve those as controlled preflight or
 Receipt facts with response digests; they reject all other text. No Receipt is
 called completion, and no parser provides dispatch, retry or recovery.
+
+The post-checkpoint delta audit also recovered Ylim's WebIM monitor. It obtains
+three secret fields from `im.chaoxing.com/webim/me`, opens the pinned Easemob
+application and treats `ext.attachment.att_chat_course.atype=2` as a sign-event
+notification carrying course/class/activity identity. Asterism now covers the
+bounded Native bootstrap GET and pure identity parsing only. The WebSocket
+connection and durable event lifecycle are a shared Core/runtime gap. The same
+audit proved that Ylim's displayed sign history is its own Prisma `SignLog`,
+not a server-visible Chaoxing result and therefore not verification evidence.
