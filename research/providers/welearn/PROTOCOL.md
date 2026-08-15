@@ -364,6 +364,27 @@ a passing threshold from Course percentage/CMI score. Future evidence must
 establish the exact readable history and attempt-creation wire before any such
 path is registered.
 
+## Completion diagnosis boundary
+
+The 2026-08-15 `TaskExecution::completion_diagnosis` audit found no reliable
+Provider-specific incomplete reason. ResourceExecution emits `Completed` only
+after fresh CMI matches completed status, progress `1` and the frozen score;
+Core ignores any diagnosis for that outcome. DurationReport can instead return
+Pending or InProgress after strictly proving only that raw time changed and the
+pre-existing completion, progress and score were preserved. That evidence does
+not prove the platform still requires more duration.
+
+Neither donor documents nor normalized WELearn responses expose a required or
+remaining duration, a pass threshold, pending child/prerequisite identity,
+teacher-review state, attempt limit or completion window. `iscomplete` and CMI
+`completion_status` are outcome states rather than reasons, `success_status` is
+donor-preserved `unknown`, and the exact `学习数据不正确` text is only a
+pre-mutation initialization marker. WELearn also registers no SubmissionVerify
+capability. The Provider therefore intentionally leaves both diagnosis hooks at
+their conservative `None` default so Core records `RemoteUnknown`. A future
+override requires a sanitized donor/live response that identifies one of those
+causes without inference.
+
 ## Completion, progress and score execution
 
 All three pinned donors expose direct SCO execution behavior and agree on this

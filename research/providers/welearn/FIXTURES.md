@@ -114,6 +114,13 @@ mixtures and an `actual_minutes` value that disagrees with the frozen
 base/range/offset. These are inline value fixtures because the artifact is a
 Provider-owned persistence schema, not a remote WELearn response.
 
+Completion-diagnosis regression keeps verified Pending and InProgress
+DurationReport outcomes on the conservative `None` Provider override. Even when
+the sanitized result proves `completion_preserved`, `progress_preserved`,
+`score_preserved` and `duration_observation_changed`, it cannot select
+`DurationInsufficient` without a required/remaining-duration fact. No remote
+diagnosis fixture is added because none exists in the audited donor surface.
+
 ## Required live-sanitized fixtures
 
 ```text

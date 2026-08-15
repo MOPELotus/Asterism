@@ -330,6 +330,41 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn verified_incomplete_duration_has_no_evidenced_completion_diagnosis() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let metadata = development_metadata().unwrap();
+        let execution = WellearnTaskExecution::try_new(
+            Arc::new(FixtureCapability {
+                metadata: metadata.clone(),
+                expected: TaskCapability::ResourceExecution,
+                calls: calls.clone(),
+            }),
+            Arc::new(FixtureCapability {
+                metadata,
+                expected: TaskCapability::DurationReport,
+                calls,
+            }),
+        )
+        .unwrap();
+        let request = request(TaskCapability::DurationReport, 1);
+
+        for remote_state in [RemoteState::Pending, RemoteState::InProgress] {
+            let outcome = ExecutionOutcome {
+                remote_state,
+                verified: true,
+                result_sanitized: serde_json::json!({
+                    "schema": "welearn.duration-report.v1",
+                    "completion_preserved": true,
+                    "progress_preserved": true,
+                    "score_preserved": true,
+                    "duration_observation_changed": true,
+                }),
+            };
+            assert_eq!(execution.completion_diagnosis(&request, &outcome), None);
+        }
+    }
+
     fn context() -> ProviderContext {
         ProviderContext {
             provider_id: ProviderId::new("welearn").unwrap(),
