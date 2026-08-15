@@ -688,6 +688,27 @@ including answers and rotating topic codes. The original `ProtocolDrift` or
 `InvalidResponse` remains the returned error, and the issued mutation remains
 non-replayable under the existing QuestionSession operation ledger.
 
+### 2026-08-15 task-score observation and atomic-verification audit
+
+The three donor refs, tag/release heads, public issue ordering and OAuth
+handoff manifest remained unchanged. Main's `ee62903` added an independent
+read-only verification record to the TaskExecution atomic-mutation sink. It
+does not create a Cidaren integration point: Cidaren uses the separate
+QuestionSession/SubmissionExecute step ledger, and no donor route provides
+per-ordinal readback for its five assessment mutations. A rotated topic code
+or accepted receipt therefore cannot be recorded as verified, and Cidaren
+does not register TaskExecution merely to consume the new sink.
+
+The evidenced readback remains terminal whole-Task SubmissionVerify. Its
+fresh task-score parser now attaches bounded `SubmissionVerify /
+UnknownResultShape` observations to malformed/non-success envelope shapes and
+decoded `score/task_score/grade` drift. Envelope observations retain only JSON
+value kinds and an optional numeric result code; decoded observations retain
+only the three alias kinds and non-null alias count. Score values, unrelated
+fields, answers, topic codes, `jv` content and the response body are omitted.
+This does not make score completion evidence or weaken the separate fresh
+100%/Completed requirement.
+
 ## Check procedure
 
 For the next checkpoint:

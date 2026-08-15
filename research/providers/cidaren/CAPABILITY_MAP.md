@@ -230,6 +230,12 @@ The current checkpoint (not a completion boundary):
     response-version strings remain outside the observation. Existing
     `ProtocolDrift`/`InvalidResponse` classification and ambiguous no-replay
     behavior are unchanged.
+46. observes terminal task-score envelope and decoded-alias drift separately
+    from assessment mutation receipts. Envelope observations retain only JSON
+    kinds and an optional numeric code; decoded observations retain only the
+    `score`/`task_score`/`grade` kinds and alias count. Score values, unrelated
+    payload fields and answer/session material remain excluded, while fresh
+    Task completion/progress continues to be the independent verification fact.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

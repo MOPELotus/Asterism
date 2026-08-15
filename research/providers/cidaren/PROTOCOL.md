@@ -559,9 +559,14 @@ retaining response or user data:
 - malformed or unrecognized assessment-step/word-selection envelopes record
   only a fixed family, root/code/message/data/jv value kinds, an optional
   numeric code and data truthiness on `Other / UnknownResultShape`.
+- malformed post-run task-score envelopes and decoded score aliases record only
+  root/code/data/jv kinds plus an optional numeric code, or the three alias
+  kinds/count, on `SubmissionVerify / UnknownResultShape`; score values and
+  unrelated decoded fields are omitted.
 
-These observations decorate the existing `ProtocolDrift` failure only. They do
-not authorize guessing, retrying a mutation or accepting the new shape. No raw
+These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
+failure only. They do not authorize guessing, retrying a mutation or accepting
+the new shape. No raw
 response, localized message, response-version string, Question text, answer,
 topic code, remote identity, credential, Cookie or token crosses this boundary.
 

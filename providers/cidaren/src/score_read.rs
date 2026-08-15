@@ -1,9 +1,9 @@
-use asterism_domain::SubmissionScore;
+use asterism_domain::{ProtocolObservationKind, ProtocolSurface, SubmissionScore};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteTaskDetail,
 };
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 use zeroize::Zeroize;
 
 use crate::{CidarenCryptoContext, decode_response_data};
@@ -163,24 +163,31 @@ pub(crate) fn parse_task_score_response(
     let mut root: Value = serde_json::from_slice(document)
         .map_err(|_| invalid_response("Cidaren task-score response is not valid JSON"))?;
     let decoded = (|| {
-        let object = root
-            .as_object()
-            .ok_or_else(|| protocol_drift("Cidaren task-score response is not an object"))?;
+        let Some(object) = root.as_object() else {
+            return Err(score_envelope_observation(
+                protocol_drift("Cidaren task-score response is not an object"),
+                &root,
+            ));
+        };
         if object.get("code").and_then(Value::as_i64) != Some(1) {
-            return Err(invalid_response(
-                "Cidaren task-score endpoint returned a non-success code",
+            return Err(score_envelope_observation(
+                invalid_response("Cidaren task-score endpoint returned a non-success code"),
+                &root,
             ));
         }
-        let data = object
-            .get("data")
-            .filter(|value| !value.is_null())
-            .ok_or_else(|| protocol_drift("Cidaren task-score response has no data"))?;
+        let Some(data) = object.get("data").filter(|value| !value.is_null()) else {
+            return Err(score_envelope_observation(
+                protocol_drift("Cidaren task-score response has no data"),
+                &root,
+            ));
+        };
         let jv = match object.get("jv") {
             None | Some(Value::Null) => "0",
             Some(Value::String(value)) if !value.is_empty() && value.len() <= 64 => value,
             _ => {
-                return Err(protocol_drift(
-                    "Cidaren task-score response has an invalid jv",
+                return Err(score_envelope_observation(
+                    protocol_drift("Cidaren task-score response has an invalid jv"),
+                    &root,
                 ));
             }
         };
@@ -208,21 +215,26 @@ pub(crate) fn normalized_task_score(
 }
 
 fn score_from_object(value: &Value) -> ProviderResult<Option<SubmissionScore>> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren task-score data is not an object"))?;
+    let Some(object) = value.as_object() else {
+        return Err(score_data_observation(
+            protocol_drift("Cidaren task-score data is not an object"),
+            value,
+        ));
+    };
     let mut accepted: Option<SubmissionScore> = None;
     for alias in SCORE_ALIASES {
-        let Some(value) = object.get(alias).filter(|value| !value.is_null()) else {
+        let Some(score_value_raw) = object.get(alias).filter(|value| !value.is_null()) else {
             continue;
         };
-        let candidate = score_value(value)?;
+        let candidate =
+            score_value(score_value_raw).map_err(|error| score_data_observation(error, value))?;
         if accepted
             .as_ref()
             .is_some_and(|accepted| accepted != &candidate)
         {
-            return Err(protocol_drift(
-                "Cidaren task-score aliases disagree on the observed score",
+            return Err(score_data_observation(
+                protocol_drift("Cidaren task-score aliases disagree on the observed score"),
+                value,
             ));
         }
         accepted = Some(candidate);
@@ -281,6 +293,66 @@ fn decimal_milli_points(encoded: &str) -> ProviderResult<u64> {
         .and_then(|whole| whole.checked_add(fractional_milli_points))
         .filter(|score| *score <= 100_000)
         .ok_or_else(|| protocol_drift("Cidaren task score is out of range"))
+}
+
+fn score_envelope_observation(error: ProviderError, root: &Value) -> ProviderError {
+    let object = root.as_object();
+    let code = object.and_then(|object| object.get("code"));
+    let fallback = error.clone();
+    error
+        .try_with_protocol_observation(
+            ProtocolSurface::SubmissionVerify,
+            ProtocolObservationKind::UnknownResultShape,
+            json!({
+                "schema": "cidaren.task-score-observation.v1",
+                "stage": "envelope",
+                "root_kind": json_value_kind(Some(root)),
+                "code_kind": json_value_kind(code),
+                "code_value": code.and_then(Value::as_i64),
+                "data_kind": json_value_kind(object.and_then(|object| object.get("data"))),
+                "jv_kind": json_value_kind(object.and_then(|object| object.get("jv"))),
+            }),
+        )
+        .unwrap_or(fallback)
+}
+
+fn score_data_observation(error: ProviderError, value: &Value) -> ProviderError {
+    let object = value.as_object();
+    let fallback = error.clone();
+    error
+        .try_with_protocol_observation(
+            ProtocolSurface::SubmissionVerify,
+            ProtocolObservationKind::UnknownResultShape,
+            json!({
+                "schema": "cidaren.task-score-observation.v1",
+                "stage": "decoded_score",
+                "root_kind": json_value_kind(Some(value)),
+                "score_kind": json_value_kind(object.and_then(|object| object.get("score"))),
+                "task_score_kind": json_value_kind(
+                    object.and_then(|object| object.get("task_score"))
+                ),
+                "grade_kind": json_value_kind(object.and_then(|object| object.get("grade"))),
+                "alias_count": object.map_or(0, |object| {
+                    SCORE_ALIASES
+                        .iter()
+                        .filter(|alias| object.get(**alias).is_some_and(|value| !value.is_null()))
+                        .count()
+                }),
+            }),
+        )
+        .unwrap_or(fallback)
+}
+
+const fn json_value_kind(value: Option<&Value>) -> &'static str {
+    match value {
+        None => "missing",
+        Some(Value::Null) => "null",
+        Some(Value::Bool(_)) => "boolean",
+        Some(Value::Number(_)) => "number",
+        Some(Value::String(_)) => "string",
+        Some(Value::Array(_)) => "array",
+        Some(Value::Object(_)) => "object",
+    }
 }
 
 fn required_task_id(value: Option<&Value>) -> ProviderResult<i64> {
@@ -434,6 +506,66 @@ mod tests {
             parse_task_score_response(br#"{"code":1,"data":{"score":100.0001}}"#, None).is_err()
         );
         assert!(parse_task_score_response(br#"{"code":1,"data":{"score":"1e2"}}"#, None).is_err());
+    }
+
+    #[test]
+    fn score_drift_observations_expose_shape_without_result_values() {
+        let envelope = br#"{
+            "code":991,
+            "data":{"answer":"must-not-cross-answer"},
+            "jv":"must-not-cross-jv"
+        }"#;
+        let error = parse_task_score_response(envelope, None).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::SubmissionVerify);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "cidaren.task-score-observation.v1",
+                "stage": "envelope",
+                "root_kind": "object",
+                "code_kind": "number",
+                "code_value": 991,
+                "data_kind": "object",
+                "jv_kind": "string",
+            })
+        );
+
+        let decoded = br#"{
+            "code":1,
+            "data":{
+                "score":"80",
+                "grade":81,
+                "answer":"must-not-cross-answer",
+                "topic_code":"must-not-cross-topic-code"
+            }
+        }"#;
+        let error = parse_task_score_response(decoded, None).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "cidaren.task-score-observation.v1",
+                "stage": "decoded_score",
+                "root_kind": "object",
+                "score_kind": "string",
+                "task_score_kind": "missing",
+                "grade_kind": "number",
+                "alias_count": 2,
+            })
+        );
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
+        assert!(!sanitized.contains("answer"));
+        assert!(!sanitized.contains("topic_code"));
+        assert!(!sanitized.contains("80"));
+        assert!(!sanitized.contains("81"));
     }
 
     #[test]

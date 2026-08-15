@@ -223,6 +223,11 @@ placeholder identities, result codes, status values and pagination shape.
   malformed root/code/message/data/jv shapes retain only a fixed family, value
   kinds, optional numeric code and data truthiness; synthetic message, answer,
   topic-code, version and payload values must not cross the observation.
+- Task-score observation tests keep response-envelope drift separate from
+  decoded score-alias drift. They retain only root/code/data/jv value kinds and
+  an optional numeric code, or `score/task_score/grade` kinds plus alias count;
+  conflicting score values, extra answer/topic fields and `jv` content remain
+  absent from the observation.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.
