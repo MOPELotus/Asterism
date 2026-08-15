@@ -151,6 +151,9 @@ immediate and recovery paths and adds no donor protocol behavior.
 The durable recovery-entry checkpoint repeated those queries with no delta.
 Joint parent/batch/child restoration before existing read-only verification is
 an Asterism persistence composition and adds no donor request or result claim.
+The symmetric durable execution-entry checkpoint found the same revisions and
+tag. It changes only how Asterism reconstructs existing Provider authority
+before the already-audited lifecycle and adds no donor protocol behavior.
 
 ## Source selection
 

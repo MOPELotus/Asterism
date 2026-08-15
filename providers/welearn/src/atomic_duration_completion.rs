@@ -3,8 +3,8 @@ use std::{fmt, sync::Arc};
 use asterism_domain::{HumanRequiredReason, RemoteState};
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionMutationVerification, ExecutionOutcome, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
-    TaskDetailCapability,
+    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderIdentity,
+    ProviderMetadata, ProviderResult, TaskDetailCapability,
 };
 use async_trait::async_trait;
 
@@ -304,6 +304,29 @@ impl WellearnAtomicDurationCompletion {
                 "verification": "provider_fresh_cmi",
             }),
         })
+    }
+
+    /// Restores the complete Provider-private parent, batch and child facts,
+    /// then enters the same fresh-rebind and atomic execution path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for any durable-artifact, fresh-detail, sequence,
+    /// transport, final-goal or verification-persistence failure.
+    pub async fn execute_durable_artifacts(
+        &self,
+        context: &ProviderContext,
+        encoded_parent_authority: &[u8],
+        encoded_batch_snapshot: &[u8],
+        child_artifact: &ProviderExecutionPlanArtifact,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        let prepared = WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+            encoded_parent_authority,
+            encoded_batch_snapshot,
+            child_artifact,
+        )?;
+        self.execute_prepared(context, &prepared, events).await
     }
 }
 

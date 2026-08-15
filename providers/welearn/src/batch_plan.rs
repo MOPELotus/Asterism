@@ -3203,9 +3203,23 @@ mod tests {
             .execute_prepared(&atomic_context(), &prepared, &events)
             .await
             .unwrap();
+        let durable_events = AtomicFixtureEvents::default();
+        let durable_outcome = executor
+            .execute_durable_artifacts(
+                &atomic_context(),
+                &authority.encode().unwrap(),
+                &prepared.batch_plan().encode_snapshot().unwrap(),
+                &prepared.provider_plan_artifact().unwrap(),
+                &durable_events,
+            )
+            .await
+            .unwrap();
 
         assert!(outcome.verified);
         assert_eq!(outcome.remote_state, RemoteState::Completed);
+        assert_eq!(durable_outcome.remote_state, outcome.remote_state);
+        assert_eq!(durable_outcome.verified, outcome.verified);
+        assert_eq!(durable_outcome.result_sanitized, outcome.result_sanitized);
         assert_eq!(
             outcome.result_sanitized["schema"],
             "welearn.atomic-duration-completion.v1"
@@ -3223,15 +3237,18 @@ mod tests {
         );
         assert!(events.verifications.lock().unwrap().is_empty());
         assert_eq!(events.sequence_plans.lock().unwrap().len(), 1);
-        assert_eq!(detail_calls.lock().unwrap().as_slice(), &["sco:1001:301"]);
-        assert_eq!(
-            transport.calls.lock().unwrap().as_slice(),
-            &[(
+        assert!(durable_events.verifications.lock().unwrap().is_empty());
+        assert_eq!(durable_events.sequence_plans.lock().unwrap().len(), 1);
+        assert_eq!(detail_calls.lock().unwrap().len(), 2);
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|call| {
+            call == &(
                 "1001".to_owned(),
                 "301".to_owned(),
                 prepared.child_plan().duration_completion_plan().unwrap(),
-            )]
-        );
+            )
+        }));
     }
 
     #[tokio::test]
@@ -3534,11 +3551,12 @@ mod tests {
             prepare_atomic_child_plan_from_fresh_inventory(&fresh_tasks, &units(), &authority)
                 .unwrap();
         let transport = Arc::new(AtomicFixtureTransport::default());
+        let detail_calls = Arc::new(Mutex::new(Vec::new()));
         let executor = WellearnAtomicDurationCompletion::try_new(
             Arc::new(AtomicFixtureDetail {
                 metadata: development_metadata().unwrap(),
                 detail: detail(fresh_tasks[1].clone()),
-                calls: Arc::new(Mutex::new(Vec::new())),
+                calls: Arc::clone(&detail_calls),
             }),
             transport.clone(),
         )
@@ -3553,6 +3571,22 @@ mod tests {
         );
         assert!(transport.calls.lock().unwrap().is_empty());
         assert!(events.verifications.lock().unwrap().is_empty());
+        assert_eq!(detail_calls.lock().unwrap().len(), 1);
+
+        assert!(
+            executor
+                .execute_durable_artifacts(
+                    &atomic_context(),
+                    b"{}",
+                    &prepared.batch_plan().encode_snapshot().unwrap(),
+                    &prepared.provider_plan_artifact().unwrap(),
+                    &events,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(detail_calls.lock().unwrap().len(), 1);
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     #[test]

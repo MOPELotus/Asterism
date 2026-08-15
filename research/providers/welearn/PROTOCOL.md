@@ -562,6 +562,11 @@ or artifact drift stops before transport. It accepts no ordinary
 `ExecutionRequest` and does not build selection authority, so this completed
 Provider boundary does not bypass the parent-planning Core gap or register the
 atomic capability prematurely.
+Its `execute_durable_artifacts` entry jointly restores the encoded parent
+authority, complete batch snapshot and exact child artifact before calling the
+same prepared path. Invalid or cross-attempt artifacts stop before fresh
+TaskDetail, sequence preparation, session resolution or mutation; successful
+input cannot select a different execution behavior from the prepared value.
 
 Fresh goal proof remains independent from that mutation lifecycle.
 `verify_atomic_duration_completion` first revalidates the plan/document shape,

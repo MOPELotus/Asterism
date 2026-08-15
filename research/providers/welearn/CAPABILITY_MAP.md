@@ -180,6 +180,9 @@ persists and authorizes each conditional sequence transition. It must still
 create/recover the parent and child Executions and register the composite entry
 before production dispatch can call it without inserting a bare save or second
 start.
+The execution coordinator also accepts the three encoded durable artifacts as
+one entry, restores them jointly and only then enters the identical prepared
+path; malformed artifacts cannot reach discovery, sequence preparation or I/O.
 
 `verify_atomic_duration_completion` is a separate pure readback boundary over
 the validated plan and combined documents. It requires exact

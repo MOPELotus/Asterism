@@ -290,6 +290,10 @@ only structural field names, response codes and bounded placeholder shapes.
   Auto freezes start, exactly `floor(target / 60)` keeps and final save. Zero
   targets retain the donor-distinct empty keep phases, and a foreign child
   artifact fails before sequence preparation.
+- Durable atomic-executor fixtures prove encoded parent/batch/child input
+  returns the same outcome as the prepared path and prepares its own exact
+  sequence once. Malformed parent authority stops before another TaskDetail or
+  transport call.
 - Native atomic transport tests bind current duration/completion to the
   query-uid endpoint and simple Referer, while Auto binds its duration phase to
   plain endpoint/simple Referer and switches only final completion to the
