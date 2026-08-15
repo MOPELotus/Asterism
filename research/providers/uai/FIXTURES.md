@@ -87,8 +87,8 @@ contain a fetch URL; only Core's encrypted QuestionSession continuation can
 retain the Provider-private route. Fetch-plan fixtures select one exact bound
 attachment, retain its Task/Question/fingerprint position, produce a stable
 nonzero request digest, enforce separate subtitle/audio/video byte ceilings,
-keep external hosts anonymous, permit the session only for exact
-`ucontent.unipus.cn`, redact route/binding Debug output and reject foreign
+keep external hosts and custom ports anonymous, permit the session only for the
+standard `https://ucontent.unipus.cn` origin, redact route/binding Debug output and reject foreign
 Question/attachment identities plus every redirected final route. Response
 fixtures move synthetic bytes into a zeroizing owner, require exact status 200,
 the original final route and a nonempty body within the frozen ceiling, bind

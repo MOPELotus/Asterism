@@ -780,8 +780,8 @@ credential leak. After complete-manifest rebinding, UAI can freeze one exact
 immutable GET plan. Its request digest covers the Core Task, remote Task and
 Question, position, Question content fingerprint, attachment ID, canonical
 URL, kind, subtitle flag, credential scope and byte ceiling. Only exact
-`ucontent.unipus.cn` receives the already scoped UAI session; every other host
-is anonymous. Subtitle, audio and video plans carry separate bounded response
+the standard `https://ucontent.unipus.cn` origin receives the already scoped
+UAI session; every external host or custom port is anonymous. Subtitle, audio and video plans carry separate bounded response
 ceilings, permit no redirect and accept only the original canonical route as
 the reported final URL. After shared execution, the Provider moves the
 downloaded `SecretValue` into a zeroizing response owner only when status is

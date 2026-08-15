@@ -839,7 +839,9 @@ impl UaiMediaFetchPlan {
         }
         let parsed = reqwest::Url::parse(&url)
             .map_err(|_| protocol_drift("UAI media fetch URL is malformed"))?;
-        let credential_scope = if parsed.host_str() == Some(UCONTENT_MEDIA_HOST) {
+        let credential_scope = if parsed.host_str() == Some(UCONTENT_MEDIA_HOST)
+            && parsed.port_or_known_default() == Some(443)
+        {
             UaiMediaFetchCredentialScope::UcontentSession
         } else {
             UaiMediaFetchCredentialScope::Anonymous
@@ -1907,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn media_fetch_plan_scopes_session_only_to_exact_ucontent_host() {
+    fn media_fetch_plan_scopes_session_only_to_exact_ucontent_https_origin() {
         let task_id = TaskId::new();
         let (parsed, question) = parsed_question_with_media_url(
             task_id,
@@ -1933,6 +1935,28 @@ mod tests {
         assert!(
             plan.validate_final_url("https://ucontent.unipus.cn.evil.example/media/listening.mp3")
                 .is_err()
+        );
+
+        let (custom_port_parsed, custom_port_question) = parsed_question_with_media_url(
+            TaskId::new(),
+            "https://ucontent.unipus.cn:444/media/listening.mp3",
+        );
+        let custom_port_artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[custom_port_parsed],
+            std::slice::from_ref(&custom_port_question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let custom_port_source = &custom_port_artifact
+            .media_sources_for_question("9001")
+            .unwrap()[0];
+        let custom_port_plan = custom_port_artifact
+            .prepare_media_fetch("9001", custom_port_source.attachment_id())
+            .unwrap();
+        assert_eq!(
+            custom_port_plan.credential_scope(),
+            UaiMediaFetchCredentialScope::Anonymous
         );
     }
 
