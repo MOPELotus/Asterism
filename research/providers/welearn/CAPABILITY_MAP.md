@@ -208,7 +208,11 @@ closes Provider proof construction and live observation persistence; recovery
 query/dispatch remains Core work. A pure Provider adapter now consumes the exact
 child-bound sequence plan plus contiguous generic issue/receipt records and the
 optional Core observation, rejects operation/ordinal/plan drift, and reuses the
-same fresh-CMI recovery proof. Neither path resumes or replays mutation.
+same fresh-CMI recovery proof. A recovery-only coordinator validates those
+records before discovery, fresh-rebinds the prepared child before the final CMI
+read, and selects the child profile's exact current/legacy endpoint. Core still
+loads same-attempt records and stores the returned verification. Neither path
+resumes or replays mutation.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. Both the

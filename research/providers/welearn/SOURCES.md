@@ -141,6 +141,10 @@ The adjacent recovery-record adapter checkpoint queried the same three heads
 and Fanyuchang tag again with identical revisions. Its issue/receipt/operation
 shape validation is an Asterism read-only recovery boundary over existing
 evidence and adds no donor behavior.
+The prepared recovery-read checkpoint repeated those queries once more and
+found no revision or tag delta. Fresh child rebinding and profile-specific final
+CMI selection compose existing inventory/read behavior and add no donor route
+or mutation claim.
 
 ## Source selection
 

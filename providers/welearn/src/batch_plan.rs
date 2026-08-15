@@ -2227,8 +2227,12 @@ mod tests {
     use crate::{
         WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionDocuments,
         WellearnAtomicDurationCompletionPlan, WellearnAtomicDurationCompletionReceipts,
-        WellearnAtomicDurationCompletionTransport, WellearnCmiDocument, WellearnScoLeavesDocument,
-        development_metadata, parse_course_inventory, parse_task_inventory, parse_unit_inventory,
+        WellearnAtomicDurationCompletionRecovery,
+        WellearnAtomicDurationCompletionRecoveryTransport,
+        WellearnAtomicDurationCompletionTransport, WellearnAtomicMutationKind,
+        WellearnAtomicPreFinalObservation, WellearnCmiDocument, WellearnScoLeavesDocument,
+        build_atomic_mutation_sequence_plan, development_metadata, parse_course_inventory,
+        parse_task_inventory, parse_unit_inventory,
     };
 
     const COURSES: &str =
@@ -2361,6 +2365,28 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct AtomicRecoveryFixtureTransport {
+        score: &'static str,
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl WellearnAtomicDurationCompletionRecoveryTransport for AtomicRecoveryFixtureTransport {
+        async fn read_atomic_final(
+            &self,
+            _context: &ProviderContext,
+            child: &WellearnAtomicChildPlan,
+        ) -> ProviderResult<WellearnCmiDocument> {
+            child.validate()?;
+            self.calls
+                .lock()
+                .unwrap()
+                .push(child.remote_task_id().to_owned());
+            Ok(completed_atomic_cmi(self.score))
+        }
+    }
+
     #[derive(Debug, Default)]
     struct AtomicFixtureEvents {
         fail_verification: bool,
@@ -2435,6 +2461,22 @@ mod tests {
             .to_string(),
         )
         .unwrap()
+    }
+
+    fn atomic_sequence_records(
+        records: &[(WellearnAtomicMutationKind, bool)],
+    ) -> (Vec<ExecutionMutationIssue>, Vec<ExecutionMutationReceipt>) {
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, (kind, accepted))| {
+                let ordinal = u32::try_from(index + 1).unwrap();
+                (
+                    ExecutionMutationIssue::new(ordinal, kind.as_str(), [1; 32]).unwrap(),
+                    ExecutionMutationReceipt::new(ordinal, [2; 32], *accepted).unwrap(),
+                )
+            })
+            .unzip()
     }
 
     fn atomic_context() -> ProviderContext {
@@ -3244,6 +3286,158 @@ mod tests {
         assert!(verifications[0].verified());
         assert_ne!(verifications[0].observation_digest(), [0; 32]);
         assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_atomic_recovery_fresh_rebinds_then_reads_without_mutation() {
+        let fresh_tasks = tasks();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&fresh_tasks, &units(), &authority)
+                .unwrap();
+        let sequence_plan = build_atomic_mutation_sequence_plan(
+            prepared.child_plan(),
+            &prepared.provider_plan_artifact().unwrap(),
+        )
+        .unwrap();
+        let (issues, receipts) = atomic_sequence_records(&[
+            (WellearnAtomicMutationKind::Start, true),
+            (WellearnAtomicMutationKind::CounterKeep, false),
+            (WellearnAtomicMutationKind::Set, true),
+            (WellearnAtomicMutationKind::Save, true),
+        ]);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            prepared.child_plan(),
+            &completed_atomic_cmi("100"),
+        )
+        .unwrap()
+        .to_sequence_observation()
+        .unwrap();
+        let detail_calls = Arc::new(Mutex::new(Vec::new()));
+        let transport = Arc::new(AtomicRecoveryFixtureTransport {
+            score: "100",
+            calls: Mutex::new(Vec::new()),
+        });
+        let recovery = WellearnAtomicDurationCompletionRecovery::try_new(
+            Arc::new(AtomicFixtureDetail {
+                metadata: development_metadata().unwrap(),
+                detail: detail(fresh_tasks[0].clone()),
+                calls: Arc::clone(&detail_calls),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        let verification = recovery
+            .verify_prepared(
+                &atomic_context(),
+                &prepared,
+                &sequence_plan,
+                &issues,
+                &receipts,
+                Some(&observation),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(verification.final_save_ordinal(), 4);
+        assert_eq!(verification.time_preservation_verified(), Some(true));
+        assert_eq!(detail_calls.lock().unwrap().as_slice(), &["sco:1001:301"]);
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            &["sco:1001:301"]
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_atomic_recovery_stops_record_or_fresh_drift_before_final_read() {
+        let fresh_tasks = tasks();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&fresh_tasks, &units(), &authority)
+                .unwrap();
+        let sequence_plan = build_atomic_mutation_sequence_plan(
+            prepared.child_plan(),
+            &prepared.provider_plan_artifact().unwrap(),
+        )
+        .unwrap();
+        let (issues, mut receipts) = atomic_sequence_records(&[
+            (WellearnAtomicMutationKind::Start, true),
+            (WellearnAtomicMutationKind::CounterKeep, false),
+            (WellearnAtomicMutationKind::Set, true),
+            (WellearnAtomicMutationKind::Save, true),
+        ]);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            prepared.child_plan(),
+            &completed_atomic_cmi("100"),
+        )
+        .unwrap()
+        .to_sequence_observation()
+        .unwrap();
+        let detail_calls = Arc::new(Mutex::new(Vec::new()));
+        let transport = Arc::new(AtomicRecoveryFixtureTransport {
+            score: "100",
+            calls: Mutex::new(Vec::new()),
+        });
+        let recovery = WellearnAtomicDurationCompletionRecovery::try_new(
+            Arc::new(AtomicFixtureDetail {
+                metadata: development_metadata().unwrap(),
+                detail: detail(fresh_tasks[1].clone()),
+                calls: Arc::clone(&detail_calls),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        receipts[1] = ExecutionMutationReceipt::new(3, [2; 32], false).unwrap();
+        assert!(
+            recovery
+                .verify_prepared(
+                    &atomic_context(),
+                    &prepared,
+                    &sequence_plan,
+                    &issues,
+                    &receipts,
+                    Some(&observation),
+                )
+                .await
+                .is_err()
+        );
+        assert!(detail_calls.lock().unwrap().is_empty());
+        assert!(transport.calls.lock().unwrap().is_empty());
+
+        receipts[1] = ExecutionMutationReceipt::new(2, [2; 32], false).unwrap();
+        assert!(
+            recovery
+                .verify_prepared(
+                    &atomic_context(),
+                    &prepared,
+                    &sequence_plan,
+                    &issues,
+                    &receipts,
+                    Some(&observation),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(detail_calls.lock().unwrap().len(), 1);
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

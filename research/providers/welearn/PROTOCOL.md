@@ -618,6 +618,15 @@ Provider proof above; request/response digests remain opaque and redacted. The
 caller must load every value from the same attempt. The adapter performs no
 storage query, network mutation, resume or replay.
 
+`WellearnAtomicDurationCompletionRecovery` adds the Provider read boundary
+around that adapter. It rejects invalid durable records before discovery,
+fresh-rebinds the complete prepared batch child, and rejects Task identity,
+capability or eligibility drift before one final CMI read. The read-only
+transport derives current Fanyuchang's full/simple-Referer profile or Auto's
+legacy minimal/task-Referer profile from the child instead of using one generic
+endpoint. It returns the sanitized verification value only; Core still owns
+same-attempt record loading, recovery dispatch and final verification storage.
+
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 The child-artifact-bound conditional sequence freezes the only legal operation
 families, dynamic occurrence bounds, response-dependent advancement and

@@ -385,6 +385,11 @@ only structural field names, response codes and bounded placeholder shapes.
   order. They recover Fanyuchang's early-rejection final ordinal and Auto's
   deterministic floor count, while rejecting foreign plans, mislabeled keeps
   and ordinal drift before fresh-CMI proof.
+- Prepared recovery-coordinator fixtures prove sequence-record drift stops
+  before Task discovery, fresh Task drift stops before final CMI, and a valid
+  Fanyuchang attempt performs exactly one detail rebind followed by one
+  read-only final fetch. Transport-profile tests keep current Fanyuchang's
+  full/simple-Referer read separate from Auto's legacy minimal/task-Referer read.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

@@ -39,7 +39,8 @@ pub use atomic_duration_completion::{
 };
 pub use atomic_recovery::{
     WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_PHASE_POSITION,
-    WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE, WellearnAtomicPreFinalObservation,
+    WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE, WellearnAtomicDurationCompletionRecovery,
+    WellearnAtomicDurationCompletionRecoveryTransport, WellearnAtomicPreFinalObservation,
     verify_atomic_duration_completion_recovery,
     verify_atomic_duration_completion_recovery_from_sequence_records,
 };

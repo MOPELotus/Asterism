@@ -1,18 +1,24 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
-    ExecutionMutationSequencePlan, ProviderError, ProviderErrorKind, ProviderResult,
+    ExecutionMutationSequencePlan, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderIdentity, ProviderMetadata, ProviderResult, TaskDetailCapability,
 };
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnAtomicDurationCompletionPlan,
     WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionVerification,
-    WellearnAtomicMutationKind, WellearnCmiDocument,
+    WellearnAtomicMutationKind, WellearnCmiDocument, WellearnPreparedAtomicChildPlan,
+    WellearnResourceExecutionTransport,
     atomic_duration_completion::{atomic_goal_changed, verify_atomic_final_snapshot},
-    build_atomic_mutation_sequence_plan, parse_cmi_snapshot,
+    build_atomic_mutation_sequence_plan,
+    cmi::parse_sco_identity,
+    metadata::development_metadata,
+    parse_cmi_snapshot,
 };
 
 /// Namespaced Provider-private type for one pre-final Fanyuchang observation.
@@ -26,6 +32,129 @@ const WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_VERSION: u16 = 1;
 const MAX_ATOMIC_PRE_FINAL_OBSERVATION_BYTES: usize = 512;
 const PRE_FINAL_TIME_DOMAIN: &[u8] = b"asterism.welearn.atomic-pre-final-time.v1\0";
 const RECOVERY_OBSERVATION_DOMAIN: &[u8] = b"asterism.welearn.atomic-recovery-observation.v1\0";
+
+/// Read-only boundary for the exact final CMI route of one atomic child.
+#[async_trait]
+pub trait WellearnAtomicDurationCompletionRecoveryTransport: Send + Sync {
+    async fn read_atomic_final(
+        &self,
+        context: &ProviderContext,
+        child: &WellearnAtomicChildPlan,
+    ) -> ProviderResult<WellearnCmiDocument>;
+}
+
+/// Fresh-rebind and read-only verification coordinator for a durable atomic
+/// child attempt. It has no mutation or resume method.
+pub struct WellearnAtomicDurationCompletionRecovery {
+    metadata: ProviderMetadata,
+    details: Arc<dyn TaskDetailCapability>,
+    transport: Arc<dyn WellearnAtomicDurationCompletionRecoveryTransport>,
+}
+
+impl WellearnAtomicDurationCompletionRecovery {
+    /// Builds the recovery-only coordinator around injected fresh-read
+    /// boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if compile-time Provider metadata is invalid.
+    pub fn try_new(
+        details: Arc<dyn TaskDetailCapability>,
+        transport: Arc<dyn WellearnAtomicDurationCompletionRecoveryTransport>,
+    ) -> ProviderResult<Self> {
+        Ok(Self {
+            metadata: development_metadata()?,
+            details,
+            transport,
+        })
+    }
+
+    /// Fresh-rebinds one prepared child and proves its final remote goal using
+    /// only the exact durable sequence records and one new CMI read.
+    ///
+    /// Sequence-record drift is rejected before fresh discovery. Fresh Task
+    /// drift is rejected before the CMI read. No mutation is issued on any
+    /// branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for context, prepared-child, sequence-record,
+    /// fresh-detail, CMI or exact-goal drift.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "recovery keeps each independently durable Core record explicit"
+    )]
+    pub async fn verify_prepared(
+        &self,
+        context: &ProviderContext,
+        prepared: &WellearnPreparedAtomicChildPlan,
+        sequence_plan: &ExecutionMutationSequencePlan,
+        issues: &[ExecutionMutationIssue],
+        receipts: &[ExecutionMutationReceipt],
+        observation: Option<&ExecutionMutationSequenceObservation>,
+    ) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+        if context.provider_id != self.metadata.id {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn atomic recovery received a foreign Provider context",
+            ));
+        }
+        prepared.validate()?;
+        let child = prepared.child_plan();
+        let (restored_receipts, pre_final) =
+            restore_recovery_sequence_records(child, sequence_plan, issues, receipts, observation)?;
+        let detail = self
+            .details
+            .task_detail(context, child.remote_task_id())
+            .await?;
+        prepared.validate_fresh_detail(&detail)?;
+        let fresh_final = self.transport.read_atomic_final(context, child).await?;
+        verify_atomic_duration_completion_recovery(
+            child,
+            &restored_receipts,
+            pre_final.as_ref(),
+            &fresh_final,
+        )
+    }
+}
+
+impl fmt::Debug for WellearnAtomicDurationCompletionRecovery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WellearnAtomicDurationCompletionRecovery")
+            .field("metadata", &self.metadata)
+            .field("details", &"configured")
+            .field("transport", &"configured")
+            .finish()
+    }
+}
+
+impl ProviderIdentity for WellearnAtomicDurationCompletionRecovery {
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
+}
+
+#[async_trait]
+impl<T> WellearnAtomicDurationCompletionRecoveryTransport for T
+where
+    T: WellearnResourceExecutionTransport + Send + Sync,
+{
+    async fn read_atomic_final(
+        &self,
+        context: &ProviderContext,
+        child: &WellearnAtomicChildPlan,
+    ) -> ProviderResult<WellearnCmiDocument> {
+        child.validate()?;
+        let (course_id, sco_id) = parse_sco_identity(child.remote_task_id())?;
+        let mutation_profile = child
+            .duration_completion_plan()?
+            .completion()
+            .mutation_profile;
+        self.verify_resource(context, &course_id, &sco_id, mutation_profile)
+            .await
+    }
+}
 
 /// Hash-only evidence of the Fanyuchang time values read after its duration
 /// phase and before its completion-bearing set/save mutations.
@@ -257,6 +386,21 @@ pub fn verify_atomic_duration_completion_recovery_from_sequence_records(
     observation: Option<&ExecutionMutationSequenceObservation>,
     fresh_final: &WellearnCmiDocument,
 ) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+    let (receipts, pre_final) =
+        restore_recovery_sequence_records(child, sequence_plan, issues, receipts, observation)?;
+    verify_atomic_duration_completion_recovery(child, &receipts, pre_final.as_ref(), fresh_final)
+}
+
+fn restore_recovery_sequence_records(
+    child: &WellearnAtomicChildPlan,
+    sequence_plan: &ExecutionMutationSequencePlan,
+    issues: &[ExecutionMutationIssue],
+    receipts: &[ExecutionMutationReceipt],
+    observation: Option<&ExecutionMutationSequenceObservation>,
+) -> ProviderResult<(
+    WellearnAtomicDurationCompletionReceipts,
+    Option<WellearnAtomicPreFinalObservation>,
+)> {
     child.validate()?;
     let artifact = child.to_provider_execution_plan_artifact()?;
     if build_atomic_mutation_sequence_plan(child, &artifact)? != *sequence_plan {
@@ -267,7 +411,8 @@ pub fn verify_atomic_duration_completion_recovery_from_sequence_records(
     let pre_final = observation
         .map(WellearnAtomicPreFinalObservation::from_sequence_observation)
         .transpose()?;
-    verify_atomic_duration_completion_recovery(child, &receipts, pre_final.as_ref(), fresh_final)
+    receipts.validate_for_plan(plan, pre_final.is_some())?;
+    Ok((receipts, pre_final))
 }
 
 fn recovery_receipts_from_sequence_records(
@@ -480,7 +625,51 @@ fn invalid_recovery_sequence_records() -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use asterism_domain::{ProviderAccountId, ProviderId};
+
     use super::*;
+
+    #[derive(Debug, Default)]
+    struct RecoveryResourceFixture {
+        profiles: Mutex<Vec<crate::WellearnResourceMutationProfile>>,
+    }
+
+    #[async_trait]
+    impl WellearnResourceExecutionTransport for RecoveryResourceFixture {
+        async fn complete_resource(
+            &self,
+            _context: &ProviderContext,
+            _course_id: &str,
+            _sco_id: &str,
+            _plan: crate::WellearnResourceExecutionPlan,
+        ) -> ProviderResult<crate::WellearnResourceExecutionDocuments> {
+            Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "recovery fixture has no mutation path",
+            ))
+        }
+
+        async fn verify_resource(
+            &self,
+            _context: &ProviderContext,
+            course_id: &str,
+            sco_id: &str,
+            mutation_profile: crate::WellearnResourceMutationProfile,
+        ) -> ProviderResult<WellearnCmiDocument> {
+            assert_eq!(course_id, "1001");
+            assert!(matches!(sco_id, "301" | "302"));
+            self.profiles.lock().unwrap().push(mutation_profile);
+            Ok(cmi(
+                "completed",
+                "1",
+                if sco_id == "301" { "100" } else { "0" },
+                Some("15"),
+                Some("45"),
+            ))
+        }
+    }
 
     #[test]
     fn fanyuchang_pre_final_observation_round_trips_and_verifies_recovery() {
@@ -784,6 +973,33 @@ mod tests {
                 &cmi("completed", "1", "0", Some("87"), Some("120")),
             )
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_read_transport_uses_each_atomic_final_profile() {
+        let transport = RecoveryResourceFixture::default();
+        let context = ProviderContext {
+            provider_id: ProviderId::new("welearn").unwrap(),
+            account_id: ProviderAccountId::new(),
+            credential_refs: Vec::new(),
+            correlation_id: "welearn-atomic-recovery-read".to_owned(),
+        };
+
+        for child in [fanyuchang_child(1), auto_child(60)] {
+            WellearnAtomicDurationCompletionRecoveryTransport::read_atomic_final(
+                &transport, &context, &child,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            transport.profiles.lock().unwrap().as_slice(),
+            &[
+                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
+                crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer,
+            ]
         );
     }
 
