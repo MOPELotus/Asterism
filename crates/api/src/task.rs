@@ -410,7 +410,10 @@ pub(super) async fn get_task_questions(
         SqliteTaskQueryRepository::new(state.database.clone()),
         SqliteProviderAccountRepository::new(state.database.clone()),
         SqliteQuestionSnapshotRepository::new(state.database.clone()),
-    );
+    )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database.clone(),
+    )));
     if let Some(secret_store) = state.secret_store.clone() {
         service = service.with_durable_flow(
             Arc::new(SqliteProviderRuntimeSettingsRepository::new(
@@ -1398,7 +1401,8 @@ fn map_task_questions_error(error: ProviderQuestionReadError) -> ApiError {
             "invalid_request_id",
             "the request correlation ID is invalid",
         ),
-        ProviderQuestionReadError::ProviderResponseInvalid => {
+        ProviderQuestionReadError::ProviderResponseInvalid
+        | ProviderQuestionReadError::InvalidProtocolObservation => {
             tracing::warn!(%error, "Provider returned invalid Questions");
             ApiError::bad_gateway(
                 "provider_task_questions_invalid",

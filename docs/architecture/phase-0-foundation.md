@@ -4618,3 +4618,23 @@ Provider error.
 Coverage uses an unknown numeric Question type and proves the typed
 SubmissionBuild/UnknownQuestionKind aggregate is stored without invented
 Execution provenance while the Draft repository remains empty.
+
+## Two-hundred-and-fiftieth Phase 0 slice
+
+`ProviderQuestionReadService` now uses the shared observation recorder for
+ordinary Question inventory/parsing and every Provider-controlled durable
+pre-Question step: attempt preparation, operation preparation and operation
+execution. The occurrence scope binds Task, request correlation and the exact
+read stage. These owner-triggered reads precede a Task Execution, so the Inbox
+reference remains null rather than inventing an Attempt.
+
+Durable ordering preserves mutation safety. A preparation failure is observed
+before it is returned because no operation was issued. When an issued operation
+fails, Core first persists the operation as Ambiguous, then records the shape,
+then returns the Provider failure; neither observation persistence nor recovery
+may replay that operation. Invalid observation payloads share the fail-closed
+invalid-Questions API surface, while Inbox storage failure remains internal.
+
+Coverage proves a parser-reported unknown Question type enters the typed
+QuestionParse/UnknownQuestionKind aggregate and the failed all-or-nothing read
+persists no QuestionSnapshot.

@@ -289,3 +289,8 @@ bound to the Task, immutable QuestionSnapshot and request correlation, retains
 a null Execution reference and must be durable before the Provider failure is
 returned. Candidate selection and coverage validation still happen first, and
 the failure path never persists a partial Draft.
+Question inventory and parsing use the same rule: a failed all-or-nothing read
+may create a shape observation but never a partial QuestionSnapshot. Durable
+pre-Question operations first persist an issued failure as Ambiguous and only
+then record its shape, preserving the no-replay boundary even if Inbox storage
+itself fails.

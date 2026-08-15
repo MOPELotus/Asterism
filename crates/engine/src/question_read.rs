@@ -13,19 +13,24 @@ use asterism_provider_api::{
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
-    ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRepository,
-    ProviderRuntimeSettingsTarget, QuestionReadAttemptRepository,
-    QuestionReadContinuationAttachRequest, QuestionReadContinuationRepositoryFactory,
-    QuestionReadMaterializeOutcome, QuestionReadMaterializeRequest,
-    QuestionReadOperationAcceptRequest, QuestionReadOperationFinishOutcome,
-    QuestionReadOperationIssueOutcome, QuestionReadOperationIssueRequest,
-    QuestionReadOperationState, QuestionSessionArtifactRepositoryFactory,
-    QuestionSessionMaterializeRequest, QuestionSnapshot, QuestionSnapshotRepository, StorageError,
-    TaskQueryRepository,
+    ProtocolObservationRepository, ProviderAccountRuntimeRepository,
+    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
+    QuestionReadAttemptRepository, QuestionReadContinuationAttachRequest,
+    QuestionReadContinuationRepositoryFactory, QuestionReadMaterializeOutcome,
+    QuestionReadMaterializeRequest, QuestionReadOperationAcceptRequest,
+    QuestionReadOperationFinishOutcome, QuestionReadOperationIssueOutcome,
+    QuestionReadOperationIssueRequest, QuestionReadOperationState,
+    QuestionSessionArtifactRepositoryFactory, QuestionSessionMaterializeRequest, QuestionSnapshot,
+    QuestionSnapshotRepository, StorageError, TaskQueryRepository,
 };
 use chrono::{Duration, Utc};
 
-use crate::{AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action};
+use crate::{
+    AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action,
+    protocol_observation::{
+        ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+    },
+};
 
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 const MAX_QUESTIONS_PER_READ: usize = 5_000;
@@ -119,6 +124,7 @@ pub struct ProviderQuestionReadService<Q, A, S> {
     accounts: A,
     snapshots: S,
     durable: Option<DurableQuestionReadDependencies>,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 #[derive(Clone)]
@@ -138,6 +144,10 @@ impl<Q, A, S> std::fmt::Debug for ProviderQuestionReadService<Q, A, S> {
             .field("accounts", &"configured")
             .field("snapshots", &"configured")
             .field("durable", &self.durable.is_some())
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
             .finish()
     }
 }
@@ -150,6 +160,7 @@ impl<Q, A, S> ProviderQuestionReadService<Q, A, S> {
             accounts,
             snapshots,
             durable: None,
+            protocol_observations: None,
         }
     }
 
@@ -167,6 +178,15 @@ impl<Q, A, S> ProviderQuestionReadService<Q, A, S> {
             continuations,
             artifacts,
         });
+        self
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
         self
     }
 }
@@ -290,10 +310,24 @@ where
             }
         }
 
-        if let Some(initial) = inventory
+        let initial = match inventory
             .prepare_question_read_attempt(&context, task.id, &task.remote_id, &runtime_settings)
-            .await?
+            .await
         {
+            Ok(initial) => initial,
+            Err(error) => {
+                self.record_protocol_observation(
+                    &account.provider_id,
+                    task.id,
+                    &context.correlation_id,
+                    "prepare-attempt",
+                    &error,
+                )
+                .await?;
+                return Err(error.into());
+            }
+        };
+        if let Some(initial) = initial {
             let durable = self
                 .durable
                 .as_ref()
@@ -369,14 +403,42 @@ where
         let parser = entry.question_parse.as_ref().ok_or_else(|| {
             ProviderQuestionReadError::CapabilityUnavailable(account.provider_id.clone())
         })?;
-        let mut references = inventory
+        let mut references = match inventory
             .list_question_refs(&context, &task.remote_id)
-            .await?;
+            .await
+        {
+            Ok(references) => references,
+            Err(error) => {
+                self.record_protocol_observation(
+                    &account.provider_id,
+                    task.id,
+                    &context.correlation_id,
+                    "inventory",
+                    &error,
+                )
+                .await?;
+                return Err(error.into());
+            }
+        };
         validate_references(&references)?;
         references.sort_by_key(|reference| reference.position);
-        let parsed = parser
+        let parsed = match parser
             .parse_question_set(&context, task.id, &task.remote_id, &references)
-            .await?;
+            .await
+        {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.record_protocol_observation(
+                    &account.provider_id,
+                    task.id,
+                    &context.correlation_id,
+                    "parse",
+                    &error,
+                )
+                .await?;
+                return Err(error.into());
+            }
+        };
         let (questions, artifact) = parsed.into_parts();
         if questions.len() != references.len() {
             return Err(ProviderQuestionReadError::ProviderResponseInvalid);
@@ -448,6 +510,34 @@ where
             self.snapshots.save_question_snapshot(&snapshot).await?;
         }
         Ok(result_from_snapshot(snapshot))
+    }
+
+    async fn record_protocol_observation(
+        &self,
+        provider_id: &ProviderId,
+        task_id: TaskId,
+        correlation_id: &str,
+        stage: &str,
+        error: &ProviderError,
+    ) -> Result<(), ProviderQuestionReadError> {
+        let occurrence_scope = format!("question-read:{task_id}:{correlation_id}:{stage}");
+        record_provider_protocol_observation(
+            self.protocol_observations.as_deref(),
+            provider_id,
+            None,
+            &occurrence_scope,
+            error,
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| match error {
+            ProviderProtocolObservationRecordError::Invalid => {
+                ProviderQuestionReadError::InvalidProtocolObservation
+            }
+            ProviderProtocolObservationRecordError::Storage(error) => {
+                ProviderQuestionReadError::Storage(error)
+            }
+        })
     }
 
     async fn resolve_runtime_settings(
@@ -555,7 +645,7 @@ where
                 revision: resolved.metadata.revision,
                 value: &resolved.value,
             };
-            let prepared = inventory
+            let prepared = match inventory
                 .prepare_question_read_operation(
                     context,
                     task.id,
@@ -563,7 +653,21 @@ where
                     continuation,
                     runtime_settings,
                 )
-                .await?;
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.record_protocol_observation(
+                        provider_id,
+                        task.id,
+                        &context.correlation_id,
+                        "prepare-operation",
+                        &error,
+                    )
+                    .await?;
+                    return Err(error.into());
+                }
+            };
             let operation_type = prepared.operation_type().to_owned();
             let request_digest = prepared.request_digest();
             let delay_seconds = prepared.delay_before_execute_seconds();
@@ -618,6 +722,14 @@ where
                     ) {
                         return Err(ProviderQuestionReadError::StateConflict);
                     }
+                    self.record_protocol_observation(
+                        provider_id,
+                        task.id,
+                        &context.correlation_id,
+                        "execute-operation",
+                        &error,
+                    )
+                    .await?;
                     return Err(ProviderQuestionReadError::Provider(error));
                 }
             };
@@ -786,6 +898,8 @@ pub enum ProviderQuestionReadError {
     CapabilityUnavailable(ProviderId),
     #[error("question read correlation id is invalid")]
     InvalidCorrelationId,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error("Provider returned invalid, duplicate, or unsanitized Questions")]
     ProviderResponseInvalid,
     #[error("durable Question read state is unavailable")]
@@ -821,23 +935,23 @@ mod tests {
     };
 
     use asterism_domain::{
-        AssessmentClass, OrchestrationState, ProviderAccount, ProviderAccountId, RemoteState,
-        SourceType, Task,
+        AssessmentClass, OrchestrationState, ProtocolObservationKind, ProtocolSurface,
+        ProviderAccount, ProviderAccountId, RemoteState, SourceType, Task,
     };
     use asterism_provider_api::{
-        PreparedProviderQuestionReadOperation, ProviderCapability, ProviderEntry, ProviderIdentity,
-        ProviderMetadata, ProviderQuestionMaterialization, ProviderQuestionReadContinuation,
-        ProviderQuestionReadStepOutcome, ProviderResult, ProviderRouteContext,
-        ProviderRuntimeSettingsSchema, QuestionInventoryCapability, QuestionParseCapability,
-        ResolvedProviderQuestionReadContinuation, ResolvedProviderRuntimeSettings,
-        VerificationLevel,
+        PreparedProviderQuestionReadOperation, ProviderCapability, ProviderEntry,
+        ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderQuestionMaterialization,
+        ProviderQuestionReadContinuation, ProviderQuestionReadStepOutcome, ProviderResult,
+        ProviderRouteContext, ProviderRuntimeSettingsSchema, QuestionInventoryCapability,
+        QuestionParseCapability, ResolvedProviderQuestionReadContinuation,
+        ResolvedProviderRuntimeSettings, VerificationLevel,
     };
     use asterism_secrets::{SecretKey, SecretValue};
     use asterism_storage::{
         Database, QuestionReadAttemptRepository, QuestionSnapshot, QuestionSnapshotRepository,
-        SecretKeyring, SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
-        SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository, SqliteSecretStore,
-        SqliteTaskQueryRepository, TaskPage,
+        SecretKeyring, SqliteProtocolObservationRepository, SqliteProviderAccountRepository,
+        SqliteProviderRuntimeSettingsRepository, SqliteQuestionReadAttemptRepository,
+        SqliteQuestionSnapshotRepository, SqliteSecretStore, SqliteTaskQueryRepository, TaskPage,
     };
     use async_trait::async_trait;
     use chrono::Utc;
@@ -897,6 +1011,7 @@ mod tests {
         metadata: ProviderMetadata,
         references: Mutex<Vec<RemoteQuestionRef>>,
         parsed_task_id: Mutex<Option<TaskId>>,
+        protocol_drift: AtomicBool,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -970,6 +1085,18 @@ mod tests {
             reference: &RemoteQuestionRef,
         ) -> ProviderResult<Question> {
             *self.parsed_task_id.lock().unwrap() = Some(task_id);
+            if self.protocol_drift.load(Ordering::Relaxed) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "question type changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::QuestionParse,
+                    ProtocolObservationKind::UnknownQuestionKind,
+                    serde_json::json!({"reply_type_digest": "sha256:test", "length": 17}),
+                )
+                .unwrap());
+            }
             Ok(Question {
                 id: asterism_domain::QuestionId::new(),
                 task_id,
@@ -1076,6 +1203,51 @@ mod tests {
                 .await,
             Err(ProviderQuestionReadError::Storage(_))
         ));
+        assert!(fixture.snapshots.snapshots.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn parser_drift_is_observed_before_question_read_fails() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let mut fixture = fixture(true);
+        fixture
+            .capability
+            .protocol_drift
+            .store(true, Ordering::Relaxed);
+        fixture.service = fixture.service.with_protocol_observations(Arc::new(
+            SqliteProtocolObservationRepository::new(database.clone()),
+        ));
+
+        assert!(matches!(
+            fixture
+                .service
+                .read(ReadTaskQuestionsCommand {
+                    owner_id: fixture.owner_id,
+                    task_id: fixture.task_id,
+                    correlation_id: "question-read-drift".to_owned(),
+                })
+                .await,
+            Err(ProviderQuestionReadError::Provider(error))
+                if error.kind == ProviderErrorKind::ProtocolDrift
+        ));
+
+        let observation: (String, String, i64, Option<String>) = sqlx::query_as(
+            "SELECT surface, kind, occurrence_count, last_execution_id \
+             FROM protocol_observations",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "question_parse".to_owned(),
+                "unknown_question_kind".to_owned(),
+                1,
+                None,
+            )
+        );
         assert!(fixture.snapshots.snapshots.lock().unwrap().is_empty());
     }
 
@@ -1413,6 +1585,7 @@ mod tests {
             metadata,
             references: Mutex::new(vec![reference("question-2", 2), reference("question-1", 1)]),
             parsed_task_id: Mutex::new(None),
+            protocol_drift: AtomicBool::new(false),
         });
         let mut registry = ProviderRegistry::default();
         registry
