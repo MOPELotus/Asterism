@@ -1,9 +1,9 @@
 use std::{fmt, sync::Arc};
 
 use asterism_domain::{
-    SubmissionDraft, SubmissionQuestionVerification, SubmissionQuestionVerificationStatus,
-    SubmissionReceipt, SubmissionScore, SubmissionVerificationSnapshot,
-    SubmissionVerificationStatus, TaskCapability, Timestamp,
+    ProtocolObservationKind, ProtocolSurface, SubmissionDraft, SubmissionQuestionVerification,
+    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionScore,
+    SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
@@ -488,12 +488,13 @@ pub(crate) fn verified_submission_score(
     if summary.is_null() {
         return Ok(None);
     }
-    let answer_list = summary
+    let answer_list_value = summary
         .as_object()
-        .and_then(|summary| summary.get("answerList"))
+        .and_then(|summary| summary.get("answerList"));
+    let answer_list = answer_list_value
         .and_then(Value::as_object)
         .filter(|answers| answers.len() <= MAX_VERIFICATION_SCORE_ENTRIES)
-        .ok_or_else(|| protocol_drift("UAI user-module score summary is invalid or oversized"))?;
+        .ok_or_else(|| unknown_score_summary(summary, answer_list_value))?;
     let mut counted = false;
     for answer in answer_list.values() {
         let question_type = answer
@@ -534,6 +535,45 @@ pub(crate) fn verified_submission_score(
         .validate()
         .map_err(|_| protocol_drift("UAI user-module average score is out of range"))?;
     Ok(Some(score))
+}
+
+fn unknown_score_summary(summary: &Value, answer_list: Option<&Value>) -> ProviderError {
+    let error = ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "UAI user-module score summary is invalid or oversized",
+    );
+    error
+        .try_with_protocol_observation(
+            ProtocolSurface::SubmissionVerify,
+            ProtocolObservationKind::UnknownResultShape,
+            serde_json::json!({
+                "schema": "uai.score-summary-observation.v1",
+                "summary_kind": json_value_kind(summary),
+                "answer_list_present": answer_list.is_some(),
+                "answer_list_kind": answer_list.map(json_value_kind),
+                "answer_list_entries": answer_list.and_then(collection_len),
+            }),
+        )
+        .unwrap_or_else(|_| protocol_drift("UAI score-summary observation could not be sanitized"))
+}
+
+const fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn collection_len(value: &Value) -> Option<usize> {
+    match value {
+        Value::Array(values) => Some(values.len()),
+        Value::Object(values) => Some(values.len()),
+        _ => None,
+    }
 }
 
 pub(crate) fn verified_submission_policy(
@@ -1259,6 +1299,46 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_score_summary_emits_shape_only_observation() {
+        let draft = draft().await;
+        let plan = UaiSubmissionPlan::from_draft(&draft, &["multichoice".to_owned()]).unwrap();
+        let mut document: Value = serde_json::from_str(SCORED_VERIFIED).unwrap();
+        document["data"]["state"]["__EXTEND_DATA__"]["__SUMMARY__"]["answerList"] = serde_json::json!([{
+            "student_answer": "must-not-cross",
+            "authorization": "must-not-cross",
+        }]);
+        let error = parse_verification_snapshot(
+            &serde_json::to_string(&document).unwrap(),
+            "group-1",
+            "submit-version-42",
+            &plan,
+            &draft,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::SubmissionVerify);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            serde_json::json!({
+                "schema": "uai.score-summary-observation.v1",
+                "summary_kind": "object",
+                "answer_list_present": true,
+                "answer_list_kind": "array",
+                "answer_list_entries": 1,
+            })
+        );
+        let encoded = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!encoded.contains("student_answer"));
+        assert!(!encoded.contains("must-not-cross"));
+        assert!(!encoded.contains("authorization"));
     }
 
     #[tokio::test]

@@ -378,3 +378,10 @@ cannot be decomposed into an upload mutation plus a later unrelated answer.
 The Provider-private compound plan now preserves that boundary with one
 validated ordinary sub-draft and one bound uploaded artifact; shared Core must
 still persist them as one compound Draft/Attempt before capability exposure.
+
+The sanitized protocol-observation checkpoint on 2026-08-15 refreshed all four
+recorded donor heads and tags. Apache remained `bef0d29155ce`, MIT remained
+`590b4a58fe17`, AutoPlayer remained `cc6bdc86a13e` and Rust remained
+`40ead69c7dab`; no new tag or protocol delta appeared. The observation schemas
+therefore describe local fail-closed diagnostics only and do not extend donor
+capability evidence.

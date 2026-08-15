@@ -7,8 +7,8 @@ use std::{
 };
 
 use asterism_domain::{
-    Question, QuestionAttachment, QuestionAttachmentKind, QuestionId, QuestionKind, QuestionOption,
-    TaskCapability, TaskId,
+    ProtocolObservationKind, ProtocolSurface, Question, QuestionAttachment, QuestionAttachmentKind,
+    QuestionId, QuestionKind, QuestionOption, TaskCapability, TaskId,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
@@ -729,9 +729,10 @@ fn question_kind_from_content(
     let module_reply = content
         .get("replyType")
         .map(|value| {
-            value.as_str().and_then(audited_reply_kind).ok_or_else(|| {
-                protocol_drift("UAI video-popup module has an unsupported reply type")
-            })
+            value
+                .as_str()
+                .and_then(audited_reply_kind)
+                .ok_or_else(|| unknown_reply_type("video_popup_module", value))
         })
         .transpose()?;
     let children = content
@@ -747,9 +748,10 @@ fn question_kind_from_content(
         let kind = child
             .get("replyType")
             .map(|value| {
-                value.as_str().and_then(audited_reply_kind).ok_or_else(|| {
-                    protocol_drift("UAI video-popup child has an unsupported reply type")
-                })
+                value
+                    .as_str()
+                    .and_then(audited_reply_kind)
+                    .ok_or_else(|| unknown_reply_type("video_popup_child", value))
             })
             .transpose()?
             .or(module_reply)
@@ -771,6 +773,40 @@ fn question_kind_from_content(
     Err(protocol_drift(
         "UAI video-popup module mixes incompatible child answer shapes",
     ))
+}
+
+fn unknown_reply_type(scope: &'static str, value: &Value) -> ProviderError {
+    let label = value.as_str();
+    let error = ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "UAI video-popup has an unsupported reply type",
+    );
+    error
+        .try_with_protocol_observation(
+            ProtocolSurface::QuestionParse,
+            ProtocolObservationKind::UnknownQuestionKind,
+            json!({
+                "schema": "uai.question-reply-type-observation.v1",
+                "scope": scope,
+                "value_kind": json_value_kind(value),
+                "label_digest": label.map(|label| <[u8; 32]>::from(Sha256::digest(label.as_bytes()))),
+                "label_length": label.map(str::len),
+            }),
+        )
+        .unwrap_or_else(|_| {
+            protocol_drift("UAI Question reply-type observation could not be sanitized")
+        })
+}
+
+const fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 fn choice_composite_children(
@@ -1827,6 +1863,80 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+    }
+
+    #[test]
+    fn unknown_video_popup_reply_types_emit_shape_only_observations() {
+        let module_label = "new-secret-bearing-reply";
+        let module_error = parse_question_entry(
+            &json!({
+                "id": "2104",
+                "content": {
+                    "type": "video-popup",
+                    "replyType": module_label,
+                    "direction": {"text": "Watch"},
+                    "answer": "must-not-cross",
+                    "children": [{"type": "basic"}],
+                },
+            }),
+            1,
+            "video-popup",
+            "group:2001:unit-1:group-video-popup-module-drift",
+        )
+        .unwrap_err();
+        assert_reply_type_observation(
+            module_error,
+            "video_popup_module",
+            "string",
+            Some(module_label),
+        );
+
+        let child_error = parse_question_entry(
+            &json!({
+                "id": "2105",
+                "content": {
+                    "type": "video-popup",
+                    "direction": {"text": "Watch"},
+                    "children": [{
+                        "type": "basic",
+                        "replyType": {"authorization": "must-not-cross"},
+                    }],
+                },
+            }),
+            1,
+            "video-popup",
+            "group:2001:unit-1:group-video-popup-child-drift",
+        )
+        .unwrap_err();
+        assert_reply_type_observation(child_error, "video_popup_child", "object", None);
+    }
+
+    fn assert_reply_type_observation(
+        error: ProviderError,
+        scope: &str,
+        value_kind: &str,
+        label: Option<&str>,
+    ) {
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::QuestionParse);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownQuestionKind
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "uai.question-reply-type-observation.v1",
+                "scope": scope,
+                "value_kind": value_kind,
+                "label_digest": label.map(|label| <[u8; 32]>::from(Sha256::digest(label.as_bytes()))),
+                "label_length": label.map(str::len),
+            })
+        );
+        let encoded = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!encoded.contains("new-secret-bearing-reply"));
+        assert!(!encoded.contains("must-not-cross"));
     }
 
     #[test]

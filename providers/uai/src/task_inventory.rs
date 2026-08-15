@@ -1,8 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
-use asterism_provider_api::{ProviderError, ProviderResult, RemoteCourse, RemoteTask};
-use serde_json::{Map, Value};
+use asterism_domain::{
+    AssessmentClass, ProtocolObservationKind, ProtocolSurface, RemoteState, SourceType,
+    TaskCapability,
+};
+use asterism_provider_api::{
+    ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse, RemoteTask,
+};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::course_inventory::{
@@ -296,10 +301,14 @@ fn task_tree_unit_ids(units: &[Value]) -> ProviderResult<BTreeSet<String>> {
         let unit = unit
             .as_object()
             .ok_or_else(|| protocol_drift("UAI Task tree contains a non-object Unit"))?;
-        if unit.get("role").and_then(Value::as_str) != Some("unit") {
-            return Err(protocol_drift(
-                "UAI Task tree contains a non-Unit top-level node",
-            ));
+        match unit.get("role").and_then(Value::as_str) {
+            Some("unit") => {}
+            Some(role) => return Err(unknown_node_role(role, unit)),
+            None => {
+                return Err(protocol_drift(
+                    "UAI Task tree contains a non-Unit top-level node",
+                ));
+            }
         }
         let identity = required_remote_component(unit.get("id"), "Task-tree Unit ID")?;
         if !identities.insert(identity) {
@@ -358,9 +367,7 @@ fn visit_node(
         role.as_str(),
         "unit" | "section" | "node" | "link" | "group"
     ) {
-        return Err(protocol_drift(
-            "UAI Task tree contains an unknown node role",
-        ));
+        return Err(unknown_node_role(&role, object));
     }
     let id = required_remote_component(object.get("id"), "Task-tree node ID")?;
     let title = node_title(object)?;
@@ -409,6 +416,28 @@ fn visit_node(
         }
     }
     Ok(())
+}
+
+fn unknown_node_role(role: &str, node: &Map<String, Value>) -> ProviderError {
+    let error = ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "UAI Task tree contains an unknown node role",
+    );
+    error
+        .try_with_protocol_observation(
+            ProtocolSurface::TaskInventory,
+            ProtocolObservationKind::UnknownTaskType,
+            json!({
+                "schema": "uai.task-node-role-observation.v1",
+                "role_digest": <[u8; 32]>::from(Sha256::digest(role.as_bytes())),
+                "role_length": role.len(),
+                "field_count": node.len(),
+                "has_children": node.contains_key("children"),
+            }),
+        )
+        .unwrap_or_else(|_| {
+            protocol_drift("UAI Task tree unknown-role observation could not be sanitized")
+        })
 }
 
 fn build_task(
@@ -785,14 +814,29 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            parse_task_inventory(
-                &courses[0],
-                &context,
-                r#"{"code":0,"course":"{\"units\":[{\"id\":\"unit-1\",\"role\":\"new-role\",\"name\":\"Unit\"}]}"}"#,
-            )
-            .is_err()
+        let unknown_role = parse_task_inventory(
+            &courses[0],
+            &context,
+            r#"{"code":0,"course":"{\"units\":[{\"id\":\"unit-1\",\"role\":\"new-role\",\"name\":\"Unit\",\"authorization\":\"must-not-cross\"}]}"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(unknown_role.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = unknown_role.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(observation.kind, ProtocolObservationKind::UnknownTaskType);
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "uai.task-node-role-observation.v1",
+                "role_digest": <[u8; 32]>::from(Sha256::digest(b"new-role")),
+                "role_length": 8,
+                "field_count": 4,
+                "has_children": false,
+            })
         );
+        let encoded = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!encoded.contains("new-role"));
+        assert!(!encoded.contains("must-not-cross"));
         assert!(
             parse_task_inventory(
                 &courses[0],

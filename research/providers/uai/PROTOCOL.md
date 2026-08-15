@@ -1190,3 +1190,22 @@ empty-array or non-empty child value plus optional extra. Fresh Group progress
 remains the only completion authority. Shared Core still needs one compound
 Draft/Attempt slot before the Provider-private preparation and transport can be
 exposed as a public capability.
+
+## Sanitized protocol observations
+
+Selected fail-closed parser exits attach only a bounded structural observation
+to their `ProtocolDrift` error. Unknown Task-tree roles use
+`uai.task-node-role-observation.v1` with the role SHA-256 and byte length, node
+field count and child presence. Unknown module or child `video-popup`
+`replyType` values use `uai.question-reply-type-observation.v1` with a static
+scope, JSON kind and optional string SHA-256/byte length. Invalid or oversized
+user-module score summaries use `uai.score-summary-observation.v1` with only
+the summary and `answerList` JSON kinds, presence and collection cardinality.
+
+These observations never contain the original response, unknown label,
+question/answer content, field-name list, route, account/task identity, Cookie,
+token or other credential material. Failure to construct the sanitized shape
+does not weaken fail-closed behavior. Unsupported composite-child kinds,
+incompatible mixed child shapes, per-row `questionType` drift and generic
+missing/changed fields remain unobserved until a similarly minimal schema is
+proved safe.
