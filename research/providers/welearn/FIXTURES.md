@@ -406,7 +406,8 @@ only structural field names, response codes and bounded placeholder shapes.
   bind the exact child artifact, accept complete Fanyuchang and Auto snapshots,
   compare an existing final-save verification with the new proof, and reject
   an ambiguous final issue, cross-child artifact, early verification or digest
-  drift.
+  drift. Both record and snapshot fixtures reject a generic retry delay, while
+  the native sink fixture asserts every WELearn receipt leaves that field empty.
 - Prepared recovery-coordinator fixtures prove sequence-record drift stops
   before Task discovery, fresh Task drift stops before final CMI, and a valid
   Fanyuchang attempt performs exactly one detail rebind followed by one
@@ -416,7 +417,8 @@ only structural field names, response codes and bounded placeholder shapes.
   values, while malformed parent authority stops before either read boundary.
   Snapshot-native prepared and durable entries produce the same proof; the
   durable form sources the child artifact from the snapshot, and an issued
-  final save without a receipt stops before Task discovery.
+  final save without a receipt or a complete snapshot carrying a foreign retry
+  delay stops before Task discovery.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

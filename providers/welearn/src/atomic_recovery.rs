@@ -621,6 +621,9 @@ fn recovery_receipts_from_sequence_records(
 ) -> ProviderResult<WellearnAtomicDurationCompletionReceipts> {
     plan.validate()?;
     if issues.len() != receipts.len()
+        || receipts
+            .iter()
+            .any(|receipt| receipt.retry_after_seconds().is_some())
         || issues
             .iter()
             .zip(receipts)
@@ -1169,6 +1172,20 @@ mod tests {
                 &sequence_plan,
                 &issues,
                 &wrong_ordinal,
+                None,
+                &cmi("completed", "1", "0", Some("87"), Some("120")),
+            )
+            .is_err()
+        );
+
+        let mut retryable = receipts;
+        retryable[1] = ExecutionMutationReceipt::new_retryable_rejection(2, [2; 32], 60).unwrap();
+        assert!(
+            verify_atomic_duration_completion_recovery_from_sequence_records(
+                &auto,
+                &sequence_plan,
+                &issues,
+                &retryable,
                 None,
                 &cmi("completed", "1", "0", Some("87"), Some("120")),
             )

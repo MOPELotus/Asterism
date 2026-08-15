@@ -556,6 +556,12 @@ and enters the observation-gated set, while every Auto phase has a fixed
 cardinality. Both profiles therefore retain their existing phase conditions
 and plan digests.
 
+Likewise, Core's generic rejected-receipt retry deadline is not part of either
+WELearn profile. Native WELearn receipts always carry no retry delay, and both
+legacy record and same-attempt snapshot restoration reject any non-empty
+`retry_after_seconds` before donor operation-shape parsing or fresh I/O. A
+delay evidenced for another Provider cannot authorize a later WELearn issue.
+
 `WellearnAtomicDurationCompletion` now supplies the unregistered high-level
 Provider coordinator for a fully prepared child. It revalidates the rebuilt
 batch/child projection, fetches one complete fresh `TaskDetail`, applies the

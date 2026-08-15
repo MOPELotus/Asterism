@@ -2186,6 +2186,7 @@ mod tests {
         }
 
         async fn record_receipt(&self, receipt: ExecutionMutationReceipt) -> ProviderResult<()> {
+            assert_eq!(receipt.retry_after_seconds(), None);
             self.events.lock().unwrap().push(format!(
                 "receipt:{}:{}",
                 receipt.ordinal(),

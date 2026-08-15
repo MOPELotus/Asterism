@@ -182,6 +182,11 @@ and Fanyuchang-tag queries with the same full revisions. Consolidating
 WELearn's already-audited proof/receipt diagnostics into one sanitized outcome
 mapping adds no donor behavior; it only prevents immediate and future recovery
 paths from diverging on Asterism result or persistence-state semantics.
+The Core retry-deadline compatibility checkpoint repeated the same three head
+and Fanyuchang-tag queries after shared commit `4d01744`; all full revisions
+remain unchanged. No WELearn donor evidence supports a delayed retry after a
+definite rejection, so the Provider rejects that generic receipt extension and
+adds no new request or scheduling behavior.
 
 ## Source selection
 

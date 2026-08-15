@@ -232,7 +232,9 @@ durable entry takes the child artifact from that snapshot and jointly restores
 encoded parent authority plus complete batch snapshot before the same
 record/fresh-read path. Composite registration/dispatch and returned
 verification persistence remain Core work; neither path resumes or replays
-mutation.
+mutation. Core's generic retry-deadline receipt extension is explicitly absent
+from WELearn native output and rejected on both record and snapshot restore;
+neither audited atomic donor retries a definite rejection after a delay.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. Both the

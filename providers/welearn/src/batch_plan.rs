@@ -3567,7 +3567,7 @@ mod tests {
         .unwrap();
         let snapshot = atomic_recovery_snapshot(
             prepared.provider_plan_artifact().unwrap(),
-            plan,
+            plan.clone(),
             &issues,
             &receipts,
             Some(observation),
@@ -3602,6 +3602,25 @@ mod tests {
             .unwrap();
         assert_eq!(prepared_proof, durable_proof);
         assert_eq!(prepared_proof.final_save_ordinal(), 4);
+        assert_eq!(detail_calls.lock().unwrap().len(), 2);
+        assert_eq!(transport.calls.lock().unwrap().len(), 2);
+
+        let mut retryable_receipts = receipts;
+        retryable_receipts[1] =
+            ExecutionMutationReceipt::new_retryable_rejection(2, [2; 32], 60).unwrap();
+        let retryable_snapshot = atomic_recovery_snapshot(
+            prepared.provider_plan_artifact().unwrap(),
+            plan,
+            &issues,
+            &retryable_receipts,
+            snapshot.observations().first().cloned(),
+        );
+        assert!(
+            recovery
+                .verify_prepared_snapshot(&atomic_context(), &prepared, &retryable_snapshot)
+                .await
+                .is_err()
+        );
         assert_eq!(detail_calls.lock().unwrap().len(), 2);
         assert_eq!(transport.calls.lock().unwrap().len(), 2);
     }
