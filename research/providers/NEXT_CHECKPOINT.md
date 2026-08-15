@@ -238,3 +238,17 @@ upstream sweep above has been recorded and any discovered migration omissions
 have either been implemented or converted into explicit, evidence-backed Core
 Gaps/hard blockers. This requirement is independent of whether the current
 Provider percentages already look close to completion.
+
+## Full-sweep record status (2026-08-15)
+
+The one-time full-sweep recording requirement is satisfied by:
+
+- `research/providers/chaoxing/FULL_UPSTREAM_SWEEP.md`;
+- `research/providers/welearn/FULL_UPSTREAM_SWEEP.md`;
+- `research/providers/uai/FULL_UPSTREAM_SWEEP.md`;
+- `research/providers/cidaren/FULL_UPSTREAM_SWEEP.md`.
+
+Each record classifies the complete observed donor surface and keeps concrete
+shared Core gaps, Provider-private follow-up and live-validation blockers in
+scope. This closes only the mandatory one-time audit ledger; it does not declare
+any Provider complete or waive subsequent upstream delta refreshes.

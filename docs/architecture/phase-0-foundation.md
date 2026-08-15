@@ -4894,3 +4894,9 @@ policy remains stopped for human action. A legacy workflow without exact result
 authority remains readable but `begin_retake` fails closed. HTTP/OpenAPI
 coverage proves explicit `true` is required, one workflow is created, the exact
 result authority is returned and a replay returns the same record.
+
+The WELearn one-time full upstream sweep is also consolidated in
+`research/providers/welearn/FULL_UPSTREAM_SWEEP.md`. A 2026-08-15 head, tag,
+Release and issue refresh found no donor revision or protocol delta. All four
+first-batch sweep records required by `NEXT_CHECKPOINT.md` are now explicit;
+shared Core gaps and live-validation gates remain active work.

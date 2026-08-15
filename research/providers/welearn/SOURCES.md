@@ -1,6 +1,6 @@
 # WELearn upstream sources
 
-Audit date: 2026-08-14
+Audit date: 2026-08-15
 
 The mandatory next-checkpoint full sweep was completed on 2026-08-14. It
 re-read every tracked README, configuration/dependency file, text source,
@@ -96,6 +96,12 @@ every revision and tag remains unchanged. It adds no new donor behavior: it
 records only the already-audited missing/non-integer mutation `ret` structure
 and preserves that validated shape across the existing no-replay manual-review
 mapping enabled by Core `9883473`.
+The 2026-08-15 explicit full-sweep-record checkpoint repeated all three
+default-head queries plus tag, Release and issue enumeration. Heads remain
+`afa87fb7c86d`, `bd160e91d045` and `85918caaccd9`; Fanyuchang's sole tag and
+Release remain older `v4.0.0@5d1df60cb007`, while YZBRH and Auto_WeLearn still
+have neither tags nor Releases. No protocol or capability delta was available.
+The consolidated result is recorded in `FULL_UPSTREAM_SWEEP.md`.
 
 ## Source selection
 
