@@ -823,6 +823,21 @@ fact. URL, raw header, response body and credential values remain excluded.
 ProviderUnavailable remain unobserved operational errors, and redirects remain
 disabled rather than followed.
 
+### 2026-08-15 Native HTTP response-body observation follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged after the response-head unit.
+No response body format or route maximum entered scope.
+
+After a successful response head, declared-length overflow, streamed overflow,
+empty body and invalid UTF-8 now attach a bounded `Other /
+UnknownResultShape` observation. It retains only fixed route/state, observed
+byte length and the route's configured maximum. Response bytes do not cross the
+observation boundary, and accumulated buffers are zeroized before every
+rejected return. Chunk-read transport failures keep their existing unobserved
+Network/InvalidResponse classification; no body replay or relaxed bound was
+added.
+
 ## Check procedure
 
 For the next checkpoint:

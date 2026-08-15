@@ -875,7 +875,13 @@ async fn read_json_response(
         .content_length()
         .is_some_and(|length| length > maximum as u64)
     {
-        return Err(oversized_response(route));
+        return Err(response_body_observation(
+            oversized_response(route),
+            route,
+            "declared_oversized",
+            response.content_length(),
+            maximum,
+        ));
     }
     let mut document = Vec::new();
     loop {
@@ -887,27 +893,47 @@ async fn read_json_response(
                 return Err(classify_reqwest_error(&error, route));
             }
         };
-        if document.len().saturating_add(chunk.len()) > maximum {
+        let observed_length = document.len().saturating_add(chunk.len());
+        if observed_length > maximum {
             document.zeroize();
-            return Err(oversized_response(route));
+            return Err(response_body_observation(
+                oversized_response(route),
+                route,
+                "streamed_oversized",
+                u64::try_from(observed_length).ok(),
+                maximum,
+            ));
         }
         document.extend_from_slice(&chunk);
     }
     if document.is_empty() {
-        return Err(ProviderError::new(
-            ProviderErrorKind::InvalidResponse,
-            format!(
-                "Cidaren {} endpoint returned an empty response",
-                route.label()
+        return Err(response_body_observation(
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!(
+                    "Cidaren {} endpoint returned an empty response",
+                    route.label()
+                ),
             ),
+            route,
+            "empty",
+            Some(0),
+            maximum,
         ));
     }
     String::from_utf8(document).map_err(|error| {
         let mut bytes = error.into_bytes();
+        let observed_length = u64::try_from(bytes.len()).ok();
         bytes.zeroize();
-        ProviderError::new(
-            ProviderErrorKind::InvalidResponse,
-            format!("Cidaren {} endpoint returned invalid UTF-8", route.label()),
+        response_body_observation(
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("Cidaren {} endpoint returned invalid UTF-8", route.label()),
+            ),
+            route,
+            "invalid_utf8",
+            observed_length,
+            maximum,
         )
     })
 }
@@ -1052,6 +1078,27 @@ fn http_content_type_observation(
                 value.eq_ignore_ascii_case("application/json")
                     || value.to_ascii_lowercase().ends_with("+json")
             }),
+        }),
+    )
+}
+
+fn response_body_observation(
+    error: ProviderError,
+    route: ResponseRoute,
+    state: &'static str,
+    observed_length: Option<u64>,
+    maximum: usize,
+) -> ProviderError {
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::Other,
+        ProtocolObservationKind::UnknownResultShape,
+        json!({
+            "schema": "cidaren.http-response-body-observation.v1",
+            "route": route.label(),
+            "state": state,
+            "observed_length": observed_length,
+            "maximum": maximum,
         }),
     )
 }
@@ -1655,6 +1702,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn response_body_framing_is_bounded_and_shape_only() {
+        let declared = fixture_response(vec![1, 2, 3, 4], Some(4));
+        let error = read_json_response(declared, ResponseRoute::TaskScore, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.protocol_observation.unwrap().shape_sanitized,
+            serde_json::json!({
+                "schema": "cidaren.http-response-body-observation.v1",
+                "route": "task-score",
+                "state": "declared_oversized",
+                "observed_length": 4,
+                "maximum": 3,
+            })
+        );
+
+        let error = response_body_observation(
+            oversized_response(ResponseRoute::WordInformation),
+            ResponseRoute::WordInformation,
+            "streamed_oversized",
+            Some(4),
+            3,
+        );
+        assert_eq!(
+            error.protocol_observation.unwrap().shape_sanitized,
+            serde_json::json!({
+                "schema": "cidaren.http-response-body-observation.v1",
+                "route": "word-information",
+                "state": "streamed_oversized",
+                "observed_length": 4,
+                "maximum": 3,
+            })
+        );
+
+        let empty = fixture_response(Vec::new(), None);
+        let error = read_json_response(empty, ResponseRoute::AccountValidation, 16)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.protocol_observation.unwrap().shape_sanitized["state"],
+            "empty"
+        );
+
+        let invalid_utf8 = fixture_response(vec![0xff, 0xfe], None);
+        let error = read_json_response(invalid_utf8, ResponseRoute::Assessment, 16)
+            .await
+            .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["state"], "invalid_utf8");
+        assert_eq!(observation.shape_sanitized["observed_length"], 2);
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("255"));
+        assert!(!sanitized.contains("254"));
+
+        let valid = fixture_response(br#"{"ok":true}"#.to_vec(), None);
+        assert_eq!(
+            read_json_response(valid, ResponseRoute::StudyTaskList, 16)
+                .await
+                .unwrap(),
+            r#"{"ok":true}"#
+        );
+    }
+
     #[test]
     fn total_parser_drives_bounded_native_pagination() {
         assert_eq!(
@@ -1664,6 +1775,16 @@ mod tests {
             .unwrap(),
             12
         );
+    }
+
+    fn fixture_response(body: Vec<u8>, content_length: Option<usize>) -> Response {
+        let mut builder = http::Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(content_length) = content_length {
+            builder = builder.header("content-length", content_length);
+        }
+        Response::from(builder.body(reqwest::Body::from(body)).unwrap())
     }
 
     fn assessment_binding() -> CidarenAssessmentBinding {

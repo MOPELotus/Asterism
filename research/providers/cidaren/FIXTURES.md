@@ -265,6 +265,10 @@ placeholder identities, result codes, status values and pagination shape.
   unobserved, while redirect and invalid/missing Content-Type attach only fixed
   route/status or header/media-type structural facts. Raw Content-Type, URL,
   response body and credentials remain absent from every observation.
+- Native HTTP body-framing tests cover declared and streamed overflow, empty
+  body, invalid UTF-8 and a valid bounded JSON body. Failure observations retain
+  only fixed route/state, observed byte length and configured maximum; body
+  bytes remain absent and already accumulated bytes are zeroized before return.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

@@ -279,6 +279,11 @@ The current checkpoint (not a completion boundary):
     presence/UTF-8, media-type length/ASCII, parameter count and JSON-suffix
     fact. Header values, URLs, bodies and credentials remain excluded, while
     401/403, 429 and 5xx stay unobserved operational errors.
+54. observes Native HTTP JSON-body framing failures after a successful response
+    head. Declared-length overflow, streamed overflow, empty body and invalid
+    UTF-8 retain only fixed route/state, observed byte length and route maximum;
+    body bytes remain zeroized and excluded. Chunk-read transport failures keep
+    their existing unobserved Network/InvalidResponse classification.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

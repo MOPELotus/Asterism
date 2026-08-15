@@ -87,6 +87,11 @@ non-JSON Content-Type attaches only header-presence/UTF-8, media-type
 ASCII/length, parameter-count and JSON-suffix facts. URL, header value, body and
 credential material are never retained. Authentication, rate-limit and server
 availability classifications remain unobserved ordinary operational errors.
+After a successful JSON response head, declared-length overflow, streamed
+overflow, empty body and invalid UTF-8 attach only fixed route/state, observed
+byte length and configured maximum as `Other / UnknownResultShape`. Body bytes
+remain excluded and are zeroized on every rejected accumulated path. A chunk
+read failure remains its existing unobserved transport classification.
 
 ## BrowserBridge Capture command/result boundary
 
@@ -612,6 +617,10 @@ retaining response or user data:
   unexpected status, or header-presence/UTF-8 and media-type structural facts,
   on `Other / UnknownResultShape`; URL, raw header, body and credential values
   stay excluded. 401/403, 429 and 5xx remain unobserved operational errors.
+- Native HTTP body framing failures record only fixed route/state, observed
+  length and route maximum on `Other / UnknownResultShape`; declared/streamed
+  overflow, empty body and invalid UTF-8 never retain body bytes, and chunk-read
+  transport errors remain unobserved.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting
