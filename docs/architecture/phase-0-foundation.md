@@ -4969,3 +4969,22 @@ artifact and hash-only records, while the immediate post-execution verifier
 does not receive recovery-only evidence. This closes the generic same-Attempt
 read/dispatch boundary, but does not itself create WELearn parent/child
 Executions or register its composite batch capability.
+
+## Two-hundred-and-seventieth Phase 0 slice
+
+A definite rejected atomic-mutation receipt can now carry a bounded retry
+delay. Core stores the resulting absolute `retry_not_before` deadline beside
+the hash-only receipt and refuses to issue the next contiguous mutation in the
+same conditional sequence before that deadline. Accepted receipts cannot carry
+a delay, and the public contract rejects zero or values above twenty-four
+hours.
+
+The deadline is derived once from the persisted receipt time, so restarts and
+worker replacement do not shorten the wait. Recovery reconstructs the original
+relative delay from those two durable timestamps and exposes it only through
+the credential-free mutation-sequence snapshot. Duplicate receipt recording
+must match the delay as well as the response digest and acceptance result.
+Coverage proves migration preserves legacy receipts, early successor issue
+fails closed, issue at the exact deadline succeeds, and recovery retains the
+original delay. This boundary does not schedule a retry job by itself and does
+not authorize replay of an issued mutation without a definite receipt.

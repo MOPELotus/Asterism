@@ -574,18 +574,13 @@ where
                 mutation.request_digest,
             )
             .map_err(|_| invalid_mutation_recovery_storage())?;
-            let receipt = match (
+            let receipt = restore_mutation_receipt(
+                mutation.ordinal,
                 mutation.response_digest,
                 mutation.accepted,
                 mutation.received_at,
-            ) {
-                (Some(response_digest), Some(accepted), Some(_)) => Some(
-                    ExecutionMutationReceipt::new(mutation.ordinal, response_digest, accepted)
-                        .map_err(|_| invalid_mutation_recovery_storage())?,
-                ),
-                (None, None, None) => None,
-                _ => return Err(invalid_mutation_recovery_storage()),
-            };
+                mutation.retry_not_before,
+            )?;
             let verification = match (
                 mutation.verification_digest,
                 mutation.verified,
@@ -4158,6 +4153,36 @@ fn invalid_mutation_recovery_storage() -> ScheduledExecutionRunError {
     ))
 }
 
+fn restore_mutation_receipt(
+    ordinal: u32,
+    response_digest: Option<[u8; 32]>,
+    accepted: Option<bool>,
+    received_at: Option<Timestamp>,
+    retry_not_before: Option<Timestamp>,
+) -> Result<Option<ExecutionMutationReceipt>, ScheduledExecutionRunError> {
+    match (response_digest, accepted, received_at, retry_not_before) {
+        (Some(response_digest), Some(false), Some(received_at), Some(not_before)) => {
+            let retry_after_seconds =
+                u64::try_from(not_before.signed_duration_since(received_at).num_seconds())
+                    .map_err(|_| invalid_mutation_recovery_storage())?;
+            ExecutionMutationReceipt::new_retryable_rejection(
+                ordinal,
+                response_digest,
+                retry_after_seconds,
+            )
+            .map(Some)
+            .map_err(|_| invalid_mutation_recovery_storage())
+        }
+        (Some(response_digest), Some(accepted), Some(_), None) => {
+            ExecutionMutationReceipt::new(ordinal, response_digest, accepted)
+                .map(Some)
+                .map_err(|_| invalid_mutation_recovery_storage())
+        }
+        (None, None, None, None) => Ok(None),
+        _ => Err(invalid_mutation_recovery_storage()),
+    }
+}
+
 struct PersistedExecutionEventSink<'a, E> {
     executions: &'a E,
     execution_id: ExecutionId,
@@ -4432,6 +4457,7 @@ impl<E: ExecutionAtomicMutationRepository> ExecutionMutationSink
                 worker_id: self.worker_id,
                 response_digest: receipt.response_digest(),
                 accepted: receipt.accepted(),
+                retry_after_seconds: receipt.retry_after_seconds(),
                 correlation_id: self.correlation_id,
                 at: Utc::now(),
             })
@@ -6813,6 +6839,55 @@ mod tests {
         assert_eq!(
             snapshot.observations()[0].observation_type(),
             "provider-alpha.fixture.precondition.v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_restores_the_original_mutation_retry_delay() {
+        let fixture = Fixture::verified_sequence_recovering(ProviderBehavior::Success).await;
+        let received_at: String = sqlx::query_scalar(
+            "SELECT received_at FROM execution_atomic_mutations WHERE execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        let received_at = chrono::DateTime::parse_from_rfc3339(&received_at)
+            .unwrap()
+            .with_timezone(&Utc);
+        sqlx::query(
+            "UPDATE execution_atomic_mutations \
+             SET accepted = 0, retry_not_before = ?, verification_digest = NULL, \
+                 verified = NULL, verified_at = NULL \
+             WHERE execution_id = ?",
+        )
+        .bind((received_at + chrono::Duration::seconds(120)).to_rfc3339())
+        .bind(fixture.execution_id.to_string())
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        let recoveries = fixture
+            .provider
+            .received_mutation_recoveries
+            .lock()
+            .unwrap();
+        let receipt = recoveries[0].as_ref().unwrap().records()[0]
+            .receipt()
+            .unwrap();
+        assert!(!receipt.accepted());
+        assert_eq!(receipt.retry_after_seconds(), Some(120));
+        assert!(
+            recoveries[0].as_ref().unwrap().records()[0]
+                .verification()
+                .is_none()
         );
     }
 

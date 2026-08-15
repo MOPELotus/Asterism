@@ -1330,8 +1330,8 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
     ) -> Result<Vec<ExecutionAtomicMutation>, StorageError> {
         let rows = sqlx::query(
             "SELECT execution_id, execution_attempt_id, ordinal, scheduler_job_id, worker_id, \
-                    operation_type, request_digest, response_digest, accepted, verification_digest, \
-                    verified, issued_at, received_at, verified_at \
+                    operation_type, request_digest, response_digest, accepted, retry_not_before, \
+                    verification_digest, verified, issued_at, received_at, verified_at \
              FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ? \
              ORDER BY ordinal",
         )
@@ -1533,6 +1533,7 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
             request_digest: request.request_digest,
             response_digest: None,
             accepted: None,
+            retry_not_before: None,
             verification_digest: None,
             verified: None,
             issued_at: request.at,
@@ -1548,6 +1549,8 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
         request: ExecutionAtomicMutationReceiptRequest<'_>,
     ) -> Result<ExecutionAtomicMutationReceiptOutcome, StorageError> {
         validate_atomic_mutation_receipt(&request)?;
+        let retry_not_before =
+            atomic_mutation_retry_not_before(request.at, request.retry_after_seconds)?;
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
         assert_worker_claims(
             &mut transaction,
@@ -1579,7 +1582,8 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
         }
         if mutation.received_at.is_some() {
             let identical = mutation.response_digest == Some(request.response_digest)
-                && mutation.accepted == Some(request.accepted);
+                && mutation.accepted == Some(request.accepted)
+                && persisted_retry_after_seconds(&mutation)? == request.retry_after_seconds;
             transaction.rollback().await?;
             return if identical {
                 Ok(ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(
@@ -1595,12 +1599,15 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
             ));
         }
         let changed = sqlx::query(
-            "UPDATE execution_atomic_mutations SET response_digest = ?, accepted = ?, received_at = ? \
+            "UPDATE execution_atomic_mutations SET response_digest = ?, accepted = ?, \
+                    retry_not_before = ?, received_at = ? \
              WHERE execution_id = ? AND execution_attempt_id = ? AND ordinal = ? \
-               AND response_digest IS NULL AND accepted IS NULL AND received_at IS NULL",
+               AND response_digest IS NULL AND accepted IS NULL \
+               AND retry_not_before IS NULL AND received_at IS NULL",
         )
         .bind(request.response_digest.as_slice())
         .bind(request.accepted)
+        .bind(retry_not_before.map(encode_timestamp))
         .bind(encode_timestamp(request.at))
         .bind(request.execution_id.to_string())
         .bind(request.attempt_id.to_string())
@@ -1623,11 +1630,13 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
                 "ordinal": request.ordinal,
                 "response_digest": "[HASHED]",
                 "accepted": request.accepted,
+                "retry_after_seconds": request.retry_after_seconds,
             }),
         )
         .await?;
         mutation.response_digest = Some(request.response_digest);
         mutation.accepted = Some(request.accepted);
+        mutation.retry_not_before = retry_not_before;
         mutation.received_at = Some(request.at);
         transaction.commit().await?;
         Ok(ExecutionAtomicMutationReceiptOutcome::Recorded(mutation))
@@ -4033,8 +4042,8 @@ async fn select_atomic_mutation(
 ) -> Result<Option<ExecutionAtomicMutation>, StorageError> {
     sqlx::query(
         "SELECT execution_id, execution_attempt_id, ordinal, scheduler_job_id, worker_id, \
-                operation_type, request_digest, response_digest, accepted, verification_digest, \
-                verified, issued_at, received_at, verified_at \
+                operation_type, request_digest, response_digest, accepted, retry_not_before, \
+                verification_digest, verified, issued_at, received_at, verified_at \
          FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ? \
            AND ordinal = ?",
     )
@@ -4237,8 +4246,8 @@ async fn select_atomic_mutations_in_transaction(
 ) -> Result<Vec<ExecutionAtomicMutation>, StorageError> {
     let rows = sqlx::query(
         "SELECT execution_id, execution_attempt_id, ordinal, scheduler_job_id, worker_id, \
-                operation_type, request_digest, response_digest, accepted, verification_digest, \
-                verified, issued_at, received_at, verified_at \
+                operation_type, request_digest, response_digest, accepted, retry_not_before, \
+                verification_digest, verified, issued_at, received_at, verified_at \
          FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ? \
          ORDER BY ordinal",
     )
@@ -4379,6 +4388,13 @@ async fn validate_sequence_mutation_issue(
     .await?;
     let phase_index = next_sequence_phase(plan.plan.phases(), &mutations)?
         .ok_or(StorageError::ExecutionStateConflict)?;
+    if mutations
+        .last()
+        .and_then(|mutation| mutation.retry_not_before)
+        .is_some_and(|not_before| request.at < not_before)
+    {
+        return Err(StorageError::ExecutionStateConflict);
+    }
     let phase = &plan.plan.phases()[phase_index];
     if phase.operation_type() != request.operation_type
         || usize::try_from(request.ordinal).ok() != Some(mutations.len() + 1)
@@ -4454,6 +4470,22 @@ fn decode_atomic_mutation(
             )),
         })
         .transpose()?;
+    let received_at = decode_optional_timestamp(row.try_get("received_at")?)?;
+    let retry_not_before = decode_optional_timestamp(row.try_get("retry_not_before")?)?;
+    if retry_not_before.is_some()
+        && (accepted != Some(false)
+            || received_at.is_none()
+            || retry_not_before.is_some_and(|deadline| {
+                received_at.is_some_and(|received| {
+                    let delay = deadline.signed_duration_since(received).num_seconds();
+                    !(1..=86_400).contains(&delay)
+                })
+            }))
+    {
+        return Err(StorageError::InvalidData(
+            "persisted execution atomic mutation retry deadline is invalid".to_owned(),
+        ));
+    }
     Ok(ExecutionAtomicMutation {
         execution_id: ExecutionId::from_str(row.try_get("execution_id")?)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
@@ -4472,6 +4504,7 @@ fn decode_atomic_mutation(
             .map(decode_execution_digest)
             .transpose()?,
         accepted,
+        retry_not_before,
         verification_digest: row
             .try_get::<Option<Vec<u8>>, _>("verification_digest")?
             .map(decode_execution_digest)
@@ -4487,9 +4520,50 @@ fn decode_atomic_mutation(
             })
             .transpose()?,
         issued_at: decode_timestamp(row.try_get("issued_at")?)?,
-        received_at: decode_optional_timestamp(row.try_get("received_at")?)?,
+        received_at,
         verified_at: decode_optional_timestamp(row.try_get("verified_at")?)?,
     })
+}
+
+fn persisted_retry_after_seconds(
+    mutation: &ExecutionAtomicMutation,
+) -> Result<Option<u64>, StorageError> {
+    let Some(deadline) = mutation.retry_not_before else {
+        return Ok(None);
+    };
+    let received_at = mutation.received_at.ok_or_else(|| {
+        StorageError::InvalidData(
+            "persisted execution atomic mutation retry deadline has no receipt".to_owned(),
+        )
+    })?;
+    let seconds = deadline.signed_duration_since(received_at).num_seconds();
+    u64::try_from(seconds).map(Some).map_err(|_| {
+        StorageError::InvalidData(
+            "persisted execution atomic mutation retry delay is invalid".to_owned(),
+        )
+    })
+}
+
+fn atomic_mutation_retry_not_before(
+    received_at: Timestamp,
+    retry_after_seconds: Option<u64>,
+) -> Result<Option<Timestamp>, StorageError> {
+    retry_after_seconds
+        .map(|seconds| {
+            let seconds = i64::try_from(seconds).map_err(|_| {
+                StorageError::InvalidData(
+                    "execution atomic mutation retry delay is invalid".to_owned(),
+                )
+            })?;
+            received_at
+                .checked_add_signed(chrono::Duration::seconds(seconds))
+                .ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "execution atomic mutation retry deadline is invalid".to_owned(),
+                    )
+                })
+        })
+        .transpose()
 }
 
 fn decode_execution_digest(bytes: Vec<u8>) -> Result<[u8; 32], StorageError> {
@@ -4575,7 +4649,12 @@ fn validate_atomic_mutation_receipt(
     request: &ExecutionAtomicMutationReceiptRequest<'_>,
 ) -> Result<(), StorageError> {
     validate_worker_token(request.worker_id, request.correlation_id)?;
-    if !(1..=100_000).contains(&request.ordinal) || request.response_digest == [0; 32] {
+    if !(1..=100_000).contains(&request.ordinal)
+        || request.response_digest == [0; 32]
+        || request
+            .retry_after_seconds
+            .is_some_and(|seconds| request.accepted || !(1..=86_400).contains(&seconds))
+    {
         return Err(StorageError::InvalidData(
             "execution atomic mutation receipt is invalid".to_owned(),
         ));
@@ -5257,6 +5336,7 @@ mod tests {
             worker_id: "atomic-worker",
             response_digest: [digest; 32],
             accepted,
+            retry_after_seconds: None,
             correlation_id: "atomic-receipt",
             at: now + chrono::Duration::seconds(seconds),
         };
@@ -5507,6 +5587,7 @@ mod tests {
             worker_id: "compound-worker",
             response_digest: [digest; 32],
             accepted: true,
+            retry_after_seconds: None,
             correlation_id: "compound-receipt",
             at: now + chrono::Duration::seconds(seconds),
         };
@@ -5797,9 +5878,15 @@ mod tests {
             worker_id: "sequence-worker",
             response_digest: [digest; 32],
             accepted,
+            retry_after_seconds: None,
             correlation_id: "sequence-receipt",
             at: now + chrono::Duration::seconds(seconds),
         };
+        let retryable_receipt =
+            |ordinal, digest, retry_after_seconds, seconds| ExecutionAtomicMutationReceiptRequest {
+                retry_after_seconds: Some(retry_after_seconds),
+                ..receipt(ordinal, digest, false, seconds)
+            };
         let early_observation = ExecutionAtomicMutationSequenceObservationRequest {
             execution_id: execution.id,
             attempt_id: attempt.id,
@@ -5908,35 +5995,68 @@ mod tests {
             .issue_execution_atomic_mutation(issue(5, "test.retry", 5, 12))
             .await
             .unwrap();
-        repository
-            .record_execution_atomic_mutation_receipt(receipt(5, 15, false, 13))
+        let retryable = match repository
+            .record_execution_atomic_mutation_receipt(retryable_receipt(5, 15, 2, 13))
             .await
-            .unwrap();
-        repository
-            .issue_execution_atomic_mutation(issue(6, "test.retry", 6, 14))
-            .await
-            .unwrap();
-        repository
-            .record_execution_atomic_mutation_receipt(receipt(6, 16, true, 15))
-            .await
-            .unwrap();
+            .unwrap()
+        {
+            ExecutionAtomicMutationReceiptOutcome::Recorded(mutation) => mutation,
+            ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(_) => {
+                panic!("first retryable receipt repeated")
+            }
+        };
+        assert_eq!(
+            retryable.retry_not_before,
+            Some(now + chrono::Duration::seconds(15))
+        );
+        assert_eq!(
+            retryable.received_at,
+            Some(now + chrono::Duration::seconds(13))
+        );
+        assert_eq!(
+            repository
+                .record_execution_atomic_mutation_receipt(retryable_receipt(5, 15, 2, 13))
+                .await
+                .unwrap(),
+            ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(retryable.clone())
+        );
         assert!(
             repository
-                .issue_execution_atomic_mutation(issue(7, "test.retry", 7, 16))
+                .record_execution_atomic_mutation_receipt(retryable_receipt(5, 15, 3, 13))
+                .await
+                .is_err()
+        );
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(6, "test.retry", 6, 14))
                 .await
                 .is_err()
         );
         repository
-            .issue_execution_atomic_mutation(issue(7, "test.save", 7, 16))
+            .issue_execution_atomic_mutation(issue(6, "test.retry", 6, 15))
             .await
             .unwrap();
         repository
-            .record_execution_atomic_mutation_receipt(receipt(7, 17, true, 17))
+            .record_execution_atomic_mutation_receipt(receipt(6, 16, true, 16))
             .await
             .unwrap();
         assert!(
             repository
-                .issue_execution_atomic_mutation(issue(8, "test.save", 8, 18))
+                .issue_execution_atomic_mutation(issue(7, "test.retry", 7, 17))
+                .await
+                .is_err()
+        );
+        repository
+            .issue_execution_atomic_mutation(issue(7, "test.save", 7, 17))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_receipt(receipt(7, 17, true, 18))
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(8, "test.save", 8, 19))
                 .await
                 .is_err()
         );

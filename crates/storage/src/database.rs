@@ -139,7 +139,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 71);
+        assert_eq!(migration_count, 72);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -241,6 +241,21 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(protocol_tables, 2);
+    }
+
+    #[tokio::test]
+    async fn retry_deadline_migration_is_present_on_a_fresh_database() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let columns = sqlx::query("PRAGMA table_info(execution_atomic_mutations)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        assert!(
+            columns
+                .iter()
+                .any(|row| row.get::<String, _>("name") == "retry_not_before")
+        );
     }
 
     #[tokio::test]
@@ -386,14 +401,26 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        let row: (i64, bool, Option<Vec<u8>>, Option<bool>, Option<String>) = sqlx::query_as(
-            "SELECT ordinal, accepted, verification_digest, verified, verified_at \
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/072_execution_mutation_retry_deadline.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let row = sqlx::query(
+            "SELECT ordinal, accepted, verification_digest, verified, verified_at, \
+                    retry_not_before \
              FROM execution_atomic_mutations",
         )
         .fetch_one(database.pool())
         .await
         .unwrap();
-        assert_eq!(row, (1, true, None, None, None));
+        assert_eq!(row.get::<i64, _>("ordinal"), 1);
+        assert!(row.get::<bool, _>("accepted"));
+        assert_eq!(row.get::<Option<Vec<u8>>, _>("verification_digest"), None);
+        assert_eq!(row.get::<Option<bool>, _>("verified"), None);
+        assert_eq!(row.get::<Option<String>, _>("verified_at"), None);
+        assert_eq!(row.get::<Option<String>, _>("retry_not_before"), None);
     }
 
     #[tokio::test]

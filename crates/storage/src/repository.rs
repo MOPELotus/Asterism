@@ -2355,6 +2355,7 @@ pub struct ExecutionAtomicMutation {
     pub request_digest: [u8; 32],
     pub response_digest: Option<[u8; 32]>,
     pub accepted: Option<bool>,
+    pub retry_not_before: Option<Timestamp>,
     pub verification_digest: Option<[u8; 32]>,
     pub verified: Option<bool>,
     pub issued_at: Timestamp,
@@ -2390,6 +2391,7 @@ pub struct ExecutionAtomicMutationReceiptRequest<'a> {
     pub worker_id: &'a str,
     pub response_digest: [u8; 32],
     pub accepted: bool,
+    pub retry_after_seconds: Option<u64>,
     pub correlation_id: &'a str,
     pub at: Timestamp,
 }

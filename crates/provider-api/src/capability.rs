@@ -2396,6 +2396,7 @@ pub struct ExecutionMutationReceipt {
     ordinal: u32,
     response_digest: [u8; 32],
     accepted: bool,
+    retry_after_seconds: Option<u64>,
 }
 
 impl fmt::Debug for ExecutionMutationReceipt {
@@ -2405,6 +2406,7 @@ impl fmt::Debug for ExecutionMutationReceipt {
             .field("ordinal", &self.ordinal)
             .field("response_digest", &"[HASHED]")
             .field("accepted", &self.accepted)
+            .field("retry_after_seconds", &self.retry_after_seconds)
             .finish()
     }
 }
@@ -2426,7 +2428,30 @@ impl ExecutionMutationReceipt {
             ordinal,
             response_digest,
             accepted,
+            retry_after_seconds: None,
         })
+    }
+
+    /// Creates a definite rejected receipt that authorizes no successor issue
+    /// before the bounded delay elapses.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty ordinal/digest or a zero/unbounded delay.
+    pub fn new_retryable_rejection(
+        ordinal: u32,
+        response_digest: [u8; 32],
+        retry_after_seconds: u64,
+    ) -> ProviderResult<Self> {
+        if !(1..=86_400).contains(&retry_after_seconds) {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation retry delay is invalid",
+            ));
+        }
+        let mut receipt = Self::new(ordinal, response_digest, false)?;
+        receipt.retry_after_seconds = Some(retry_after_seconds);
+        Ok(receipt)
     }
 
     pub const fn ordinal(self) -> u32 {
@@ -2439,6 +2464,10 @@ impl ExecutionMutationReceipt {
 
     pub const fn accepted(self) -> bool {
         self.accepted
+    }
+
+    pub const fn retry_after_seconds(self) -> Option<u64> {
+        self.retry_after_seconds
     }
 }
 
@@ -3124,6 +3153,18 @@ mod execution_mutation_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn retryable_rejection_receipt_is_bounded_and_redacted() {
+        let receipt = ExecutionMutationReceipt::new_retryable_rejection(1, [9; 32], 120).unwrap();
+        assert!(!receipt.accepted());
+        assert_eq!(receipt.retry_after_seconds(), Some(120));
+        let debug = format!("{receipt:?}");
+        assert!(debug.contains("retry_after_seconds: Some(120)"));
+        assert!(!debug.contains("9, 9"));
+        assert!(ExecutionMutationReceipt::new_retryable_rejection(1, [9; 32], 0).is_err());
+        assert!(ExecutionMutationReceipt::new_retryable_rejection(1, [9; 32], 86_401).is_err());
     }
 }
 
