@@ -343,6 +343,21 @@ every fixture before staging it.
 - Retake fixtures must show fresh QIDs/option mappings and separate Chapter
   `redoTest` from Exam `reTest`; they may not authorize mutation during the
   read-only bootstrap test path.
+- Sign-in fixtures must include the exact active-list envelope, a separately
+  bound `preSign` document, each supported normal/gesture/location mode, the
+  semantics of any required `objectId`, and a fresh exact activity readback. An
+  opaque `stuSignajax` string is a Receipt at most and never authorizes replay
+  after an ambiguous request.
+- Learning-count fixtures must expose a fresh server-visible count before and
+  after one visit. `studentstudyAjax`, `setlog` and monitor responses alone are
+  insufficient, and a synthetic local target counter is not verification.
+- Hyperlink/timed-reader fixtures must retain nested-frame identity, the exact
+  `#hyperlink` or `bookifame` selector family, attachment/job binding and a
+  separate fresh completed-card observation. A successful click, page turn or
+  elapsed timer is not completion evidence.
+- In-video Question fixtures must retain exact media/Question/option identity
+  and a server-visible saved result. Random selection is never a valid fixture
+  expectation.
 - Completion-diagnosis regression maps only a fresh Expired verification to
   `WindowClosed`. Pending, InProgress, NotOpen, Removed, Unknown and Completed
   must not be guessed as prerequisite, teacher review, duration or score facts.

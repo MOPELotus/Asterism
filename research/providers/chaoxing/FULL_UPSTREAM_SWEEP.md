@@ -44,8 +44,8 @@ The refreshed symbolic revisions are unchanged:
 | Random/fuzzer fallbacks and random in-video answers | none | Intentionally excluded: Asterism never invents an answer |
 | Notifications, updater, UI panels, download/export and local session UX | application behavior | Not a Chaoxing protocol capability |
 
-Additional executable donor behavior recovered by the sweep includes Samueli's
-post-task learning-count loop, normal/photo/location sign-in methods, and
+Additional donor protocol behavior recovered by the sweep includes Samueli's
+post-task learning-count loop, low-level normal/object/location sign-in methods, and
 Video-to-Audio fallback; CxKitty's QR session, face upload and independent Exam
 export; OCS's PPT/book page turns, timed Read, in-video questions and repeated
 study controls; and historical `cxmooc-tools` Audio, Document, result collection
@@ -55,6 +55,16 @@ explicit `insertaudio` card fact and never through failure-driven fallback.
 Sign-in, learning-count manipulation, in-video Questions and Browser-only
 long-tail interactions still need separate fresh fixtures and durable
 mutation/verification designs before registration.
+
+The post-sweep implementation audit further narrows those remaining claims.
+Samueli's sign-in change `741d5c1` adds request helpers and an unused CLI flag,
+not an end-to-end dispatcher or readback. Its learning-count change `38a2698`
+increments only local state and treats missing/rejected logging calls as
+non-fatal. OCS's hyperlink path binds `#hyperlink` to the surrounding frame job
+but proves only a click plus a three-second wait; its timed-reader path is a
+nested-frame page-turn sequence. These are valid donor protocol surfaces, but
+none is verified completion. Their exact blocker/fixture criteria are recorded
+in `PROTOCOL.md`, `DRIFT.md` and `FIXTURES.md`.
 
 ## Observed Question boundary
 

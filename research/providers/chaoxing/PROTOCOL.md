@@ -692,6 +692,43 @@ teacher review. Those states return no Provider override and Core retains its
 conservative `RemoteUnknown` diagnosis. A completed result always wins in Core,
 and score or answer mismatch is not reclassified as a completion reason here.
 
+## Remaining activity and Browser-only mutations
+
+Samueli commit `741d5c1884aa84ea50c650897c870229c1de812e` adds the
+low-level activity-list, `preSign` and `pptSign/stuSignajax` requests plus
+normal/gesture/location numeric modes. It also adds an `--auto-sign` argument,
+but no caller dispatches that argument or classifies an activity into a safe
+sign-in command. The final request returns opaque text and the donor performs
+no independent activity readback. Asterism therefore has protocol evidence for
+the route family, but not enough evidence to inventory exact sign-in variants,
+freeze required object/location inputs, classify a receipt or recover an
+ambiguous mutation. Registration requires a Core sign-in inventory/operation
+contract, sanitized active-list/pre-sign/result fixtures and a fresh readback
+which proves the exact activity was completed.
+
+Samueli commit `38a269811c9bb4a44bb31beaf02c552168c50864` implements
+post-task learning-count traffic by loading `studentstudyAjax`, extracting one
+absolute `fystat-ans.chaoxing.com/log/setlog` script URL, sending it, sending two
+monitor requests around a 30-second wait and incrementing only a process-local
+counter. Missing `setlog`, a rejected `setlog` response and monitor failures do
+not stop that local counter, and no donor route reads the resulting server
+count. These calls cannot become verified Asterism execution until a fresh
+server-visible count or equivalent exact readback is captured. Any future
+implementation also needs a durable per-visit operation because replaying an
+ambiguous `setlog` can over-count.
+
+OCS `890686a5e54f9a6d52d1169bae9ea5971e0863c7` identifies a
+hyperlink iframe with `#hyperlink`, binds the surrounding frame `jobid` to one
+attachment, temporarily disables the element's popup handler, clicks once and
+waits three seconds. It does not read completion afterward. Its timed-reader
+path is likewise Browser-only: it identifies
+`iframe[name="bookifame"][src*="timing"]` and drives page controls after
+route-provided timing waits. Both require sanitized nested-frame fixtures, a
+versioned BrowserBridge command and a separate fresh card/progress readback;
+neither a click nor elapsed time is a completion receipt. OCS's in-video path
+offers only random-or-ignore behavior, so it provides no acceptable answer
+authority; exact Question and saved-result fixtures remain mandatory.
+
 ## Protocol drift observations
 
 Three fail-closed Provider branches attach Core-validated structural evidence:

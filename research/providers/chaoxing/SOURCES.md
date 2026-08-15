@@ -72,6 +72,13 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-15: re-read Samueli sign-in commit `741d5c1`, learning-count commit
+  `38a2698` and OCS's pinned hyperlink/timed-reader/in-video implementation.
+  The sign-in CLI flag is unwired and its low-level request returns opaque text;
+  learning-count advances only local state without server readback; hyperlink
+  and timed Read prove Browser actions plus waits but no completion; and random
+  in-video answers remain excluded. Recorded exact durable/readback/fixture
+  blockers without dropping these donor protocol surfaces from scope.
 - 2026-08-15: no CxKitty revision changed while the shared durable
   interactive-auth contract landed. Wired the existing QR transport into the
   Development factory with canonical encrypted continuation state, exact

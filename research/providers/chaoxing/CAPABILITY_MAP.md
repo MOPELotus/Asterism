@@ -304,5 +304,10 @@ contracts:
   families, while BrowserBridge mutation and shared child modeling remain
   required for lossless completion;
 - Sign-in, post-task learning-count, in-video Questions and hyperlink execution
-  remain evidenced donor capabilities requiring their own fixtures, durable
-  mutation design and verification rather than deletion from scope.
+  remain evidenced donor protocol surfaces requiring their own fixtures,
+  durable mutation design and verification rather than deletion from scope.
+  The current sign-in CLI flag is unwired; learning-count advances only a local
+  counter without server readback; OCS hyperlink/timed-reader flows prove only
+  Browser actions and waits; and the observed in-video strategy is random or
+  ignore. None is advertised until exact identity, receipt and independent
+  verification are available.
