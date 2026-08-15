@@ -9,6 +9,7 @@ mod auth_session;
 mod browser_bridge;
 mod browser_bridge_command;
 mod completion_workflow;
+mod course;
 mod credit;
 mod database;
 mod execution;
@@ -41,6 +42,7 @@ pub use auth_session::SqliteAuthSessionRepository;
 pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
 pub use browser_bridge_command::SqliteBrowserBridgeCommandArtifactRepository;
 pub use completion_workflow::SqliteCompletionWorkflowRepository;
+pub use course::SqliteCourseProgressRepository;
 pub use credit::{CreditGrant, CreditGrantOutcome, CreditGrantResult, SqliteCreditRepository};
 pub use database::{Database, StorageError};
 pub use execution::SqliteExecutionRepository;
@@ -76,23 +78,23 @@ pub use repository::{
     BrowserBridgeSessionRepository, BrowserBridgeWorkflowCommitOutcome,
     BrowserBridgeWorkflowCommitRequest, BrowserBridgeWorkflowContextIssue,
     BrowserBridgeWorkflowPlanIssue, ClaimedAnswerBootstrapHarvest, CompletionWorkflowCreateOutcome,
-    CompletionWorkflowRepository, CreditQueryRepository, CreditRepository, CreditReservationDetail,
-    CreditReservationPage, CreditTransactionPage, DispatchedBrowserBridgeCommand,
-    ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
-    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
-    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
-    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,
-    ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
-    ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
-    ExecutionCapabilityStepState, ExecutionDetail, ExecutionLeaseRepository,
-    ExecutionLogAppendRequest, ExecutionLogPage, ExecutionPage, ExecutionProgressUpdate,
-    ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
-    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionStrictCompletionRetryConfirmation,
-    ExecutionStrictCompletionRetryRequest, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, ExternalOauthClaim, GlobalAnswerCorpusEvidence,
-    OutboxRepository, PendingBrowserBridgeResult, PriorAnswerEvidence, ProviderAccountRepository,
-    ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
+    CompletionWorkflowRepository, CourseAggregateProgressRecord, CourseProgressRepository,
+    CreditQueryRepository, CreditRepository, CreditReservationDetail, CreditReservationPage,
+    CreditTransactionPage, DispatchedBrowserBridgeCommand, ExecutionAtomicMutation,
+    ExecutionAtomicMutationIssueOutcome, ExecutionAtomicMutationIssueRequest,
+    ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
+    ExecutionAtomicMutationRepository, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
+    ExecutionBillingReservation, ExecutionCapabilityCallMutation, ExecutionCapabilityStep,
+    ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
+    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionDetail,
+    ExecutionLeaseRepository, ExecutionLogAppendRequest, ExecutionLogPage, ExecutionPage,
+    ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionQuestionStepFinishRequest,
+    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionRuntimeSettingsResolution,
+    ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
+    ExecutionStrictCompletionRetryConfirmation, ExecutionStrictCompletionRetryRequest,
+    ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, ExternalOauthClaim,
+    GlobalAnswerCorpusEvidence, OutboxRepository, PendingBrowserBridgeResult, PriorAnswerEvidence,
+    ProviderAccountRepository, ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
     ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
     ProviderRuntimeSettingsWriteOutcome, ProviderRuntimeSettingsWriteRequest,
     QuestionReadAttemptRepository, QuestionReadContinuation, QuestionReadContinuationAttachRequest,

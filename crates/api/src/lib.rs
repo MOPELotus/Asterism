@@ -7,6 +7,7 @@ mod admin;
 mod auth;
 mod auth_bootstrap;
 mod browser_bridge;
+mod course;
 mod credit;
 mod execution;
 mod openapi_contract;
@@ -169,6 +170,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(account::get_scan_schedule).put(account::configure_scan_schedule),
         )
         .merge(task_routes())
+        .route(
+            "/api/v1/courses/{course_id}/progress",
+            get(course::get_course_progress),
+        )
         .merge(runtime_settings_routes())
         .merge(credit_routes())
         .merge(execution_routes())
@@ -1101,6 +1106,13 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/tasks/{task_id}/attempt-history".to_owned(),
             task_attempt_history_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/courses/{course_id}/progress".to_owned(),
+            course_progress_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -2061,6 +2073,24 @@ fn task_attempt_history_path() -> Value {
             "401": {"description": "Authentication required"},
             "403": {"description": "Task read permission is required"},
             "404": {"description": "Owner-scoped Task not found"}
+        }
+    }})
+}
+
+fn course_progress_path() -> Value {
+    json!({"get": {
+        "operationId": "getCourseProgress",
+        "description": "Reads an owner-scoped aggregate over persisted Course Tasks and latest verified scored results without a Provider call; unsupported required and duration dimensions remain null.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "course_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Course metadata and aggregate completion, blocker and score facts"},
+            "400": {"description": "Invalid Course ID"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Task read permission is required"},
+            "404": {"description": "Owner-scoped Course not found"}
         }
     }})
 }
@@ -4427,6 +4457,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the scan integration keeps authentication, inventory persistence and immediate Course aggregate visibility together"
+    )]
     async fn provider_account_scan_requires_remote_auth_and_commits_inventory() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
@@ -4481,9 +4515,10 @@ mod tests {
             .await
             .unwrap();
         let scanned = app
+            .clone()
             .oneshot(
                 Request::post(scan_path)
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, &cookie)
                     .header("x-request-id", "scan-api-test")
                     .body(Body::empty())
                     .unwrap(),
@@ -4497,6 +4532,49 @@ mod tests {
                 .unwrap();
         assert_eq!(report["courses_seen"], 1);
         assert_eq!(report["tasks_created"], 1);
+
+        let course_id: String =
+            sqlx::query_scalar("SELECT id FROM courses WHERE provider_account_id = ?")
+                .bind(account_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        let progress = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/courses/{course_id}/progress"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(progress.status(), StatusCode::OK);
+        assert_eq!(progress.headers()[header::CACHE_CONTROL], "no-store");
+        let progress = response_json(progress).await;
+        assert_eq!(progress["course"]["id"], course_id);
+        assert_eq!(progress["progress"]["total_task_count"], 1);
+        assert_eq!(progress["progress"]["countable_task_count"], 1);
+        assert_eq!(progress["progress"]["completed_task_count"], 0);
+        assert_eq!(progress["progress"]["remaining_task_count"], 1);
+        assert_eq!(progress["progress"]["completion_millis"], 0);
+        assert!(progress["progress"]["required"].is_null());
+        assert!(progress["progress"]["duration"].is_null());
+        assert!(progress["progress"]["score"].is_null());
+
+        let foreign = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/courses/{}/progress",
+                    asterism_domain::CourseId::new()
+                ))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
 
         for table in ["tasks", "task_snapshots", "task_diffs", "event_outbox"] {
             let query = format!("SELECT COUNT(*) FROM {table}");

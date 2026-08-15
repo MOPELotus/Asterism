@@ -22,7 +22,10 @@ pub mod submission;
 pub mod task;
 pub mod user;
 
-pub use account::{Course, ProviderAccount, ProviderId};
+pub use account::{
+    Course, CourseAggregateProgress, CourseAggregateProgressError, CourseDurationProgress,
+    CourseRequiredProgress, CourseScoreProgress, ProviderAccount, ProviderId,
+};
 pub use answer_evidence::{
     AnswerBootstrapHarvest, AnswerBootstrapHarvestState, AnswerBootstrapHarvestValidationError,
     AnswerEvidenceClass, CorpusProjectionEligibility, GlobalCorpusQuestionAsset,

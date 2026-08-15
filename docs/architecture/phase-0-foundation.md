@@ -4478,3 +4478,28 @@ pagination and returns 404 for missing or foreign Tasks. OpenAPI describes the
 complete index and its references. Integration coverage traverses a real
 persisted Candidate, Draft, ExecutionAttempt, SubmissionResult and automatic
 VerifiedHistorical projection through the API while preserving owner scope.
+
+## Two-hundred-and-forty-fourth Phase 0 slice
+
+Core now defines a validated `CourseAggregateProgress` read model and exposes
+it at the owner-scoped Course boundary. The aggregate separates total
+discovered Tasks from the non-Removed completion denominator and reports fresh
+persisted counts for remote Completed, remaining, NotOpen, CreditBlocked,
+HumanRequired and Failed facts. Diagnostic counts intentionally remain
+independent rather than forcing overlapping platform states into a false
+partition.
+
+Completion is a `0..1000` ratio and exists only with a non-zero denominator.
+Score aggregation selects the latest persisted SubmissionResult per countable
+Task, validates its verification snapshot, normalizes each score to the same
+thousand-point scale and returns the average plus latest verification time.
+Older results on the same Task do not double-count. Required-task and duration
+dimensions have explicit Domain types but remain null until audited upstream
+facts can populate them; absence is not converted to zero.
+
+The Storage query first proves Course ownership through ProviderAccount and the
+API returns `no-store`, 400 for malformed IDs and 404 for missing or foreign
+Courses. Storage coverage verifies Removed exclusion, completion and diagnostic
+counts, newest-score selection and owner isolation. API coverage reads the
+Course and Task created by a real scan and confirms unknown dimensions remain
+null. OpenAPI describes the complete response.

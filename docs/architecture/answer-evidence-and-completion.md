@@ -219,3 +219,21 @@ fields freezes the canonical defaults against its original capture time.
 Missing Provider-owned values, unknown values, malformed types and
 schema-version changes remain fail-closed; compatibility handling never
 broadens Provider authority.
+
+## Course aggregate progress
+
+Course progress is an owner-scoped read model over persisted Course, Task and
+verified Submission facts. Remote `Completed` is the completion authority;
+local Execution success alone does not increment completed Task count. Removed
+Tasks remain visible in the total discovered count but are excluded from the
+countable completion denominator. Remaining, NotOpen, CreditBlocked,
+HumanRequired and Failed counts are separate diagnostic dimensions and may
+overlap where the underlying facts overlap.
+
+The aggregate returns a `0..1000` completion ratio only when the countable
+denominator is non-zero. It summarizes only each Task's latest verified scored
+result and averages normalized score ratios so different raw point scales do
+not distort the Course score. Required-task and duration aggregates are typed
+optional dimensions: until audited Provider or dependency facts establish
+them, they remain null rather than being reported as zero. The read performs no
+Provider call and never crosses ProviderAccount ownership.

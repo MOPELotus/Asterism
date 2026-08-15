@@ -69,6 +69,105 @@ pub struct Course {
     pub last_seen_at: Timestamp,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CourseRequiredProgress {
+    pub required_task_count: u32,
+    pub completed_required_task_count: u32,
+    pub completion_millis: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CourseDurationProgress {
+    pub observed_seconds: u64,
+    pub required_seconds: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CourseScoreProgress {
+    pub scored_task_count: u32,
+    pub average_score_millis: u16,
+    pub last_verified_at: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CourseAggregateProgress {
+    pub course_id: CourseId,
+    pub provider_account_id: ProviderAccountId,
+    pub total_task_count: u32,
+    pub countable_task_count: u32,
+    pub completed_task_count: u32,
+    pub remaining_task_count: u32,
+    pub not_open_task_count: u32,
+    pub credit_blocked_task_count: u32,
+    pub human_required_task_count: u32,
+    pub failed_task_count: u32,
+    pub completion_millis: Option<u16>,
+    pub required: Option<CourseRequiredProgress>,
+    pub duration: Option<CourseDurationProgress>,
+    pub score: Option<CourseScoreProgress>,
+    pub observed_at: Timestamp,
+}
+
+impl CourseAggregateProgress {
+    /// Validates count partitions and bounded aggregate ratios.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CourseAggregateProgressError`] when a persisted aggregate is
+    /// internally inconsistent or claims data absent from its denominator.
+    pub fn validate(&self) -> Result<(), CourseAggregateProgressError> {
+        if self.countable_task_count > self.total_task_count
+            || self.completed_task_count > self.countable_task_count
+            || self
+                .completed_task_count
+                .checked_add(self.remaining_task_count)
+                != Some(self.countable_task_count)
+            || [
+                self.not_open_task_count,
+                self.credit_blocked_task_count,
+                self.human_required_task_count,
+                self.failed_task_count,
+            ]
+            .into_iter()
+            .any(|count| count > self.countable_task_count)
+            || self.completion_millis
+                != completion_millis(self.completed_task_count, self.countable_task_count)
+        {
+            return Err(CourseAggregateProgressError);
+        }
+        if let Some(required) = self.required
+            && (required.completed_required_task_count > required.required_task_count
+                || required.completion_millis
+                    != completion_millis(
+                        required.completed_required_task_count,
+                        required.required_task_count,
+                    ))
+        {
+            return Err(CourseAggregateProgressError);
+        }
+        if self.score.is_some_and(|score| {
+            score.scored_task_count == 0
+                || score.scored_task_count > self.countable_task_count
+                || score.average_score_millis > 1_000
+                || score.last_verified_at > self.observed_at
+        }) {
+            return Err(CourseAggregateProgressError);
+        }
+        Ok(())
+    }
+}
+
+fn completion_millis(completed: u32, total: u32) -> Option<u16> {
+    (total > 0).then(|| {
+        u16::try_from(u64::from(completed) * 1_000 / u64::from(total))
+            .expect("bounded course completion ratio fits u16")
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("course aggregate progress is internally inconsistent")]
+pub struct CourseAggregateProgressError;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +177,35 @@ mod tests {
         assert!(ProviderId::new("unipus-ai").is_ok());
         assert!(ProviderId::new("UCampus").is_err());
         assert!(ProviderId::new("with space").is_err());
+    }
+
+    #[test]
+    fn course_progress_preserves_unknown_dimensions_and_exact_counts() {
+        let now = chrono::Utc::now();
+        let progress = CourseAggregateProgress {
+            course_id: CourseId::new(),
+            provider_account_id: ProviderAccountId::new(),
+            total_task_count: 5,
+            countable_task_count: 4,
+            completed_task_count: 1,
+            remaining_task_count: 3,
+            not_open_task_count: 1,
+            credit_blocked_task_count: 1,
+            human_required_task_count: 1,
+            failed_task_count: 0,
+            completion_millis: Some(250),
+            required: None,
+            duration: None,
+            score: Some(CourseScoreProgress {
+                scored_task_count: 1,
+                average_score_millis: 800,
+                last_verified_at: now,
+            }),
+            observed_at: now,
+        };
+        assert!(progress.validate().is_ok());
+        let mut invalid = progress;
+        invalid.remaining_task_count = 4;
+        assert_eq!(invalid.validate(), Err(CourseAggregateProgressError));
     }
 }

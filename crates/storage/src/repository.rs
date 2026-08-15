@@ -9,18 +9,18 @@ use asterism_domain::{
     AuditRecord, AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId,
     AuthSession, AuthSessionId, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
     BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession,
-    BrowserBridgeSessionId, CompletionPolicySnapshot, CreditAccount, CreditReservation,
-    CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
-    ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
-    ExecutionStage, ExecutionState, ExternalOauthPending, GlobalAnswerCorpusEntryId,
-    GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel, OrchestrationState, PriceQuote,
-    PrivateAnswerEvidence, PrivateAnswerEvidenceId, ProviderAccount, ProviderAccountId,
-    ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
-    QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId, QuestionSession,
-    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
-    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
-    UserProfile, UserStatus, WebSession, WebSessionId,
+    BrowserBridgeSessionId, CompletionPolicySnapshot, Course, CourseAggregateProgress, CourseId,
+    CreditAccount, CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId,
+    Execution, ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease,
+    ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
+    GlobalAnswerCorpusEntryId, GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel,
+    OrchestrationState, PriceQuote, PrivateAnswerEvidence, PrivateAnswerEvidenceId,
+    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
+    Question, QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId,
+    QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
+    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
+    SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
+    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     BrowserBridgeWorkflowResult, BrowserSessionSpec, ProviderExecutionPlanArtifact,
@@ -352,6 +352,21 @@ pub trait TaskQueryRepository: Send + Sync {
         owner_id: UserId,
         task_id: TaskId,
     ) -> Result<Option<Task>, StorageError>;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CourseAggregateProgressRecord {
+    pub course: Course,
+    pub progress: CourseAggregateProgress,
+}
+
+#[async_trait]
+pub trait CourseProgressRepository: Send + Sync {
+    async fn find_owned_course_aggregate_progress(
+        &self,
+        owner_id: UserId,
+        course_id: CourseId,
+    ) -> Result<Option<CourseAggregateProgressRecord>, StorageError>;
 }
 
 /// Internal Task lookup for an already authorized Scheduler execution.

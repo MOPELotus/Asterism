@@ -96,6 +96,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
         "TaskCompletionWorkflowsResponse",
     ),
     ("listTaskAttemptHistory", "TaskAttemptHistoryPageResponse"),
+    ("getCourseProgress", "CourseProgressResponse"),
     ("getTaskDetail", "TaskDetailResponse"),
     (
         "getTaskBrowserSessionSpec",
@@ -1134,6 +1135,61 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             "TaskAttemptHistoryPageResponse",
             page_response("TaskAttemptHistoryEntry"),
         ),
+        ("Course", course_schema()),
+        (
+            "CourseRequiredProgress",
+            object(
+                &[
+                    "required_task_count",
+                    "completed_required_task_count",
+                    "completion_millis",
+                ],
+                json!({
+                    "required_task_count": unsigned_integer(),
+                    "completed_required_task_count": unsigned_integer(),
+                    "completion_millis": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000}
+                }),
+            ),
+        ),
+        (
+            "CourseDurationProgress",
+            object(
+                &["observed_seconds", "required_seconds"],
+                json!({
+                    "observed_seconds": unsigned_integer(),
+                    "required_seconds": {"type": ["integer", "null"], "minimum": 0}
+                }),
+            ),
+        ),
+        (
+            "CourseScoreProgress",
+            object(
+                &[
+                    "scored_task_count",
+                    "average_score_millis",
+                    "last_verified_at",
+                ],
+                json!({
+                    "scored_task_count": unsigned_integer(),
+                    "average_score_millis": {"type": "integer", "minimum": 0, "maximum": 1000},
+                    "last_verified_at": timestamp()
+                }),
+            ),
+        ),
+        (
+            "CourseAggregateProgress",
+            course_aggregate_progress_schema(),
+        ),
+        (
+            "CourseProgressResponse",
+            object(
+                &["course", "progress"],
+                json!({
+                    "course": schema_ref("Course"),
+                    "progress": schema_ref("CourseAggregateProgress")
+                }),
+            ),
+        ),
         ("ExecutionPageResponse", page_response("Execution")),
         (
             "ExecutionDetailResponse",
@@ -1177,6 +1233,72 @@ fn provider_scan_report_schema() -> Value {
                     }
                 }))
             }
+        }),
+    )
+}
+
+fn course_schema() -> Value {
+    object(
+        &[
+            "id",
+            "provider_account_id",
+            "remote_id",
+            "title",
+            "term",
+            "teacher",
+            "remote_status",
+            "metadata",
+            "last_seen_at",
+        ],
+        json!({
+            "id": uuid(),
+            "provider_account_id": uuid(),
+            "remote_id": string(),
+            "title": string(),
+            "term": nullable_string(),
+            "teacher": nullable_string(),
+            "remote_status": nullable_string(),
+            "metadata": {},
+            "last_seen_at": timestamp()
+        }),
+    )
+}
+
+fn course_aggregate_progress_schema() -> Value {
+    object(
+        &[
+            "course_id",
+            "provider_account_id",
+            "total_task_count",
+            "countable_task_count",
+            "completed_task_count",
+            "remaining_task_count",
+            "not_open_task_count",
+            "credit_blocked_task_count",
+            "human_required_task_count",
+            "failed_task_count",
+            "completion_millis",
+            "required",
+            "duration",
+            "score",
+            "observed_at",
+        ],
+        json!({
+            "course_id": uuid(),
+            "provider_account_id": uuid(),
+            "total_task_count": unsigned_integer(),
+            "countable_task_count": unsigned_integer(),
+            "completed_task_count": unsigned_integer(),
+            "remaining_task_count": unsigned_integer(),
+            "not_open_task_count": unsigned_integer(),
+            "credit_blocked_task_count": unsigned_integer(),
+            "human_required_task_count": unsigned_integer(),
+            "failed_task_count": unsigned_integer(),
+            "completion_millis": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000},
+            "required": nullable_schema_ref("CourseRequiredProgress"),
+            "duration": nullable_schema_ref("CourseDurationProgress"),
+            "score": nullable_schema_ref("CourseScoreProgress"),
+            "observed_at": timestamp()
         }),
     )
 }
