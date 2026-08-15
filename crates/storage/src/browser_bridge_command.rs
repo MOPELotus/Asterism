@@ -2680,6 +2680,19 @@ mod tests {
             serde_json::from_str::<AuthState>(&persisted.2).unwrap(),
             AuthState::Authenticated
         );
+        let harvest_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM answer_bootstrap_harvests")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        let harvest_job_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scheduled_jobs WHERE job_kind = 'answer_bootstrap_harvest'",
+        )
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(harvest_count, 1);
+        assert_eq!(harvest_job_count, 1);
         assert!(
             fixture
                 .session_repository
@@ -2707,6 +2720,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retry, BrowserBridgeCredentialCommitOutcome::BindingConflict);
+        let harvest_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM answer_bootstrap_harvests")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!(harvest_count, 1);
     }
 
     #[tokio::test]
@@ -3398,7 +3417,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO provider_accounts \
              (id, owner_user_id, provider_id, display_name, auth_state_json, created_at, updated_at) \
-             VALUES (?, ?, ?, 'primary', '\"authenticated\"', ?, ?)",
+             VALUES (?, ?, ?, 'primary', '\"idle\"', ?, ?)",
         )
         .bind(account.to_string())
         .bind(owner.to_string())

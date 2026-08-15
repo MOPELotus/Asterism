@@ -339,3 +339,8 @@ Capture bootstrap observation precedes the first successful account binding.
 It therefore cannot create a ProviderAccount, trigger bootstrap harvesting,
 store a credential or add evidence to the owner corpus; only the existing
 atomic successful bootstrap commit may establish those downstream facts.
+Existing installations receive the same invariant through an idempotent
+migration: an account already authenticated before the harvest tables existed
+gets one generation-1 job, while unbound accounts do not. Credential refresh,
+reauthentication and duplicate terminal receipts never schedule repeated full
+history scans.

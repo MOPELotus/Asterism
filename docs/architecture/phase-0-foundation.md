@@ -4828,3 +4828,19 @@ shape neither consumes that claim nor creates the candidate ProviderAccount,
 secret blob or successful binding fact. Coverage proves an
 Authentication/FieldDrift observation is durable while the claimed state is
 preserved and both account and secret tables remain empty.
+
+## Two-hundred-and-sixty-third Phase 0 slice
+
+The initial Answer History harvest invariant now covers both new bindings and
+upgrades. Migration 065 backfills generation 1 only for already-Authenticated
+ProviderAccounts that have no initial harvest, preserving the account's owner,
+Provider, account identity and last authentication timestamp in one typed
+pending scheduler job. Idle and other unbound states are not scheduled.
+
+Normal direct credential, AuthSession, Capture bootstrap and BrowserBridge
+credential commits continue to create the same job inside their existing
+account/secret transaction when they perform the first transition to
+Authenticated. Subsequent credential replacement and replay cannot create a
+second full scan. Coverage decodes the migrated scheduler payload, proves the
+backfill is idempotent, and verifies direct, AuthSession and BrowserBridge entry
+points retain exactly one harvest/job across refresh or duplicate submission.

@@ -2802,6 +2802,19 @@ mod tests {
             .unwrap();
         assert_eq!(account.auth_state, AuthState::Authenticated);
         assert_eq!(account.credential_refs.len(), 2);
+        assert_initial_harvest(&database, owner_id, &account, account.updated_at).await;
+        let refreshed = store
+            .replace_provider_credentials(
+                owner_id,
+                account_id,
+                runtime_password_bundle(Utc::now(), b"refreshed-cookie"),
+                &access,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.len(), 3);
+        assert_eq!(table_count(&database, "answer_bootstrap_harvests").await, 1);
+        assert_eq!(table_count(&database, "scheduled_jobs").await, 1);
         let committed_audits: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
              AND action = 'provider_credentials_committed'",
@@ -2810,7 +2823,7 @@ mod tests {
         .fetch_one(database.pool())
         .await
         .unwrap();
-        assert_eq!(committed_audits, 1);
+        assert_eq!(committed_audits, 2);
     }
 
     #[tokio::test]

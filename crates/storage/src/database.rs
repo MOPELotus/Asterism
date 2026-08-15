@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 64);
+        assert_eq!(migration_count, 65);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -239,6 +239,91 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(protocol_tables, 2);
+    }
+
+    #[tokio::test]
+    async fn authenticated_account_backfill_creates_one_typed_initial_harvest() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = "018f0000-0000-7000-8000-000000000001";
+        let account_id = "018f0000-0000-7000-8000-000000000002";
+        let idle_account_id = "018f0000-0000-7000-8000-000000000003";
+        let bound_at = "2026-08-15T10:00:00+00:00";
+        sqlx::query(
+            "INSERT INTO users \
+             (id, username, password_hash, status, roles_json, permissions_json, created_at, \
+              updated_at) VALUES (?, 'harvest-backfill-owner', '$argon2id$test', 'active', \
+              '[\"user\"]', '[]', ?, ?)",
+        )
+        .bind(owner_id)
+        .bind(bound_at)
+        .bind(bound_at)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        for (id, state) in [
+            (account_id, "\"authenticated\""),
+            (idle_account_id, "\"idle\""),
+        ] {
+            sqlx::query(
+                "INSERT INTO provider_accounts \
+                 (id, owner_user_id, provider_id, display_name, auth_state_json, created_at, \
+                  updated_at) VALUES (?, ?, 'provider-alpha', 'Primary', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(owner_id)
+            .bind(state)
+            .bind(bound_at)
+            .bind(bound_at)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/065_answer_bootstrap_harvest_backfill.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let row: (String, String, String, String, String) = sqlx::query_as(
+            "SELECT harvest.owner_user_id, harvest.provider_id, \
+                    harvest.provider_account_id, harvest.created_at, job.payload_json \
+             FROM answer_bootstrap_harvests AS harvest \
+             INNER JOIN scheduled_jobs AS job ON job.id = harvest.schedule_id",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(row.0, owner_id);
+        assert_eq!(row.1, "provider-alpha");
+        assert_eq!(row.2, account_id);
+        assert_eq!(row.3, bound_at);
+        assert!(matches!(
+            serde_json::from_str::<asterism_scheduler::ScheduledJobKind>(&row.4).unwrap(),
+            asterism_scheduler::ScheduledJobKind::AnswerBootstrapHarvest {
+                provider_account_id,
+                generation: 1,
+                ..
+            } if provider_account_id.to_string() == account_id
+        ));
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/065_answer_bootstrap_harvest_backfill.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT COUNT(*) FROM answer_bootstrap_harvests), \
+                (SELECT COUNT(*) FROM scheduled_jobs \
+                 WHERE job_kind = 'answer_bootstrap_harvest')",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(counts, (1, 1));
     }
 
     #[tokio::test]

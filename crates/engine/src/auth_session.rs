@@ -1221,6 +1221,13 @@ mod tests {
             account.credential_refs,
             [committed.credentials[0].secret.id]
         );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM answer_bootstrap_harvests")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
