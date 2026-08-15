@@ -89,7 +89,11 @@ attachment, retain its Task/Question/fingerprint position, produce a stable
 nonzero request digest, enforce separate subtitle/audio/video byte ceilings,
 keep external hosts anonymous, permit the session only for exact
 `ucontent.unipus.cn`, redact route/binding Debug output and reject foreign
-Question/attachment identities plus every redirected final route.
+Question/attachment identities plus every redirected final route. Response
+fixtures move synthetic bytes into a zeroizing owner, require exact status 200,
+the original final route and a nonempty body within the frozen ceiling, bind
+the byte digest and length to the request digest, redact body/route/binding and
+reject partial status, empty, oversized or route-substituted responses.
 DNS/private-range resolution and bounded streaming execution remain the shared
 downloader boundary.
 

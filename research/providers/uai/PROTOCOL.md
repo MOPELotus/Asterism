@@ -778,9 +778,16 @@ URL, kind, subtitle flag, credential scope and byte ceiling. Only exact
 `ucontent.unipus.cn` receives the already scoped UAI session; every other host
 is anonymous. Subtitle, audio and video plans carry separate bounded response
 ceilings, permit no redirect and accept only the original canonical route as
-the reported final URL. The shared downloader must still enforce
-DNS/private-range policy and bounded streaming, then bind the resulting bytes
-plus model credential to the exact Task and AnswerResolve attempt.
+the reported final URL. After shared execution, the Provider moves the
+downloaded `SecretValue` into a zeroizing response owner only when status is
+exactly 200, the reported final URL still equals that canonical route and the
+actual body is nonempty and within the plan ceiling. Its response digest hashes
+the immutable request digest, exact body digest and byte length, preventing a
+valid download for another attachment from being substituted downstream.
+Response MIME or file-signature inference is intentionally absent because the
+donors provide no stable contract for it. The shared downloader must still
+enforce DNS/private-range policy and bounded streaming, then bind the accepted
+bytes plus model credential to the exact Task and AnswerResolve attempt.
 
 After a durable media submission yields its receipt, session-aware
 SubmissionVerify rebinds that same complete manifest to every immutable Draft

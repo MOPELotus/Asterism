@@ -920,6 +920,55 @@ impl UaiMediaFetchPlan {
             ))
         }
     }
+
+    /// Consumes the exact successful downloader output into a response owner
+    /// bound to this immutable request.
+    ///
+    /// Shared execution must apply the plan's DNS/private-range, credential,
+    /// redirect and streaming policy before constructing the secret body.
+    /// This boundary independently rechecks the facts observable after the
+    /// download and does not infer a media type from unaudited response
+    /// headers or file signatures.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-200 response, changed final route, empty body or payload
+    /// exceeding the request's frozen response ceiling.
+    pub fn accept_response(
+        self,
+        status: u16,
+        final_url: &str,
+        body: SecretValue,
+    ) -> ProviderResult<UaiMediaFetchResponse> {
+        if status != 200 {
+            return Err(invalid_response(
+                "UAI media fetch did not return an exact successful response",
+            ));
+        }
+        self.validate_final_url(final_url)?;
+        let body_len = u64::try_from(body.expose_secret().len())
+            .map_err(|_| invalid_response("UAI media fetch response size is invalid"))?;
+        if body_len == 0 || body_len > self.max_response_bytes {
+            return Err(invalid_response(
+                "UAI media fetch response is empty or exceeds its frozen bound",
+            ));
+        }
+        let body_digest = Sha256::digest(body.expose_secret()).into();
+        let response_digest =
+            media_fetch_response_digest(self.request_digest, body_digest, body_len);
+        if body_digest == [0; 32] || response_digest == [0; 32] {
+            return Err(invalid_response(
+                "UAI media fetch response digest is invalid",
+            ));
+        }
+        Ok(UaiMediaFetchResponse {
+            plan: self,
+            body,
+            body_len,
+            body_digest,
+            response_digest,
+        })
+    }
 }
 
 impl fmt::Debug for UaiMediaFetchPlan {
@@ -932,6 +981,60 @@ impl fmt::Debug for UaiMediaFetchPlan {
             .field("credential_scope", &self.credential_scope)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("request_digest", &self.request_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Zeroizing media bytes accepted only for one exact immutable fetch plan.
+///
+/// The response digest binds the byte digest and length to the request digest,
+/// so downstream transcription cannot substitute bytes fetched for another
+/// Task, Question, attachment or route.
+pub struct UaiMediaFetchResponse {
+    plan: UaiMediaFetchPlan,
+    body: SecretValue,
+    body_len: u64,
+    body_digest: [u8; 32],
+    response_digest: [u8; 32],
+}
+
+impl UaiMediaFetchResponse {
+    pub const fn plan(&self) -> &UaiMediaFetchPlan {
+        &self.plan
+    }
+
+    pub const fn body_len(&self) -> u64 {
+        self.body_len
+    }
+
+    pub const fn body_digest(&self) -> [u8; 32] {
+        self.body_digest
+    }
+
+    pub const fn response_digest(&self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    /// Explicitly exposes media bytes to the already authorized bounded
+    /// transcription or answer-resolution adapter.
+    pub fn expose_body(&self) -> &[u8] {
+        self.body.expose_secret()
+    }
+
+    pub fn into_parts(self) -> (UaiMediaFetchPlan, SecretValue) {
+        (self.plan, self.body)
+    }
+}
+
+impl fmt::Debug for UaiMediaFetchResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiMediaFetchResponse")
+            .field("binding", &"[REDACTED]")
+            .field("body", &"[REDACTED]")
+            .field("body_len", &self.body_len)
+            .field("body_digest", &self.body_digest)
+            .field("response_digest", &self.response_digest)
             .finish_non_exhaustive()
     }
 }
@@ -974,6 +1077,19 @@ fn media_fetch_request_digest(
         UaiMediaFetchCredentialScope::Anonymous => 0,
     }]);
     digest.update(max_response_bytes.to_be_bytes());
+    digest.finalize().into()
+}
+
+fn media_fetch_response_digest(
+    request_digest: [u8; 32],
+    body_digest: [u8; 32],
+    body_len: u64,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:media-fetch-response:v1\0");
+    digest.update(request_digest);
+    digest.update(body_digest);
+    digest.update(body_len.to_be_bytes());
     digest.finalize().into()
 }
 
@@ -1474,6 +1590,114 @@ mod tests {
         assert_eq!(plan.max_response_bytes(), MAX_AUDIO_RESPONSE_BYTES);
         assert!(
             plan.validate_final_url("https://ucontent.unipus.cn.evil.example/media/listening.mp3")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn media_fetch_response_binds_secret_bytes_to_the_exact_request() {
+        let task_id = TaskId::new();
+        let (parsed, question) = parsed_question(task_id);
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let audio_id = artifact.media_sources_for_question("9001").unwrap()[0]
+            .attachment_id()
+            .to_owned();
+        let plan = artifact.prepare_media_fetch("9001", &audio_id).unwrap();
+        let request_digest = plan.request_digest();
+        let url = plan.expose_url().to_owned();
+        let response = plan
+            .accept_response(200, &url, SecretValue::new(b"synthetic audio".to_vec()))
+            .unwrap();
+
+        assert_eq!(response.plan().request_digest(), request_digest);
+        assert_eq!(response.body_len(), 15);
+        assert_eq!(response.expose_body(), b"synthetic audio");
+        assert_ne!(response.body_digest(), [0; 32]);
+        assert_ne!(response.response_digest(), [0; 32]);
+        let debug = format!("{response:?}");
+        assert!(!debug.contains("synthetic audio"));
+        assert!(!debug.contains("media.example.edu"));
+        assert!(!debug.contains(&audio_id));
+
+        let duplicate = artifact
+            .prepare_media_fetch("9001", &audio_id)
+            .unwrap()
+            .accept_response(200, &url, SecretValue::new(b"synthetic audio".to_vec()))
+            .unwrap();
+        let changed = artifact
+            .prepare_media_fetch("9001", &audio_id)
+            .unwrap()
+            .accept_response(200, &url, SecretValue::new(b"different audio".to_vec()))
+            .unwrap();
+        assert_eq!(response.response_digest(), duplicate.response_digest());
+        assert_ne!(response.response_digest(), changed.response_digest());
+
+        let (accepted_plan, accepted_body) = response.into_parts();
+        assert_eq!(accepted_plan.request_digest(), request_digest);
+        assert_eq!(accepted_body.expose_secret(), b"synthetic audio");
+    }
+
+    #[test]
+    fn media_fetch_response_rejects_status_route_empty_and_size_drift() {
+        let task_id = TaskId::new();
+        let (parsed, question) = parsed_question(task_id);
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let sources = artifact.media_sources_for_question("9001").unwrap();
+        let audio_id = sources[0].attachment_id().to_owned();
+        let subtitle_id = sources[1].attachment_id().to_owned();
+        let audio_url = sources[0].expose_url().to_owned();
+        let subtitle_url = sources[1].expose_url().to_owned();
+
+        assert!(
+            artifact
+                .prepare_media_fetch("9001", &audio_id)
+                .unwrap()
+                .accept_response(206, &audio_url, SecretValue::new(vec![1]))
+                .is_err()
+        );
+        assert!(
+            artifact
+                .prepare_media_fetch("9001", &audio_id)
+                .unwrap()
+                .accept_response(
+                    200,
+                    "https://cdn.example.edu/listening.mp3",
+                    SecretValue::new(vec![1]),
+                )
+                .is_err()
+        );
+        assert!(
+            artifact
+                .prepare_media_fetch("9001", &audio_id)
+                .unwrap()
+                .accept_response(200, &audio_url, SecretValue::new(Vec::new()))
+                .is_err()
+        );
+        assert!(
+            artifact
+                .prepare_media_fetch("9001", &subtitle_id)
+                .unwrap()
+                .accept_response(
+                    200,
+                    &subtitle_url,
+                    SecretValue::new(vec![
+                        b'x';
+                        usize::try_from(MAX_SUBTITLE_RESPONSE_BYTES).unwrap()
+                            + 1
+                    ]),
+                )
                 .is_err()
         );
     }
