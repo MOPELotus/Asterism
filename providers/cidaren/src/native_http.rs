@@ -16,7 +16,7 @@ use reqwest::{
         RETRY_AFTER, USER_AGENT,
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -921,7 +921,7 @@ async fn read_json_response(
             maximum,
         ));
     }
-    String::from_utf8(document).map_err(|error| {
+    let mut document = String::from_utf8(document).map_err(|error| {
         let mut bytes = error.into_bytes();
         let observed_length = u64::try_from(bytes.len()).ok();
         bytes.zeroize();
@@ -935,7 +935,26 @@ async fn read_json_response(
             observed_length,
             maximum,
         )
-    })
+    })?;
+    let mut deserializer = serde_json::Deserializer::from_str(&document);
+    let valid_json = IgnoredAny::deserialize(&mut deserializer)
+        .and_then(|_| deserializer.end())
+        .is_ok();
+    if !valid_json {
+        let observed_length = u64::try_from(document.len()).ok();
+        document.zeroize();
+        return Err(response_body_observation(
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("Cidaren {} endpoint returned invalid JSON", route.label()),
+            ),
+            route,
+            "invalid_json",
+            observed_length,
+            maximum,
+        ));
+    }
+    Ok(document)
 }
 
 fn validate_status(
@@ -1756,6 +1775,16 @@ mod tests {
         let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
         assert!(!sanitized.contains("255"));
         assert!(!sanitized.contains("254"));
+
+        let invalid_json = fixture_response(b"must-not-cross-json".to_vec(), None);
+        let error = read_json_response(invalid_json, ResponseRoute::WordPrototype, 64)
+            .await
+            .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["state"], "invalid_json");
+        assert_eq!(observation.shape_sanitized["observed_length"], 19);
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
 
         let valid = fixture_response(br#"{"ok":true}"#.to_vec(), None);
         assert_eq!(

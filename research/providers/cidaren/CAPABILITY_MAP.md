@@ -290,6 +290,11 @@ The current checkpoint (not a completion boundary):
     time values remain excluded. Existing unknown task/status observations are
     preserved without replacement and the complete inventory still fails
     atomically.
+56. validates one complete JSON value at the Native HTTP body boundary before
+    any route parser receives it, using a non-retaining deserializer. Invalid
+    syntax or trailing data zeroizes the owned body and retains only fixed
+    route, `invalid_json`, observed length and configured maximum in the body
+    observation; response content and parsed trees remain excluded.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

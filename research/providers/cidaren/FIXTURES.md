@@ -266,9 +266,11 @@ placeholder identities, result codes, status values and pagination shape.
   route/status or header/media-type structural facts. Raw Content-Type, URL,
   response body and credentials remain absent from every observation.
 - Native HTTP body-framing tests cover declared and streamed overflow, empty
-  body, invalid UTF-8 and a valid bounded JSON body. Failure observations retain
-  only fixed route/state, observed byte length and configured maximum; body
-  bytes remain absent and already accumulated bytes are zeroized before return.
+  body, invalid UTF-8, invalid JSON and a valid bounded JSON body. Failure
+  observations retain only fixed route/state, observed byte length and
+  configured maximum; body bytes/text remain absent and already accumulated
+  owners are zeroized before return. JSON syntax validation uses `IgnoredAny`
+  plus end-of-input rather than retaining a second response tree.
 - Class/study Task-row shape tests inject a string-valued progress field and
   assert that only row/object and fixed known-field kinds cross the observation
   boundary. Synthetic progress text, Course/list identity and titles remain

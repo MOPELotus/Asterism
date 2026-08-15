@@ -852,6 +852,20 @@ unknown-task-type and unknown-class-status observations are preserved rather
 than replaced. Every row failure still rejects the complete inventory before
 any partial or stale Task can reach TaskDetail, progress or terminal readback.
 
+### 2026-08-15 Native JSON syntax boundary follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged after the Task-row unit. No
+response body syntax or route parser shape entered scope.
+
+The shared Native HTTP reader now validates one complete JSON value with a
+non-retaining `IgnoredAny` deserializer before returning the owned UTF-8 string
+to any route parser. Invalid syntax and trailing data zeroize the string and
+attach the existing bounded response-body shape with only fixed route,
+`invalid_json`, observed length and configured maximum. Response text and a
+duplicate parsed tree do not cross the boundary. Route parsers remain
+responsible for semantic shape and protocol-vocabulary checks.
+
 ## Check procedure
 
 For the next checkpoint:

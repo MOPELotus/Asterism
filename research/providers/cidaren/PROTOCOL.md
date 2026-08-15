@@ -92,6 +92,10 @@ overflow, empty body and invalid UTF-8 attach only fixed route/state, observed
 byte length and configured maximum as `Other / UnknownResultShape`. Body bytes
 remain excluded and are zeroized on every rejected accumulated path. A chunk
 read failure remains its existing unobserved transport classification.
+The resulting UTF-8 string is then validated as one complete JSON value with a
+non-retaining deserializer before it reaches a route parser. Invalid syntax or
+trailing data zeroizes that string and reuses the same body observation with
+`invalid_json`; no duplicate response tree or response text is retained.
 
 ## BrowserBridge Capture command/result boundary
 
@@ -623,8 +627,8 @@ retaining response or user data:
   stay excluded. 401/403, 429 and 5xx remain unobserved operational errors.
 - Native HTTP body framing failures record only fixed route/state, observed
   length and route maximum on `Other / UnknownResultShape`; declared/streamed
-  overflow, empty body and invalid UTF-8 never retain body bytes, and chunk-read
-  transport errors remain unobserved.
+  overflow, empty body, invalid UTF-8 and invalid JSON never retain body
+  bytes/text, and chunk-read transport errors remain unobserved.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting
