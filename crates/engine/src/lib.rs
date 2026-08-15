@@ -1,5 +1,6 @@
 //! Pure orchestration state machines and policy guards.
 
+mod answer_history_harvest;
 mod answer_resolution;
 mod answer_resolve;
 mod assessment;
@@ -28,6 +29,10 @@ mod task_lifecycle;
 mod task_progress;
 mod transition;
 
+pub use answer_history_harvest::{
+    AnswerHistoryHarvestFailure, AnswerHistoryHarvestTickReport, AnswerHistoryHarvestWorker,
+    AnswerHistoryHarvestWorkerConfig, AnswerHistoryHarvestWorkerError,
+};
 pub use answer_resolution::{
     ConservativeAnswerResolverError, ConservativeAnswerResolverService,
     ResolveAnswerCandidatesCommand,

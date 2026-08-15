@@ -4085,3 +4085,32 @@ process commits an import and crashes before advancing its watermark, the next
 claim can safely reread and reingest that exact Provider result, observe the
 ledger duplicate and then advance. Migration 057 persists this crash-recovery
 boundary without treating a duplicate import as new Answer Evidence.
+
+## Two-hundred-and-twenty-sixth Phase 0 slice
+
+The bootstrap Answer History worker now has a bounded one-Provider-page claim
+boundary. It decodes only a versioned, Provider-bound cursor, resolves each
+remote Task identity inside the exact Provider account, validates the returned
+Attempt/result evidence, imports it through the atomic history ledger and only
+then advances progress. A successful non-terminal page atomically persists the
+next cursor and releases the scheduler claim without consuming a retry attempt;
+the next due claim resumes from that cursor. A terminal page completes with
+`total == scanned`. Repeated non-terminal cursors, cross-account Tasks, future
+observations and changed result bindings fail closed.
+
+The owner-private history layer also retains submitted answers whose result page
+does not expose a reliable per-Question verdict. Migration 058 permits a
+history import to contain candidates with zero reliable evidence: those
+candidates remain attached to the immutable private snapshot and import ledger,
+but do not increment or project into the identity-free Global Corpus. Official
+answers become Official evidence; submitted answers become VerifiedHistorical
+or Negative only when the Provider supplies an exact positive or negative
+verdict. Score, retake facts, result surface and task/question provenance remain
+private evidence provenance.
+
+The Engine deliberately is not attached to the daemon loop yet. Bootstrap jobs
+must not be claimed merely because an account exists: daemon activation waits
+for a real registered Native HTTP, BrowserBridge or Capture-backed history
+transport. The synthetic Chaoxing adapter verifies the contract but its native
+registry slot remains absent, so existing first-auth jobs cannot be exhausted
+by a false unsupported scan.
