@@ -28,6 +28,10 @@ const MAX_ATTACHMENT_ID_BYTES: usize = 128;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_QUESTION_ID_BYTES: usize = 512;
 const MAX_POSITION: u32 = 100_000;
+const MAX_SUBTITLE_RESPONSE_BYTES: u64 = 8 * 1_024 * 1_024;
+const MAX_AUDIO_RESPONSE_BYTES: u64 = 128 * 1_024 * 1_024;
+const MAX_VIDEO_RESPONSE_BYTES: u64 = 512 * 1_024 * 1_024;
+const UCONTENT_MEDIA_HOST: &str = "ucontent.unipus.cn";
 
 /// Encoded Provider continuation intended for Core's encrypted
 /// `QuestionSession` artifact store.
@@ -564,6 +568,58 @@ impl UaiQuestionArtifactSet {
     pub fn question_count(&self) -> usize {
         self.questions.len()
     }
+
+    /// Freezes one exact media fetch request from this already rebound
+    /// complete Question continuation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing, duplicate or foreign Question/attachment identities
+    /// and any source that no longer satisfies its canonical route binding.
+    pub fn prepare_media_fetch(
+        &self,
+        remote_question_id: &str,
+        attachment_id: &str,
+    ) -> ProviderResult<UaiMediaFetchPlan> {
+        valid_question_identity(remote_question_id)?;
+        if !valid_text(attachment_id, MAX_ATTACHMENT_ID_BYTES) {
+            return Err(protocol_drift(
+                "UAI media fetch attachment identity is invalid",
+            ));
+        }
+        let mut entries = self
+            .questions
+            .iter()
+            .filter(|question| question.remote_question_id.as_str() == remote_question_id);
+        let question = entries
+            .next()
+            .ok_or_else(|| protocol_drift("UAI media fetch Question is missing or foreign"))?;
+        if entries.next().is_some() {
+            return Err(protocol_drift(
+                "UAI media fetch Question identity is ambiguous",
+            ));
+        }
+        let mut sources = question
+            .media_sources
+            .iter()
+            .filter(|source| source.attachment_id.as_str() == attachment_id);
+        let source = sources
+            .next()
+            .ok_or_else(|| protocol_drift("UAI media fetch attachment is missing or foreign"))?;
+        if sources.next().is_some() {
+            return Err(protocol_drift(
+                "UAI media fetch attachment identity is ambiguous",
+            ));
+        }
+        UaiMediaFetchPlan::try_new(
+            &self.task_id,
+            &self.remote_task_id,
+            &question.remote_question_id,
+            question.position,
+            &question.question_fingerprint,
+            source,
+        )
+    }
 }
 
 impl fmt::Debug for UaiQuestionArtifactSet {
@@ -684,6 +740,241 @@ impl fmt::Debug for UaiQuestionArtifactMediaSource {
             .field("subtitle", &self.subtitle)
             .finish()
     }
+}
+
+/// Whether the future shared downloader may attach the already scoped UAI
+/// session to this exact request. External media hosts remain anonymous even
+/// though the donor's generic client would forward its default headers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UaiMediaFetchCredentialScope {
+    UcontentSession,
+    Anonymous,
+}
+
+/// Immutable, request-digest-bound authority for one UAI Question media GET.
+///
+/// It performs no DNS lookup or network I/O. Shared download execution must
+/// still enforce DNS/private-range policy, streaming bounds and no redirects.
+pub struct UaiMediaFetchPlan {
+    task_id: Zeroizing<String>,
+    remote_task_id: Zeroizing<String>,
+    remote_question_id: Zeroizing<String>,
+    position: u32,
+    question_fingerprint: Zeroizing<String>,
+    attachment_id: Zeroizing<String>,
+    kind: QuestionAttachmentKind,
+    subtitle: bool,
+    url: Zeroizing<String>,
+    credential_scope: UaiMediaFetchCredentialScope,
+    max_response_bytes: u64,
+    request_digest: [u8; 32],
+}
+
+impl UaiMediaFetchPlan {
+    fn try_new(
+        task_id: &str,
+        remote_task_id: &str,
+        remote_question_id: &str,
+        position: u32,
+        question_fingerprint: &str,
+        source: &UaiQuestionArtifactMediaSource,
+    ) -> ProviderResult<Self> {
+        validate_remote_task_identity(remote_task_id)?;
+        valid_question_identity(remote_question_id)?;
+        QuestionContentFingerprint::from_str(question_fingerprint)
+            .map_err(|_| protocol_drift("UAI media fetch Question fingerprint is invalid"))?;
+        let (url, kind) = canonical_media_url(&source.url, source.subtitle)?;
+        if url != source.url.as_str()
+            || kind != source.kind
+            || source.attachment_id.as_str()
+                != media_attachment_id(remote_task_id, remote_question_id, &url)
+            || position == 0
+            || position > MAX_POSITION
+            || !valid_text(task_id, 128)
+        {
+            return Err(protocol_drift(
+                "UAI media fetch source is stale, malformed or foreign",
+            ));
+        }
+        let parsed = reqwest::Url::parse(&url)
+            .map_err(|_| protocol_drift("UAI media fetch URL is malformed"))?;
+        let credential_scope = if parsed.host_str() == Some(UCONTENT_MEDIA_HOST) {
+            UaiMediaFetchCredentialScope::UcontentSession
+        } else {
+            UaiMediaFetchCredentialScope::Anonymous
+        };
+        let max_response_bytes = match (source.kind, source.subtitle) {
+            (QuestionAttachmentKind::File, true) => MAX_SUBTITLE_RESPONSE_BYTES,
+            (QuestionAttachmentKind::Audio, false) => MAX_AUDIO_RESPONSE_BYTES,
+            (QuestionAttachmentKind::Video, false) => MAX_VIDEO_RESPONSE_BYTES,
+            _ => {
+                return Err(protocol_drift(
+                    "UAI media fetch source kind is not donor-audited",
+                ));
+            }
+        };
+        let request_digest = media_fetch_request_digest(
+            task_id,
+            remote_task_id,
+            remote_question_id,
+            position,
+            question_fingerprint,
+            &source.attachment_id,
+            source.kind,
+            source.subtitle,
+            &url,
+            credential_scope,
+            max_response_bytes,
+        );
+        if request_digest == [0; 32] {
+            return Err(invalid_response(
+                "UAI media fetch request digest is invalid",
+            ));
+        }
+        Ok(Self {
+            task_id: Zeroizing::new(task_id.to_owned()),
+            remote_task_id: Zeroizing::new(remote_task_id.to_owned()),
+            remote_question_id: Zeroizing::new(remote_question_id.to_owned()),
+            position,
+            question_fingerprint: Zeroizing::new(question_fingerprint.to_owned()),
+            attachment_id: source.attachment_id.clone(),
+            kind: source.kind,
+            subtitle: source.subtitle,
+            url: Zeroizing::new(url),
+            credential_scope,
+            max_response_bytes,
+            request_digest,
+        })
+    }
+
+    pub const fn method(&self) -> &'static str {
+        "GET"
+    }
+
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub fn remote_question_id(&self) -> &str {
+        &self.remote_question_id
+    }
+
+    pub const fn position(&self) -> u32 {
+        self.position
+    }
+
+    pub fn question_fingerprint(&self) -> &str {
+        &self.question_fingerprint
+    }
+
+    pub fn attachment_id(&self) -> &str {
+        &self.attachment_id
+    }
+
+    pub fn expose_url(&self) -> &str {
+        &self.url
+    }
+
+    pub const fn credential_scope(&self) -> UaiMediaFetchCredentialScope {
+        self.credential_scope
+    }
+
+    pub const fn max_response_bytes(&self) -> u64 {
+        self.max_response_bytes
+    }
+
+    pub const fn kind(&self) -> QuestionAttachmentKind {
+        self.kind
+    }
+
+    pub const fn is_subtitle(&self) -> bool {
+        self.subtitle
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub const fn permits_redirects(&self) -> bool {
+        false
+    }
+
+    /// Requires the downloader to report the exact canonical route selected
+    /// by this plan. Redirect handling stays fail-closed until a shared
+    /// redirect chain contract can preserve DNS and credential scope.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, non-canonical or changed final routes.
+    pub fn validate_final_url(&self, final_url: &str) -> ProviderResult<()> {
+        let (canonical, kind) = canonical_media_url(final_url, self.subtitle)?;
+        if canonical == self.url.as_str() && kind == self.kind {
+            Ok(())
+        } else {
+            Err(protocol_drift(
+                "UAI media fetch response crossed its frozen route",
+            ))
+        }
+    }
+}
+
+impl fmt::Debug for UaiMediaFetchPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiMediaFetchPlan")
+            .field("binding", &"[REDACTED]")
+            .field("kind", &self.kind)
+            .field("subtitle", &self.subtitle)
+            .field("credential_scope", &self.credential_scope)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("request_digest", &self.request_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each immutable Question/media/request fact is an independent digest authority"
+)]
+fn media_fetch_request_digest(
+    task_id: &str,
+    remote_task_id: &str,
+    remote_question_id: &str,
+    position: u32,
+    question_fingerprint: &str,
+    attachment_id: &str,
+    kind: QuestionAttachmentKind,
+    subtitle: bool,
+    url: &str,
+    credential_scope: UaiMediaFetchCredentialScope,
+    max_response_bytes: u64,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for field in [
+        b"asterism:uai:media-fetch:v1".as_slice(),
+        task_id.as_bytes(),
+        remote_task_id.as_bytes(),
+        remote_question_id.as_bytes(),
+        question_fingerprint.as_bytes(),
+        attachment_id.as_bytes(),
+        attachment_kind_name(kind).as_bytes(),
+        url.as_bytes(),
+    ] {
+        digest.update(field);
+        digest.update(b"\0");
+    }
+    digest.update(position.to_be_bytes());
+    digest.update([u8::from(subtitle)]);
+    digest.update([match credential_scope {
+        UaiMediaFetchCredentialScope::UcontentSession => 1,
+        UaiMediaFetchCredentialScope::Anonymous => 0,
+    }]);
+    digest.update(max_response_bytes.to_be_bytes());
+    digest.finalize().into()
 }
 
 #[derive(Serialize)]
@@ -868,6 +1159,16 @@ mod tests {
     const REMOTE_TASK_ID: &str = "group:2001:unit-1:group-media";
 
     fn parsed_question(task_id: TaskId) -> (ParsedUaiQuestion, Question) {
+        parsed_question_with_media_url(
+            task_id,
+            "https://media.example.edu/listening.mp3#duration=10",
+        )
+    }
+
+    fn parsed_question_with_media_url(
+        task_id: TaskId,
+        audio_url: &str,
+    ) -> (ParsedUaiQuestion, Question) {
         let parsed = parse_question_entry(
             &json!({
                 "id": "9001",
@@ -876,7 +1177,7 @@ mod tests {
                     "direction": {"text": "Summarize the recording"},
                     "contents": [{
                         "name": "Listening.mp3",
-                        "path": "https://media.example.edu/listening.mp3#duration=10",
+                        "path": audio_url,
                         "subtitles": [{
                             "name": "English",
                             "path": "https://media.example.edu/listening.vtt#track=en"
@@ -1069,6 +1370,110 @@ mod tests {
         reordered.swap(0, 1);
         assert!(
             UaiQuestionArtifactSet::decode_bound(&value, digest, REMOTE_TASK_ID, &reordered,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn media_fetch_plan_binds_external_route_without_credentials_or_redirects() {
+        let task_id = TaskId::new();
+        let task_id_text = task_id.to_string();
+        let (parsed, question) = parsed_question(task_id);
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let sources = artifact.media_sources_for_question("9001").unwrap();
+        let audio_id = sources[0].attachment_id().to_owned();
+        let subtitle_id = sources[1].attachment_id().to_owned();
+
+        let audio = artifact.prepare_media_fetch("9001", &audio_id).unwrap();
+        assert_eq!(audio.method(), "GET");
+        assert_eq!(audio.task_id(), task_id_text);
+        assert_eq!(audio.remote_task_id(), REMOTE_TASK_ID);
+        assert_eq!(audio.remote_question_id(), "9001");
+        assert_eq!(audio.position(), 1);
+        assert_eq!(
+            audio.question_fingerprint(),
+            question.content_fingerprint().unwrap().to_string()
+        );
+        assert_eq!(audio.attachment_id(), audio_id);
+        assert_eq!(audio.kind(), QuestionAttachmentKind::Audio);
+        assert!(!audio.is_subtitle());
+        assert_eq!(
+            audio.credential_scope(),
+            UaiMediaFetchCredentialScope::Anonymous
+        );
+        assert_eq!(audio.max_response_bytes(), MAX_AUDIO_RESPONSE_BYTES);
+        assert_ne!(audio.request_digest(), [0; 32]);
+        assert!(!audio.permits_redirects());
+        audio.validate_final_url(audio.expose_url()).unwrap();
+        assert!(
+            audio
+                .validate_final_url("https://cdn.example.edu/listening.mp3")
+                .is_err()
+        );
+        let debug = format!("{audio:?}");
+        assert!(!debug.contains("media.example.edu"));
+        assert!(!debug.contains(&task_id_text));
+        assert!(!debug.contains(&audio_id));
+
+        let subtitle = artifact.prepare_media_fetch("9001", &subtitle_id).unwrap();
+        assert_eq!(subtitle.kind(), QuestionAttachmentKind::File);
+        assert!(subtitle.is_subtitle());
+        assert_eq!(subtitle.max_response_bytes(), MAX_SUBTITLE_RESPONSE_BYTES);
+        assert_ne!(subtitle.request_digest(), audio.request_digest());
+        assert!(artifact.prepare_media_fetch("9002", &audio_id).is_err());
+        assert!(artifact.prepare_media_fetch("9001", "foreign").is_err());
+
+        let (video_parsed, video_question) = parsed_question_with_media_url(
+            TaskId::new(),
+            "https://media.example.edu/listening.mp4",
+        );
+        let video_artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[video_parsed],
+            std::slice::from_ref(&video_question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let video_source = &video_artifact.media_sources_for_question("9001").unwrap()[0];
+        let video = video_artifact
+            .prepare_media_fetch("9001", video_source.attachment_id())
+            .unwrap();
+        assert_eq!(video.kind(), QuestionAttachmentKind::Video);
+        assert_eq!(video.max_response_bytes(), MAX_VIDEO_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn media_fetch_plan_scopes_session_only_to_exact_ucontent_host() {
+        let task_id = TaskId::new();
+        let (parsed, question) = parsed_question_with_media_url(
+            task_id,
+            "https://ucontent.unipus.cn/media/listening.mp3",
+        );
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let source = &artifact.media_sources_for_question("9001").unwrap()[0];
+        let plan = artifact
+            .prepare_media_fetch("9001", source.attachment_id())
+            .unwrap();
+
+        assert_eq!(
+            plan.credential_scope(),
+            UaiMediaFetchCredentialScope::UcontentSession
+        );
+        assert_eq!(plan.max_response_bytes(), MAX_AUDIO_RESPONSE_BYTES);
+        assert!(
+            plan.validate_final_url("https://ucontent.unipus.cn.evil.example/media/listening.mp3")
                 .is_err()
         );
     }

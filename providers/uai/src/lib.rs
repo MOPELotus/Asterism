@@ -141,7 +141,8 @@ pub use question::{
 pub use question_artifact::{
     EncodedUaiQuestionArtifact, EncodedUaiQuestionArtifactSet, UAI_QUESTION_ARTIFACT_PHASE,
     UAI_QUESTION_ARTIFACT_TYPE, UAI_QUESTION_SET_ARTIFACT_PHASE,
-    UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS, UAI_QUESTION_SET_ARTIFACT_TYPE, UaiQuestionArtifact,
+    UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS, UAI_QUESTION_SET_ARTIFACT_TYPE,
+    UaiMediaFetchCredentialScope, UaiMediaFetchPlan, UaiQuestionArtifact,
     UaiQuestionArtifactMediaSource, UaiQuestionArtifactSet,
 };
 pub use resource_execution::{

@@ -771,9 +771,16 @@ input/output, strips its header, cue ordinals and timestamp rows, normalizes
 only cue text into transcript metadata and is excluded from the display stem. The
 current donor sends its default authorization/cookie header set through its
 generic media GET even when the URL host changes; Asterism does not copy that
-credential leak. A shared downloader must enforce DNS/private-range and
-redirect policy, decide host-scoped authentication, and bind the resulting
-bytes plus model credential to the exact Task and AnswerResolve attempt.
+credential leak. After complete-manifest rebinding, UAI can freeze one exact
+immutable GET plan. Its request digest covers the Core Task, remote Task and
+Question, position, Question content fingerprint, attachment ID, canonical
+URL, kind, subtitle flag, credential scope and byte ceiling. Only exact
+`ucontent.unipus.cn` receives the already scoped UAI session; every other host
+is anonymous. Subtitle, audio and video plans carry separate bounded response
+ceilings, permit no redirect and accept only the original canonical route as
+the reported final URL. The shared downloader must still enforce
+DNS/private-range policy and bounded streaming, then bind the resulting bytes
+plus model credential to the exact Task and AnswerResolve attempt.
 
 After a durable media submission yields its receipt, session-aware
 SubmissionVerify rebinds that same complete manifest to every immutable Draft

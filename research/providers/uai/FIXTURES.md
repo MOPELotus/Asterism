@@ -84,9 +84,14 @@ AnswerResolve accepts the exact type/phase/revision/digest-bound artifact,
 rebinds it before fresh content/answer reads, keeps the legacy `None` path and
 rejects foreign metadata without transport. Persisted Domain Questions never
 contain a fetch URL; only Core's encrypted QuestionSession continuation can
-retain the Provider-private route. DNS/private-range resolution,
-redirect handling and host-scoped authenticated media fetching remain the
-shared downloader boundary.
+retain the Provider-private route. Fetch-plan fixtures select one exact bound
+attachment, retain its Task/Question/fingerprint position, produce a stable
+nonzero request digest, enforce separate subtitle/audio/video byte ceilings,
+keep external hosts anonymous, permit the session only for exact
+`ucontent.unipus.cn`, redact route/binding Debug output and reject foreign
+Question/attachment identities plus every redirected final route.
+DNS/private-range resolution and bounded streaming execution remain the shared
+downloader boundary.
 
 ## Required live-sanitized fixtures
 
