@@ -260,6 +260,12 @@ The current checkpoint (not a completion boundary):
     are retained; topic code, stem, option, answer tag and matching content are
     excluded. Invalid caller Task/position binding remains unobserved local
     protocol failure rather than remote drift.
+51. observes malformed successful native OAuth V2 envelopes and authenticated
+    handshake/payload drift. Only root/known field kinds and counts, numeric
+    success code, protocol booleans, fixed-AAD match and encoded string lengths
+    are retained; OAuth code, public key, salt, IV, ciphertext, token and
+    version values remain excluded. Ordinary rejected/expired codes and
+    decrypted invalid-token Authentication remain unobserved.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

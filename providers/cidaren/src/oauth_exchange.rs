@@ -4,6 +4,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
+use asterism_domain::{ProtocolObservationKind, ProtocolSurface};
 use asterism_provider_api::{
     CredentialReplacement, ProviderError, ProviderErrorKind, ProviderResult,
 };
@@ -18,11 +19,14 @@ use p256::{
 };
 use rand_core::OsRng;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::CidarenTokenSession;
+use crate::{
+    CidarenTokenSession,
+    protocol_observation::{error_with_protocol_observation, json_value_kind},
+};
 
 pub(crate) const LOGIN_VERSION: &str = "2.7.0.260715_01";
 const CRYPTO_VERSION: &str = "v1";
@@ -241,125 +245,131 @@ impl CidarenOauthBootstrap {
         if response_document.is_empty() || response_document.len() > MAX_LOGIN_RESPONSE_BYTES {
             return Err(invalid_login_response());
         }
-        let mut root = ZeroizingJson::new(
+        let root = ZeroizingJson::new(
             serde_json::from_slice::<Value>(response_document)
                 .map_err(|_| invalid_login_response())?,
         );
-        let object = root
-            .value()
-            .as_object()
-            .ok_or_else(invalid_login_response)?;
-        let code = object
-            .get("code")
-            .and_then(Value::as_i64)
-            .ok_or_else(invalid_login_response)?;
+        let Some(object) = root.value().as_object() else {
+            return Err(oauth_response_observation(
+                invalid_login_response(),
+                root.value(),
+            ));
+        };
+        let Some(code) = object.get("code").and_then(Value::as_i64) else {
+            return Err(oauth_response_observation(
+                invalid_login_response(),
+                root.value(),
+            ));
+        };
         if code != 1 {
             return Err(ProviderError::new(
                 ProviderErrorKind::Authentication,
                 "Cidaren rejected or expired the WeChat OAuth authorization code",
             ));
         }
-        let data = object
-            .get("data")
-            .and_then(Value::as_object)
-            .ok_or_else(invalid_login_response)?;
-        if data.get("handshake_required").and_then(Value::as_bool) != Some(false)
-            || data.get("encrypted").and_then(Value::as_bool) != Some(true)
-        {
-            return Err(protocol_drift());
-        }
-        let handshake = data
-            .get("handshake")
-            .and_then(Value::as_object)
-            .ok_or_else(protocol_drift)?;
-        let payload = data
-            .get("payload")
-            .and_then(Value::as_object)
-            .ok_or_else(protocol_drift)?;
-        require_version(handshake.get("version"))?;
-        require_version(payload.get("version"))?;
-
-        let server_public_key = decode_bounded_base64(
-            handshake.get("spub_k"),
-            MAX_HANDSHAKE_FIELD_BYTES,
-            protocol_drift,
-        )?;
-        let server_public_key =
-            PublicKey::from_public_key_der(&server_public_key).map_err(|_| protocol_drift())?;
-        let salt = decode_bounded_base64(
-            handshake.get("salt"),
-            MAX_HANDSHAKE_FIELD_BYTES,
-            protocol_drift,
-        )?;
-        let shared_secret = self.private_key.diffie_hellman(&server_public_key);
-        let shared_secret = Zeroizing::new(shared_secret.raw_secret_bytes().to_vec());
-        let hkdf = Hkdf::<Sha256>::new(Some(salt.as_slice()), shared_secret.as_slice());
-        let mut key = Zeroizing::new([0_u8; AES_256_KEY_BYTES]);
-        hkdf.expand(LOGIN_HKDF_INFO, key.as_mut())
-            .map_err(|_| invalid_login_response())?;
-
-        let aad = payload
-            .get("aad")
-            .and_then(Value::as_str)
-            .filter(|value| *value == LOGIN_AAD)
-            .ok_or_else(protocol_drift)?;
-        let iv = decode_bounded_base64(
-            payload.get("iv"),
-            AES_GCM_NONCE_BYTES,
-            invalid_login_response,
-        )?;
-        if iv.len() != AES_GCM_NONCE_BYTES {
-            return Err(invalid_login_response());
-        }
-        let ciphertext = decode_bounded_base64(
-            payload
-                .get("cipher_text")
-                .or_else(|| payload.get("cipherText")),
-            MAX_LOGIN_CIPHERTEXT_BYTES,
-            invalid_login_response,
-        )?;
-        let cipher =
-            Aes256Gcm::new_from_slice(key.as_slice()).map_err(|_| internal_crypto_error())?;
-        let plaintext = cipher
-            .decrypt(
-                Nonce::from_slice(&iv),
-                Payload {
-                    msg: ciphertext.as_slice(),
-                    aad: aad.as_bytes(),
-                },
-            )
-            .map_err(|_| invalid_login_response())?;
-        let mut plaintext = Zeroizing::new(plaintext);
-        if plaintext.is_empty() || plaintext.len() > MAX_LOGIN_PLAINTEXT_BYTES {
-            return Err(invalid_login_response());
-        }
-        let session = ZeroizingJson::new(
-            serde_json::from_slice::<Value>(plaintext.as_slice())
-                .map_err(|_| invalid_login_response())?,
-        );
-        plaintext.zeroize();
-        let token = session
-            .value()
-            .as_object()
-            .and_then(|object| object.get("token"))
-            .and_then(Value::as_str)
-            .ok_or_else(invalid_login_response)?
-            .to_owned();
-        let crypto_value = ZeroizingJson::new(serde_json::json!({
-            "login_info": {
-                "a": format!("h{}", STANDARD.encode(shared_secret.as_slice())),
-                "b": format!("a{}", STANDARD.encode(salt.as_slice())),
+        (|| {
+            let data = object
+                .get("data")
+                .and_then(Value::as_object)
+                .ok_or_else(invalid_login_response)?;
+            if data.get("handshake_required").and_then(Value::as_bool) != Some(false)
+                || data.get("encrypted").and_then(Value::as_bool) != Some(true)
+            {
+                return Err(protocol_drift());
             }
-        }));
-        let crypto_document =
-            serde_json::to_vec(crypto_value.value()).map_err(|_| internal_crypto_error())?;
-        let material = CidarenOauthLoginMaterial {
-            token: SecretString::new(token),
-            crypto_document: SecretValue::new(crypto_document),
-        };
-        material.token_session()?;
-        root.zeroize_now();
-        Ok(material)
+            let handshake = data
+                .get("handshake")
+                .and_then(Value::as_object)
+                .ok_or_else(protocol_drift)?;
+            let payload = data
+                .get("payload")
+                .and_then(Value::as_object)
+                .ok_or_else(protocol_drift)?;
+            require_version(handshake.get("version"))?;
+            require_version(payload.get("version"))?;
+
+            let server_public_key = decode_bounded_base64(
+                handshake.get("spub_k"),
+                MAX_HANDSHAKE_FIELD_BYTES,
+                protocol_drift,
+            )?;
+            let server_public_key =
+                PublicKey::from_public_key_der(&server_public_key).map_err(|_| protocol_drift())?;
+            let salt = decode_bounded_base64(
+                handshake.get("salt"),
+                MAX_HANDSHAKE_FIELD_BYTES,
+                protocol_drift,
+            )?;
+            let shared_secret = self.private_key.diffie_hellman(&server_public_key);
+            let shared_secret = Zeroizing::new(shared_secret.raw_secret_bytes().to_vec());
+            let hkdf = Hkdf::<Sha256>::new(Some(salt.as_slice()), shared_secret.as_slice());
+            let mut key = Zeroizing::new([0_u8; AES_256_KEY_BYTES]);
+            hkdf.expand(LOGIN_HKDF_INFO, key.as_mut())
+                .map_err(|_| invalid_login_response())?;
+
+            let aad = payload
+                .get("aad")
+                .and_then(Value::as_str)
+                .filter(|value| *value == LOGIN_AAD)
+                .ok_or_else(protocol_drift)?;
+            let iv = decode_bounded_base64(
+                payload.get("iv"),
+                AES_GCM_NONCE_BYTES,
+                invalid_login_response,
+            )?;
+            if iv.len() != AES_GCM_NONCE_BYTES {
+                return Err(invalid_login_response());
+            }
+            let ciphertext = decode_bounded_base64(
+                payload
+                    .get("cipher_text")
+                    .or_else(|| payload.get("cipherText")),
+                MAX_LOGIN_CIPHERTEXT_BYTES,
+                invalid_login_response,
+            )?;
+            let cipher =
+                Aes256Gcm::new_from_slice(key.as_slice()).map_err(|_| internal_crypto_error())?;
+            let plaintext = cipher
+                .decrypt(
+                    Nonce::from_slice(&iv),
+                    Payload {
+                        msg: ciphertext.as_slice(),
+                        aad: aad.as_bytes(),
+                    },
+                )
+                .map_err(|_| invalid_login_response())?;
+            let mut plaintext = Zeroizing::new(plaintext);
+            if plaintext.is_empty() || plaintext.len() > MAX_LOGIN_PLAINTEXT_BYTES {
+                return Err(invalid_login_response());
+            }
+            let session = ZeroizingJson::new(
+                serde_json::from_slice::<Value>(plaintext.as_slice())
+                    .map_err(|_| invalid_login_response())?,
+            );
+            plaintext.zeroize();
+            let token = session
+                .value()
+                .as_object()
+                .and_then(|object| object.get("token"))
+                .and_then(Value::as_str)
+                .ok_or_else(invalid_login_response)?
+                .to_owned();
+            let crypto_value = ZeroizingJson::new(serde_json::json!({
+                "login_info": {
+                    "a": format!("h{}", STANDARD.encode(shared_secret.as_slice())),
+                    "b": format!("a{}", STANDARD.encode(salt.as_slice())),
+                }
+            }));
+            let crypto_document =
+                serde_json::to_vec(crypto_value.value()).map_err(|_| internal_crypto_error())?;
+            let material = CidarenOauthLoginMaterial {
+                token: SecretString::new(token),
+                crypto_document: SecretValue::new(crypto_document),
+            };
+            material.token_session()?;
+            Ok(material)
+        })()
+        .map_err(|error| oauth_response_observation(error, root.value()))
     }
 }
 
@@ -572,6 +582,95 @@ fn protocol_drift() -> ProviderError {
     )
 }
 
+fn oauth_response_observation(error: ProviderError, root: &Value) -> ProviderError {
+    if error.protocol_observation.is_some()
+        || !matches!(
+            error.kind,
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
+        )
+    {
+        return error;
+    }
+    let object = root.as_object();
+    let data = object
+        .and_then(|object| object.get("data"))
+        .and_then(Value::as_object);
+    let handshake = data
+        .and_then(|data| data.get("handshake"))
+        .and_then(Value::as_object);
+    let payload = data
+        .and_then(|data| data.get("payload"))
+        .and_then(Value::as_object);
+    let ciphertext = payload.and_then(|payload| {
+        payload
+            .get("cipher_text")
+            .or_else(|| payload.get("cipherText"))
+    });
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::Authentication,
+        ProtocolObservationKind::UnknownResultShape,
+        json!({
+            "schema": "cidaren.oauth-v2-response-observation.v1",
+            "root_kind": json_value_kind(Some(root)),
+            "root_fields": object.map(Map::len),
+            "code_kind": json_value_kind(object.and_then(|object| object.get("code"))),
+            "code_value": object
+                .and_then(|object| object.get("code"))
+                .and_then(Value::as_i64),
+            "data_kind": json_value_kind(object.and_then(|object| object.get("data"))),
+            "data_fields": data.map(Map::len),
+            "handshake_required_kind": json_value_kind(
+                data.and_then(|data| data.get("handshake_required"))
+            ),
+            "handshake_required_value": data
+                .and_then(|data| data.get("handshake_required"))
+                .and_then(Value::as_bool),
+            "encrypted_kind": json_value_kind(data.and_then(|data| data.get("encrypted"))),
+            "encrypted_value": data
+                .and_then(|data| data.get("encrypted"))
+                .and_then(Value::as_bool),
+            "handshake_kind": json_value_kind(data.and_then(|data| data.get("handshake"))),
+            "handshake_fields": handshake.map(Map::len),
+            "handshake_version_kind": json_value_kind(
+                handshake.and_then(|handshake| handshake.get("version"))
+            ),
+            "handshake_version_length": string_length(
+                handshake.and_then(|handshake| handshake.get("version"))
+            ),
+            "server_public_key_kind": json_value_kind(
+                handshake.and_then(|handshake| handshake.get("spub_k"))
+            ),
+            "server_public_key_length": string_length(
+                handshake.and_then(|handshake| handshake.get("spub_k"))
+            ),
+            "salt_kind": json_value_kind(handshake.and_then(|handshake| handshake.get("salt"))),
+            "salt_length": string_length(handshake.and_then(|handshake| handshake.get("salt"))),
+            "payload_kind": json_value_kind(data.and_then(|data| data.get("payload"))),
+            "payload_fields": payload.map(Map::len),
+            "payload_version_kind": json_value_kind(
+                payload.and_then(|payload| payload.get("version"))
+            ),
+            "payload_version_length": string_length(
+                payload.and_then(|payload| payload.get("version"))
+            ),
+            "aad_kind": json_value_kind(payload.and_then(|payload| payload.get("aad"))),
+            "aad_matches_expected": payload
+                .and_then(|payload| payload.get("aad"))
+                .and_then(Value::as_str)
+                .map(|aad| aad == LOGIN_AAD),
+            "iv_kind": json_value_kind(payload.and_then(|payload| payload.get("iv"))),
+            "iv_length": string_length(payload.and_then(|payload| payload.get("iv"))),
+            "ciphertext_kind": json_value_kind(ciphertext),
+            "ciphertext_length": string_length(ciphertext),
+        }),
+    )
+}
+
+fn string_length(value: Option<&Value>) -> Option<usize> {
+    value.and_then(Value::as_str).map(str::len)
+}
+
 fn internal_crypto_error() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
@@ -694,6 +793,7 @@ mod tests {
             .complete(br#"{"code":11003,"msg":"expired","data":null}"#.to_vec())
             .unwrap_err();
         assert_eq!(rejected.kind, ProviderErrorKind::Authentication);
+        assert!(rejected.protocol_observation.is_none());
 
         let bootstrap = CidarenOauthBootstrap::generate().unwrap();
         let request = bootstrap
@@ -739,10 +839,72 @@ mod tests {
                 .build_request(CidarenOauthCode::try_new(code).unwrap(), 3)
                 .unwrap();
             let response = encrypted_response(request.public_key_spki(), token);
-            assert_eq!(
-                bootstrap.complete(response).unwrap_err().kind,
-                ProviderErrorKind::Authentication
-            );
+            let error = bootstrap.complete(response).unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::Authentication);
+            assert!(error.protocol_observation.is_none());
+        }
+    }
+
+    #[test]
+    fn oauth_response_shape_observations_exclude_crypto_values() {
+        let error = CidarenOauthBootstrap::generate()
+            .unwrap()
+            .complete(br#"{"code":"must-not-cross-code","data":"must-not-cross-data"}"#.to_vec())
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::Authentication);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(observation.shape_sanitized["code_kind"], "string");
+        assert_eq!(observation.shape_sanitized["code_value"], Value::Null);
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
+
+        let bootstrap = CidarenOauthBootstrap::generate().unwrap();
+        let request = bootstrap
+            .build_request(CidarenOauthCode::try_new("shape-code").unwrap(), 4)
+            .unwrap();
+        let mut response: Value = serde_json::from_slice(&encrypted_response(
+            request.public_key_spki(),
+            "shape-token",
+        ))
+        .unwrap();
+        let server_public_key = response["data"]["handshake"]["spub_k"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let salt = response["data"]["handshake"]["salt"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ciphertext = response["data"]["payload"]["cipher_text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let drifted_version = "must-not-cross-version";
+        response["data"]["handshake"]["version"] = Value::String(drifted_version.to_owned());
+        let error = bootstrap
+            .complete(serde_json::to_vec(&response).unwrap())
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["code_value"], 1);
+        assert_eq!(observation.shape_sanitized["encrypted_value"], true);
+        assert_eq!(
+            observation.shape_sanitized["handshake_required_value"],
+            false
+        );
+        assert_eq!(
+            observation.shape_sanitized["handshake_version_length"],
+            drifted_version.len()
+        );
+        assert_eq!(observation.shape_sanitized["aad_matches_expected"], true);
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        for value in [drifted_version, &server_public_key, &salt, &ciphertext] {
+            assert!(!sanitized.contains(value));
         }
     }
 

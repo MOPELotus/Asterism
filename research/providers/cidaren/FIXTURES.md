@@ -249,6 +249,12 @@ placeholder identities, result codes, status values and pagination shape.
   observation. Synthetic topic code, stem, option and answer-tag values remain
   absent; missing mode is shape drift, unknown numeric mode keeps its existing
   exact classification and invalid caller Task binding has no observation.
+- Native OAuth V2 shape tests distinguish ordinary rejected/expired codes and
+  decrypted invalid tokens (Authentication with no observation) from malformed
+  successful envelopes and handshake drift. Observations retain only field
+  kinds/counts, protocol booleans, fixed-AAD match and encoded lengths; OAuth
+  code, server public key, salt, IV, ciphertext, version and token values remain
+  absent while the complete response still zeroizes on every return path.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

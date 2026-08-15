@@ -589,6 +589,12 @@ retaining response or user data:
   `QuestionParse / UnknownResultShape`; topic code, stem, options, answer tags
   and relations stay excluded. Unknown numeric modes retain the smaller
   `UnknownQuestionKind` shape, while caller binding errors remain unobserved.
+- malformed `code=1` native OAuth V2 envelopes and authenticated
+  handshake/payload failures record only root/known field kinds and counts,
+  protocol booleans, fixed-AAD match and encoded string lengths on
+  `Authentication / UnknownResultShape`; OAuth code, server public key, salt,
+  IV, ciphertext, version and token values stay excluded. Ordinary non-success
+  codes and decrypted invalid-token Authentication remain unobserved.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting

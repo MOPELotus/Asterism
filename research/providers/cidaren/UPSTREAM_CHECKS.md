@@ -774,6 +774,22 @@ option, answer-tag and relation values remain excluded. The existing exact
 while invalid caller binding remains an unobserved local protocol error. This
 does not weaken mode-73's explicit Skip-only execution evidence boundary.
 
+### 2026-08-15 OAuth V2 response-observation follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged after the Question-payload
+unit. No login route, version or cryptographic transcript entered scope.
+
+Malformed successful native OAuth V2 envelopes and authenticated
+handshake/payload failures now attach a bounded `Authentication /
+UnknownResultShape` observation. It retains only root/known field kinds and
+counts, numeric success code, handshake/encryption booleans, fixed-AAD match and
+encoded string lengths. OAuth callback code, server public key, salt, IV,
+ciphertext, response version and decrypted token values remain in zeroizing
+owners and do not cross the observation boundary. A well-formed non-success
+code and a successfully decrypted but invalid token remain unobserved ordinary
+Authentication; the one-shot no-replay exchange contract is unchanged.
+
 ## Check procedure
 
 For the next checkpoint:
