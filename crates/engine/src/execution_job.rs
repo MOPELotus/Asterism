@@ -36,8 +36,8 @@ use asterism_storage::{
     CompletionWorkflowRepository, ExecutionAtomicMutationIssueOutcome,
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
     ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationReceiptOutcome,
-    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
-    ExecutionAtomicMutationSequenceObservationOutcome,
+    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRecoveryVerificationRequest,
+    ExecutionAtomicMutationRepository, ExecutionAtomicMutationSequenceObservationOutcome,
     ExecutionAtomicMutationSequenceObservationRequest,
     ExecutionAtomicMutationSequencePlanPrepareOutcome,
     ExecutionAtomicMutationSequencePlanPrepareRequest, ExecutionAtomicMutationVerificationOutcome,
@@ -516,7 +516,31 @@ where
         };
         let finished_at = Utc::now().max(now);
         match result {
-            Ok(verification) => {
+            Ok(recovery) => {
+                let (verification, mutation_verification) = recovery.into_parts();
+                let mutation_verification = match validate_recovery_mutation_verification(
+                    mutation_sequence.as_ref(),
+                    mutation_verification,
+                    execution_goal_verified(
+                        &prepared.request.requested_capabilities,
+                        &verification,
+                    ),
+                ) {
+                    Ok(verification) => verification,
+                    Err(error) => {
+                        return self
+                            .finish_from_recovery_error(job, &error, finished_at, correlation_id)
+                            .await;
+                    }
+                };
+                self.record_recovery_mutation_verification(
+                    job,
+                    attempt_id,
+                    mutation_verification,
+                    finished_at,
+                    correlation_id,
+                )
+                .await?;
                 self.finish_from_execution_verification(
                     job,
                     attempt_id,
@@ -626,6 +650,39 @@ where
         )
         .map(Some)
         .map_err(|_| invalid_mutation_recovery_storage())
+    }
+
+    async fn record_recovery_mutation_verification(
+        &self,
+        job: &ScheduledJob,
+        attempt_id: asterism_domain::ExecutionAttemptId,
+        verification: Option<ExecutionMutationVerification>,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<(), ScheduledExecutionRunError> {
+        let Some(verification) = verification else {
+            return Ok(());
+        };
+        match self
+            .executions
+            .record_execution_atomic_mutation_recovery_verification(
+                ExecutionAtomicMutationRecoveryVerificationRequest {
+                    execution_id: claimed_execution_id(job)?,
+                    attempt_id,
+                    ordinal: verification.ordinal(),
+                    scheduler_job_id: job.id,
+                    worker_id: claimed_worker(job)?,
+                    observation_digest: verification.observation_digest(),
+                    verified: verification.verified(),
+                    correlation_id,
+                    at,
+                },
+            )
+            .await?
+        {
+            ExecutionAtomicMutationVerificationOutcome::Recorded(_)
+            | ExecutionAtomicMutationVerificationOutcome::AlreadyRecorded(_) => Ok(()),
+        }
     }
 
     #[allow(
@@ -761,6 +818,36 @@ where
             }
         };
         let finished_at = Utc::now().max(now);
+        let result = match result {
+            Ok(recovery) => {
+                let (verification, mutation_verification) = recovery.into_parts();
+                let mutation_verification = match validate_recovery_mutation_verification(
+                    mutation_sequence.as_ref(),
+                    mutation_verification,
+                    execution_goal_verified(
+                        &prepared.request.requested_capabilities,
+                        &verification,
+                    ),
+                ) {
+                    Ok(verification) => verification,
+                    Err(error) => {
+                        return self
+                            .finish_from_recovery_error(job, &error, finished_at, correlation_id)
+                            .await;
+                    }
+                };
+                self.record_recovery_mutation_verification(
+                    job,
+                    attempt_id,
+                    mutation_verification,
+                    finished_at,
+                    correlation_id,
+                )
+                .await?;
+                Ok(verification)
+            }
+            Err(error) => Err(error),
+        };
         match result {
             Ok(verification)
                 if execution_goal_verified(
@@ -4183,6 +4270,33 @@ fn restore_mutation_receipt(
     }
 }
 
+fn validate_recovery_mutation_verification(
+    snapshot: Option<&ExecutionMutationSequenceRecoverySnapshot>,
+    verification: Option<ExecutionMutationVerification>,
+    goal_verified: bool,
+) -> Result<Option<ExecutionMutationVerification>, ProviderError> {
+    let Some(verification) = verification else {
+        return Ok(None);
+    };
+    let valid = !goal_verified || verification.verified();
+    let valid = valid
+        && snapshot.is_some_and(|snapshot| {
+            snapshot.final_accepted_mutation_ordinal() == Some(verification.ordinal())
+                && snapshot
+                    .records()
+                    .last()
+                    .and_then(ExecutionMutationRecoveryRecord::verification)
+                    .is_none_or(|persisted| persisted == verification)
+        });
+    if !valid {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Provider recovery mutation verification is not bound to the final accepted mutation",
+        ));
+    }
+    Ok(Some(verification))
+}
+
 struct PersistedExecutionEventSink<'a, E> {
     executions: &'a E,
     execution_id: ExecutionId,
@@ -5315,12 +5429,30 @@ mod tests {
             context: &ProviderContext,
             request: &ProviderExecutionRequest,
             mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
-        ) -> ProviderResult<ExecutionOutcome> {
+        ) -> ProviderResult<asterism_provider_api::ExecutionRecoveryOutcome> {
             self.received_mutation_recoveries
                 .lock()
                 .unwrap()
                 .push(mutation_sequence.cloned());
-            self.verify_execution(context, request).await
+            let outcome = self.verify_execution(context, request).await?;
+            let pending_verification = mutation_sequence.and_then(|snapshot| {
+                let ordinal = snapshot.final_accepted_mutation_ordinal()?;
+                snapshot
+                    .records()
+                    .last()?
+                    .verification()
+                    .is_none()
+                    .then(|| ExecutionMutationVerification::new(ordinal, [44; 32], true).unwrap())
+            });
+            Ok(match pending_verification {
+                Some(verification) => {
+                    asterism_provider_api::ExecutionRecoveryOutcome::with_mutation_verification(
+                        outcome,
+                        verification,
+                    )
+                }
+                None => asterism_provider_api::ExecutionRecoveryOutcome::new(outcome),
+            })
         }
 
         fn completion_diagnosis(
@@ -6839,6 +6971,58 @@ mod tests {
         assert_eq!(
             snapshot.observations()[0].observation_type(),
             "provider-alpha.fixture.precondition.v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_persists_fresh_final_mutation_verification_before_finish() {
+        let fixture = Fixture::verified_sequence_recovering(ProviderBehavior::Success).await;
+        sqlx::query(
+            "UPDATE execution_atomic_mutations \
+             SET verification_digest = NULL, verified = NULL, verified_at = NULL \
+             WHERE execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        let persisted: (Vec<u8>, bool, String) = sqlx::query_as(
+            "SELECT verification_digest, verified, verified_at \
+             FROM execution_atomic_mutations WHERE execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(persisted.0, vec![44; 32]);
+        assert!(persisted.1);
+        assert!(!persisted.2.is_empty());
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records \
+             WHERE action = 'execution_atomic_mutation_recovery_verification_recorded' \
+               AND actor_id = 'recovery-worker'",
+        )
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 1);
+    }
+
+    #[test]
+    fn recovery_mutation_verification_requires_a_bound_sequence() {
+        let verification = ExecutionMutationVerification::new(1, [44; 32], true).unwrap();
+        assert!(validate_recovery_mutation_verification(None, Some(verification), true).is_err());
+        assert_eq!(
+            validate_recovery_mutation_verification(None, None, false).unwrap(),
+            None
         );
     }
 

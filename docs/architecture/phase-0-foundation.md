@@ -4988,3 +4988,30 @@ Coverage proves migration preserves legacy receipts, early successor issue
 fails closed, issue at the exact deadline succeeds, and recovery retains the
 original delay. This boundary does not schedule a retry job by itself and does
 not authorize replay of an issued mutation without a definite receipt.
+
+## Two-hundred-and-seventy-first Phase 0 slice
+
+Execution recovery can now return an optional hash-only verification for the
+final accepted mutation together with the ordinary goal-bound outcome. Core
+accepts that evidence only when the frozen conditional sequence is fully
+advanced, its final record has a definite accepted receipt, the ordinal is
+exact, and any verification already present in the same snapshot is identical.
+An incomplete, rejected, fixed-plan or mutation-free recovery cannot attach a
+mutation verification.
+
+The recovery worker writes new evidence through a dedicated repository path
+bound to its claimed Recovery job, live execution lease and exact active
+Attempt.
+Storage independently requires the target to be the latest accepted mutation;
+it never impersonates the original execution worker or changes the issue and
+receipt records. An exact existing verification is idempotent, while any digest
+or result mismatch fails closed. The proof is committed before Core consumes
+the Provider outcome and finishes or advances recovery, so a crash exposes the
+same durable verification to the next read-only snapshot instead of repeating
+remote mutation or readback work.
+
+Coverage proves a fresh final proof is persisted by the recovery worker and the
+Execution then succeeds. This contract carries no Provider-private stage
+output: UAI upload versions/keys/answers and WELearn parent batch authority must
+still use separately encrypted, atomically bound state rather than a sanitized
+plan artifact or mutation digest.

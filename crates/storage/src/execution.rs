@@ -31,7 +31,8 @@ use crate::{
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
     ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationPlanRecord,
     ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
-    ExecutionAtomicMutationRepository, ExecutionAtomicMutationSequenceObservationOutcome,
+    ExecutionAtomicMutationRecoveryVerificationRequest, ExecutionAtomicMutationRepository,
+    ExecutionAtomicMutationSequenceObservationOutcome,
     ExecutionAtomicMutationSequenceObservationRecord,
     ExecutionAtomicMutationSequenceObservationRequest,
     ExecutionAtomicMutationSequencePlanPrepareOutcome,
@@ -1739,6 +1740,138 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
             mutation,
         ))
     }
+
+    async fn record_execution_atomic_mutation_recovery_verification(
+        &self,
+        request: ExecutionAtomicMutationRecoveryVerificationRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationVerificationOutcome, StorageError> {
+        validate_atomic_mutation_verification(&ExecutionAtomicMutationVerificationRequest {
+            execution_id: request.execution_id,
+            attempt_id: request.attempt_id,
+            ordinal: request.ordinal,
+            scheduler_job_id: request.scheduler_job_id,
+            worker_id: request.worker_id,
+            observation_digest: request.observation_digest,
+            verified: request.verified,
+            correlation_id: request.correlation_id,
+            at: request.at,
+        })?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            false,
+        )
+        .await?;
+        let outcome =
+            record_recovery_atomic_mutation_verification(&mut transaction, &request).await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+}
+
+async fn record_recovery_atomic_mutation_verification(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request: &ExecutionAtomicMutationRecoveryVerificationRequest<'_>,
+) -> Result<ExecutionAtomicMutationVerificationOutcome, StorageError> {
+    let recovery_job: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_jobs \
+             WHERE id = ? AND job_kind = 'recovery' AND state = 'claimed' AND worker_id = ?",
+    )
+    .bind(request.scheduler_job_id.to_string())
+    .bind(request.worker_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if recovery_job != 1 {
+        return Err(StorageError::ExecutionStateConflict);
+    }
+    let active = find_active_attempt(&mut *transaction, request.execution_id).await?;
+    if active.id != request.attempt_id {
+        return Err(StorageError::ExecutionAttemptNotActive);
+    }
+    let Some(mut mutation) = select_atomic_mutation(
+        &mut *transaction,
+        request.execution_id,
+        request.attempt_id,
+        request.ordinal,
+    )
+    .await?
+    else {
+        return Err(StorageError::ExecutionStateConflict);
+    };
+    let latest_ordinal: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(ordinal), 0) FROM execution_atomic_mutations \
+             WHERE execution_id = ? AND execution_attempt_id = ?",
+    )
+    .bind(request.execution_id.to_string())
+    .bind(request.attempt_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if latest_ordinal != i64::from(request.ordinal) || mutation.accepted != Some(true) {
+        return Err(StorageError::ExecutionStateConflict);
+    }
+    if mutation.verified_at.is_some() {
+        let identical = mutation.verification_digest == Some(request.observation_digest)
+            && mutation.verified == Some(request.verified);
+        return if identical {
+            Ok(ExecutionAtomicMutationVerificationOutcome::AlreadyRecorded(
+                mutation,
+            ))
+        } else {
+            Err(StorageError::ExecutionStateConflict)
+        };
+    }
+    if mutation
+        .received_at
+        .is_none_or(|received_at| request.at < received_at)
+    {
+        return Err(StorageError::InvalidData(
+            "execution atomic mutation recovery verification predates its receipt".to_owned(),
+        ));
+    }
+    let changed = sqlx::query(
+        "UPDATE execution_atomic_mutations \
+             SET verification_digest = ?, verified = ?, verified_at = ? \
+             WHERE execution_id = ? AND execution_attempt_id = ? AND ordinal = ? \
+               AND accepted = 1 AND verification_digest IS NULL \
+               AND verified IS NULL AND verified_at IS NULL",
+    )
+    .bind(request.observation_digest.as_slice())
+    .bind(request.verified)
+    .bind(encode_timestamp(request.at))
+    .bind(request.execution_id.to_string())
+    .bind(request.attempt_id.to_string())
+    .bind(i64::from(request.ordinal))
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(StorageError::ExecutionStateConflict);
+    }
+    insert_worker_audit(
+        &mut *transaction,
+        request.execution_id,
+        request.worker_id,
+        "execution_atomic_mutation_recovery_verification_recorded",
+        request.at,
+        request.correlation_id,
+        serde_json::json!({
+            "attempt_id": request.attempt_id,
+            "ordinal": request.ordinal,
+            "observation_digest": "[HASHED]",
+            "verified": request.verified,
+        }),
+    )
+    .await?;
+    mutation.verification_digest = Some(request.observation_digest);
+    mutation.verified = Some(request.verified);
+    mutation.verified_at = Some(request.at);
+    Ok(ExecutionAtomicMutationVerificationOutcome::Recorded(
+        mutation,
+    ))
 }
 
 #[async_trait]

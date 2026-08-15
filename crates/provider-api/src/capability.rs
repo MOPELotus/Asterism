@@ -1668,14 +1668,18 @@ pub trait TaskExecutionCapability: ProviderIdentity {
 
     /// Rebinds a recovery attempt with the exact immutable mutation sequence
     /// records loaded by Core. The snapshot is read-only evidence and never
-    /// authorizes issuing or replaying a remote mutation.
+    /// authorizes issuing or replaying a remote mutation. A fresh independent
+    /// readback may return the final accepted mutation's hash-only verification
+    /// for Core to persist before consuming the recovery outcome.
     async fn verify_execution_recovery(
         &self,
         context: &ProviderContext,
         request: &ExecutionRequest,
         _mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
-    ) -> ProviderResult<ExecutionOutcome> {
-        self.verify_execution(context, request).await
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        self.verify_execution(context, request)
+            .await
+            .map(ExecutionRecoveryOutcome::new)
     }
 
     /// Maps Provider-specific verified execution facts to a shared reason why
@@ -2640,6 +2644,19 @@ impl ExecutionMutationSequenceRecoverySnapshot {
     pub fn observations(&self) -> &[ExecutionMutationSequenceObservation] {
         &self.observations
     }
+
+    /// Returns the only mutation ordinal that may receive a recovery-time
+    /// verification, once every frozen phase has definitely advanced.
+    pub fn final_accepted_mutation_ordinal(&self) -> Option<u32> {
+        if !recovery_sequence_is_complete(&self.plan, &self.records) {
+            return None;
+        }
+        let record = self.records.last()?;
+        record
+            .receipt()
+            .is_some_and(ExecutionMutationReceipt::accepted)
+            .then(|| record.issue().ordinal())
+    }
 }
 
 impl fmt::Debug for ExecutionMutationSequenceRecoverySnapshot {
@@ -2753,6 +2770,26 @@ fn sequence_phase_can_repeat(
                 .is_some_and(|receipt| !receipt.accepted()))
 }
 
+fn recovery_sequence_is_complete(
+    plan: &ExecutionMutationSequencePlan,
+    records: &[ExecutionMutationRecoveryRecord],
+) -> bool {
+    let mut record_index = 0_usize;
+    for phase in plan.phases() {
+        let start = record_index;
+        while records
+            .get(record_index)
+            .is_some_and(|record| record.issue().operation_type() == phase.operation_type())
+        {
+            record_index += 1;
+        }
+        if !sequence_phase_can_advance(phase, &records[start..record_index]) {
+            return false;
+        }
+    }
+    record_index == records.len()
+}
+
 fn valid_recovery_observations(
     provider_prefix: &str,
     plan: &ExecutionMutationSequencePlan,
@@ -2775,6 +2812,43 @@ fn invalid_execution_mutation_recovery() -> crate::ProviderError {
         crate::ProviderErrorKind::InvalidResponse,
         "Provider execution mutation recovery evidence is invalid",
     )
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionRecoveryOutcome {
+    outcome: ExecutionOutcome,
+    mutation_verification: Option<ExecutionMutationVerification>,
+}
+
+impl ExecutionRecoveryOutcome {
+    pub const fn new(outcome: ExecutionOutcome) -> Self {
+        Self {
+            outcome,
+            mutation_verification: None,
+        }
+    }
+
+    pub const fn with_mutation_verification(
+        outcome: ExecutionOutcome,
+        mutation_verification: ExecutionMutationVerification,
+    ) -> Self {
+        Self {
+            outcome,
+            mutation_verification: Some(mutation_verification),
+        }
+    }
+
+    pub const fn outcome(&self) -> &ExecutionOutcome {
+        &self.outcome
+    }
+
+    pub const fn mutation_verification(&self) -> Option<ExecutionMutationVerification> {
+        self.mutation_verification
+    }
+
+    pub fn into_parts(self) -> (ExecutionOutcome, Option<ExecutionMutationVerification>) {
+        (self.outcome, self.mutation_verification)
+    }
 }
 
 #[async_trait]
@@ -3141,6 +3215,7 @@ mod execution_mutation_tests {
         .unwrap();
         assert_eq!(snapshot.records().len(), 2);
         assert!(snapshot.records()[1].receipt().is_none());
+        assert_eq!(snapshot.final_accepted_mutation_ordinal(), None);
         assert_eq!(snapshot.observations()[0].phase_position(), 2);
         let debug = format!("{snapshot:?}");
         assert!(debug.contains("record_count: 2"));
@@ -3153,6 +3228,57 @@ mod execution_mutation_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn completed_recovery_identifies_its_final_verification_target() {
+        let artifact = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new("uai").unwrap(),
+            "uai.upload.v1",
+            serde_json::json!({"mode": "upload"}),
+        )
+        .unwrap();
+        let plan = ExecutionMutationSequencePlan::try_new(
+            artifact.artifact_digest(),
+            "uai.upload.sequence.v1",
+            vec![
+                ExecutionMutationSequencePhase::try_new(
+                    "uai.upload.final",
+                    1,
+                    1,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                    None,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let completed = ExecutionMutationSequenceRecoverySnapshot::try_new(
+            artifact,
+            plan,
+            vec![
+                ExecutionMutationRecoveryRecord::try_new(
+                    ExecutionMutationIssue::new(1, "uai.upload.final", [4; 32]).unwrap(),
+                    Some(ExecutionMutationReceipt::new(1, [6; 32], true).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(completed.final_accepted_mutation_ordinal(), Some(1));
+        let recovery = ExecutionRecoveryOutcome::with_mutation_verification(
+            ExecutionOutcome {
+                remote_state: RemoteState::Completed,
+                verified: true,
+                result_sanitized: serde_json::json!({"goal_matched": true}),
+            },
+            ExecutionMutationVerification::new(1, [7; 32], true).unwrap(),
+        );
+        assert!(recovery.outcome().verified);
+        assert_eq!(recovery.mutation_verification().unwrap().ordinal(), 1);
     }
 
     #[test]

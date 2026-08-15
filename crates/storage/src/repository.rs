@@ -2415,6 +2415,19 @@ pub struct ExecutionAtomicMutationVerificationRequest<'a> {
     pub at: Timestamp,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExecutionAtomicMutationRecoveryVerificationRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub ordinal: u32,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub observation_digest: [u8; 32],
+    pub verified: bool,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionAtomicMutationVerificationOutcome {
     Recorded(ExecutionAtomicMutation),
@@ -2561,6 +2574,11 @@ pub trait ExecutionAtomicMutationRepository: Send + Sync {
     async fn record_execution_atomic_mutation_verification(
         &self,
         request: ExecutionAtomicMutationVerificationRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationVerificationOutcome, StorageError>;
+
+    async fn record_execution_atomic_mutation_recovery_verification(
+        &self,
+        request: ExecutionAtomicMutationRecoveryVerificationRequest<'_>,
     ) -> Result<ExecutionAtomicMutationVerificationOutcome, StorageError>;
 }
 
