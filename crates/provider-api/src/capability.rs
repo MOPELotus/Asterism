@@ -1453,6 +1453,16 @@ pub trait SubmissionVerifyCapability: ProviderIdentity {
         self.verify_submission(context, remote_task_id, draft, receipt)
             .await
     }
+
+    /// Maps Provider-specific verified result facts to a shared reason why the
+    /// Task is not complete. Core ignores this diagnosis once fresh remote
+    /// state is already Completed.
+    fn completion_diagnosis(
+        &self,
+        _verification: &SubmissionVerificationSnapshot,
+    ) -> Option<asterism_domain::CompletionDiagnosis> {
+        None
+    }
 }
 
 pub struct ExecutionPlanningRequest<'a> {
@@ -1604,6 +1614,17 @@ pub trait TaskExecutionCapability: ProviderIdentity {
             crate::ProviderErrorKind::UnsupportedTask,
             "Provider does not implement goal-bound execution verification",
         ))
+    }
+
+    /// Maps Provider-specific verified execution facts to a shared reason why
+    /// the Task is not complete. Returning `None` leaves Core on the
+    /// conservative `RemoteUnknown` path.
+    fn completion_diagnosis(
+        &self,
+        _request: &ExecutionRequest,
+        _outcome: &ExecutionOutcome,
+    ) -> Option<asterism_domain::CompletionDiagnosis> {
+        None
     }
 }
 

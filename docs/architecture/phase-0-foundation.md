@@ -4258,3 +4258,20 @@ nanosecond suffix rather than accepting SQLite's millisecond formatting loss.
 The migration has a populated-row regression, and API coverage proves a Task
 attempt-limit override is frozen into the durable policy rather than merely
 remaining in the generic settings map.
+
+## Two-hundred-and-thirty-fourth Phase 0 slice
+
+Provider execution and submission-verification contracts now expose optional,
+typed completion-diagnosis hooks without putting Provider wire details into
+Core. Providers may map audited result facts to reasons such as insufficient
+duration or pending required children; the default returns no diagnosis and
+therefore grants no automatic retry authority.
+
+The Engine has one pure observation boundary for both execution and submission
+results. It validates the Provider payload, recognizes completion only from
+fresh verified `Completed`, ignores any conflicting diagnosis after completion,
+maps an otherwise rejected submission to `ScoreBelowThreshold`, and maps every
+other unsupported incomplete result to `RemoteUnknown`. Each observation thus
+contains exactly one completion outcome or one diagnosis and is ready for a
+later atomic workflow transition without treating mutation success as Task
+completion.

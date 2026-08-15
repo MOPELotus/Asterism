@@ -140,6 +140,14 @@ are verified, never blindly replayed. Scored assessments must not use AI or the
 Corpus in an unsupervised submit-until-pass loop; a failed assessment enters
 review/confirmation or an explicitly controlled retry/retake policy.
 
+Provider execution and submission verification may map audited, sanitized
+platform facts into a shared `CompletionDiagnosis`. Core still owns the final
+observation: only fresh verified `Completed` produces a completion outcome;
+Provider diagnosis is ignored once completion is verified. A rejected
+submission without a more precise audited diagnosis becomes
+`score_below_threshold`; every other incomplete result without evidence becomes
+`remote_unknown`, which stops automatic work instead of guessing a retry.
+
 ## Score Improvement / Retake
 
 Score Improvement is separate from Completion and is explicit opt-in after the

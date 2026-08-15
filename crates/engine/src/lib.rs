@@ -10,6 +10,7 @@ mod auth_session;
 mod browser_bridge_credential;
 mod browser_bridge_session;
 mod browser_bridge_workflow;
+mod completion_observation;
 mod credential;
 mod execution_job;
 mod execution_request;
@@ -87,6 +88,10 @@ pub use browser_bridge_workflow::{
     BrowserBridgeWorkflowProcessorError, BrowserBridgeWorkflowTickReport,
     BrowserBridgeWorkflowValidationError, BrowserBridgeWorkflowValidationService,
     ValidateBrowserBridgeWorkflowCommand, ValidatedBrowserBridgeWorkflow,
+};
+pub use completion_observation::{
+    CompletionObservation, CompletionObservationError, observe_execution_completion,
+    observe_submission_completion,
 };
 pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use execution_job::{
