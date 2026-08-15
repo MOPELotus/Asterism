@@ -1,15 +1,22 @@
+use std::str::FromStr;
+
 use asterism_domain::{
-    ScoreImprovementState, ScoreImprovementWorkflow, ScoreImprovementWorkflowId,
-    StrictCompletionState, StrictCompletionWorkflow, StrictCompletionWorkflowId, TaskId, UserId,
+    CompletionPolicySnapshot, CompletionWorkflowBinding, ExecutionAttemptId, ExecutionId,
+    ProviderAccountId, ScoreImprovementState, ScoreImprovementWorkflow, ScoreImprovementWorkflowId,
+    StrictCompletionState, StrictCompletionWorkflow, StrictCompletionWorkflowId, TaskId, Timestamp,
+    UserId,
 };
 use async_trait::async_trait;
+use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::auth_session::encode_timestamp;
+use crate::auth_session::{decode_timestamp, encode_timestamp};
+use crate::execution::{assert_worker_claims, validate_worker_token};
 use crate::{
     CompletionWorkflowCreateOutcome, CompletionWorkflowRepository, Database,
     ScoreImprovementBeginRequest, ScoreImprovementObserveRequest, ScoreImprovementWorkflowRecord,
-    StorageError, StrictCompletionBeginRequest, StrictCompletionObserveRequest,
+    StorageError, StrictCompletionBeginRequest, StrictCompletionExecutionObservationRecord,
+    StrictCompletionExecutionObservationRequest, StrictCompletionObserveRequest,
     StrictCompletionWorkflowRecord,
 };
 
@@ -150,6 +157,114 @@ impl CompletionWorkflowRepository for SqliteCompletionWorkflowRepository {
         Ok(record)
     }
 
+    async fn record_strict_completion_execution_observation(
+        &self,
+        request: StrictCompletionExecutionObservationRequest<'_>,
+    ) -> Result<StrictCompletionExecutionObservationRecord, StorageError> {
+        validate_worker_token(request.worker_id, request.correlation_id)?;
+        validate_execution_observation(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        if let Some(existing) = find_execution_observation(
+            &mut transaction,
+            request.execution_id,
+            request.execution_attempt_id,
+        )
+        .await?
+        {
+            if existing.outcome == request.outcome && existing.diagnosis == request.diagnosis {
+                transaction.commit().await?;
+                return Ok(existing);
+            }
+            return Err(invalid_transition());
+        }
+
+        let binding = load_execution_observation_binding(&mut transaction, &request).await?;
+        let existing = sqlx::query("SELECT * FROM strict_completion_workflows WHERE task_id = ?")
+            .bind(binding.binding.task_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .as_ref()
+            .map(decode_strict_record)
+            .transpose()?;
+        let workflow_created_at = if request.outcome.is_some() {
+            request.at
+        } else {
+            binding.policy.captured_at
+        };
+        let (mut workflow, revision, created) = match existing {
+            Some(record) => {
+                if record.workflow.binding != binding.binding {
+                    return Err(invalid_transition());
+                }
+                (record.workflow, record.revision, false)
+            }
+            None => (
+                StrictCompletionWorkflow::new(
+                    binding.binding,
+                    binding.policy,
+                    request.outcome,
+                    workflow_created_at,
+                )
+                .map_err(|_| invalid_transition())?,
+                1,
+                true,
+            ),
+        };
+
+        let workflow_attempt_no = if created && request.outcome.is_some() {
+            None
+        } else if let Some(outcome) = request.outcome {
+            workflow
+                .observe_verified_completion(outcome, request.at)
+                .map_err(|_| invalid_transition())?;
+            None
+        } else if workflow.state == StrictCompletionState::Disabled {
+            None
+        } else if workflow.state == StrictCompletionState::Active {
+            let attempt_no = workflow
+                .begin_attempt(
+                    binding.formal_assessment,
+                    request.retry_confirmed,
+                    binding.attempt_started_at,
+                )
+                .map_err(|_| invalid_transition())?;
+            workflow
+                .observe(None, request.diagnosis, request.at)
+                .map_err(|_| invalid_transition())?;
+            Some(attempt_no)
+        } else {
+            return Err(invalid_transition());
+        };
+
+        let revision = if created {
+            insert_strict_record(&mut transaction, &workflow).await?;
+            revision
+        } else {
+            persist_strict_record(&mut transaction, &workflow, revision).await?
+        };
+        insert_execution_observation(&mut transaction, &request, workflow.id, workflow_attempt_no)
+            .await?;
+        transaction.commit().await?;
+        Ok(StrictCompletionExecutionObservationRecord {
+            execution_id: request.execution_id,
+            execution_attempt_id: request.execution_attempt_id,
+            workflow: StrictCompletionWorkflowRecord { workflow, revision },
+            workflow_attempt_no,
+            outcome: request.outcome,
+            diagnosis: request.diagnosis,
+            observed_at: request.at,
+        })
+    }
+
     async fn create_score_improvement_workflow(
         &self,
         workflow: &ScoreImprovementWorkflow,
@@ -274,6 +389,176 @@ impl CompletionWorkflowRepository for SqliteCompletionWorkflowRepository {
         transaction.commit().await?;
         Ok(record)
     }
+}
+
+struct ExecutionObservationBinding {
+    binding: CompletionWorkflowBinding,
+    policy: CompletionPolicySnapshot,
+    formal_assessment: bool,
+    attempt_started_at: Timestamp,
+}
+
+fn validate_execution_observation(
+    request: &StrictCompletionExecutionObservationRequest<'_>,
+) -> Result<(), StorageError> {
+    if request.outcome.is_some() == request.diagnosis.is_some() {
+        Err(invalid_transition())
+    } else {
+        Ok(())
+    }
+}
+
+async fn load_execution_observation_binding(
+    transaction: &mut Transaction<'_, Sqlite>,
+    request: &StrictCompletionExecutionObservationRequest<'_>,
+) -> Result<ExecutionObservationBinding, StorageError> {
+    let row = sqlx::query(
+        "SELECT execution.task_id, task.provider_account_id, account.owner_user_id, \
+                task.assessment_class, settings.completion_policy_json, settings.captured_at, \
+                attempt.started_at AS attempt_started_at \
+         FROM executions AS execution \
+         INNER JOIN execution_attempts AS attempt ON attempt.execution_id = execution.id \
+         INNER JOIN tasks AS task ON task.id = execution.task_id \
+         INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         INNER JOIN execution_runtime_settings AS settings \
+                 ON settings.execution_id = execution.id \
+         WHERE execution.id = ? AND attempt.id = ? AND attempt.finished_at IS NULL",
+    )
+    .bind(request.execution_id.to_string())
+    .bind(request.execution_attempt_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(invalid_transition)?;
+    let captured_at = decode_timestamp(row.try_get("captured_at")?)?;
+    let attempt_started_at = decode_timestamp(row.try_get("attempt_started_at")?)?;
+    let policy_json = row.try_get::<String, _>("completion_policy_json")?;
+    let policy: CompletionPolicySnapshot = serde_json::from_str(&policy_json)?;
+    if policy.captured_at != captured_at
+        || policy.validate().is_err()
+        || attempt_started_at < captured_at
+        || request.at < attempt_started_at
+    {
+        return Err(invalid_transition());
+    }
+    Ok(ExecutionObservationBinding {
+        binding: CompletionWorkflowBinding {
+            owner_user_id: UserId::from_str(row.try_get("owner_user_id")?)
+                .map_err(|_| invalid_transition())?,
+            provider_account_id: ProviderAccountId::from_str(row.try_get("provider_account_id")?)
+                .map_err(|_| invalid_transition())?,
+            task_id: TaskId::from_str(row.try_get("task_id")?).map_err(|_| invalid_transition())?,
+        },
+        policy,
+        formal_assessment: row.try_get::<&str, _>("assessment_class")? == "formal",
+        attempt_started_at,
+    })
+}
+
+async fn find_execution_observation(
+    transaction: &mut Transaction<'_, Sqlite>,
+    execution_id: ExecutionId,
+    execution_attempt_id: ExecutionAttemptId,
+) -> Result<Option<StrictCompletionExecutionObservationRecord>, StorageError> {
+    let Some(row) = sqlx::query(
+        "SELECT execution_attempt_id, workflow_id, workflow_attempt_no, completion_outcome, \
+                diagnosis, observed_at \
+         FROM strict_completion_execution_observations WHERE execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let actual_attempt_id = ExecutionAttemptId::from_str(row.try_get("execution_attempt_id")?)
+        .map_err(|_| invalid_transition())?;
+    if actual_attempt_id != execution_attempt_id {
+        return Err(invalid_transition());
+    }
+    let workflow_id = StrictCompletionWorkflowId::from_str(row.try_get("workflow_id")?)
+        .map_err(|_| invalid_transition())?;
+    let workflow_row = sqlx::query("SELECT * FROM strict_completion_workflows WHERE id = ?")
+        .bind(workflow_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or_else(invalid_transition)?;
+    Ok(Some(StrictCompletionExecutionObservationRecord {
+        execution_id,
+        execution_attempt_id,
+        workflow: decode_strict_record(&workflow_row)?,
+        workflow_attempt_no: row
+            .try_get::<Option<i64>, _>("workflow_attempt_no")?
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| invalid_transition())?,
+        outcome: decode_optional_enum(row.try_get("completion_outcome")?)?,
+        diagnosis: decode_optional_enum(row.try_get("diagnosis")?)?,
+        observed_at: decode_timestamp(row.try_get("observed_at")?)?,
+    }))
+}
+
+async fn insert_strict_record(
+    transaction: &mut Transaction<'_, Sqlite>,
+    workflow: &StrictCompletionWorkflow,
+) -> Result<(), StorageError> {
+    workflow.validate().map_err(|_| invalid_transition())?;
+    sqlx::query(
+        "INSERT INTO strict_completion_workflows \
+         (id, owner_user_id, provider_account_id, task_id, state, workflow_json, revision, \
+          created_at, updated_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+    )
+    .bind(workflow.id.to_string())
+    .bind(workflow.binding.owner_user_id.to_string())
+    .bind(workflow.binding.provider_account_id.to_string())
+    .bind(workflow.binding.task_id.to_string())
+    .bind(encode_strict_state(workflow.state))
+    .bind(serde_json::to_string(workflow)?)
+    .bind(encode_timestamp(workflow.created_at))
+    .bind(encode_timestamp(workflow.updated_at))
+    .bind(workflow.finished_at.map(encode_timestamp))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn insert_execution_observation(
+    transaction: &mut Transaction<'_, Sqlite>,
+    request: &StrictCompletionExecutionObservationRequest<'_>,
+    workflow_id: StrictCompletionWorkflowId,
+    workflow_attempt_no: Option<u32>,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO strict_completion_execution_observations \
+         (execution_id, execution_attempt_id, workflow_id, workflow_attempt_no, \
+          completion_outcome, diagnosis, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(request.execution_id.to_string())
+    .bind(request.execution_attempt_id.to_string())
+    .bind(workflow_id.to_string())
+    .bind(workflow_attempt_no.map(i64::from))
+    .bind(request.outcome.map(encode_enum).transpose()?)
+    .bind(request.diagnosis.map(encode_enum).transpose()?)
+    .bind(encode_timestamp(request.at))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn encode_enum(value: impl Serialize) -> Result<String, StorageError> {
+    match serde_json::to_value(value)? {
+        serde_json::Value::String(value) => Ok(value),
+        _ => Err(invalid_transition()),
+    }
+}
+
+fn decode_optional_enum<T>(value: Option<String>) -> Result<Option<T>, StorageError>
+where
+    T: DeserializeOwned,
+{
+    value
+        .map(|value| serde_json::from_value(serde_json::Value::String(value)))
+        .transpose()
+        .map_err(Into::into)
 }
 
 async fn validate_binding(
@@ -574,6 +859,193 @@ mod tests {
                 captured_at: self.now,
             }
         }
+
+        async fn claimed_execution(
+            &self,
+            offset_seconds: i64,
+        ) -> (
+            ExecutionId,
+            ExecutionAttemptId,
+            asterism_domain::ScheduleId,
+            Timestamp,
+        ) {
+            let execution_id = ExecutionId::new();
+            let attempt_id = ExecutionAttemptId::new();
+            let job_id = asterism_domain::ScheduleId::new();
+            let created_at = self.now + Duration::seconds(offset_seconds);
+            let started_at = created_at + Duration::seconds(1);
+            let observed_at = started_at + Duration::seconds(1);
+            let lease_expires_at = observed_at + Duration::minutes(5);
+            let mut policy = self.policy();
+            policy.captured_at = created_at;
+            policy.strict_expires_at = Some(created_at + Duration::hours(1));
+            policy.score_improvement_expires_at = Some(created_at + Duration::hours(1));
+            sqlx::query(
+                "INSERT INTO executions \
+                 (id, task_id, requested_capabilities_json, requested_by, request_source, state, \
+                  scheduled_at, started_at, created_at) \
+                 VALUES (?, ?, '[\"resource_execution\"]', ?, 'system', 'running', ?, ?, ?)",
+            )
+            .bind(execution_id.to_string())
+            .bind(self.task.to_string())
+            .bind(self.owner.to_string())
+            .bind(text(created_at))
+            .bind(text(started_at))
+            .bind(text(created_at))
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO execution_runtime_settings \
+                 (execution_id, provider_id, schema_version, resolved_settings_json, sources_json, \
+                  completion_policy_json, captured_at) VALUES (?, 'provider-alpha', 1, '{}', '{}', ?, ?)",
+            )
+            .bind(execution_id.to_string())
+            .bind(serde_json::to_string(&policy).unwrap())
+            .bind(text(created_at))
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO execution_attempts (id, execution_id, attempt_no, started_at) \
+                 VALUES (?, ?, 1, ?)",
+            )
+            .bind(attempt_id.to_string())
+            .bind(execution_id.to_string())
+            .bind(text(started_at))
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            sqlx::query("DELETE FROM execution_leases WHERE task_id = ?")
+                .bind(self.task.to_string())
+                .execute(self.database.pool())
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO execution_leases (task_id, execution_id, worker_id, expires_at) \
+                 VALUES (?, ?, 'completion-worker', ?)",
+            )
+            .bind(self.task.to_string())
+            .bind(execution_id.to_string())
+            .bind(text(lease_expires_at))
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            let job_kind = asterism_scheduler::ScheduledJobKind::Execution { execution_id };
+            sqlx::query(
+                "INSERT INTO scheduled_jobs \
+                 (id, job_kind, payload_json, run_at, state, attempts, idempotency_key, worker_id, \
+                  lease_expires_at, created_at, updated_at) \
+                 VALUES (?, 'execution', ?, ?, 'claimed', 1, ?, 'completion-worker', ?, ?, ?)",
+            )
+            .bind(job_id.to_string())
+            .bind(serde_json::to_string(&job_kind).unwrap())
+            .bind(text(created_at))
+            .bind(format!("completion-observation:{execution_id}"))
+            .bind(text(lease_expires_at))
+            .bind(text(created_at))
+            .bind(text(created_at))
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            (execution_id, attempt_id, job_id, observed_at)
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_observations_are_atomic_idempotent_and_completion_is_monotonic() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteCompletionWorkflowRepository::new(fixture.database.clone());
+        let (execution_id, attempt_id, job_id, observed_at) = fixture.claimed_execution(0).await;
+        let request = StrictCompletionExecutionObservationRequest {
+            execution_id,
+            execution_attempt_id: attempt_id,
+            scheduler_job_id: job_id,
+            worker_id: "completion-worker",
+            retry_confirmed: false,
+            outcome: None,
+            diagnosis: Some(CompletionDiagnosis::DurationInsufficient),
+            at: observed_at,
+            correlation_id: "completion-observation-1",
+        };
+        let first = repository
+            .record_strict_completion_execution_observation(request.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.workflow_attempt_no, Some(1));
+        assert_eq!(first.workflow.revision, 1);
+        assert_eq!(first.workflow.workflow.state, StrictCompletionState::Active);
+        assert_eq!(first.workflow.workflow.attempts_started, 1);
+        assert_eq!(
+            repository
+                .record_strict_completion_execution_observation(request)
+                .await
+                .unwrap(),
+            first
+        );
+
+        let (execution_id, attempt_id, job_id, observed_at) = fixture.claimed_execution(10).await;
+        let second = repository
+            .record_strict_completion_execution_observation(
+                StrictCompletionExecutionObservationRequest {
+                    execution_id,
+                    execution_attempt_id: attempt_id,
+                    scheduler_job_id: job_id,
+                    worker_id: "completion-worker",
+                    retry_confirmed: false,
+                    outcome: None,
+                    diagnosis: Some(CompletionDiagnosis::DurationInsufficient),
+                    at: observed_at,
+                    correlation_id: "completion-observation-2",
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.workflow_attempt_no, Some(2));
+        assert_eq!(second.workflow.revision, 2);
+        assert_eq!(
+            second.workflow.workflow.state,
+            StrictCompletionState::Stopped
+        );
+        assert_eq!(
+            second.workflow.workflow.last_diagnosis,
+            Some(CompletionDiagnosis::AttemptLimitReached)
+        );
+
+        let (execution_id, attempt_id, job_id, observed_at) = fixture.claimed_execution(20).await;
+        let completed = repository
+            .record_strict_completion_execution_observation(
+                StrictCompletionExecutionObservationRequest {
+                    execution_id,
+                    execution_attempt_id: attempt_id,
+                    scheduler_job_id: job_id,
+                    worker_id: "completion-worker",
+                    retry_confirmed: false,
+                    outcome: Some(CompletionOutcome::Completed),
+                    diagnosis: None,
+                    at: observed_at,
+                    correlation_id: "completion-observation-3",
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.workflow_attempt_no, None);
+        assert_eq!(completed.workflow.revision, 3);
+        assert_eq!(
+            completed.workflow.workflow.state,
+            StrictCompletionState::Completed
+        );
+        assert_eq!(
+            completed.workflow.workflow.verified_outcome,
+            Some(CompletionOutcome::Completed)
+        );
+        assert_eq!(completed.workflow.workflow.last_diagnosis, None);
+        let observation_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM strict_completion_execution_observations")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!(observation_count, 3);
     }
 
     #[tokio::test]

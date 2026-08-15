@@ -298,12 +298,7 @@ impl StrictCompletionWorkflow {
             return Err(StrictCompletionWorkflowError::StateConflict);
         }
         if let Some(outcome) = outcome {
-            self.state = StrictCompletionState::Completed;
-            self.verified_outcome = Some(outcome);
-            self.last_diagnosis = None;
-            self.updated_at = at;
-            self.finished_at = Some(at);
-            return Ok(());
+            return self.complete(outcome, at);
         }
         let diagnosis = diagnosis.ok_or(StrictCompletionWorkflowError::DiagnosisRequired)?;
         self.last_diagnosis = Some(diagnosis);
@@ -323,6 +318,43 @@ impl StrictCompletionWorkflow {
             self.state = StrictCompletionState::Active;
         }
         Ok(())
+    }
+
+    /// Applies a fresh verified Completed/Passed observation even after
+    /// automatic completion was disabled or stopped. Completion is monotonic:
+    /// this method cannot attach a diagnosis or reopen a completed workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StrictCompletionWorkflowError`] for regressing time or a
+    /// conflicting second completion outcome.
+    pub fn observe_verified_completion(
+        &mut self,
+        outcome: CompletionOutcome,
+        at: Timestamp,
+    ) -> Result<(), StrictCompletionWorkflowError> {
+        self.validate_transition_time(at)?;
+        if self.state == StrictCompletionState::Completed {
+            return if self.verified_outcome == Some(outcome) {
+                Ok(())
+            } else {
+                Err(StrictCompletionWorkflowError::StateConflict)
+            };
+        }
+        self.complete(outcome, at)
+    }
+
+    fn complete(
+        &mut self,
+        outcome: CompletionOutcome,
+        at: Timestamp,
+    ) -> Result<(), StrictCompletionWorkflowError> {
+        self.state = StrictCompletionState::Completed;
+        self.verified_outcome = Some(outcome);
+        self.last_diagnosis = None;
+        self.updated_at = at;
+        self.finished_at = Some(at);
+        self.validate()
     }
 
     fn stop(&mut self, diagnosis: CompletionDiagnosis, at: Timestamp) {
@@ -721,6 +753,37 @@ mod tests {
         assert_eq!(
             workflow.last_diagnosis,
             Some(CompletionDiagnosis::AttemptLimitReached)
+        );
+    }
+
+    #[test]
+    fn fresh_completion_is_monotonic_after_automatic_work_stops() {
+        let now = Utc::now();
+        let mut workflow =
+            StrictCompletionWorkflow::new(binding(), policy(now), None, now).unwrap();
+        workflow.begin_attempt(false, false, now).unwrap();
+        workflow
+            .observe(
+                None,
+                Some(CompletionDiagnosis::HumanActionRequired),
+                now + Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(workflow.state, StrictCompletionState::Stopped);
+
+        workflow
+            .observe_verified_completion(CompletionOutcome::Completed, now + Duration::seconds(2))
+            .unwrap();
+        assert_eq!(workflow.state, StrictCompletionState::Completed);
+        assert_eq!(
+            workflow.verified_outcome,
+            Some(CompletionOutcome::Completed)
+        );
+        assert_eq!(workflow.last_diagnosis, None);
+        assert_eq!(
+            workflow
+                .observe_verified_completion(CompletionOutcome::Passed, now + Duration::seconds(3)),
+            Err(StrictCompletionWorkflowError::StateConflict)
         );
     }
 

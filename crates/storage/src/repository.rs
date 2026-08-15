@@ -166,6 +166,30 @@ pub struct StrictCompletionObserveRequest {
 }
 
 #[derive(Clone, Debug)]
+pub struct StrictCompletionExecutionObservationRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub execution_attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub retry_confirmed: bool,
+    pub outcome: Option<asterism_domain::CompletionOutcome>,
+    pub diagnosis: Option<asterism_domain::CompletionDiagnosis>,
+    pub at: Timestamp,
+    pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictCompletionExecutionObservationRecord {
+    pub execution_id: ExecutionId,
+    pub execution_attempt_id: ExecutionAttemptId,
+    pub workflow: StrictCompletionWorkflowRecord,
+    pub workflow_attempt_no: Option<u32>,
+    pub outcome: Option<asterism_domain::CompletionOutcome>,
+    pub diagnosis: Option<asterism_domain::CompletionDiagnosis>,
+    pub observed_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
 pub struct ScoreImprovementBeginRequest {
     pub owner_user_id: UserId,
     pub workflow_id: asterism_domain::ScoreImprovementWorkflowId,
@@ -207,6 +231,11 @@ pub trait CompletionWorkflowRepository: Send + Sync {
         &self,
         request: StrictCompletionObserveRequest,
     ) -> Result<StrictCompletionWorkflowRecord, StorageError>;
+
+    async fn record_strict_completion_execution_observation(
+        &self,
+        request: StrictCompletionExecutionObservationRequest<'_>,
+    ) -> Result<StrictCompletionExecutionObservationRecord, StorageError>;
 
     async fn create_score_improvement_workflow(
         &self,

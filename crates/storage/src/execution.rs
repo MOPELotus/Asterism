@@ -1906,7 +1906,7 @@ async fn select_execution(
     .ok_or(StorageError::ExecutionStateConflict)
 }
 
-async fn assert_worker_claims(
+pub(crate) async fn assert_worker_claims(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     execution_id: ExecutionId,
     scheduler_job_id: ScheduleId,
@@ -1972,7 +1972,10 @@ async fn assert_execution_lease(
     }
 }
 
-fn validate_worker_token(worker_id: &str, correlation_id: &str) -> Result<(), StorageError> {
+pub(crate) fn validate_worker_token(
+    worker_id: &str,
+    correlation_id: &str,
+) -> Result<(), StorageError> {
     let valid = |value: &str| {
         !value.is_empty()
             && value.len() <= 256

@@ -4275,3 +4275,23 @@ other unsupported incomplete result to `RemoteUnknown`. Each observation thus
 contains exactly one completion outcome or one diagnosis and is ready for a
 later atomic workflow transition without treating mutation success as Task
 completion.
+
+## Two-hundred-and-thirty-fifth Phase 0 slice
+
+Migration 061 adds an exactly-once Strict Completion observation ledger keyed
+by both Execution and ExecutionAttempt. The Storage operation accepts only the
+worker's live scheduler claim and lease, derives owner/account/Task/formal
+assessment and frozen completion policy from the durable execution graph, and
+atomically creates or advances the Task's Strict workflow together with the
+observation row. Exact replay returns the existing record; a conflicting
+attempt or outcome fails without incrementing the workflow attempt count.
+
+Strict Completion is now monotonic across manual or delayed resolution. A
+diagnosed attempt can remain Active for another bounded attempt or stop at a
+hard/attempt limit, while any later fresh Completed/Passed fact can close an
+Active, Disabled or Stopped workflow as Completed. It cannot replace one
+verified completion outcome with another or restore automatic work from a
+diagnosis. Storage coverage exercises replay plus three separate Executions:
+retryable diagnosis, attempt-limit stop, then verified completion. The runner
+call sites are intentionally the next slice; this slice establishes their
+atomic crash-recovery boundary first.

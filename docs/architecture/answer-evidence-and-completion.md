@@ -148,6 +148,15 @@ submission without a more precise audited diagnosis becomes
 `score_below_threshold`; every other incomplete result without evidence becomes
 `remote_unknown`, which stops automatic work instead of guessing a retry.
 
+Each applied Strict Completion observation has an exactly-once ledger binding
+to one Execution and its active ExecutionAttempt. Storage derives owner,
+ProviderAccount, Task, assessment class and frozen policy from durable rows,
+checks the live worker claim, and creates or advances the workflow in the same
+transaction as the ledger entry. A replay cannot increment the workflow attempt
+counter twice. `Stopped` ends automatic work but is not negative completion:
+a later fresh Completed/Passed observation monotonically closes the workflow as
+Completed and clears the obsolete diagnosis.
+
 ## Score Improvement / Retake
 
 Score Improvement is separate from Completion and is explicit opt-in after the
