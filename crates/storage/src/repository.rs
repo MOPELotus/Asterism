@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use asterism_auth::TokenDigest;
 use asterism_domain::{
@@ -95,6 +98,7 @@ pub trait AnswerBootstrapHarvestRepository: Send + Sync {
     async fn claim_due_answer_bootstrap_harvests(
         &self,
         worker_id: &str,
+        eligible_provider_ids: &BTreeSet<ProviderId>,
         now: Timestamp,
         lease_expires_at: Timestamp,
         limit: u32,

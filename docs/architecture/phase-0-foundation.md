@@ -4114,3 +4114,19 @@ for a real registered Native HTTP, BrowserBridge or Capture-backed history
 transport. The synthetic Chaoxing adapter verifies the contract but its native
 registry slot remains absent, so existing first-auth jobs cannot be exhausted
 by a false unsupported scan.
+
+## Two-hundred-and-twenty-seventh Phase 0 slice
+
+Answer Bootstrap Harvest claiming is now explicitly filtered by the set of
+Providers whose current registry entries advertise and implement
+`AnswerHistoryHarvest`. Storage applies that filter both to due-job selection
+and to expired-claim retirement. An empty set or a set containing only other
+Providers returns no claims and leaves the harvest state, scheduler state and
+attempt budget untouched.
+
+The Engine derives the eligible set from the already integrity-checked Provider
+registry on every tick and passes it into the atomic claim boundary. This makes
+daemon activation safe before every Provider has a real transport: unsupported
+accounts retain their one durable first-auth job for a future implementation,
+while a Provider becomes executable only when metadata and the exact history
+capability slot register together.

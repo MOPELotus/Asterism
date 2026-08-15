@@ -1,4 +1,4 @@
-use std::{fmt::Display, str::FromStr};
+use std::{collections::BTreeSet, fmt::Display, str::FromStr};
 
 use asterism_domain::{
     AnswerBootstrapHarvest, AnswerBootstrapHarvestId, AnswerBootstrapHarvestState,
@@ -64,18 +64,29 @@ impl AnswerBootstrapHarvestRepository for SqliteAnswerBootstrapHarvestRepository
     async fn claim_due_answer_bootstrap_harvests(
         &self,
         worker_id: &str,
+        eligible_provider_ids: &BTreeSet<ProviderId>,
         now: Timestamp,
         lease_expires_at: Timestamp,
         limit: u32,
     ) -> Result<Vec<ClaimedAnswerBootstrapHarvest>, StorageError> {
         validate_claim(worker_id, now, lease_expires_at, limit)?;
+        if eligible_provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let eligible_provider_ids = serde_json::to_string(
+            &eligible_provider_ids
+                .iter()
+                .map(ProviderId::as_str)
+                .collect::<Vec<_>>(),
+        )?;
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
-        retire_exhausted_expired_claims(&mut transaction, now).await?;
+        retire_exhausted_expired_claims(&mut transaction, &eligible_provider_ids, now).await?;
         let rows = sqlx::query(
             "SELECT harvest.id, harvest.schedule_id, job.state AS job_state \
              FROM answer_bootstrap_harvests AS harvest \
              INNER JOIN scheduled_jobs AS job ON job.id = harvest.schedule_id \
              WHERE job.job_kind = 'answer_bootstrap_harvest' AND job.run_at <= ? \
+               AND harvest.provider_id IN (SELECT value FROM json_each(?)) \
                AND job.attempts < ? \
                AND harvest.state IN ('pending', 'paused', 'running') \
                AND (job.state = 'pending' OR \
@@ -83,6 +94,7 @@ impl AnswerBootstrapHarvestRepository for SqliteAnswerBootstrapHarvestRepository
              ORDER BY job.run_at, job.id LIMIT ?",
         )
         .bind(encode_timestamp(now))
+        .bind(&eligible_provider_ids)
         .bind(MAX_HARVEST_ATTEMPTS)
         .bind(encode_timestamp(now))
         .bind(i64::from(limit))
@@ -351,15 +363,18 @@ fn validate_failure(request: &AnswerBootstrapHarvestFailure<'_>) -> Result<(), S
 
 async fn retire_exhausted_expired_claims(
     transaction: &mut Transaction<'_, Sqlite>,
+    eligible_provider_ids: &str,
     now: Timestamp,
 ) -> Result<(), StorageError> {
     let schedule_ids = sqlx::query_scalar::<_, String>(
         "SELECT job.id FROM scheduled_jobs AS job \
          INNER JOIN answer_bootstrap_harvests AS harvest ON harvest.schedule_id = job.id \
          WHERE job.job_kind = 'answer_bootstrap_harvest' AND job.state = 'claimed' \
+           AND harvest.provider_id IN (SELECT value FROM json_each(?)) \
            AND job.lease_expires_at <= ? AND job.attempts + 1 >= ? \
            AND harvest.state = 'running'",
     )
+    .bind(eligible_provider_ids)
     .bind(encode_timestamp(now))
     .bind(MAX_HARVEST_ATTEMPTS)
     .fetch_all(&mut **transaction)
@@ -840,9 +855,10 @@ mod tests {
             at: Timestamp,
             lease_expires_at: Timestamp,
         ) -> ClaimedAnswerBootstrapHarvest {
+            let eligible = BTreeSet::from([self.provider.clone()]);
             let claimed = self
                 .repository()
-                .claim_due_answer_bootstrap_harvests(worker_id, at, lease_expires_at, 1)
+                .claim_due_answer_bootstrap_harvests(worker_id, &eligible, at, lease_expires_at, 1)
                 .await
                 .unwrap();
             assert_eq!(claimed.len(), 1);
@@ -894,6 +910,49 @@ mod tests {
             0
         );
         assert_eq!(count(&fixture.database, "scheduled_jobs").await, 0);
+    }
+
+    #[tokio::test]
+    async fn claim_filter_leaves_unsupported_provider_harvest_untouched() {
+        let fixture = Fixture::initialized().await;
+        let repository = fixture.repository();
+        let claimed_at = fixture.now + Duration::seconds(1);
+        let lease = claimed_at + Duration::minutes(1);
+        assert!(
+            repository
+                .claim_due_answer_bootstrap_harvests(
+                    "filtered-worker",
+                    &BTreeSet::new(),
+                    claimed_at,
+                    lease,
+                    1,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            repository
+                .claim_due_answer_bootstrap_harvests(
+                    "filtered-worker",
+                    &BTreeSet::from([ProviderId::new("provider-beta").unwrap()]),
+                    claimed_at,
+                    lease,
+                    1,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fixture.harvest().await.state,
+            AnswerBootstrapHarvestState::Pending
+        );
+        let job: (String, i64) = sqlx::query_as("SELECT state, attempts FROM scheduled_jobs")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(job, ("pending".to_owned(), 0));
     }
 
     #[tokio::test]
@@ -966,6 +1025,7 @@ mod tests {
             repository
                 .claim_due_answer_bootstrap_harvests(
                     "harvest-worker-b",
+                    &BTreeSet::from([fixture.provider.clone()]),
                     retry_at - Duration::seconds(1),
                     retry_at + Duration::minutes(1),
                     1,
@@ -1034,6 +1094,7 @@ mod tests {
             repository
                 .claim_due_answer_bootstrap_harvests(
                     "page-worker-b",
+                    &BTreeSet::from([fixture.provider.clone()]),
                     next_run - Duration::milliseconds(1),
                     next_run + Duration::minutes(1),
                     1,
@@ -1061,7 +1122,13 @@ mod tests {
         let claimed_at = fixture.now + Duration::seconds(1);
         let lease = claimed_at + Duration::seconds(1);
         let claimed = repository
-            .claim_due_answer_bootstrap_harvests("expiring-worker", claimed_at, lease, 1)
+            .claim_due_answer_bootstrap_harvests(
+                "expiring-worker",
+                &BTreeSet::from([fixture.provider.clone()]),
+                claimed_at,
+                lease,
+                1,
+            )
             .await
             .unwrap();
         sqlx::query("UPDATE scheduled_jobs SET attempts = 4 WHERE id = ?")
@@ -1072,6 +1139,7 @@ mod tests {
         let reclaimed = repository
             .claim_due_answer_bootstrap_harvests(
                 "replacement-worker",
+                &BTreeSet::from([fixture.provider.clone()]),
                 lease,
                 lease + Duration::minutes(1),
                 1,

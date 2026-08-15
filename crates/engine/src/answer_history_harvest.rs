@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use asterism_domain::{
     AnswerBootstrapHarvestState, AnswerCandidate, AnswerCandidateId, AnswerEvidenceClass,
@@ -113,10 +113,19 @@ where
         now: Timestamp,
     ) -> Result<AnswerHistoryHarvestTickReport, AnswerHistoryHarvestWorkerError> {
         let lease_expires_at = add_seconds(now, self.config.claim_ttl_seconds)?;
+        let eligible_provider_ids = self
+            .registry
+            .metadata()
+            .filter(|metadata| {
+                metadata.advertises(asterism_provider_api::ProviderCapability::AnswerHistoryHarvest)
+            })
+            .map(|metadata| metadata.id.clone())
+            .collect::<BTreeSet<_>>();
         let claimed = self
             .harvests
             .claim_due_answer_bootstrap_harvests(
                 &self.config.worker_id,
+                &eligible_provider_ids,
                 now,
                 lease_expires_at,
                 self.config.claim_limit,
