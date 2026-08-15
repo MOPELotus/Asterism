@@ -4352,3 +4352,29 @@ existing first-attempt diagnosis and then inserts a Completed observation for a
 second attempt of the same Execution. Storage lookup now resolves idempotency by
 attempt first and separately verifies the Execution binding, preventing a
 foreign attempt from reusing another Execution's ledger entry.
+
+## Two-hundred-and-thirty-ninth Phase 0 slice
+
+The execution worker now consumes the atomic Strict Completion observation
+record instead of discarding the updated workflow state. When a reliable
+non-Submission result leaves a routine Task's workflow Active, Core closes the
+current ExecutionAttempt as failed, moves the same Execution to RetryWaiting
+and creates the existing numbered Retry job. The Retry starts a fresh
+ExecutionAttempt, so every additional observation retains its own attempt
+provenance while the frozen completion policy remains unchanged.
+
+Continuation is bounded independently by both the Strict workflow and the
+worker retry policy. A terminal Completed/Passed or stopped/disabled workflow
+does not retry; an exhausted worker retry budget or a next run time at/after
+the frozen Strict deadline requires human action. Formal assessment never
+receives an automatic second attempt merely because execution was authorized:
+an Active first result becomes HumanRequired until the separate confirmation
+flow grants a retry. Submission is deliberately excluded because its next
+attempt must build a fresh QuestionSnapshot, Draft and Attempt rather than
+replaying the prior immutable Draft.
+
+Engine coverage runs one incomplete DurationReport through three distinct
+attempts of the same Execution, observes two numbered retries, then proves the
+third observation stops at the frozen attempt limit with three unique ledger
+bindings. A separate formal-assessment regression enables execution, records
+the first incomplete observation and proves that no Retry job is created.
