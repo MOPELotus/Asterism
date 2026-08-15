@@ -28,6 +28,7 @@ const MAX_OPTIONS: usize = 256;
 const MAX_RELATIONS: usize = 256;
 const MAX_POSITION: u32 = 100_000;
 const MAX_REMOTE_TOPIC_TOTAL: u32 = 100_000;
+const MAX_CURRENT_QUESTION_STATE_CODE: u32 = 100_000;
 
 /// Sanitized progress counters returned with the donor's current attempt
 /// payload. These counters are remote observations and deliberately remain
@@ -543,6 +544,12 @@ fn question_payload_observation(error: ProviderError, payload: &Value) -> Provid
             "topic_total_kind": json_value_kind(
                 object.and_then(|object| object.get("topic_total"))
             ),
+            "chance_num_kind": json_value_kind(
+                object.and_then(|object| object.get("chance_num"))
+            ),
+            "answer_state_kind": json_value_kind(
+                object.and_then(|object| object.get("answer_state"))
+            ),
             "stem_kind": json_value_kind(stem),
             "stem_fields": stem_object.map(Map::len),
             "stem_content_kind": json_value_kind(
@@ -645,13 +652,46 @@ fn optional_remote_counter(
         Some(Value::Number(value)) => value
             .as_u64()
             .and_then(|value| u32::try_from(value).ok())
-            .filter(|value| *value <= MAX_REMOTE_TOPIC_TOTAL)
+            .filter(|value| *value <= MAX_CURRENT_QUESTION_STATE_CODE)
             .map(Some)
             .ok_or_else(|| {
                 protocol_drift(format!("Cidaren attempt {label}-topic count is invalid"))
             }),
         _ => Err(protocol_drift(format!(
             "Cidaren attempt {label}-topic count is invalid"
+        ))),
+    }
+}
+
+fn parse_current_question_state(object: &Map<String, Value>) -> ProviderResult<Option<(u32, u32)>> {
+    let chance_num = optional_current_question_state_code(object.get("chance_num"), "chance_num")?;
+    let answer_state =
+        optional_current_question_state_code(object.get("answer_state"), "answer_state")?;
+    match (chance_num, answer_state) {
+        (None, None) => Ok(None),
+        (Some(chance_num), Some(answer_state)) => Ok(Some((chance_num, answer_state))),
+        _ => Err(protocol_drift(
+            "Cidaren current Question state fields are incomplete",
+        )),
+    }
+}
+
+fn optional_current_question_state_code(
+    value: Option<&Value>,
+    label: &'static str,
+) -> ProviderResult<Option<u32>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value <= MAX_REMOTE_TOPIC_TOTAL)
+            .map(Some)
+            .ok_or_else(|| {
+                protocol_drift(format!("Cidaren current Question {label} code is invalid"))
+            }),
+        _ => Err(protocol_drift(format!(
+            "Cidaren current Question {label} code is invalid"
         ))),
     }
 }
@@ -1001,7 +1041,8 @@ fn sanitized_metadata(
         ));
     }
     let word_tip = optional_text(object.get("w_tip"), MAX_OPTION_BYTES, "word tip")?;
-    Ok(json!({
+    let current_question_state = parse_current_question_state(object)?;
+    let mut metadata = json!({
         "schema": "cidaren.attempt-question.v1",
         "remote_task_id": remote_task_id,
         "topic_mode": topic_mode,
@@ -1014,7 +1055,20 @@ fn sanitized_metadata(
         "word_tip": word_tip,
         "stem_sha256": format!("{:x}", Sha256::digest(stem.as_bytes())),
         "option_count": options.len(),
-    }))
+    });
+    if let Some((chance_num, answer_state)) = current_question_state {
+        metadata
+            .as_object_mut()
+            .ok_or_else(|| invalid_response("Cidaren Question metadata is not an object"))?
+            .insert(
+                "cidaren_current_question_state".to_owned(),
+                json!({
+                    "chance_num": chance_num,
+                    "answer_state": answer_state,
+                }),
+            );
+    }
+    Ok(metadata)
 }
 
 fn parse_relations(value: Option<&Value>) -> ProviderResult<Vec<String>> {
@@ -1051,14 +1105,22 @@ fn question_remote_id(
     options: &[QuestionOption],
     metadata: &Value,
 ) -> ProviderResult<String> {
-    let material = serde_json::to_vec(&json!({
+    let mut semantic_metadata = metadata.clone();
+    semantic_metadata
+        .as_object_mut()
+        .ok_or_else(|| invalid_response("Cidaren Question metadata is not an object"))?
+        .remove("cidaren_current_question_state");
+    let mut identity = json!({
         "topic_mode": topic_mode,
         "stem": stem,
         "options": options,
-        "metadata": metadata,
-    }))
-    .map_err(|_| invalid_response("Cidaren Question fingerprint cannot be encoded"))?;
-    let digest = Sha256::digest(material);
+        "metadata": semantic_metadata,
+    });
+    let mut material = serde_json::to_vec(&identity)
+        .map_err(|_| invalid_response("Cidaren Question fingerprint cannot be encoded"))?;
+    zeroize_json(&mut identity);
+    let digest = Sha256::digest(&material);
+    material.zeroize();
     let mut remote_id = String::from("question:");
     write!(&mut remote_id, "{digest:x}")
         .map_err(|_| invalid_response("Cidaren Question fingerprint cannot be encoded"))?;
@@ -1261,6 +1323,10 @@ mod tests {
         assert!(question.options.is_empty());
         assert_eq!(question.metadata_sanitized["answer_count"], json!(2));
         assert_eq!(question.metadata_sanitized["word_lengths"], json!([7, 2]));
+        assert_eq!(
+            question.metadata_sanitized["cidaren_current_question_state"],
+            json!({"chance_num": 2, "answer_state": 1})
+        );
         assert!(
             !serde_json::to_string(&question)
                 .unwrap()
@@ -1278,6 +1344,68 @@ mod tests {
         payload["w_lens"] = json!([7, 0]);
         assert_eq!(
             parse_attempt_question(&payload, "class-task:2002", 2)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+    }
+
+    #[test]
+    fn current_question_state_is_bounded_and_excluded_from_remote_identity() {
+        let payload: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+        ))
+        .unwrap();
+        let reference = parse_attempt_question(&payload, "class-task:2002", 2)
+            .unwrap()
+            .question_ref()
+            .unwrap();
+
+        let mut changed = payload.clone();
+        changed["chance_num"] = json!(1);
+        changed["answer_state"] = json!(0);
+        let changed = parse_attempt_question(&changed, "class-task:2002", 2)
+            .unwrap()
+            .question_ref()
+            .unwrap();
+        assert_eq!(changed.remote_id, reference.remote_id);
+        assert_ne!(changed.metadata_sanitized, reference.metadata_sanitized);
+
+        let mut incomplete = payload.clone();
+        incomplete.as_object_mut().unwrap().remove("answer_state");
+        let error = parse_attempt_question(&incomplete, "class-task:2002", 2).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["chance_num_kind"], "number");
+        assert_eq!(observation.shape_sanitized["answer_state_kind"], "missing");
+        assert!(
+            observation
+                .shape_sanitized
+                .get("cidaren_current_question_state")
+                .is_none()
+        );
+
+        let mut fractional = payload.clone();
+        fractional["chance_num"] = json!(1.5);
+        assert_eq!(
+            parse_attempt_question(&fractional, "class-task:2002", 2)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        let mut oversized = payload;
+        oversized["answer_state"] = json!(100_001);
+        assert_eq!(
+            parse_attempt_question(&oversized, "class-task:2002", 2)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        oversized["answer_state"] = json!(-1);
+        assert_eq!(
+            parse_attempt_question(&oversized, "class-task:2002", 2)
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::ProtocolDrift

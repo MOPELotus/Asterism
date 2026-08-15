@@ -655,8 +655,13 @@ Public issue 99 contains a current `topic_mode=73` payload which the donor
 explicitly does not implement. Its redacted structure has `answer_num=2`, two
 positive `w_lens`, no options and one ordinary rotating `topic_code`.
 Asterism parses this as `QuestionKind::FillBlank`, requires the answer count to
-equal the bounded word-length count and keeps the token ephemeral. The common
-`SkipAnswer` mutation remains available, so the attempt can continue. No
+equal the bounded word-length count and keeps the token ephemeral. The same
+payload's paired integer `chance_num`/`answer_state` fields are retained under
+`cidaren_current_question_state` as bounded raw current-Question observations.
+They are excluded from the stable remote Question identity, and a partial,
+fractional, negative or oversized pair fails closed with a value-free shape
+observation. They remain neither correctness nor history/retake authority. The
+common `SkipAnswer` mutation remains available, so the attempt can continue. No
 evidence defines whether two answers are comma-joined, separately verified or
 encoded another way; AnswerResolve and ordinary answer Build/Verify therefore
 fail closed for mode 73 instead of inventing a score-affecting wire format.

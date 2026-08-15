@@ -360,8 +360,11 @@ state machines require one explicit Main-owned representation boundary:
 - Strict Completion is supported by fresh exact `Completed + 100%` and is
   independent of the optional score; no separate passing threshold exists;
 - Score Improvement has no evidenced retake/reset/eligibility protocol.
-  `chance_num` is current-Question state, not retake authority, so a completed
-  Task must not be restarted speculatively.
+  The paired integer `chance_num`/`answer_state` values are now preserved as
+  bounded `cidaren_current_question_state` metadata, but remain current-Question
+  observations rather than correctness/history/retake authority. They are
+  excluded from stable remote Question identity, and a completed Task must not
+  be restarted speculatively.
 
 These are not missing Cidaren parsers: the absent wire facts must remain
 unknown/unsupported in shared state until a new donor or authorized trace

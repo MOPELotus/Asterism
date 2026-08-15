@@ -866,6 +866,21 @@ attach the existing bounded response-body shape with only fixed route,
 duplicate parsed tree do not cross the boundary. Route parsers remain
 responsible for semantic shape and protocol-vocabulary checks.
 
+### 2026-08-15 current-Question state projection follow-up
+
+The donor refs, public/historical tags and releases and public issue update head
+remained unchanged before this unit. No new Question mode, result route or
+mode-73 direct-answer encoding entered scope.
+
+The paired integer `chance_num`/`answer_state` shape from public issue 99 is now
+parsed as a bounded raw current-Question observation and persisted only under
+`cidaren_current_question_state`. Both fields must be present together and lie
+within `0..=100000`; partial, fractional, negative or oversized shapes fail
+closed and attach only their JSON value kinds to the existing Question payload
+observation. State-only changes do not alter the stable remote Question
+identity. The values remain neither correctness receipts nor history/retake
+authority, and this adds no direct mode-73 answer encoding or mutation retry.
+
 ## Check procedure
 
 For the next checkpoint:

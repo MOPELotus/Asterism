@@ -76,8 +76,13 @@ inconsistent or unbounded values.
 The synthetic mode-73 fixture retains only the public issue 99 structural
 facts: two answers, two positive word lengths, no options and placeholder
 text/token values. Parser tests require `FillBlank`, answer-count/length
-agreement and token omission from serialized Questions. It is not answer-wire
-evidence; AnswerResolve and ordinary answer Build/Verify stay fail-closed,
+agreement, paired bounded `chance_num`/`answer_state` projection and token
+omission from serialized Questions. State-only changes do not change the
+stable remote Question identity; malformed/partial state fails closed and its
+observation contains field kinds rather than values. The state pair remains
+current-Question metadata, not correctness, history or retake authority. It is
+not answer-wire evidence; AnswerResolve and ordinary answer Build/Verify stay
+fail-closed,
 while the distinct explicit Skip Draft/execution path is available.
 
 The BrowserBridge fixtures are synthetic result transport documents generated
@@ -393,7 +398,8 @@ placeholder identities, result codes, status values and pagination shape.
   eligibility shape; `chance_num` remains current-Question data. Shared corpus
   bootstrap and Score Improvement must preserve that absence, while Strict
   Completion can consume the existing fresh 100%/Completed fixture.
-- Unknown response fields are dropped.
+- Unknown response fields are dropped. The explicitly audited current-Question
+  state pair is retained only under `cidaren_current_question_state`.
 - Capability advertisement follows implemented registry slots; an unfinished
   shared integration is recorded as a concrete Core Gap, never as a policy
   exclusion or Provider completion boundary.
