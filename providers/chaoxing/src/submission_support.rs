@@ -1108,13 +1108,17 @@ fn parse_chapter_result_answers(
             ));
         }
         let text = Zeroizing::new(normalized_text(question.text()));
-        let Some(type_code @ ("0" | "1" | "3")) = chapter_result_type(text.as_str()) else {
+        let Some(type_code @ ("0" | "1" | "2" | "3")) = chapter_result_type(text.as_str()) else {
             return Ok(None);
         };
         if !text.contains(answer_label) {
             return Ok(None);
         }
-        let value = parse_labeled_visible_answer(text.as_str(), answer_label, type_code)?;
+        let value = match parse_labeled_visible_answer(text.as_str(), answer_label, type_code) {
+            Ok(value) => value,
+            Err(error) if error.kind == ProviderErrorKind::UnsupportedTask => return Ok(None),
+            Err(error) => return Err(error),
+        };
         answers.push(ChapterRemoteAnswer {
             remote_id: remote_id.to_owned(),
             type_code: type_code.to_owned(),
@@ -1155,6 +1159,9 @@ fn chapter_standard_answer(
                 "Chaoxing Chapter Work standard true/false answer is invalid",
             )),
         },
+        "2" if fill_blank_count(question) == Some(1) => {
+            Ok(NormalizedAnswer::Texts(vec![actual.value.clone()]))
+        }
         _ => Err(unsupported(
             "Chaoxing Chapter Work standard-answer type is unsupported",
         )),
@@ -1347,12 +1354,22 @@ fn parse_exam_visible_answer(value: &str, type_code: &str) -> ProviderResult<Opt
         return Ok(None);
     };
     let value = value.trim_start_matches([':', '：']).trim();
-    let value = ["正确答案", "答案解析", "得分"]
-        .into_iter()
-        .filter_map(|marker| value.find(marker))
-        .min()
-        .map_or(value, |end| &value[..end])
-        .trim();
+    let value = [
+        "正确答案",
+        "答案解析",
+        "得分",
+        "未作答",
+        "未答",
+        "待批阅",
+        "等待批阅",
+        "答案待公布",
+        "暂无答案",
+    ]
+    .into_iter()
+    .filter_map(|marker| value.find(marker))
+    .min()
+    .map_or(value, |end| &value[..end])
+    .trim();
     if value.is_empty() || value.len() > MAX_FORM_FIELD_BYTES {
         return Ok(None);
     }
@@ -1382,6 +1399,7 @@ fn parse_exam_visible_answer(value: &str, type_code: &str) -> ProviderResult<Opt
             "错误" | "错" | "false" | "FALSE" | "×" => Ok(Some("false".to_owned())),
             _ => Ok(None),
         },
+        "2" => Ok(bounded_visible_text_answer(value).then(|| value.to_owned())),
         _ => Ok(None),
     }
 }
@@ -1676,7 +1694,9 @@ fn encode_answer(
         (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(value)) => {
             Ok(if *value { "true" } else { "false" }.to_owned())
         }
-        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values)) if !values.is_empty() => {
+        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values))
+            if values.len() == 1 && fill_blank_count(question) == Some(1) =>
+        {
             Ok(values.concat())
         }
         (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) if values.len() == 1 => {
@@ -1686,6 +1706,14 @@ fn encode_answer(
             "Chaoxing native submission cannot encode this answer shape",
         )),
     }
+}
+
+fn fill_blank_count(question: &Question) -> Option<u64> {
+    question
+        .metadata_sanitized
+        .get("blank_count")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|count| (1..=256).contains(count))
 }
 
 fn answer_selection_count(answer: &NormalizedAnswer) -> usize {
@@ -1722,12 +1750,23 @@ fn parse_labeled_visible_answer(
         .split_once(answer_label)
         .ok_or_else(|| protocol_drift("Chaoxing Work result visible-answer label is missing"))?;
     let value = value.trim_start_matches([':', '：']).trim();
-    let value = ["我的答案", "正确答案", "答案解析", "得分"]
-        .into_iter()
-        .filter_map(|marker| value.find(marker))
-        .min()
-        .map_or(value, |end| &value[..end])
-        .trim();
+    let value = [
+        "我的答案",
+        "正确答案",
+        "答案解析",
+        "得分",
+        "未作答",
+        "未答",
+        "待批阅",
+        "等待批阅",
+        "答案待公布",
+        "暂无答案",
+    ]
+    .into_iter()
+    .filter_map(|marker| value.find(marker))
+    .min()
+    .map_or(value, |end| &value[..end])
+    .trim();
     match type_code {
         "0" | "1" => {
             let mut answer = value
@@ -1752,10 +1791,29 @@ fn parse_labeled_visible_answer(
         "3" => Err(protocol_drift(
             "Chaoxing Work result true/false answer is invalid",
         )),
+        "2" => parse_visible_text_answer(value),
         _ => Err(unsupported(
             "Chaoxing Work result answer type is unsupported",
         )),
     }
+}
+
+fn parse_visible_text_answer(value: &str) -> ProviderResult<String> {
+    if !bounded_visible_text_answer(value) {
+        return Err(unsupported(
+            "Chaoxing Work result has no exact visible text answer",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn bounded_visible_text_answer(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_FORM_FIELD_BYTES
+        && !matches!(
+            value,
+            "未作答" | "未答" | "待批阅" | "等待批阅" | "答案待公布" | "暂无答案" | "--"
+        )
 }
 
 fn require_field(
@@ -1920,10 +1978,16 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/work/chapter-result.html");
     const CHAPTER_HISTORY_RESULT: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/chapter-history-result.html");
+    const CHAPTER_HISTORY_FILL_RESULT: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/chapter-history-result-fill.html");
     const EXAM_QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
+    const EXAM_FILL_QUESTION: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-fill.html");
     const EXAM_RESULT: &str =
         include_str!("../../../fixtures/providers/chaoxing/exam/detail-result.html");
+    const EXAM_FILL_RESULT: &str =
+        include_str!("../../../fixtures/providers/chaoxing/exam/detail-result-fill.html");
     const PARTIAL_EXAM_RESULT: &str =
         include_str!("../../../fixtures/providers/chaoxing/exam/detail-result-partial.html");
 
@@ -2442,6 +2506,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_blank_result_keeps_submitted_and_official_text_evidence_exact() {
+        let draft = chapter_draft().await;
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        let result = ChaoxingChapterWorkVerificationDocument::try_new(
+            CHAPTER_HISTORY_FILL_RESULT.to_owned(),
+        )
+        .unwrap();
+        let candidates = parse_chapter_work_answer_candidates(&result, &questions).unwrap();
+        assert_eq!(candidates.len(), 4);
+        assert_eq!(
+            candidates[2].answer,
+            NormalizedAnswer::Texts(vec!["bounded answer".to_owned()])
+        );
+        let evidence = parse_chapter_work_result_evidence(&result, &questions).unwrap();
+        assert_eq!(
+            evidence.questions()[2].submitted_answer(),
+            &NormalizedAnswer::Texts(vec!["bounded answer".to_owned()])
+        );
+        assert_eq!(
+            evidence.questions()[2].official_answer(),
+            &NormalizedAnswer::Texts(vec!["bounded answer".to_owned()])
+        );
+        assert_eq!(
+            evidence.questions()[2].judgement(),
+            ChaoxingChapterWorkAnswerJudgement::MatchesOfficial
+        );
+
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let snapshot = parse_chapter_work_verification_snapshot(&result, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(
+            snapshot.questions[2].status,
+            SubmissionQuestionVerificationStatus::Confirmed
+        );
+
+        let pending =
+            CHAPTER_HISTORY_FILL_RESULT.replacen("正确答案：bounded answer", "答案待公布", 1);
+        let pending = ChaoxingChapterWorkVerificationDocument::try_new(pending).unwrap();
+        assert_eq!(
+            parse_chapter_work_answer_candidates(&pending, &questions)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::UnsupportedTask
+        );
+        let snapshot = parse_chapter_work_verification_snapshot(&pending, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+
+        let pending_submission =
+            CHAPTER_HISTORY_FILL_RESULT.replacen("我的答案：bounded answer", "我的答案：待批阅", 1);
+        let pending_submission =
+            ChaoxingChapterWorkVerificationDocument::try_new(pending_submission).unwrap();
+        let snapshot =
+            parse_chapter_work_verification_snapshot(&pending_submission, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+
+        let mut multi_blank_questions = questions;
+        multi_blank_questions[2].metadata_sanitized["blank_count"] = serde_json::json!(2);
+        assert_eq!(
+            parse_chapter_work_answer_candidates(&result, &multi_blank_questions)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::UnsupportedTask
+        );
+    }
+
+    #[tokio::test]
     async fn exam_result_confirms_or_rejects_only_exact_visible_values() {
         let draft = exam_draft().await;
         let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
@@ -2493,6 +2627,34 @@ mod tests {
         let snapshot = parse_exam_verification_snapshot(&no_score, &plan, &draft).unwrap();
         assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
         assert_eq!(snapshot.score, None);
+    }
+
+    #[tokio::test]
+    async fn exam_single_blank_requires_exact_non_pending_visible_text() {
+        let draft = exam_fill_draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let result =
+            ChaoxingExamVerificationDocument::try_new(EXAM_FILL_RESULT.to_owned()).unwrap();
+        let snapshot = parse_exam_verification_snapshot(&result, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+
+        let changed = ChaoxingExamVerificationDocument::try_new(EXAM_FILL_RESULT.replacen(
+            "bounded answer",
+            "changed answer",
+            1,
+        ))
+        .unwrap();
+        let snapshot = parse_exam_verification_snapshot(&changed, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Rejected);
+
+        let pending = ChaoxingExamVerificationDocument::try_new(EXAM_FILL_RESULT.replacen(
+            "bounded answer",
+            "待批阅",
+            1,
+        ))
+        .unwrap();
+        let snapshot = parse_exam_verification_snapshot(&pending, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
     }
 
     #[tokio::test]
@@ -2710,7 +2872,7 @@ mod tests {
             ),
             selected(
                 questions[2].id,
-                NormalizedAnswer::Texts(vec!["bounded".to_owned(), " answer".to_owned()]),
+                NormalizedAnswer::Texts(vec!["bounded answer".to_owned()]),
             ),
             selected(questions[3].id, NormalizedAnswer::Boolean(true)),
         ];
@@ -2849,6 +3011,51 @@ mod tests {
         };
         draft.validate().unwrap();
         draft
+    }
+
+    async fn exam_fill_draft() -> SubmissionDraft {
+        let task_id = TaskId::new();
+        let questions = parse_exam_question_page(EXAM_FILL_QUESTION)
+            .unwrap()
+            .into_iter()
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let selected = vec![selected(
+            questions[0].id,
+            NormalizedAnswer::Texts(vec!["bounded answer".to_owned()]),
+        )];
+        let context = ProviderContext {
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            account_id: asterism_domain::ProviderAccountId::new(),
+            credential_refs: vec![asterism_domain::SecretId::new()],
+            correlation_id: "chaoxing-exam-fill-verification-support".to_owned(),
+        };
+        let preview = ChaoxingSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(&context, "exam:100:200:exam-fill-1", &questions, &selected)
+            .await
+            .unwrap();
+        SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            provider_version: crate::metadata::development_metadata()
+                .unwrap()
+                .implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 1,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
+            items: questions
+                .into_iter()
+                .zip(selected)
+                .map(|(question, selected)| SubmissionDraftItem { question, selected })
+                .collect(),
+            payload_preview: preview,
+            created_at: Utc::now(),
+        }
     }
 
     fn selected(

@@ -527,7 +527,14 @@ fn append_question_fields(
                     .map(|value| (format!("answers{question_id}"), value)),
             );
         }
-        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values)) if !values.is_empty() => {
+        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values))
+            if values.len() == 1
+                && question
+                    .metadata_sanitized
+                    .get("blank_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1) =>
+        {
             for (index, value) in values.iter().enumerate() {
                 fields.push((format!("answer{question_id}{}", index + 1), value.clone()));
             }
@@ -697,6 +704,8 @@ mod tests {
     const COVER: &str = include_str!("../../../fixtures/providers/chaoxing/exam/cover-ready.html");
     const QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
+    const FILL_QUESTION: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-fill.html");
     const SAVE_1: &str =
         include_str!("../../../fixtures/providers/chaoxing/exam/submit-save-1.json");
     const SAVE_2: &str =
@@ -802,6 +811,39 @@ mod tests {
             ChaoxingExamSubmissionCommand::try_new(artifact, &draft, "9001", [5; 32], prepared_at)
                 .unwrap();
         assert!(final_command.is_final());
+    }
+
+    #[test]
+    fn single_blank_command_fields_require_the_bound_blank_count() {
+        let task_id = TaskId::new();
+        let mut question = parse_exam_question_page(FILL_QUESTION)
+            .unwrap()
+            .remove(0)
+            .to_question(task_id)
+            .unwrap();
+        let answer = NormalizedAnswer::Texts(vec!["bounded answer".to_owned()]);
+        let mut fields = Vec::new();
+        append_question_fields(&mut fields, &question, &answer).unwrap();
+        assert!(fields.iter().any(|field| {
+            field
+                == &(
+                    "answerexam-fill-q-11".to_owned(),
+                    "bounded answer".to_owned(),
+                )
+        }));
+        assert!(
+            fields
+                .iter()
+                .any(|field| field == &("blankNumexam-fill-q-1".to_owned(), "1,".to_owned()))
+        );
+
+        question.metadata_sanitized["blank_count"] = serde_json::json!(2);
+        assert_eq!(
+            append_question_fields(&mut Vec::new(), &question, &answer)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 
     #[tokio::test]

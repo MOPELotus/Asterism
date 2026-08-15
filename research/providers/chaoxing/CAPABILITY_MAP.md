@@ -16,10 +16,10 @@ source modules even when their assessments share field names or HTML shapes.
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, while completed Exams with a strictly bound preview entry add fresh result score/retake provenance without enabling retake execution |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Document/Read/Video/Audio/Live resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live-account validation still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
-| AnswerResolve | `chaoxing-exam` completed Chapter result | Samueli Tiku, CxKitty searchers, OCS wrappers/cache, agent pre-computed answers | Reference | A typed but unregistered component rebinds fresh completed Chapter Work detail and consumes one abstract bound result document before producing strict ProviderNative candidates; all other donor sources are external/manual/random and no pending Work/Exam standard-answer protocol exists |
-| AnswerHistoryHarvest | `chaoxing-exam` completed Chapter result | Samueli issue #607, OCS result cache | Reference | A typed capability pages only completed Chapter Work references supplied by a bounded read-only transport, binds the audited `workAnswerId` into a Provider attempt digest, hashes the exact result document, applies Core's TaskId to parsed Questions and emits submitted/official/correctness/score/structural `RedoTest` facts. The native development factory does not advertise it until a real BrowserBridge/Capture list/read transport exists |
-| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work, Chapter Work and Exam execute Core-frozen partial coverage without inventing answers. Work forms preserve the complete current control order and rebuild unanswered values empty. Exam's encrypted v3 continuation retains the complete ordered Question identity/fingerprint set plus the frozen selected original positions; saves traverse only selected Draft Questions and send each donor `start` as its original zero-based paper index. No Exam mutation is routed through Work payloads or replayed after ambiguity |
-| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, requires the full result Question count and unique identities, and confirms/rejects only selected Draft Questions at their original positions from exact type/value evidence. Unselected or unsupported result Questions are not answer evidence. The independent bounded result score remains fixed thousandths. A fresh explicit Expired state maps to `WindowClosed`; all less specific incomplete states remain conservatively undiagnosed |
+| AnswerResolve | `chaoxing-exam` completed Chapter result | Samueli Tiku, CxKitty searchers, OCS wrappers/cache, agent pre-computed answers | Reference | A typed but unregistered component rebinds fresh completed Chapter Work detail and consumes one abstract bound result document before producing strict ProviderNative candidates for choice/true-false and exactly one bound fill blank; all other donor sources are external/manual/random and no pending Work/Exam standard-answer protocol exists |
+| AnswerHistoryHarvest | `chaoxing-exam` completed Chapter result | Samueli issue #607, OCS result cache | Reference | A typed capability pages only completed Chapter Work references supplied by a bounded read-only transport, binds the audited `workAnswerId` into a Provider attempt digest, hashes the exact result document, applies Core's TaskId to parsed Questions and emits submitted/official/correctness/score/structural `RedoTest` facts for choice/true-false and exact single-blank text. The native development factory does not advertise it until a real BrowserBridge/Capture list/read transport exists |
+| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work, Chapter Work and Exam execute Core-frozen partial coverage without inventing answers. Work forms preserve the complete current control order and rebuild unanswered values empty. Chapter/Exam fill mutation requires a parsed `blank_count=1` and exactly one Draft text; ambiguous multi-blank concatenation fails closed. Exam's encrypted v3 continuation retains the complete ordered Question identity/fingerprint set plus the frozen selected original positions; saves traverse only selected Draft Questions and send each donor `start` as its original zero-based paper index. No Exam mutation is routed through Work payloads or replayed after ambiguity |
+| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, requires the full result Question count and unique identities, and confirms/rejects only selected Draft Questions at their original positions from exact type/value evidence. Exact single-blank submitted text is supported only when the Question binds one blank; pending placeholders are not evidence. Unselected or unsupported result Questions are not answer evidence. The independent bounded result score remains fixed thousandths. A fresh explicit Expired state maps to `WindowClosed`; all less specific incomplete states remain conservatively undiagnosed |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream. Unknown numeric Question kinds, unknown Chapter resource structures and unknown Work result shapes now attach bounded protocol observations containing only controlled enums, counts and field-presence facts |
 | BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
 
@@ -190,20 +190,23 @@ policy and remains independently guarded.
   per-Question facts stay Unverified because a completion card is not answer
   readback. A separate Provider parser now accepts only the donor-observed
   `selectWorkQuestionYiPiYue` result shape: complete unique `singleQuesId`
-  identity/order/type facts plus visible single/multiple/true-false answers are
-  compared per Question, while the independent 0-100 final score is retained as
-  exact thousandths. Missing, extra, reordered, fill/short-answer or otherwise
-  unsupported facts are Inconclusive, and duplicate identities or malformed or
+  identity/order/type facts plus visible single/multiple/true-false or exact
+  single-blank answers are compared per Question, while the independent 0-100
+  final score is retained as
+  exact thousandths. Missing, extra, reordered, multi-blank, pending-text,
+  short-answer or otherwise unsupported facts are Inconclusive, and duplicate
+  identities or malformed or
   conflicting scores fail closed. This parser is not yet wired into the
   capability because the audited result is reached through a study-page iframe
   whose shared BrowserBridge runtime remains Main-owned.
 - The same bound Chapter Work result parser can map a complete `正确答案` set to
-  `ProviderNative` AnswerCandidates for single-choice, multiple-choice and
-  true/false Questions. Candidate creation rechecks QID/order/type and current
-  option IDs, uses full confidence only for the server-declared standard value,
+  `ProviderNative` AnswerCandidates for single-choice, multiple-choice,
+  true/false and exactly one bound fill blank. Candidate creation rechecks
+  QID/order/type, current option IDs where applicable and `blank_count=1`, uses
+  full confidence only for the server-declared standard value,
   and retains sanitized route/QID provenance without copying result HTML.
-  Missing answers, fill/short-answer types, reordered Questions or unknown
-  options fail closed. `AnswerResolve` is not advertised and no `redoTest`
+  Missing/pending answers, multi-blank/short-answer types, reordered Questions
+  or unknown options fail closed. `AnswerResolve` is not advertised and no `redoTest`
   mutation is implemented until the shared BrowserBridge supplies the fully
   bound fresh result document and Main wires the capability lifecycle.
 - `ChaoxingAnswerResolve` now implements the typed Provider API around that

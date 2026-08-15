@@ -69,6 +69,12 @@ runtime responsibilities, so metadata does not advertise `QrCode` yet.
 
 ## Refresh log
 
+- 2026-08-15: re-read the pinned CxKitty/OCS/agent/`chaoxing-exam` type-2
+  paths without a donor revision change. Added explicit page-derived blank
+  cardinality, limited Chapter/Exam mutation to one bound blank/value, and
+  fixture-covered exact single-blank Chapter history/standard evidence plus
+  Exam submitted-value verification. Pending labels and multi-blank shapes
+  remain unsupported instead of being concatenated or inferred.
 - 2026-08-15: completed the Provider-owned partial mobile Exam follow-up from
   the full sweep without changing donor revisions. The encrypted attempt schema
   is now v3: it preserves the complete ordered Question binding and selected

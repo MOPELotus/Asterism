@@ -248,10 +248,13 @@ fn parse_question_node(
             "Chaoxing choice Question has fewer than two options",
         ));
     }
-    let metadata_sanitized = json!({
+    let mut metadata_sanitized = json!({
         "page_kind": page_kind.metadata_name(),
         "provider_type_code": type_code,
     });
+    if kind == QuestionKind::FillBlank {
+        metadata_sanitized["blank_count"] = json!(parse_blank_count(node, page_kind)?);
+    }
     let parsed = ParsedChaoxingQuestion {
         remote_id,
         position,
@@ -264,6 +267,21 @@ fn parse_question_node(
     };
     parsed.to_question(TaskId::new())?;
     Ok(parsed)
+}
+
+fn parse_blank_count(node: ElementRef<'_>, page_kind: QuestionPageKind) -> ProviderResult<u32> {
+    let selector = selector(match page_kind {
+        QuestionPageKind::ChapterWorkMobile => ".blankList2 li",
+        QuestionPageKind::ExamMobile => ".completionList.objectAuswerList",
+        QuestionPageKind::WorkPreview | QuestionPageKind::ExamPreview => {
+            ".blankItemDiv, .eidtDiv textarea"
+        }
+    });
+    let count = node.select(&selector).count();
+    u32::try_from(count)
+        .ok()
+        .filter(|count| (1..=256).contains(count))
+        .ok_or_else(|| protocol_drift("Chaoxing fill-blank Question has no bounded blank set"))
 }
 
 fn parse_options(
@@ -495,6 +513,8 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
     const EXAM_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
+    const EXAM_FILL: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-fill.html");
     const WORK_PREVIEW_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/work-preview-mixed.html");
     const EXAM_PREVIEW_MIXED: &str =
@@ -519,6 +539,7 @@ mod tests {
         assert_eq!(parsed[0].remote_id, "work-q-1");
         assert_eq!(parsed[0].options[1].content.as_deref(), Some("Mars"));
         assert_eq!(parsed[2].metadata_sanitized["provider_type_code"], 2);
+        assert_eq!(parsed[2].metadata_sanitized["blank_count"], 1);
         assert_eq!(
             parsed[3].attachments[0].kind,
             QuestionAttachmentKind::Formula
@@ -546,6 +567,15 @@ mod tests {
             assert_eq!(reference.position, u32::try_from(index + 1).unwrap());
             assert_eq!(reference.remote_id, format!("exam-q-{}", index + 1));
         }
+    }
+
+    #[test]
+    fn exam_mobile_single_blank_preserves_its_exact_blank_count() {
+        let parsed = parse_exam_question_page(EXAM_FILL).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].kind, QuestionKind::FillBlank);
+        assert_eq!(parsed[0].metadata_sanitized["provider_type_code"], 2);
+        assert_eq!(parsed[0].metadata_sanitized["blank_count"], 1);
     }
 
     #[test]

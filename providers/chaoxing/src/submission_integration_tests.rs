@@ -695,7 +695,7 @@ async fn chapter_draft() -> SubmissionDraft {
         ),
         selected(
             questions[2].id,
-            NormalizedAnswer::Texts(vec!["bounded".to_owned(), " answer".to_owned()]),
+            NormalizedAnswer::Texts(vec!["bounded answer".to_owned()]),
         ),
         selected(questions[3].id, NormalizedAnswer::Boolean(true)),
     ];

@@ -186,7 +186,11 @@ fn validate_answer_shape(
             Ok(())
         }
         (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_)) => Ok(()),
-        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values)) if !values.is_empty() => Ok(()),
+        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values))
+            if values.len() == 1 && fill_blank_count(question) == Some(1) =>
+        {
+            Ok(())
+        }
         (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values))
             if values.len() == 1 && task_kind != SubmissionTaskKind::Exam =>
         {
@@ -203,6 +207,14 @@ fn validate_answer_shape(
             "Chaoxing Work answer type does not match its Question kind",
         )),
     }
+}
+
+fn fill_blank_count(question: &Question) -> Option<u64> {
+    question
+        .metadata_sanitized
+        .get("blank_count")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|count| (1..=256).contains(count))
 }
 
 fn unknown_question_kind(question: &Question) -> ProviderError {
@@ -530,7 +542,7 @@ mod tests {
             ),
             selection(
                 questions[2].id,
-                NormalizedAnswer::Texts(vec!["bounded".to_owned(), " answer".to_owned()]),
+                NormalizedAnswer::Texts(vec!["bounded answer".to_owned()]),
             ),
             selection(questions[3].id, NormalizedAnswer::Boolean(true)),
         ];
@@ -555,6 +567,45 @@ mod tests {
         let encoded = serde_json::to_string(&preview).unwrap();
         assert!(!encoded.contains("bounded"));
         assert!(!encoded.contains("PRIVATE"));
+
+        let mut ambiguous = selected.clone();
+        ambiguous[2].answer =
+            NormalizedAnswer::Texts(vec!["first".to_owned(), "second".to_owned()]);
+        assert_eq!(
+            ChaoxingSubmissionBuild::try_new()
+                .unwrap()
+                .build_submission_preview(
+                    &context(),
+                    "resource:100:200:4001:job-work",
+                    &questions,
+                    &ambiguous,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::InvalidResponse
+        );
+
+        let mut missing_binding = questions;
+        missing_binding[2]
+            .metadata_sanitized
+            .as_object_mut()
+            .unwrap()
+            .remove("blank_count");
+        assert_eq!(
+            ChaoxingSubmissionBuild::try_new()
+                .unwrap()
+                .build_submission_preview(
+                    &context(),
+                    "resource:100:200:4001:job-work",
+                    &missing_binding,
+                    &selected,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::InvalidResponse
+        );
     }
 
     fn selection(

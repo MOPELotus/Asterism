@@ -39,12 +39,15 @@ fixtures/providers/chaoxing/
     submission-view-partial.html
     chapter-submission-editor.html
     chapter-result.html
+    chapter-history-result.html
+    chapter-history-result-fill.html
   exam/
     list-empty-script-keywords.html
     list-mixed.html
     list-mixed.expected.json
     detail-result.html
     detail-result-partial.html
+    detail-result-fill.html
     cover-ready.html
     start-question.html
     submit-save-1.json
@@ -54,6 +57,7 @@ fixtures/providers/chaoxing/
   questions/
     work-mobile-mixed.html
     exam-mobile-mixed.html
+    exam-mobile-fill.html
     work-preview-mixed.html
     exam-preview-mixed.html
   chapter/
@@ -95,7 +99,7 @@ verification.
 The Question fixtures separate CxKitty's mobile Chapter Work and Exam structures
 from the current OCS independent `/mooc2/work/dowork` and
 `/mooc2/exam/preview` structures. Attempt-local IDs, type inputs, stems, options
-and non-fetchable attachment labels are retained, while current/hidden answer
+blank cardinality and non-fetchable attachment labels are retained, while current/hidden answer
 inputs and every submission field are deliberately excluded from normalized
 output. The legacy `work-mobile-mixed.html` filename refers specifically to
 Chapter Work and is not an independent Work transport fixture. The independent
@@ -127,9 +131,10 @@ the same partial final submission.
 
 `work/chapter-submission-editor.html` adds the primary donor's synthetic
 Chapter Work `form1` shape. Tests prove stale answer inputs and unknown fields
-are discarded, type codes and ordered fill text are encoded from the immutable
-Draft, the mutation occurs once, and a separate completed-card read confirms
-only task-level completion.
+are discarded, type codes and one Question-bound single-blank text are encoded
+from the immutable Draft, ambiguous multi-blank text fails closed, the mutation
+occurs once, and a separate completed-card read confirms only task-level
+completion.
 
 `work/chapter-result.html` models the 2026-06 Chapter-test donor's completed
 `selectWorkQuestionYiPiYue` iframe with `singleQuesId[data=qid]`, localized
@@ -137,8 +142,8 @@ Question types, visible `我的答案` / `正确答案`, and `最终成绩`. Par
 complete ID/order/type/value binding for single-choice, multiple-choice and
 true/false, per-Question rejection rather than all-or-nothing status, exact
 fixed-point scores for 0, 82.5 and 99.999, and `None` when score is absent.
-Missing/extra/reordered/fill-blank facts stay Inconclusive; duplicate IDs and
-malformed, out-of-range or conflicting scores fail closed. The fixture is
+Missing/extra/reordered/multi-blank or pending-text facts stay Inconclusive;
+duplicate IDs and malformed, out-of-range or conflicting scores fail closed. The fixture is
 synthetic parser evidence and does not claim that Native HTTP can reach the
 iframe result route.
 
@@ -159,7 +164,15 @@ and a lookalike `notRedoTest(...)` handler does not create retake availability.
 The fixture neither grants mutation authority nor proves BrowserBridge access
 to a live historical result.
 
-The same fixture now contains the minimum result-page stem/type/current-option
+`work/chapter-history-result-fill.html` adds a Question-bound type-2 single
+blank with exact visible submitted and official text. Tests retain those values
+as separate redacted evidence, produce one ProviderNative standard candidate,
+confirm an exact submitted value even when only the official value is pending,
+and stay Inconclusive when the submitted value itself is pending. Rebinding the
+same result to `blank_count=2` is unsupported; no concatenation or inferred
+blank partition is permitted.
+
+`work/chapter-history-result.html` also contains the minimum result-page stem/type/current-option
 DOM needed to reconstruct Questions under the Core-provided TaskId. A synthetic
 two-page `ChaoxingAnswerHistoryTransport` proves sanitized ordinal cursors,
 strict `workAnswerId`-based Provider attempt digests, an exact result-document
@@ -167,6 +180,13 @@ digest, Task-bound Questions and separate submitted/official/correctness/score/
 retake output. Invalid cursor zero, a changed attempt digest and lookalike
 retake handlers fail before the result transport. No synthetic route is used by
 the native development factory.
+
+`questions/exam-mobile-fill.html` and `exam/detail-result-fill.html` form the
+matching mobile Exam contract. The Question parser binds exactly one rendered
+blank, the save body emits only `answer{qid}1` plus `blankNum{qid}=1,`, and the
+result verifier confirms/rejects only one exact bounded visible text value.
+Pending-label values are Inconclusive and changing the bound blank count makes
+mutation fail closed. These are synthetic shapes, not live route validation.
 
 Capability-level tests wrap the same bounded fixture with a fake fresh
 TaskDetail and result transport. They prove that the typed resolver emits three

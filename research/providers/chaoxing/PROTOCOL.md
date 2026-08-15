@@ -313,8 +313,10 @@ from being consumed as Chapter Work.
 
 `SubmissionBuild` keeps selected values out of the preview and maps donor type
 codes 0/1/2/3/4 to single-choice, multiple-choice, fill-blank, true/false and
-short-answer. Ordered fill texts are concatenated exactly as the donor does;
-short-answer accepts one text value and other shapes fail closed.
+short-answer. Fill submission requires the fresh page to expose exactly one
+bounded blank and the Draft to contain exactly one text value; multi-blank
+concatenation is ambiguous and fails closed. Short-answer accepts one text
+value and other shapes fail closed.
 
 `SubmissionExecute` rebuilds from the immutable Draft, rebinds the exact
 Course/Chapter/seven-card target, acquires one fresh editor and forwards only
@@ -330,10 +332,12 @@ The 2026-06 Chapter-test donor separately records completed/waiting results in a
 `div.singleQuesId[data=qid]`, exposes a localized Question type and visible
 `我的答案` / `正确答案`, and reports `最终成绩`. The Provider-side result parser
 requires a complete unique QID set in immutable-Draft order, exact type and
-visible answer values for single-choice, multiple-choice and true/false. It
+visible answer values for single-choice, multiple-choice, true/false and a
+`blank_count=1` fill Question. It
 emits per-Question Confirmed/Rejected facts and retains the independent 0-100
-score as fixed thousandths on any verification status. Missing, extra,
-reordered, fill/short-answer or unsupported evidence remains Inconclusive;
+score as fixed thousandths on any verification status. A pending submitted
+fill value is not evidence. Missing, extra, reordered, multi-blank/short-answer
+or unsupported evidence remains Inconclusive;
 duplicates and malformed or conflicting scores fail closed. The parser is an
 offline boundary only until Main's BrowserBridge can supply the fresh bound
 study-page iframe document. The completed card alone continues to produce only
@@ -341,11 +345,12 @@ task-level confirmation.
 
 The same strict result boundary parses `正确答案` independently from the user's
 submitted value. When every result Question matches the current Question set by
-QID, DOM order and type, single-choice, multiple-choice and true/false standard
-values become full-confidence `ProviderNative` AnswerCandidates. Each choice
+QID, DOM order and type, single-choice, multiple-choice, true/false and exact
+single-blank standard values become full-confidence `ProviderNative`
+AnswerCandidates. Each choice
 must still name an option ID in the fresh Question snapshot; the candidate
 provenance records only the result-route schema and remote QID. Missing standard
-answers, fill/short-answer types, reordered Questions or unknown options fail
+answers, pending/multi-blank/short-answer types, reordered Questions or unknown options fail
 closed. This pure parser neither advertises `AnswerResolve` nor invokes
 `redoTest`; both require the Main-owned BrowserBridge binding and a separately
 durable retake operation.
@@ -497,7 +502,9 @@ the v3 artifact's complete ordered QID/position binding with bounded type fields
 Draft Question must occur at its original DOM position with the exact
 `exam_mobile` type code and a visible allowlisted `我的答案` value. Type codes 0,
 1 and 3 use bounded single-choice, sorted multi-choice and exact boolean
-grammars. Unselected Questions may use other numeric types or omit visible
+grammars. Type 2 additionally requires the parsed Question to bind exactly one
+blank and preserves one bounded visible text value byte-for-byte; empty or
+pending-label values are not evidence. Unselected Questions may use other numeric types or omit visible
 answers; they remain structural count/identity evidence only. Missing/extra
 fields, selected ID/position/type drift or absent selected visible answers
 produce `Inconclusive` with `Unverified` Questions; duplicates fail closed. Only a fully bound value
@@ -621,7 +628,8 @@ and are not represented by the current `AnswerCandidate` contract.
 
 The Provider exposes a typed Chapter Work history parser
 over the already bounded `selectWorkQuestionYiPiYue` document. For the supported
-0/1/3 subset it requires complete QID/order/type/current-option binding and both
+0/1/3 plus exact single-blank type-2 subset it requires complete
+QID/order/type/current-option-or-blank-count binding and both
 visible labels, then returns the submitted value, official value, exact
 per-Question equality judgement, fixed-point score and an optional exact
 `redoTest(...)` entry. It does not construct Private Evidence, infer owner or
@@ -690,7 +698,9 @@ children. The existing Asterism mapping deliberately keeps code 10 Composite
 because donor evidence conflicts; it must remain non-submittable until a
 route-specific fixture resolves the variant. Types 11/14/15 require bounded
 BrowserBridge interaction and, for 14/15/shared-option issue #297, first-class
-shared context/options/children. Fill and short result answers remain blocked
-on exact result DOM and grading-label fixtures; batch observations show they
-can remain pending manual review. Unknown types stay in the snapshot as
+shared context/options/children. Exact single-blank result text is now
+fixture-covered for Chapter history/standard evidence and Exam submitted-value
+verification. Multi-blank and short result answers remain blocked on exact DOM
+and grading-label fixtures; pending manual-review labels never become answer
+evidence. Unknown types stay in the snapshot as
 `QuestionKind::Unknown` and lower answer coverage instead of disappearing.

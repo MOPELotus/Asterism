@@ -63,7 +63,7 @@ The combined donors establish these currently observed families:
 | Chaoxing code/shape | Donor evidence | Current boundary |
 |---|---|---|
 | `0` single, `1` multiple, `3` true/false | all current donors | Parsed, native mutation and strict visible-answer verification |
-| `2` fill | CxKitty, OCS, agent skill and `chaoxing-exam` | Parsed and native Chapter/Exam value encoding exists; result harvesting stays blocked on exact result DOM because fill can be pending manual grading |
+| `2` fill | CxKitty, OCS, agent skill and `chaoxing-exam` | Parsed blank cardinality now gates mutation: exactly one bound blank/value is encoded for Chapter/Exam and exact single-blank visible text is fixture-covered for Chapter history/standard evidence plus Exam submitted-value verification. Multi-blank and pending/manual-grading states remain fail-closed pending exact fixtures |
 | `4..9` text/short/reference answers | OCS and browser donors | Parsed as ShortAnswer; exact Browser/editor mutation and reference-answer provenance still need fixtures |
 | `10` | OCS treats as text completion; existing Asterism evidence maps it Composite | Donor-variant conflict: retain fail-closed submission until a route-specific fixture disambiguates it |
 | `11` matching/line | OCS current implementation | Parsed as Matching; rendered select-box mutation needs a bounded BrowserBridge recipe and result fixture |
@@ -174,8 +174,8 @@ notably partial coverage, Audio, sign-in, learning-count, in-video Questions,
 historical bootstrap and bounded retake/score-improvement semantics. The
 coverage, corpus, retake and compound-Question work cannot be closed honestly
 inside the Provider, so their precise shared gaps are recorded above. Existing
-strict parsers already close the provider-private choice/true-false result
-surface; unsupported result types remain fail-closed pending live-sanitized
+strict parsers now close the provider-private choice/true-false and exact
+single-blank result surface; unsupported/multi-blank result types remain fail-closed pending live-sanitized
 fixtures rather than speculative parsing.
 
 This one-time full-sweep requirement is complete for Chaoxing. Future meaningful
