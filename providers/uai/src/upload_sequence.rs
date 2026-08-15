@@ -259,12 +259,18 @@ impl UaiUploadFinalSubmissionSequence {
         if !outcome.matches(ordinal, kind, sequence_binding_digest, request_digest) {
             return Err(foreign_sequence_material());
         }
-        sink.record_receipt(ExecutionMutationReceipt::new(
-            ordinal,
-            outcome.response_digest(),
-            outcome.accepted(),
-        )?)
-        .await
+        let receipt = if outcome.accepted() {
+            ExecutionMutationReceipt::new(ordinal, outcome.response_digest(), true)?
+        } else {
+            ExecutionMutationReceipt::new_retryable_rejection(
+                ordinal,
+                outcome.response_digest(),
+                outcome
+                    .retry_after_seconds()
+                    .ok_or_else(foreign_sequence_material)?,
+            )?
+        };
+        sink.record_receipt(receipt).await
     }
 
     fn validate_request(
@@ -675,6 +681,11 @@ mod tests {
                 .record_single_outcome(1, &request, &outcome, &sink)
                 .await
                 .unwrap();
+            assert_eq!(sink.retry_deadlines(), vec![Some(120)]);
+            assert!(sequence.issue_single(2, &request, &sink).await.is_err());
+            sink.advance_seconds(119);
+            assert!(sequence.issue_single(2, &request, &sink).await.is_err());
+            sink.advance_seconds(1);
             sequence.issue_single(2, &request, &sink).await.unwrap();
             assert!(
                 sequence
@@ -743,8 +754,9 @@ mod tests {
     #[derive(Default)]
     struct FixtureSequenceState {
         prepared: bool,
+        now_seconds: u64,
         issues: Vec<(u32, [u8; 32])>,
-        receipts: Vec<(u32, bool)>,
+        receipts: Vec<(u32, bool, Option<u64>)>,
     }
 
     impl FixtureSequenceSink {
@@ -755,6 +767,21 @@ mod tests {
                 state.receipts.len(),
                 state.receipts.iter().map(|receipt| receipt.1).collect(),
             )
+        }
+
+        fn retry_deadlines(&self) -> Vec<Option<u64>> {
+            self.state
+                .lock()
+                .unwrap()
+                .receipts
+                .iter()
+                .map(|receipt| receipt.2)
+                .collect()
+        }
+
+        fn advance_seconds(&self, seconds: u64) {
+            let mut state = self.state.lock().unwrap();
+            state.now_seconds = state.now_seconds.checked_add(seconds).unwrap();
         }
     }
 
@@ -777,6 +804,11 @@ mod tests {
                 && state.issues.len() == state.receipts.len()
                 && state.issues.len() < UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS as usize
                 && !state.receipts.iter().any(|receipt| receipt.1)
+                && state.receipts.last().is_none_or(|receipt| {
+                    receipt
+                        .2
+                        .is_none_or(|deadline| state.now_seconds >= deadline)
+                })
                 && usize::try_from(issue.ordinal()).ok() == Some(state.issues.len() + 1)
                 && issue.operation_type() == UAI_UPLOAD_FINAL_OPERATION_TYPE;
             if !valid {
@@ -793,7 +825,18 @@ mod tests {
             if !valid {
                 return Err(foreign_sequence_material());
             }
-            state.receipts.push((receipt.ordinal(), receipt.accepted()));
+            let retry_not_before = receipt
+                .retry_after_seconds()
+                .map(|seconds| {
+                    state
+                        .now_seconds
+                        .checked_add(seconds)
+                        .ok_or_else(foreign_sequence_material)
+                })
+                .transpose()?;
+            state
+                .receipts
+                .push((receipt.ordinal(), receipt.accepted(), retry_not_before));
             Ok(())
         }
     }

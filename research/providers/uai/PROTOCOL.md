@@ -1273,7 +1273,10 @@ also carries the same semantic binding digest before its exact issue-time wire
 digest is registered. A code-0 version-bearing response produces an accepted
 mutation receipt and immediately closes the phase. Only a structurally valid
 numeric `600001` or `600002` response becomes an `accepted=false` mutation
-receipt with the donor's 120-second retry delay, permitting ordinal two.
+receipt through `new_retryable_rejection(..., 120)`. Core atomically derives
+and persists `retry_not_before` with that receipt, rejects ordinal two both
+immediately and at 119 seconds, and permits issuance at the exact 120-second
+boundary.
 Other rejection codes, malformed responses and transport ambiguity return an
 error without recording a receipt, so the issued ordinal remains locked. Each
 classified outcome also binds its exact ordinal; even an identical second wire
@@ -1341,8 +1344,9 @@ accepted occurrence, otherwise repeat a definite rejection up to the bounded
 donor maximum" without forcing a second POST after success. UAI's classifier
 further narrows the repeat authority to the two evidenced throttle codes; a
 generic `accepted=false` result cannot be constructed from any other response.
-Durable retry scheduling and the encrypted stage-output contract above remain
-shared integration work.
+Core now persists the 120-second retry deadline and rejects early successor
+issuance. Scheduler wake-up/executor integration and the encrypted stage-output
+contract above remain shared work.
 
 The donor's `basic-scoop-content,oral-sentence` path is likewise atomic rather
 than a normal matching submit followed by an unrelated oral completion. The

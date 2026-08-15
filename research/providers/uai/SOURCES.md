@@ -439,3 +439,11 @@ changed the audited reply, exact readback or separate Group-completion order.
 The Core projection therefore retains two non-replayable mutation ordinals and
 uses the already audited current-user/content readback only as the explicit
 gate between them.
+
+The persisted upload retry-deadline checkpoint later on 2026-08-15 queried all
+four default refs and complete tag refs once more. Apache remained
+`bef0d29155ce`, MIT remained `590b4a58fe17`, AutoPlayer remained
+`cc6bdc86a13e` and Rust remained `525c7ecfc2b`; no donor or release delta
+changed the exact numeric `600001`/`600002` classification or 120-second delay.
+The new durable deadline is therefore a faithful Core persistence of existing
+donor evidence rather than a newly inferred retry policy.
