@@ -1133,9 +1133,13 @@ hash to the fresh Task fingerprint, hierarchy and topic. Native HTTP then refres
 incomplete available `tab_type=task` progress leaf before sending the donor's
 empty `submitType=2` Group mutation once. Its accepted version is a separate
 receipt and only fresh exact Group progress can confirm completion.
-Cross-Provider registration still requires a shared immutable discussion
-Draft/attempt contract so both mutations and their independent readbacks remain
-durably recoverable without ambiguous replay. External media-source
+Core's fixed mutation topology can now represent the two stable discussion
+ordinals: the reply request is known at step one, and step two may bind its
+fresh completion request only after exact reply readback verifies step one.
+Cross-Provider registration still requires a scheduling-time immutable
+discussion Draft/artifact/capability binding the zeroizing content to that
+topology so both mutations and their independent readbacks remain durably
+recoverable without ambiguous replay. External media-source
 orchestration still requires the shared downloader/model contracts; ordinary
 QuestionSession persistence, session-aware AnswerResolve and ordinary
 answer-bearing prepared SubmissionExecute handoff are now integrated. The
@@ -1209,6 +1213,16 @@ changed modules fail closed. The shared artifact lifecycle, durable attempt and
 one compound Draft that owns both slots remain active Core integration work. A
 grant, object-store response, accepted final receipt or even exact two-module
 readback alone is never Group completion evidence.
+
+Core's fixed mutation topology and issue-time dynamic request digest now cover
+the structural shape of staged upload, but its dependency gate intentionally
+requires an independently verified predecessor. The Qiniu POST response
+repeating the exact key is the mutation receipt itself; no audited donor route
+performs a separate object-store readback before final UAI submission.
+Asterism therefore does not record that response again as verification merely
+to satisfy the DAG. Upload integration needs a receipt-dependent step contract
+matching this protocol (or new independent donor evidence), in addition to the
+existing Artifact/Draft capability.
 
 The donor's `basic-scoop-content,oral-sentence` path is likewise atomic rather
 than a normal matching submit followed by an unrelated oral completion. The
