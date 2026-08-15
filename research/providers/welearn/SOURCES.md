@@ -168,6 +168,15 @@ an explicitly rejected atomic mutation until acceptance, so existing WELearn
 phase semantics remain unchanged. The new ordered child/artifact/sequence
 projection is only Asterism dispatch-planning composition over already-audited
 facts and adds no donor route, setting or result claim.
+The Core same-attempt recovery-snapshot integration checkpoint repeated all
+three default-head queries and the Fanyuchang tag after shared commit
+`d66ebb6`. The full revisions remain `afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2`,
+`bd160e91d0452b8bf483087fbdd3bdd58d855e13` and
+`85918caaccd93b73b1e41fe537b4e9a11377b759`, with `v4.0.0` still at
+`5d1df60cb0078f70679be2a22f2afbf1ef4fa88a`. The snapshot adapter only binds
+already-audited WELearn artifacts, sequence records, observations and fresh
+read-only proof; it adds no donor protocol behavior and supplies no mutation
+replay authority.
 
 ## Source selection
 

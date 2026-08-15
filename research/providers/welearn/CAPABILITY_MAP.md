@@ -219,11 +219,16 @@ child-bound sequence plan plus contiguous generic issue/receipt records and the
 optional Core observation, rejects operation/ordinal/plan drift, and reuses the
 same fresh-CMI recovery proof. A recovery-only coordinator validates those
 records before discovery, fresh-rebinds the prepared child before the final CMI
-read, and selects the child profile's exact current/legacy endpoint. Core still
-loads same-attempt records and stores the returned verification. Its durable
-entry jointly restores encoded parent authority, complete batch snapshot and
-child artifact before the same record/fresh-read path. Neither path resumes or
-replays mutation.
+read, and selects the child profile's exact current/legacy endpoint. Core now
+loads artifact, plan, records and observations from one attempt into an
+immutable recovery snapshot. WELearn's snapshot adapter requires a complete
+receipt set, exact donor observation shape and only an exact accepted-final-save
+stored verification; ambiguity or substitution stops before fresh I/O. Its
+durable entry takes the child artifact from that snapshot and jointly restores
+encoded parent authority plus complete batch snapshot before the same
+record/fresh-read path. Composite registration/dispatch and returned
+verification persistence remain Core work; neither path resumes or replays
+mutation.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. Both the

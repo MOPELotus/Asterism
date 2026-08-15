@@ -2,7 +2,8 @@ use std::{fmt, sync::Arc};
 
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
-    ExecutionMutationSequencePlan, ProviderContext, ProviderError, ProviderErrorKind,
+    ExecutionMutationSequencePlan, ExecutionMutationSequenceRecoverySnapshot,
+    ExecutionMutationVerification, ProviderContext, ProviderError, ProviderErrorKind,
     ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderResult,
     TaskDetailCapability,
 };
@@ -118,6 +119,48 @@ impl WellearnAtomicDurationCompletionRecovery {
         )
     }
 
+    /// Fresh-rebinds and verifies one prepared child from Core's immutable
+    /// same-attempt sequence snapshot.
+    ///
+    /// The snapshot is fully restored before Task discovery. An ambiguous
+    /// final issue, a foreign artifact/plan/observation or a misplaced durable
+    /// verification therefore stops before any fresh I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for context, prepared-child, snapshot,
+    /// fresh-detail, CMI or exact-goal drift.
+    pub async fn verify_prepared_snapshot(
+        &self,
+        context: &ProviderContext,
+        prepared: &WellearnPreparedAtomicChildPlan,
+        snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+        if context.provider_id != self.metadata.id {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn atomic recovery received a foreign Provider context",
+            ));
+        }
+        prepared.validate()?;
+        let child = prepared.child_plan();
+        let (receipts, pre_final, stored_verification) =
+            restore_recovery_sequence_snapshot(child, snapshot)?;
+        let detail = self
+            .details
+            .task_detail(context, child.remote_task_id())
+            .await?;
+        prepared.validate_fresh_detail(&detail)?;
+        let fresh_final = self.transport.read_atomic_final(context, child).await?;
+        verify_restored_recovery_snapshot(
+            child,
+            &receipts,
+            pre_final.as_ref(),
+            stored_verification,
+            &fresh_final,
+        )
+    }
+
     /// Restores all Provider-private durable artifacts together, then enters
     /// the same record-first, fresh-rebind, read-only verification path.
     ///
@@ -154,6 +197,29 @@ impl WellearnAtomicDurationCompletionRecovery {
             observation,
         )
         .await
+    }
+
+    /// Jointly restores parent, batch and the snapshot's exact child artifact,
+    /// then enters the same snapshot-first read-only verification path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for any parent, batch, child, snapshot,
+    /// fresh-detail or final-CMI inconsistency.
+    pub async fn verify_durable_snapshot(
+        &self,
+        context: &ProviderContext,
+        encoded_parent_authority: &[u8],
+        encoded_batch_snapshot: &[u8],
+        snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+        let prepared = WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+            encoded_parent_authority,
+            encoded_batch_snapshot,
+            snapshot.artifact(),
+        )?;
+        self.verify_prepared_snapshot(context, &prepared, snapshot)
+            .await
     }
 }
 
@@ -430,6 +496,100 @@ pub fn verify_atomic_duration_completion_recovery_from_sequence_records(
     verify_atomic_duration_completion_recovery(child, &receipts, pre_final.as_ref(), fresh_final)
 }
 
+/// Verifies one atomic child from Core's complete same-attempt recovery
+/// snapshot and a new final CMI read.
+///
+/// This adapter requires the exact child artifact and sequence, a receipt for
+/// every issued mutation, the donor-specific observation shape and at most one
+/// already-persisted verification on the accepted final save. It never issues
+/// or resumes a mutation.
+///
+/// # Errors
+///
+/// Returns a typed error for artifact, plan, record, observation, persisted
+/// verification or final-goal drift.
+pub fn verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+    child: &WellearnAtomicChildPlan,
+    snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    fresh_final: &WellearnCmiDocument,
+) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+    let (receipts, pre_final, stored_verification) =
+        restore_recovery_sequence_snapshot(child, snapshot)?;
+    verify_restored_recovery_snapshot(
+        child,
+        &receipts,
+        pre_final.as_ref(),
+        stored_verification,
+        fresh_final,
+    )
+}
+
+fn restore_recovery_sequence_snapshot(
+    child: &WellearnAtomicChildPlan,
+    snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+) -> ProviderResult<(
+    WellearnAtomicDurationCompletionReceipts,
+    Option<WellearnAtomicPreFinalObservation>,
+    Option<ExecutionMutationVerification>,
+)> {
+    child.validate()?;
+    if snapshot.artifact() != &child.to_provider_execution_plan_artifact()? {
+        return Err(invalid_recovery_sequence_records());
+    }
+    let issues = snapshot
+        .records()
+        .iter()
+        .map(|record| record.issue().clone())
+        .collect::<Vec<_>>();
+    let receipts = snapshot
+        .records()
+        .iter()
+        .map(|record| {
+            record
+                .receipt()
+                .ok_or_else(invalid_recovery_sequence_records)
+        })
+        .collect::<ProviderResult<Vec<_>>>()?;
+    let observation = match snapshot.observations() {
+        [] => None,
+        [observation] => Some(observation),
+        _ => return Err(invalid_recovery_sequence_records()),
+    };
+    let (receipts, pre_final) =
+        restore_recovery_sequence_records(child, snapshot.plan(), &issues, &receipts, observation)?;
+    let final_save_ordinal = receipts.final_save_ordinal(child.duration_completion_plan()?)?;
+    let mut stored_verifications = snapshot
+        .records()
+        .iter()
+        .filter_map(asterism_provider_api::ExecutionMutationRecoveryRecord::verification);
+    let stored_verification = stored_verifications.next();
+    if stored_verifications.next().is_some()
+        || stored_verification.is_some_and(|verification| {
+            verification.ordinal() != final_save_ordinal || !verification.verified()
+        })
+    {
+        return Err(invalid_recovery_sequence_records());
+    }
+    Ok((receipts, pre_final, stored_verification))
+}
+
+fn verify_restored_recovery_snapshot(
+    child: &WellearnAtomicChildPlan,
+    receipts: &WellearnAtomicDurationCompletionReceipts,
+    pre_final: Option<&WellearnAtomicPreFinalObservation>,
+    stored_verification: Option<ExecutionMutationVerification>,
+    fresh_final: &WellearnCmiDocument,
+) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+    let verification =
+        verify_atomic_duration_completion_recovery(child, receipts, pre_final, fresh_final)?;
+    if stored_verification.is_some()
+        && verification.to_execution_mutation_verification()? != stored_verification
+    {
+        return Err(invalid_recovery_sequence_records());
+    }
+    Ok(verification)
+}
+
 fn restore_recovery_sequence_records(
     child: &WellearnAtomicChildPlan,
     sequence_plan: &ExecutionMutationSequencePlan,
@@ -667,6 +827,7 @@ mod tests {
     use std::sync::Mutex;
 
     use asterism_domain::{ProviderAccountId, ProviderId};
+    use asterism_provider_api::ExecutionMutationRecoveryRecord;
 
     use super::*;
 
@@ -1015,6 +1176,166 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sequence_snapshot_restores_exact_fanyuchang_and_auto_evidence() {
+        let fanyuchang = fanyuchang_child(3);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            &fanyuchang,
+            &cmi("incomplete", "0.25", "20", Some("15"), Some("45")),
+        )
+        .unwrap()
+        .to_sequence_observation()
+        .unwrap();
+        let records = [
+            (WellearnAtomicMutationKind::Start, true),
+            (WellearnAtomicMutationKind::CounterKeep, true),
+            (WellearnAtomicMutationKind::CounterKeep, false),
+            (WellearnAtomicMutationKind::Set, true),
+            (WellearnAtomicMutationKind::Save, true),
+        ];
+        let snapshot = sequence_snapshot(&fanyuchang, &records, Some(observation.clone()), None);
+        let final_cmi = cmi("completed", "1", "100", Some("15"), Some("45"));
+        let verification = verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+            &fanyuchang,
+            &snapshot,
+            &final_cmi,
+        )
+        .unwrap();
+        assert_eq!(verification.final_save_ordinal(), 5);
+
+        let persisted = verification
+            .to_execution_mutation_verification()
+            .unwrap()
+            .unwrap();
+        let snapshot = sequence_snapshot(&fanyuchang, &records, Some(observation), Some(persisted));
+        assert_eq!(
+            verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+                &fanyuchang,
+                &snapshot,
+                &final_cmi,
+            )
+            .unwrap(),
+            verification
+        );
+
+        let auto = auto_child(120);
+        let auto_snapshot = sequence_snapshot(
+            &auto,
+            &[
+                (WellearnAtomicMutationKind::Start, false),
+                (WellearnAtomicMutationKind::ImplicitKeep, true),
+                (WellearnAtomicMutationKind::ImplicitKeep, false),
+                (WellearnAtomicMutationKind::Save, true),
+            ],
+            None,
+            None,
+        );
+        assert_eq!(
+            verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+                &auto,
+                &auto_snapshot,
+                &cmi("completed", "1", "0", Some("87"), Some("120")),
+            )
+            .unwrap()
+            .final_save_ordinal(),
+            4
+        );
+    }
+
+    #[test]
+    fn sequence_snapshot_rejects_ambiguity_substitution_and_verification_drift() {
+        let child = fanyuchang_child(1);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            &child,
+            &cmi("incomplete", "0.25", "20", Some("15"), Some("45")),
+        )
+        .unwrap()
+        .to_sequence_observation()
+        .unwrap();
+        let records = [
+            (WellearnAtomicMutationKind::Start, true),
+            (WellearnAtomicMutationKind::CounterKeep, false),
+            (WellearnAtomicMutationKind::Set, true),
+            (WellearnAtomicMutationKind::Save, true),
+        ];
+        let final_cmi = cmi("completed", "1", "100", Some("15"), Some("45"));
+
+        let foreign = fanyuchang_child(2);
+        let foreign_snapshot =
+            sequence_snapshot(&foreign, &records, Some(observation.clone()), None);
+        assert!(
+            verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+                &child,
+                &foreign_snapshot,
+                &final_cmi,
+            )
+            .is_err()
+        );
+
+        let early_verification = ExecutionMutationVerification::new(1, [9; 32], true).unwrap();
+        let early_snapshot = sequence_snapshot(
+            &child,
+            &records,
+            Some(observation.clone()),
+            Some(early_verification),
+        );
+        assert!(
+            verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+                &child,
+                &early_snapshot,
+                &final_cmi,
+            )
+            .is_err()
+        );
+
+        let drifted_verification = ExecutionMutationVerification::new(4, [8; 32], true).unwrap();
+        let drifted_snapshot = sequence_snapshot(
+            &child,
+            &records,
+            Some(observation.clone()),
+            Some(drifted_verification),
+        );
+        assert!(
+            verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+                &child,
+                &drifted_snapshot,
+                &final_cmi,
+            )
+            .is_err()
+        );
+
+        let artifact = child.to_provider_execution_plan_artifact().unwrap();
+        let plan = build_atomic_mutation_sequence_plan(&child, &artifact).unwrap();
+        let (issues, receipts) = sequence_records(&records);
+        let final_index = receipts.len() - 1;
+        let ambiguous_records = issues
+            .into_iter()
+            .zip(receipts)
+            .enumerate()
+            .map(|(index, (issue, receipt))| {
+                ExecutionMutationRecoveryRecord::try_new(
+                    issue,
+                    (index != final_index).then_some(receipt),
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        let ambiguous = ExecutionMutationSequenceRecoverySnapshot::try_new(
+            artifact,
+            plan,
+            ambiguous_records,
+            vec![observation],
+        )
+        .unwrap();
+        assert!(
+            verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+                &child, &ambiguous, &final_cmi,
+            )
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn recovery_read_transport_uses_each_atomic_final_profile() {
         let transport = RecoveryResourceFixture::default();
@@ -1084,6 +1405,34 @@ mod tests {
                 )
             })
             .unzip()
+    }
+
+    fn sequence_snapshot(
+        child: &WellearnAtomicChildPlan,
+        records: &[(WellearnAtomicMutationKind, bool)],
+        observation: Option<ExecutionMutationSequenceObservation>,
+        verification: Option<ExecutionMutationVerification>,
+    ) -> ExecutionMutationSequenceRecoverySnapshot {
+        let artifact = child.to_provider_execution_plan_artifact().unwrap();
+        let plan = build_atomic_mutation_sequence_plan(child, &artifact).unwrap();
+        let (issues, receipts) = sequence_records(records);
+        let recovery_records = issues
+            .into_iter()
+            .zip(receipts)
+            .map(|(issue, receipt)| {
+                let record_verification =
+                    verification.filter(|candidate| candidate.ordinal() == issue.ordinal());
+                ExecutionMutationRecoveryRecord::try_new(issue, Some(receipt), record_verification)
+                    .unwrap()
+            })
+            .collect();
+        ExecutionMutationSequenceRecoverySnapshot::try_new(
+            artifact,
+            plan,
+            recovery_records,
+            observation.into_iter().collect(),
+        )
+        .unwrap()
     }
 
     fn cmi(

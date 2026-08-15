@@ -643,6 +643,17 @@ Provider proof above; request/response digests remain opaque and redacted. The
 caller must load every value from the same attempt. The adapter performs no
 storage query, network mutation, resume or replay.
 
+Core's `ExecutionMutationSequenceRecoverySnapshot` now supplies that
+same-attempt envelope for registered executions: exact child artifact,
+artifact-bound plan, ordered issue/optional-receipt/optional-verification
+records and phase observations. WELearn's snapshot adapter narrows it to a
+completed donor lifecycle. Every issue must have a receipt; Fanyuchang must
+have exactly its phase-3 observation and Auto none; any stored verification
+must be unique, true, attached to the accepted final save and byte-for-byte
+equal to the new fresh-CMI proof. An ambiguous final issue or cross-child
+artifact/plan fails before fresh I/O. The adapter remains read-only and never
+turns a snapshot into mutation authority.
+
 `WellearnAtomicDurationCompletionRecovery` adds the Provider read boundary
 around that adapter. It rejects invalid durable records before discovery,
 fresh-rebinds the complete prepared batch child, and rejects Task identity,
@@ -656,6 +667,12 @@ complete batch snapshot and exact child artifact alongside the sequence records,
 jointly restores all Provider-private values first, and then enters the same
 record-first/fresh-rebind path. Malformed or cross-attempt artifacts therefore
 cannot reach Task discovery or CMI I/O.
+The snapshot-native `verify_prepared_snapshot` and `verify_durable_snapshot`
+entries remove those parallel record arguments. The durable form takes its
+child artifact only from the Core snapshot, jointly restores parent/batch/child,
+then applies the same snapshot-first, fresh-rebind and read-only final-CMI
+proof. These methods are still outside capability registration until Core owns
+WELearn composite parent/child creation and dispatch.
 
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 The child-artifact-bound conditional sequence freezes the only legal operation

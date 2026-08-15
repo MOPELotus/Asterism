@@ -48,6 +48,7 @@ pub use atomic_recovery::{
     WellearnAtomicDurationCompletionRecoveryTransport, WellearnAtomicPreFinalObservation,
     verify_atomic_duration_completion_recovery,
     verify_atomic_duration_completion_recovery_from_sequence_records,
+    verify_atomic_duration_completion_recovery_from_sequence_snapshot,
 };
 pub use atomic_sequence::{
     WELLEARN_ATOMIC_DURATION_COMPLETION_SEQUENCE_TYPE, build_atomic_mutation_sequence_plan,
