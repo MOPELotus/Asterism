@@ -4812,3 +4812,19 @@ detected frozen-plan corruption stays a Core validation error and is not
 misattributed as Provider evidence. Coverage proves a typed
 BrowserBridge/UnknownResultShape is retained after exactly one Provider call
 while no workflow transition reaches the commit boundary.
+
+## Two-hundred-and-sixty-second Phase 0 slice
+
+Capture-based authentication bootstrap now records a Provider-supplied
+credential-validation shape under the bootstrap session and request
+correlation. The public bootstrap submission route injects the shared SQLite
+repository. The observation has no ProviderAccount or Execution provenance
+because an AddAccount candidate has not crossed the atomic account/secret
+commit boundary yet.
+
+Provider rejection and drift deliberately leave the bootstrap session Claimed
+and its access token usable for another bounded Capture submission. Recording a
+shape neither consumes that claim nor creates the candidate ProviderAccount,
+secret blob or successful binding fact. Coverage proves an
+Authentication/FieldDrift observation is durable while the claimed state is
+preserved and both account and secret tables remain empty.

@@ -335,3 +335,7 @@ BrowserBridge workflow observations are likewise diagnostic only. They may
 retain the shape of a failed Provider interpretation of an exact recovered
 result, but cannot create the next browser command, commit an intermediate or
 terminal transition, verify remote completion or contribute answer evidence.
+Capture bootstrap observation precedes the first successful account binding.
+It therefore cannot create a ProviderAccount, trigger bootstrap harvesting,
+store a credential or add evidence to the owner corpus; only the existing
+atomic successful bootstrap commit may establish those downstream facts.

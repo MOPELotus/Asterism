@@ -5,26 +5,30 @@ use asterism_domain::{
     AuthBootstrapPurpose, AuthBootstrapSession, AuthBootstrapSessionId, AuthState, ProviderAccount,
     ProviderAccountId, Timestamp,
 };
-use asterism_provider_api::{CaptureRecipe, ProviderRegistry, SessionStatus};
+use asterism_provider_api::{CaptureRecipe, ProviderError, ProviderRegistry, SessionStatus};
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretActor, SecretStoreError, SecretString,
 };
 use asterism_storage::{
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
-    AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, ProviderAccountRepository,
-    StorageError,
+    AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository,
+    ProtocolObservationRepository, ProviderAccountRepository, StorageError,
 };
 use chrono::Utc;
 
 use crate::credential::{CredentialProvisionError, validate_candidate_for_account};
+use crate::protocol_observation::{
+    ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AuthBootstrapCredentialService<A, S, C> {
     registry: Arc<ProviderRegistry>,
     accounts: A,
     sessions: S,
     credentials: C,
     access_tokens: OpaqueTokenService,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<A, S, C> AuthBootstrapCredentialService<A, S, C> {
@@ -46,7 +50,34 @@ impl<A, S, C> AuthBootstrapCredentialService<A, S, C> {
             sessions,
             credentials,
             access_tokens: OpaqueTokenService::new("ast_boot")?,
+            protocol_observations: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<A, S, C> std::fmt::Debug for AuthBootstrapCredentialService<A, S, C> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthBootstrapCredentialService")
+            .field("registry", &self.registry)
+            .field("accounts", &"configured")
+            .field("sessions", &"configured")
+            .field("credentials", &"configured")
+            .field("access_tokens", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -86,14 +117,25 @@ where
         let mut account = self
             .resolve_account(&session, request.display_name, &request.bundle)
             .await?;
-        let (bundle, status) = validate_candidate_for_account(
+        let validation = validate_candidate_for_account(
             self.registry.as_ref(),
             &account,
             request.bundle,
             None,
             &access,
         )
-        .await?;
+        .await;
+        let (bundle, status) = match validation {
+            Ok(validated) => validated,
+            Err(CredentialProvisionError::Provider(error)) => {
+                self.record_protocol_observation(&session, &access.correlation_id, &error)
+                    .await?;
+                return Err(AuthBootstrapCredentialServiceError::Credential(
+                    CredentialProvisionError::Provider(error),
+                ));
+            }
+            Err(error) => return Err(AuthBootstrapCredentialServiceError::Credential(error)),
+        };
         let completed_at = Utc::now();
         if session.purpose == AuthBootstrapPurpose::AddAccount {
             account.created_at = completed_at;
@@ -165,6 +207,35 @@ where
                     .ok_or(AuthBootstrapCredentialServiceError::AccountBindingConflict)
             }
         }
+    }
+
+    async fn record_protocol_observation(
+        &self,
+        session: &AuthBootstrapSession,
+        correlation_id: &str,
+        error: &ProviderError,
+    ) -> Result<(), AuthBootstrapCredentialServiceError> {
+        let occurrence_scope = format!(
+            "auth-bootstrap:{}:credential-validation:{correlation_id}",
+            session.id
+        );
+        record_provider_protocol_observation(
+            self.protocol_observations.as_deref(),
+            &session.provider_id,
+            None,
+            &occurrence_scope,
+            error,
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| match error {
+            ProviderProtocolObservationRecordError::Invalid => {
+                AuthBootstrapCredentialServiceError::InvalidProtocolObservation
+            }
+            ProviderProtocolObservationRecordError::Storage(error) => {
+                AuthBootstrapCredentialServiceError::Storage(error)
+            }
+        })
     }
 }
 
@@ -251,6 +322,8 @@ pub enum AuthBootstrapCredentialServiceError {
     AccountBindingConflict,
     #[error("captured credential does not match the session's frozen Provider recipe")]
     RecipeMismatch,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error(transparent)]
     Credential(#[from] CredentialProvisionError),
     #[error(transparent)]
@@ -264,20 +337,21 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use asterism_domain::{
-        AuditActor, AuthBootstrapState, AuthMethod, ProviderId, Role, SessionKind,
+        AuditActor, AuthBootstrapState, AuthMethod, ProtocolObservationKind, ProtocolSurface,
+        ProviderId, Role, SessionKind,
     };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureRecipe,
         CaptureValueSource, CredentialValidation, ProviderAuthContext, ProviderCapability,
-        ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
-        VerificationLevel,
+        ProviderContext, ProviderEntry, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
+        ProviderResult, VerificationLevel,
     };
     use asterism_secrets::{
         CredentialAcquisition, CredentialField, SecretKey, SecretPurpose, SecretValue,
     };
     use asterism_storage::{
         Database, SecretKeyring, SqliteAuthBootstrapSessionRepository,
-        SqliteProviderAccountRepository, SqliteSecretStore,
+        SqliteProtocolObservationRepository, SqliteProviderAccountRepository, SqliteSecretStore,
     };
     use async_trait::async_trait;
     use chrono::Duration;
@@ -287,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_provider_status_creates_account_and_completes_bootstrap() {
-        let fixture = fixture(true).await;
+        let fixture = fixture(true, false).await;
         let (session_id, access_token) =
             claimed_add_session(&fixture, "bootstrap-engine-valid").await;
         let access_plaintext = access_token.expose_secret().to_owned();
@@ -333,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_rejection_leaves_claimed_session_retryable_without_secret_writes() {
-        let fixture = fixture(false).await;
+        let fixture = fixture(false, false).await;
         let (session_id, access_token) =
             claimed_add_session(&fixture, "bootstrap-engine-rejected").await;
         let access_plaintext = access_token.expose_secret().to_owned();
@@ -371,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn frozen_recipe_rejects_shape_drift_before_provider_or_secret_writes() {
-        let fixture = fixture(true).await;
+        let fixture = fixture(true, false).await;
         let (session_id, access_token) =
             claimed_add_session(&fixture, "bootstrap-engine-recipe-drift").await;
         let mut bundle = credential_bundle(b"captured-cookie");
@@ -396,6 +470,53 @@ mod tests {
         assert_eq!(table_count(&fixture.database, "secret_blobs").await, 0);
     }
 
+    #[tokio::test]
+    async fn provider_drift_is_observed_without_consuming_claim_or_writing_secrets() {
+        let fixture = fixture(true, true).await;
+        let (session_id, access_token) =
+            claimed_add_session(&fixture, "bootstrap-engine-provider-drift").await;
+        let access_plaintext = access_token.expose_secret().to_owned();
+        let error = fixture
+            .credentials
+            .submit(AuthBootstrapCredentialRequest {
+                session_id,
+                access_token,
+                display_name: Some("primary".to_owned()),
+                bundle: credential_bundle(b"uncommitted-cookie"),
+                submitted_at: Utc::now(),
+                correlation_id: "bootstrap-engine-provider-drift-submit".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthBootstrapCredentialServiceError::Credential(
+                CredentialProvisionError::Provider(error)
+            ) if error.kind == ProviderErrorKind::ProtocolDrift
+        ));
+        let session = fixture
+            .bootstrap
+            .authenticate_access(crate::AuthBootstrapAccessRequest {
+                session_id,
+                access_token: SecretString::new(access_plaintext),
+                authenticated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(session.state, AuthBootstrapState::Claimed);
+        assert_eq!(table_count(&fixture.database, "provider_accounts").await, 0);
+        assert_eq!(table_count(&fixture.database, "secret_blobs").await, 0);
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            ("authentication".to_owned(), "field_drift".to_owned(), None,)
+        );
+    }
+
     struct Fixture {
         database: Database,
         owner: asterism_domain::UserId,
@@ -407,7 +528,7 @@ mod tests {
         >,
     }
 
-    async fn fixture(valid: bool) -> Fixture {
+    async fn fixture(valid: bool, protocol_drift: bool) -> Fixture {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
         let owner = asterism_domain::UserId::new();
@@ -429,6 +550,7 @@ mod tests {
         let authentication = Arc::new(TestAuthentication {
             metadata: metadata.clone(),
             valid,
+            protocol_drift,
         });
         let mut registry = ProviderRegistry::default();
         registry
@@ -451,11 +573,14 @@ mod tests {
             ),
         );
         Fixture {
-            database,
+            database: database.clone(),
             owner,
             bootstrap: AuthBootstrapService::new(sessions.clone()).unwrap(),
             credentials: AuthBootstrapCredentialService::new(registry, accounts, sessions, store)
-                .unwrap(),
+                .unwrap()
+                .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+                    database.clone(),
+                ))),
         }
     }
 
@@ -535,6 +660,7 @@ mod tests {
     struct TestAuthentication {
         metadata: ProviderMetadata,
         valid: bool,
+        protocol_drift: bool,
     }
 
     impl ProviderIdentity for TestAuthentication {
@@ -580,6 +706,18 @@ mod tests {
         ) -> ProviderResult<CredentialValidation> {
             assert_eq!(context.provider_id, credential.provider_id);
             assert!(context.auth_session_id.is_none());
+            if self.protocol_drift {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "captured credential status changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::Authentication,
+                    ProtocolObservationKind::FieldDrift,
+                    serde_json::json!({"document": "session_status", "missing": "valid"}),
+                )
+                .unwrap());
+            }
             Ok(CredentialValidation::accepted(SessionStatus {
                 valid: self.valid,
                 kind: credential.session_kind,

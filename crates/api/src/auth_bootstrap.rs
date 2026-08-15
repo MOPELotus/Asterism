@@ -1,4 +1,4 @@
-use std::{fmt, net::SocketAddr, str::FromStr};
+use std::{fmt, net::SocketAddr, str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AuthBootstrapClientEvent, AuthBootstrapClientEventKind, AuthBootstrapPurpose,
@@ -18,7 +18,8 @@ use asterism_secrets::{
 };
 use asterism_storage::{
     AuthBootstrapSessionRepository, ProviderAccountRepository,
-    SqliteAuthBootstrapSessionRepository, SqliteProviderAccountRepository,
+    SqliteAuthBootstrapSessionRepository, SqliteProtocolObservationRepository,
+    SqliteProviderAccountRepository,
 };
 use axum::{
     Extension, Json,
@@ -248,10 +249,13 @@ pub(super) async fn submit_auth_bootstrap_credential(
     let accepted = AuthBootstrapCredentialService::new(
         state.providers,
         SqliteProviderAccountRepository::new(state.database.clone()),
-        SqliteAuthBootstrapSessionRepository::new(state.database),
+        SqliteAuthBootstrapSessionRepository::new(state.database.clone()),
         secret_store,
     )
     .map_err(ApiError::internal)?
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .submit(AuthBootstrapCredentialRequest {
         session_id,
         access_token,
@@ -421,6 +425,10 @@ fn map_bootstrap_credential_error(error: AuthBootstrapCredentialServiceError) ->
         AuthBootstrapCredentialServiceError::RecipeMismatch => ApiError::conflict(
             "capture_recipe_mismatch",
             "the captured credential does not match the Provider recipe frozen for this session",
+        ),
+        AuthBootstrapCredentialServiceError::InvalidProtocolObservation => ApiError::bad_gateway(
+            "provider_authentication_invalid",
+            "the Provider returned inconsistent authentication data",
         ),
         AuthBootstrapCredentialServiceError::Credential(error) => {
             crate::account::map_credential_error(error)
