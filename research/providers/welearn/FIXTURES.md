@@ -227,29 +227,31 @@ only structural field names, response codes and bounded placeholder shapes.
   legacy and atomic-final wire profiles. Cross-donor combinations fail both at
   TaskExecution preparation and the native transport boundary before I/O.
 - Atomic duration-completion plan tests derive each complete profile from one
-  profile discriminator and frozen target, accept Auto's zero-second floor but
-  reject current Fanyuchang zero, enforce the shared 19,800-second ceiling, and
+  profile discriminator and frozen target, accept both evidenced zero-second
+  shapes, enforce the shared 19,800-second ceiling, and
   reject restored profile/cadence/protocol/score/CMI/write-family drift. These
   are pure plan tests and do not claim persistence, scheduling or mutation
   authority.
 - Atomic combined-document tests keep CMI evidence separate from ordered
   mutation receipts. Current-donor fixtures require post-duration CMI, an
   accepted start, one set/save slot and either every keep or one terminal
-  rejection; Auto fixtures require exactly one keep per full minute, no
-  post-duration/set slot and accept an empty zero-target keep list. Explicit
+  rejection. A current zero-target fixture proves start plus fresh CMI and
+  set/save are still required with an empty keep list. Auto fixtures require
+  exactly one keep per full minute, no post-duration/set slot and accept an
+  empty zero-target keep list. Explicit
   `false` receipts remain valid diagnostics, while missing, extra or
   post-rejection mutations fail before CMI parsing. No execution entry is
   fixture-claimed by these value tests.
 - Atomic child-plan tests materialize current Fanyuchang only with an explicit
-  frozen nonzero deterministic target, take modular Auto targets only from the
-  exact validated batch entry, preserve Auto's zero equal-floor child, and
+  frozen bounded deterministic target including zero, take modular Auto targets
+  only from the exact validated batch entry, preserve Auto's zero equal-floor child, and
   reject every singleton flow. Bounded JSON round trips retain Course/Task and
   ordinal bindings; unknown fields, version drift, cross-flow profiles,
   missing/extra target authority and oversized artifacts fail closed.
 - Core-artifact adapter tests freeze `welearn.atomic-child.v1`, require provider
   `welearn`, prove the JSON payload contains only the eight bounded plan fields,
-  preserve Auto's zero target, and verify Debug redaction. Foreign provider or
-  type, another valid ordinal, wrong frozen target and drifted batch facts all
+  preserve both profiles' zero target, and verify Debug redaction. Foreign
+  provider or type, another valid ordinal, wrong frozen target and drifted batch facts all
   fail before a child plan can be restored.
 - Fresh atomic-planning fixtures require explicit parent Course, atomic flow,
   ordered Unit selection, expected child and exact target authority. They prove

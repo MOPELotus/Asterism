@@ -436,9 +436,9 @@ impl WellearnAtomicDurationCompletionPlan {
     /// # Errors
     ///
     /// Returns an internal error when the target is outside the profile's
-    /// evidenced bounds. Modular Auto deliberately accepts a zero-second
-    /// floor allocation, while current Fanyuchang requires at least one
-    /// client-counter second.
+    /// evidenced bounds. Both atomic profiles accept zero: modular Auto may
+    /// derive a zero-second floor allocation, while current Fanyuchang accepts
+    /// a literal `0` input and still performs start plus final completion.
     pub fn try_new(
         profile: WellearnAtomicCompletionProfile,
         target_seconds: u64,
@@ -533,7 +533,7 @@ impl WellearnAtomicDurationCompletionPlan {
             complete_profile,
             (
                 FanyuchangFreshSetSave100,
-                1..=MAX_DURATION_REPORT_SECONDS,
+                0..=MAX_DURATION_REPORT_SECONDS,
                 1,
                 ClientCounter,
                 100,
@@ -650,13 +650,13 @@ mod tests {
     }
 
     #[test]
-    fn target_bounds_preserve_auto_zero_floor_only() {
+    fn target_bounds_preserve_both_evidenced_zero_shapes() {
         assert!(
             WellearnAtomicDurationCompletionPlan::try_new(
                 WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
                 0,
             )
-            .is_err()
+            .is_ok()
         );
         assert!(
             WellearnAtomicDurationCompletionPlan::try_new(
@@ -745,6 +745,34 @@ mod tests {
         assert_eq!(documents.receipts().set_accepted(), Some(false));
         assert!(!documents.receipts().save_accepted());
         documents.validate_for_plan(plan).unwrap();
+    }
+
+    #[test]
+    fn current_zero_target_still_requires_start_completion_and_fresh_readback() {
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+            0,
+        )
+        .unwrap();
+        let documents = WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            cmi(),
+            Some(snapshot_cmi(
+                "incomplete",
+                "0.25",
+                "20",
+                Some("0"),
+                Some("0"),
+            )),
+            snapshot_cmi("completed", "1", "100", Some("0"), Some("0")),
+            WellearnAtomicDurationCompletionReceipts::new(true, Vec::new(), Some(true), true),
+        )
+        .unwrap();
+
+        assert!(documents.receipts().heartbeat_acceptances().is_empty());
+        let verification = verify_atomic_duration_completion(plan, &documents).unwrap();
+        assert_eq!(verification.score_percent(), 100);
+        assert_eq!(verification.time_preservation_verified(), Some(true));
     }
 
     #[test]

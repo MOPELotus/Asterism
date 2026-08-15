@@ -474,8 +474,10 @@ The Provider-owned `WellearnAtomicDurationCompletionPlan` is the typed wire
 payload for that authority. Its constructor derives all fields from one
 `WellearnAtomicCompletionProfile` plus the frozen target, and its validator
 rechecks the complete tuple before any future fresh discovery or mutation.
-Current Fanyuchang permits `1..=19,800` seconds and binds client-counter cadence
-1 to its score-100 fresh-time JSON set plus one current-route save. Modular Auto
+Current Fanyuchang permits `0..=19,800` seconds and binds client-counter cadence
+1 to its score-100 fresh-time JSON set plus one current-route save. At target
+zero it still starts, fresh-reads and performs the final set/save, with no keep.
+Modular Auto
 permits `0..=19,800` seconds and binds implicit-server cadence 60 to its
 score-0 zero-time interaction-suffix save-only legacy-route final. In
 particular, target zero remains a valid atomic Auto plan even though it is not
@@ -686,7 +688,7 @@ serialization boundary materialized from one exact entry only after the whole
 child remote Task, entry ordinal, flow, atomic execution shape, exact completion
 profile and concrete target. Current Fanyuchang entries intentionally contain
 no aggregate target, so their already-frozen deterministic per-Execution target
-must be supplied explicitly and must be at least one second. Modular Auto takes
+must be supplied explicitly in the bounded `0..=19,800` range. Modular Auto takes
 only the entry's equal-floor target and preserves zero; an external replacement
 target is rejected. Singleton flows cannot produce this payload. Decode repeats
 the schema, size, identity, flow/profile and atomic target validation instead of

@@ -149,9 +149,11 @@ fresh-time set/save versus Auto's score-0 zero-time save-only final.
 `WellearnAtomicDurationCompletionPlan` expands either profile and one frozen
 target into the complete immutable cadence, duration protocol, score, CMI,
 time, write, save-sequence and endpoint/Referer facts, and rejects every
-restored cross-donor mixture. Auto's evidenced equal-floor zero-second target
-is valid only in its atomic profile; current Fanyuchang still requires at least
-one client-counter second. This Provider plan neither persists nor schedules an
+restored cross-donor mixture. Both atomic profiles accept an evidenced zero
+target, but retain different wire behavior: current Fanyuchang still starts,
+fresh-reads and performs its final set/save with no client-counter keeps, while
+Auto performs its start and completion-bearing save with no implicit keeps.
+This Provider plan neither persists nor schedules an
 operation. A separate `WellearnAtomicDurationCompletionDocuments` bundle keeps
 initial, optional post-duration and final CMI evidence apart from ordered
 start/heartbeat/set/save acceptance receipts. Its plan validator requires the
@@ -209,8 +211,9 @@ minute budget, floors one equal per-child share and discards the remainder.
 For atomic entries, `WellearnAtomicChildPlan` now provides a bounded versioned
 Provider-private serialization boundary binding Course/Task/ordinal, exact
 flow, atomic shape, profile and concrete target. It requires an explicitly
-frozen nonzero Fanyuchang target, consumes Auto's entry target including zero,
-and rejects all singleton flows and restored tuple drift. It now converts to
+frozen bounded Fanyuchang target including zero, consumes Auto's entry target
+including zero, and rejects all singleton flows and restored tuple drift. It
+now converts to
 Core's credential-free `welearn.atomic-child.v1` execution-plan artifact under
 the stricter local 1 KiB bound; recovery checks provider/type and fully rebinds
 the payload to the validated batch, expected ordinal and frozen target.

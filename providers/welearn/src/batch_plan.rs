@@ -907,8 +907,9 @@ fn welearn_provider_id() -> ProviderResult<ProviderId> {
 /// Materializes one exact atomic child from a fully validated batch plan.
 ///
 /// Current Fanyuchang has no aggregate entry target, so its deterministic
-/// per-Execution target must already be frozen and supplied. Modular Auto must
-/// use the equal-floor target stored on the exact entry, including zero.
+/// per-Execution target must already be frozen and supplied, including the
+/// donor-evidenced literal zero. Modular Auto must use the equal-floor target
+/// stored on the exact entry, including zero.
 /// Singleton flows never produce this value.
 ///
 /// # Errors
@@ -2442,7 +2443,7 @@ mod tests {
             WellearnBatchFlow::FanyuchangDuration,
             WellearnBatchUnitSelection::Explicit(vec![1, 0]),
             "sco:1001:301",
-            Some(37),
+            Some(0),
             None,
         )
         .unwrap();
@@ -2871,11 +2872,17 @@ mod tests {
     }
 
     #[test]
-    fn atomic_child_plan_rejects_missing_or_invalid_fanyuchang_target() {
+    fn atomic_child_plan_accepts_fanyuchang_zero_and_rejects_invalid_targets() {
         let batch =
             build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
         assert!(materialize_atomic_child_plan(&batch, 0, None).is_err());
-        assert!(materialize_atomic_child_plan(&batch, 0, Some(0)).is_err());
+        let zero = materialize_atomic_child_plan(&batch, 0, Some(0)).unwrap();
+        assert_eq!(zero.target_seconds(), 0);
+        assert_eq!(
+            WellearnAtomicChildPlan::decode_bound(&zero.encode().unwrap(), &batch, 0, Some(0))
+                .unwrap(),
+            zero
+        );
         assert!(
             materialize_atomic_child_plan(
                 &batch,

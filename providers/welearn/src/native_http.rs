@@ -2545,7 +2545,7 @@ mod tests {
     fn atomic_http_profiles_switch_auto_referer_only_for_completion() {
         let current = WellearnAtomicDurationCompletionPlan::try_new(
             crate::WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
-            10,
+            0,
         )
         .unwrap();
         assert_eq!(
