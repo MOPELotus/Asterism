@@ -429,14 +429,18 @@ the sequence to a nonzero u32. It also bounds the Group identity, opaque
 menu/page handles and residence seconds. The secret owner is dropped before
 the safe projection is returned. The resulting enum distinguishes only
 `ScanMenu`, `ClickMenu`, scoped `ScanPage`, `ClickTab`, `ClickTask`,
-`Residence` and `Ping`. Its separate zero-sized read-only DOM profile exposes
+`Residence`, `ResidenceControl` and `Ping`. Its separate zero-sized read-only DOM profile exposes
 only the Provider-compiled discovery families, selector sets, cardinalities,
 popup/video ceilings and iframe/DOM timings. A command cannot provide a CSS
 selector or script; unknown `selector`/`script` fields fail strict schema
-validation even on unit actions. `ResidenceControl` remains outside this DOM
-handler until Core defines active-control cancellation/recovery ownership. This
-boundary decodes and projects only; it performs no DOM operation and accepts
-no helper echo as authority.
+validation even on unit actions. `ResidenceControl` projects only a bounded
+Task handle, exact active leaf budget and typed pause/resume/restart value into
+a selector-free helper-runtime recipe, then accepts only a matching control
+acknowledgement whose active seconds do not exceed that budget. It does not
+issue a concurrent control or mutate the accumulated cursor; Core must still
+define active-exchange cancellation/recovery ownership. This boundary decodes
+and projects only; it performs no DOM operation and accepts no helper echo as
+authority.
 
 That projection now compiles into a second closed typed value before Capture
 interprets any DOM work. `ScanMenu` carries the donor's exact ordered 12-root
@@ -456,21 +460,24 @@ contains only the opaque handle copied from the validated projection and the
 fixed centered-scroll then `mouseover`, `mousedown`, `mouseup`, `click`
 sequence. Residence contains only the projected Task handle/budget/video flag,
 five exact popup selectors, two exact video selectors, the 3-second DOM poll,
-donor 1-second video poll, 16-popup and 30-minute video ceilings. `Ping` has no
-DOM facts. Every field is private and has no raw JSON, script or caller-selector
+donor 1-second video poll, 16-popup and 30-minute video ceilings. Residence
+control has no selectors and carries only its projected handle, budget and
+closed control enum; `Ping` has no DOM facts. Every field is private and has no raw JSON, script or caller-selector
 constructor; validation compares all constants, order and bounds exactly, and
 Debug redacts DOM, handles and budgets. Recipe compilation still executes no
-DOM, and the earlier projection rejection keeps `ResidenceControl` outside the
-boundary.
+DOM. Projecting a control recipe still grants no accumulated-cursor transition
+or exchange-cancellation authority.
 
 The inverse helper boundary also remains typed. The validated projection keeps
 its session/origin/frame/Task/sequence internally but redacts all five from
 Debug. Callers can submit only bounded `MenuScanned`, `PageScanned`,
-`ClickAcknowledged`, `Residence` or `Pong` observations. Menu/Page inputs carry
+`ClickAcknowledged`, `Residence`, `ResidenceControl` or `Pong` observations. Menu/Page inputs carry
 ordered ordinals and rendered labels only; they cannot supply handles. UAI
 reconstructs each opaque handle from the retained binding, rejects missing or
 reordered ordinals and applies the 2048-Micro/64-Tab/128-Task and 512-byte label
-bounds. Click/Ping observations carry no echoed binding. Residence accepts only
+bounds. Click/Ping observations carry no echoed binding. Residence control
+accepts only the observed active seconds and reconstructs the exact Task handle
+and control from the projection. Residence accepts only
 bounded actual active/video/count/cancel/last-label facts and must remain under
 the projected action budget and video policy. Only the matching command action
 can encode each observation.

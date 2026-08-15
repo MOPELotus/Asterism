@@ -1528,6 +1528,11 @@ pub enum UaiBrowserHelperAction {
         seconds: u64,
         play_video: bool,
     },
+    ResidenceControl {
+        task_handle: String,
+        seconds: u64,
+        control: UaiBrowserResidenceControl,
+    },
     Ping,
 }
 
@@ -1560,6 +1565,12 @@ impl fmt::Debug for UaiBrowserHelperAction {
                 .field("task_handle", &"[REDACTED]")
                 .field("seconds", seconds)
                 .field("play_video", play_video)
+                .finish(),
+            Self::ResidenceControl { .. } => formatter
+                .debug_struct("ResidenceControl")
+                .field("task_handle", &"[REDACTED]")
+                .field("budget", &"[REDACTED]")
+                .field("control", &"[BOUND]")
                 .finish(),
             Self::Ping => formatter.write_str("Ping"),
         }
@@ -2061,6 +2072,60 @@ impl fmt::Debug for UaiBrowserHelperResidenceRecipe {
     }
 }
 
+/// Closed helper-runtime control for one already active Residence action.
+///
+/// It contains no selector or script authority. Core still owns cancellation
+/// and exchange sequencing before one of these recipes can be dispatched.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperResidenceControlRecipe {
+    task_handle: String,
+    seconds: u64,
+    control: UaiBrowserResidenceControl,
+}
+
+impl UaiBrowserHelperResidenceControlRecipe {
+    pub fn task_handle(&self) -> &str {
+        &self.task_handle
+    }
+
+    pub const fn seconds(&self) -> u64 {
+        self.seconds
+    }
+
+    pub const fn control(&self) -> &UaiBrowserResidenceControl {
+        &self.control
+    }
+
+    fn validate(&self) -> ProviderResult<()> {
+        if is_browser_page_handle(&self.task_handle)
+            && (1..=28_800).contains(&self.seconds)
+            && !matches!(
+                self.control,
+                UaiBrowserResidenceControl::Restart {
+                    start_micro_ordinal
+                } if start_micro_ordinal >= MAX_DISCOVERED_MICROS
+            )
+        {
+            Ok(())
+        } else {
+            Err(invalid_helper_recipe(
+                "UAI helper Residence-control recipe drifted",
+            ))
+        }
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperResidenceControlRecipe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperResidenceControlRecipe")
+            .field("task_handle", &"[REDACTED]")
+            .field("budget", &"[REDACTED]")
+            .field("control", &"[BOUND]")
+            .finish()
+    }
+}
+
 /// Closed, non-executing DOM recipe compiled from one validated projection.
 #[derive(Clone, Eq, PartialEq)]
 pub enum UaiBrowserHelperDomRecipe {
@@ -2068,6 +2133,7 @@ pub enum UaiBrowserHelperDomRecipe {
     ScanPage(UaiBrowserHelperPageRecipe),
     Click(UaiBrowserHelperClickRecipe),
     Residence(UaiBrowserHelperResidenceRecipe),
+    ResidenceControl(UaiBrowserHelperResidenceControlRecipe),
     Ping,
 }
 
@@ -2085,6 +2151,7 @@ impl UaiBrowserHelperDomRecipe {
             Self::ScanPage(recipe) => recipe.validate(),
             Self::Click(recipe) => recipe.validate(),
             Self::Residence(recipe) => recipe.validate(),
+            Self::ResidenceControl(recipe) => recipe.validate(),
             Self::Ping => Ok(()),
         }
     }
@@ -2097,6 +2164,7 @@ impl fmt::Debug for UaiBrowserHelperDomRecipe {
             Self::ScanPage(_) => formatter.write_str("ScanPage([REDACTED])"),
             Self::Click(_) => formatter.write_str("Click([REDACTED])"),
             Self::Residence(_) => formatter.write_str("Residence([REDACTED])"),
+            Self::ResidenceControl(_) => formatter.write_str("ResidenceControl([REDACTED])"),
             Self::Ping => formatter.write_str("Ping"),
         }
     }
@@ -2303,6 +2371,17 @@ impl UaiBrowserHelperCommandProjection {
                 max_popup_clicks: profile.max_popup_clicks_per_stage(),
                 max_video_seconds: profile.max_video_seconds(),
             }),
+            UaiBrowserHelperAction::ResidenceControl {
+                task_handle,
+                seconds,
+                control,
+            } => UaiBrowserHelperDomRecipe::ResidenceControl(
+                UaiBrowserHelperResidenceControlRecipe {
+                    task_handle: task_handle.clone(),
+                    seconds: *seconds,
+                    control: control.clone(),
+                },
+            ),
             UaiBrowserHelperAction::Ping => UaiBrowserHelperDomRecipe::Ping,
         };
         recipe.validate()?;
@@ -2397,6 +2476,22 @@ impl UaiBrowserHelperCommandProjection {
                     &result,
                 )
             }
+            (
+                UaiBrowserHelperAction::ResidenceControl {
+                    task_handle,
+                    seconds,
+                    control,
+                },
+                UaiBrowserHelperObservation::ResidenceControl(observation),
+            ) if observation.observed_active_seconds <= *seconds => self.encode_event(
+                &nonce,
+                UaiBrowserEvent::ResidenceControlResult {
+                    task_handle: task_handle.clone(),
+                    control: control.clone(),
+                    accepted: true,
+                    observed_active_seconds: observation.observed_active_seconds,
+                },
+            ),
             _ => Err(ProviderError::new(
                 ProviderErrorKind::ProtocolDrift,
                 "UAI helper observation does not match its projected action",
@@ -2625,6 +2720,43 @@ impl fmt::Debug for UaiBrowserHelperResidenceObservation {
     }
 }
 
+/// Bounded active-seconds observation returned after an accepted Residence
+/// pause, resume or restart control.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperResidenceControlObservation {
+    observed_active_seconds: u64,
+}
+
+impl UaiBrowserHelperResidenceControlObservation {
+    /// # Errors
+    ///
+    /// Rejects values above the Provider's absolute Residence ceiling. The
+    /// exact active leaf budget is checked when the observation is encoded.
+    pub fn try_new(observed_active_seconds: u64) -> ProviderResult<Self> {
+        if observed_active_seconds > 28_800 {
+            return Err(invalid_helper_result(
+                "UAI helper Residence-control observation is unbounded",
+            ));
+        }
+        Ok(Self {
+            observed_active_seconds,
+        })
+    }
+
+    pub const fn observed_active_seconds(&self) -> u64 {
+        self.observed_active_seconds
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperResidenceControlObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperResidenceControlObservation")
+            .field("observed_active_seconds", &self.observed_active_seconds)
+            .finish()
+    }
+}
+
 /// Closed typed observation set accepted by the UAI helper encoder.
 #[derive(Clone, Eq, PartialEq)]
 pub enum UaiBrowserHelperObservation {
@@ -2632,6 +2764,7 @@ pub enum UaiBrowserHelperObservation {
     PageScanned(Vec<UaiBrowserHelperPageObservation>),
     ClickAcknowledged,
     Residence(UaiBrowserHelperResidenceObservation),
+    ResidenceControl(UaiBrowserHelperResidenceControlObservation),
     Pong,
 }
 
@@ -2649,6 +2782,10 @@ impl fmt::Debug for UaiBrowserHelperObservation {
             Self::ClickAcknowledged => formatter.write_str("ClickAcknowledged"),
             Self::Residence(observation) => formatter
                 .debug_tuple("Residence")
+                .field(observation)
+                .finish(),
+            Self::ResidenceControl(observation) => formatter
+                .debug_tuple("ResidenceControl")
                 .field(observation)
                 .finish(),
             Self::Pong => formatter.write_str("Pong"),
@@ -3290,6 +3427,25 @@ fn helper_action_from_command(
                 task_handle: task_handle.clone(),
                 seconds: *seconds,
                 play_video: *play_video,
+            })
+        }
+        UaiBrowserCommand::ResidenceControl {
+            task_handle,
+            seconds,
+            control,
+        } if is_browser_page_handle(task_handle)
+            && (1..=28_800).contains(seconds)
+            && !matches!(
+                control,
+                UaiBrowserResidenceControl::Restart {
+                    start_micro_ordinal
+                } if *start_micro_ordinal >= MAX_DISCOVERED_MICROS
+            ) =>
+        {
+            Ok(UaiBrowserHelperAction::ResidenceControl {
+                task_handle: task_handle.clone(),
+                seconds: *seconds,
+                control: control.clone(),
             })
         }
         UaiBrowserCommand::Ping => Ok(UaiBrowserHelperAction::Ping),
@@ -6011,6 +6167,25 @@ mod tests {
                     scope: UaiBrowserPageScope::Task,
                 },
             ),
+            (
+                UaiBrowserCommandEnvelope::residence_control(
+                    &plan,
+                    &binding,
+                    9,
+                    &task,
+                    UaiBrowserResidenceControl::Restart {
+                        start_micro_ordinal: 3,
+                    },
+                )
+                .unwrap(),
+                UaiBrowserHelperAction::ResidenceControl {
+                    task_handle: task.entry().handle.clone(),
+                    seconds: 1_200,
+                    control: UaiBrowserResidenceControl::Restart {
+                        start_micro_ordinal: 3,
+                    },
+                },
+            ),
         ];
 
         for (command, expected_action) in commands {
@@ -6041,6 +6216,9 @@ mod tests {
             | UaiBrowserHelperAction::ClickTask { handle } = &expected_action
             {
                 assert!(!debug.contains(handle));
+            }
+            if let UaiBrowserHelperAction::ResidenceControl { task_handle, .. } = &expected_action {
+                assert!(!debug.contains(task_handle));
             }
 
             let recipe = projected.compile_dom_recipe().unwrap();
@@ -6152,6 +6330,20 @@ mod tests {
                     assert!(!recipe_debug.contains(task_handle));
                     assert!(!recipe_debug.contains(&seconds.to_string()));
                 }
+                (
+                    UaiBrowserHelperAction::ResidenceControl {
+                        task_handle,
+                        seconds,
+                        control,
+                    },
+                    UaiBrowserHelperDomRecipe::ResidenceControl(recipe),
+                ) => {
+                    assert_eq!(recipe.task_handle(), task_handle);
+                    assert_eq!(recipe.seconds(), *seconds);
+                    assert_eq!(recipe.control(), control);
+                    assert!(!recipe_debug.contains(task_handle));
+                    assert!(!recipe_debug.contains(&seconds.to_string()));
+                }
                 (UaiBrowserHelperAction::Ping, UaiBrowserHelperDomRecipe::Ping) => {}
                 _ => panic!("helper DOM recipe does not match projected action"),
             }
@@ -6171,6 +6363,10 @@ mod tests {
                 }
                 UaiBrowserHelperDomRecipe::Residence(recipe) => {
                     recipe.video_poll_millis += 1;
+                    true
+                }
+                UaiBrowserHelperDomRecipe::ResidenceControl(recipe) => {
+                    recipe.seconds = 0;
                     true
                 }
                 UaiBrowserHelperDomRecipe::Ping => false,
@@ -6215,6 +6411,11 @@ mod tests {
                     )
                     .unwrap(),
                 ),
+                UaiBrowserHelperAction::ResidenceControl { .. } => {
+                    UaiBrowserHelperObservation::ResidenceControl(
+                        UaiBrowserHelperResidenceControlObservation::try_new(600).unwrap(),
+                    )
+                }
                 UaiBrowserHelperAction::Ping => UaiBrowserHelperObservation::Pong,
             };
             let encoded = projected.encode_observation(observation).unwrap();
@@ -6273,7 +6474,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "one negative matrix keeps every independent helper dispatch authority visible"
     )]
-    fn helper_projection_rejects_echo_authority_selectors_scripts_and_controls() {
+    fn helper_projection_rejects_echo_authority_selectors_scripts_and_unbounded_actions() {
         let plan = residence_plan(false);
         let session_id = BrowserBridgeSessionId::new();
         let nonce = session_id.to_string();
@@ -6429,27 +6630,6 @@ mod tests {
             )
             .is_err()
         );
-        let control = UaiBrowserCommandEnvelope::residence_control(
-            &plan,
-            &binding,
-            4,
-            &task,
-            UaiBrowserResidenceControl::Pause,
-        )
-        .unwrap();
-        let artifact = control.encode_artifact(&plan).unwrap();
-        let digest = artifact.digest();
-        assert!(
-            UaiBrowserHelperCommandProjection::decode_dispatch(
-                artifact.into_secret_value(),
-                digest,
-                session_id,
-                UCONTENT_ORIGIN,
-                "frame-helper",
-                4,
-            )
-            .is_err()
-        );
         let oversized = SecretValue::new(vec![b'x'; MAX_BROWSER_COMMAND_BYTES + 1]);
         let digest = Sha256::digest(oversized.expose_secret()).into();
         assert!(
@@ -6565,6 +6745,63 @@ mod tests {
         );
         assert!(
             UaiBrowserHelperResidenceObservation::try_new(28_801, 1, 1, 1, 0, false, None,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn helper_control_encoder_rejects_foreign_or_over_budget_observations() {
+        let plan = residence_plan(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &session_id.to_string(),
+            UCONTENT_ORIGIN,
+            "frame-control",
+        )
+        .unwrap();
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            plan.target.task.clone(),
+            true,
+        )
+        .unwrap();
+        let task = plan.select_target_task_entry(&binding, &[task]).unwrap();
+        let command = UaiBrowserCommandEnvelope::residence_control(
+            &plan,
+            &binding,
+            4,
+            &task,
+            UaiBrowserResidenceControl::Pause,
+        )
+        .unwrap();
+        let artifact = command.encode_artifact(&plan).unwrap();
+        let digest = artifact.digest();
+        let projection = project_browser_helper_command(
+            artifact.into_secret_value(),
+            digest,
+            session_id,
+            UCONTENT_ORIGIN,
+            "frame-control",
+            4,
+        )
+        .unwrap();
+        assert!(
+            projection
+                .encode_observation(UaiBrowserHelperObservation::ResidenceControl(
+                    UaiBrowserHelperResidenceControlObservation::try_new(1_201).unwrap(),
+                ))
+                .is_err()
+        );
+        assert!(
+            projection
+                .encode_observation(UaiBrowserHelperObservation::Residence(
+                    UaiBrowserHelperResidenceObservation::try_new(600, 1, 1, 1, 0, true, None,)
+                        .unwrap(),
+                ))
                 .is_err()
         );
     }

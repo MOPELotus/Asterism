@@ -133,11 +133,12 @@ checkpoint, not a Provider completion boundary. It:
     donor selectors, discovery families, action/time/cardinality ceilings,
     master-resolved settings and nonce/frame/origin security. A consuming
     helper projection now validates Core secret bytes/digest plus actual
-    session/origin/frame/sequence and exposes only seven typed audited actions
+    session/origin/frame/sequence and exposes only eight typed audited actions
     with a read-only compile-time DOM profile. It compiles those two authorities
     into a closed action-specific DOM recipe: exact four-family Menu hierarchy,
     scoped Tab/Task active tests, projected-handle-only click flow, bounded
-    popup/video residence or DOM-free Ping. Recipe fields are private,
+    popup/video residence, selector-free bounded Residence control or DOM-free
+    Ping. Recipe fields are private,
     compile-time-only, exactly revalidated and Debug-redacted. A consuming
     cursor-result adapter declares exact closed singleton Intermediate and
     ExecutionTerminal result sets (and no credential result), then binds type,
