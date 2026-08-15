@@ -1,9 +1,15 @@
-use std::{collections::BTreeSet, sync::Mutex};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use asterism_domain::{
-    AnswerBootstrapHarvestId, AuthState, NormalizedAnswer, ProviderAccountId, ProviderId, Question,
-    QuestionId, QuestionKind, QuestionOption, ScheduleId, SubmissionScore, TaskId, Timestamp,
-    UserId,
+    AnswerBootstrapHarvestId, AuthState, NormalizedAnswer, ProtocolObservationKind,
+    ProtocolSurface, ProviderAccountId, ProviderId, Question, QuestionId, QuestionKind,
+    QuestionOption, ScheduleId, SubmissionScore, TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::{
     AnswerHistoryCursor, AnswerHistoryHarvestCapability, AnswerHistoryPage,
@@ -15,7 +21,8 @@ use asterism_provider_api::{
 use asterism_scheduler::ScheduledJobKind;
 use asterism_storage::{
     Database, SqliteAnswerBootstrapHarvestRepository, SqliteAnswerHistoryIngestionRepository,
-    SqliteProviderAccountRepository, SqliteTaskQueryRepository,
+    SqliteProtocolObservationRepository, SqliteProviderAccountRepository,
+    SqliteTaskQueryRepository,
 };
 use async_trait::async_trait;
 use chrono::{Duration, SecondsFormat, Utc};
@@ -28,6 +35,7 @@ struct FakeHistoryProvider {
     metadata: ProviderMetadata,
     observed_at: Timestamp,
     list_cursors: Mutex<Vec<Option<AnswerHistoryCursor>>>,
+    fail_list_with_drift: AtomicBool,
 }
 
 impl ProviderIdentity for FakeHistoryProvider {
@@ -44,6 +52,18 @@ impl AnswerHistoryHarvestCapability for FakeHistoryProvider {
         cursor: Option<&AnswerHistoryCursor>,
     ) -> ProviderResult<AnswerHistoryPage> {
         self.list_cursors.lock().unwrap().push(cursor.cloned());
+        if self.fail_list_with_drift.load(Ordering::Relaxed) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "history result page shape changed",
+            )
+            .try_with_protocol_observation(
+                ProtocolSurface::SubmissionVerify,
+                ProtocolObservationKind::UnknownResultShape,
+                json!({"document": "history_result", "answer_list_kind": "object"}),
+            )
+            .unwrap());
+        }
         let (ordinal, next_cursor, complete) = if cursor.is_none() {
             (
                 1_u8,
@@ -231,6 +251,7 @@ impl Fixture {
             metadata,
             observed_at: created_at,
             list_cursors: Mutex::new(Vec::new()),
+            fail_list_with_drift: AtomicBool::new(false),
         });
         Self {
             database,
@@ -260,6 +281,9 @@ impl Fixture {
             config(),
         )
         .unwrap()
+        .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+            self.database.clone(),
+        )))
     }
 }
 
@@ -340,6 +364,46 @@ async fn missing_materialized_task_retries_without_advancing_the_page_cursor() {
         watermark.cursor.unwrap().value_sanitized,
         json!({"page": 2})
     );
+}
+
+#[tokio::test]
+async fn history_drift_is_observed_without_advancing_or_importing() {
+    let fixture = Fixture::new().await;
+    fixture
+        .provider
+        .fail_list_with_drift
+        .store(true, Ordering::Relaxed);
+    let report = fixture.worker().tick_once(fixture.now).await.unwrap();
+    assert_eq!(
+        report,
+        AnswerHistoryHarvestTickReport {
+            claimed: 1,
+            dead_lettered: 1,
+            ..AnswerHistoryHarvestTickReport::default()
+        }
+    );
+    let state: (String, i64, String) = sqlx::query_as(
+        "SELECT state, scanned_task_count, watermark_sanitized_json \
+         FROM answer_bootstrap_harvests",
+    )
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(state, ("failed".to_owned(), 0, "{}".to_owned()));
+    let observation: (String, String, Option<String>) =
+        sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        observation,
+        (
+            "submission_verify".to_owned(),
+            "unknown_result_shape".to_owned(),
+            None,
+        )
+    );
+    assert_counts(&fixture.database, (0, 0, 0, 0, 0)).await;
 }
 
 #[test]

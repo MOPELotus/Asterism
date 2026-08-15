@@ -618,7 +618,10 @@ fn start_answer_history_worker(
             max_provider_retry_delay_seconds: config.scheduler.retry_max_delay_seconds,
         },
     )
-    .context("failed to configure the answer history worker")?;
+    .context("failed to configure the answer history worker")?
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        database.clone(),
+    )));
     let tick_interval = std::time::Duration::from_secs(config.scheduler.tick_interval_seconds);
     Ok(Some(tokio::spawn(run_answer_history_worker(
         worker,

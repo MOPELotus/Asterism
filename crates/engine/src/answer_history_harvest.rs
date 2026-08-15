@@ -13,10 +13,15 @@ use asterism_storage::{
     AnswerBootstrapHarvestCompletion, AnswerBootstrapHarvestFailure,
     AnswerBootstrapHarvestRepository, AnswerBootstrapHarvestYield, AnswerCandidateRecord,
     AnswerHistoryIngestRequest, AnswerHistoryIngestionRepository, ClaimedAnswerBootstrapHarvest,
-    ProviderAccountRuntimeRepository, QuestionSnapshot, StorageError, TaskRuntimeRepository,
+    ProtocolObservationRepository, ProviderAccountRuntimeRepository, QuestionSnapshot,
+    StorageError, TaskRuntimeRepository,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::protocol_observation::{
+    ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+};
 
 const WATERMARK_VERSION: u32 = 1;
 
@@ -57,13 +62,13 @@ impl AnswerHistoryHarvestWorkerConfig {
     }
 }
 
-#[derive(Debug)]
 pub struct AnswerHistoryHarvestWorker<H, A, T, I> {
     registry: Arc<ProviderRegistry>,
     harvests: H,
     accounts: A,
     tasks: T,
     imports: I,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
     config: AnswerHistoryHarvestWorkerConfig,
 }
 
@@ -88,8 +93,36 @@ impl<H, A, T, I> AnswerHistoryHarvestWorker<H, A, T, I> {
             accounts,
             tasks,
             imports,
+            protocol_observations: None,
             config,
         })
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<H, A, T, I> std::fmt::Debug for AnswerHistoryHarvestWorker<H, A, T, I> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AnswerHistoryHarvestWorker")
+            .field("registry", &self.registry)
+            .field("harvests", &"configured")
+            .field("accounts", &"configured")
+            .field("tasks", &"configured")
+            .field("imports", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .field("config", &self.config)
+            .finish()
     }
 }
 
@@ -235,10 +268,26 @@ where
             credential_refs: account.credential_refs.clone(),
             correlation_id: format!("answer-bootstrap-harvest:{}", claimed.harvest.id),
         };
-        let page = capability
+        let page = match capability
             .list_answer_history(&context, cursor.as_ref())
             .await
-            .map_err(PageError::Provider)?;
+        {
+            Ok(page) => page,
+            Err(error) => {
+                let occurrence_scope = format!(
+                    "answer-history:{}:page:{}",
+                    claimed.harvest.id, claimed.harvest.scanned_task_count
+                );
+                self.record_protocol_observation(
+                    &account.provider_id,
+                    &occurrence_scope,
+                    &error,
+                    now,
+                )
+                .await?;
+                return Err(PageError::Provider(error));
+            }
+        };
         let (references, next_cursor, complete) = page.into_parts();
         let page_count =
             u32::try_from(references.len()).map_err(|_| PageError::InvalidProviderEvidence)?;
@@ -304,10 +353,21 @@ where
             course_id: task.course_id,
             reference,
         };
-        let provider_evidence = capability
-            .read_answer_history_task(context, &request)
-            .await
-            .map_err(PageError::Provider)?;
+        let provider_evidence = match capability.read_answer_history_task(context, &request).await {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let occurrence_scope =
+                    format!("answer-history:{}:task:{}", claimed.harvest.id, task.id);
+                self.record_protocol_observation(
+                    &account.provider_id,
+                    &occurrence_scope,
+                    &error,
+                    now,
+                )
+                .await?;
+                return Err(PageError::Provider(error));
+            }
+        };
         provider_evidence
             .validate(&request)
             .map_err(|_| PageError::InvalidProviderEvidence)?;
@@ -339,6 +399,28 @@ where
             .await
             .map_err(PageError::Storage)?;
         Ok(true)
+    }
+
+    async fn record_protocol_observation(
+        &self,
+        provider_id: &ProviderId,
+        occurrence_scope: &str,
+        error: &ProviderError,
+        observed_at: Timestamp,
+    ) -> Result<(), PageError> {
+        record_provider_protocol_observation(
+            self.protocol_observations.as_deref(),
+            provider_id,
+            None,
+            occurrence_scope,
+            error,
+            observed_at,
+        )
+        .await
+        .map_err(|error| match error {
+            ProviderProtocolObservationRecordError::Invalid => PageError::InvalidProviderEvidence,
+            ProviderProtocolObservationRecordError::Storage(error) => PageError::Storage(error),
+        })
     }
 
     async fn record_failure(

@@ -305,3 +305,8 @@ Provider-native AnswerResolve observations are diagnostic only. Even when a
 shape is durably retained, the failed call writes no AnswerCandidate and cannot
 promote anything into the owner corpus. Evidence still requires the ordinary
 typed Candidate and verification/provenance contracts.
+Bootstrap/history harvesting applies the same separation page by page. A result
+shape may enter the diagnostic Inbox, but the failing page cannot advance its
+watermark or scanned count and cannot create a QuestionSnapshot, Candidate,
+private evidence, global corpus entry or import receipt. Observation never
+counts as a successful bootstrap import.

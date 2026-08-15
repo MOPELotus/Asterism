@@ -4690,3 +4690,22 @@ failure remains internal.
 
 Coverage proves an AnswerResolve/UnknownResultShape aggregate is stored without
 Execution provenance while the candidate batch remains empty.
+
+## Two-hundred-and-fifty-fourth Phase 0 slice
+
+The read-only Answer History bootstrap worker now records Provider-supplied
+protocol shapes from both page enumeration and individual historical Task
+reads. Page occurrences bind the harvest and current scanned-count position;
+Task occurrences bind the harvest and local Task. They carry no Execution ID
+because the harvest is explicitly prohibited from creating an Attempt.
+
+The daemon injects the shared SQLite inbox repository. Observation persistence
+happens before the Provider failure is classified into the harvest ledger. An
+invalid payload remains terminal invalid Provider evidence; Inbox storage
+failure follows the existing retryable/terminal storage classification. Neither
+case advances the cursor or scanned count.
+
+Coverage proves an unknown historical result shape is retained as
+SubmissionVerify/UnknownResultShape while the harvest watermark remains at its
+initial value and QuestionSnapshot, Candidate, private evidence, global corpus
+and import-ledger tables all remain empty.
