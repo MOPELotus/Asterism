@@ -108,6 +108,10 @@ the sole older Fanyuchang Release and issue counts `1/9/0` remain unchanged, so
 no new donor commit, protocol or capability delta was available. The resulting
 implementation slice only closes a fail-closed initial-CMI validation gap in
 the already-audited atomic lifecycle.
+The adjacent prepared-child recovery checkpoint repeated the same three remote
+head and tag queries before implementation; all revisions and the sole
+Fanyuchang tag remained unchanged. It adds only strict reconstruction from
+already-audited durable batch/artifact facts and no new protocol behavior.
 
 ## Source selection
 

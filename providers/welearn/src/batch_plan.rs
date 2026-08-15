@@ -577,6 +577,39 @@ impl WellearnPreparedAtomicChildPlan {
         &self.child_plan
     }
 
+    /// Restores one complete prepared child from Core's independently durable
+    /// batch, ordinal, target authority and Provider-private child artifact.
+    ///
+    /// This boundary performs no fresh I/O and grants no execution authority.
+    /// The caller must still run [`Self::validate_fresh_detail`] immediately
+    /// before entering the atomic transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for any batch, ordinal, target, Provider
+    /// namespace, artifact type, payload or child-plan drift.
+    pub fn restore_from_provider_execution_plan_artifact(
+        batch_plan: WellearnBatchPlan,
+        expected_entry_index: usize,
+        frozen_fanyuchang_target_seconds: Option<u64>,
+        artifact: &ProviderExecutionPlanArtifact,
+    ) -> ProviderResult<Self> {
+        validate_batch_plan_integrity(&batch_plan)?;
+        let child_plan = WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+            artifact,
+            &batch_plan,
+            expected_entry_index,
+            frozen_fanyuchang_target_seconds,
+        )?;
+        let prepared = Self {
+            batch_plan,
+            entry_index: expected_entry_index,
+            child_plan,
+        };
+        prepared.validate()?;
+        Ok(prepared)
+    }
+
     /// Revalidates the exact child projection against its rebuilt batch.
     ///
     /// # Errors
@@ -2359,6 +2392,49 @@ mod tests {
             )
             .unwrap(),
             plan
+        );
+    }
+
+    #[test]
+    fn prepared_atomic_child_restores_only_exact_durable_facts() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let child = materialize_atomic_child_plan(&batch, 1, Some(37)).unwrap();
+        let artifact = child.to_provider_execution_plan_artifact().unwrap();
+        let prepared =
+            WellearnPreparedAtomicChildPlan::restore_from_provider_execution_plan_artifact(
+                batch.clone(),
+                1,
+                Some(37),
+                &artifact,
+            )
+            .unwrap();
+        assert_eq!(prepared.batch_plan(), &batch);
+        assert_eq!(prepared.entry_index(), 1);
+        assert_eq!(prepared.child_plan(), &child);
+
+        for (entry_index, target) in [(0, Some(37)), (1, Some(38)), (1, None)] {
+            assert!(
+                WellearnPreparedAtomicChildPlan::restore_from_provider_execution_plan_artifact(
+                    batch.clone(),
+                    entry_index,
+                    target,
+                    &artifact,
+                )
+                .is_err()
+            );
+        }
+
+        let mut drifted_batch = batch;
+        drifted_batch.entries[1].unit_index = 99;
+        assert!(
+            WellearnPreparedAtomicChildPlan::restore_from_provider_execution_plan_artifact(
+                drifted_batch,
+                1,
+                Some(37),
+                &artifact,
+            )
+            .is_err()
         );
     }
 

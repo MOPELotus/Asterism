@@ -267,6 +267,10 @@ only structural field names, response codes and bounded placeholder shapes.
   preserve both profiles' zero target, and verify Debug redaction. Foreign
   provider or type, another valid ordinal, wrong frozen target and drifted batch facts all
   fail before a child plan can be restored.
+- Prepared-child recovery tests require the independently durable complete
+  batch, expected ordinal, frozen Fanyuchang target and exact Core artifact to
+  rebind together. A different ordinal/target or drifted batch cannot rebuild
+  the coordinator input, and successful restoration still performs no I/O.
 - Fresh atomic-planning fixtures require explicit parent Course, atomic flow,
   ordered Unit selection, expected child and exact target authority. They prove
   reversed Fanyuchang Unit order is preserved, a complete 61-child Auto
