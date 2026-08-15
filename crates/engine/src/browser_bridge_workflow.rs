@@ -14,19 +14,25 @@ use asterism_secrets::{SecretAccess, SecretStoreError};
 use asterism_storage::{
     BrowserBridgeCommandArtifactRepository, BrowserBridgeResultAttemptFinishRequest,
     BrowserBridgeSessionRepository, BrowserBridgeWorkflowCommitOutcome,
-    BrowserBridgeWorkflowCommitRequest, PendingBrowserBridgeResult,
+    BrowserBridgeWorkflowCommitRequest, PendingBrowserBridgeResult, ProtocolObservationRepository,
     ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository,
 };
 
-use crate::BrowserBridgeRuntimeRecoverySnapshot;
+use crate::{
+    BrowserBridgeRuntimeRecoverySnapshot,
+    protocol_observation::{
+        ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+    },
+};
 
 /// Core-owned validation of one recovered intermediate or execution-terminal
 /// `BrowserBridge` result. This layer performs no persistence.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BrowserBridgeWorkflowValidationService<Q, A> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<Q, A> BrowserBridgeWorkflowValidationService<Q, A> {
@@ -35,7 +41,32 @@ impl<Q, A> BrowserBridgeWorkflowValidationService<Q, A> {
             registry,
             tasks,
             accounts,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<Q, A> std::fmt::Debug for BrowserBridgeWorkflowValidationService<Q, A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeWorkflowValidationService")
+            .field("registry", &self.registry)
+            .field("tasks", &"configured")
+            .field("accounts", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -115,6 +146,8 @@ where
         let recovered = recovery
             .latest
             .ok_or(BrowserBridgeWorkflowValidationError::ResultMissing)?;
+        let session_id = recovery.session.id;
+        let sequence = recovered.command.exchange.sequence;
         let result = recovered
             .result
             .ok_or(BrowserBridgeWorkflowValidationError::ResultMissing)?;
@@ -175,10 +208,11 @@ where
             runtime_binding: recovery.binding,
         };
         request.validate()?;
+        let provider_id = account.provider_id;
         let transition = capability
             .complete_browser_bridge_workflow_result(
                 &ProviderContext {
-                    provider_id: account.provider_id,
+                    provider_id: provider_id.clone(),
                     account_id: account.id,
                     credential_refs: account.credential_refs,
                     correlation_id: access.correlation_id.clone(),
@@ -186,13 +220,56 @@ where
                 &context.runtime_settings,
                 request,
             )
-            .await?;
+            .await;
+        let transition = match transition {
+            Ok(transition) => transition,
+            Err(error) => {
+                self.record_protocol_observation(
+                    &provider_id,
+                    session_id,
+                    sequence,
+                    &access.correlation_id,
+                    &error,
+                )
+                .await?;
+                return Err(BrowserBridgeWorkflowValidationError::Provider(error));
+            }
+        };
         Ok(ValidatedBrowserBridgeWorkflow {
             owner_user_id,
             provider_account_id: recovery.session.provider_account_id,
             task_id: recovery.session.task_id,
             transition,
             access,
+        })
+    }
+
+    async fn record_protocol_observation(
+        &self,
+        provider_id: &ProviderId,
+        session_id: asterism_domain::BrowserBridgeSessionId,
+        sequence: u64,
+        correlation_id: &str,
+        error: &ProviderError,
+    ) -> Result<(), BrowserBridgeWorkflowValidationError> {
+        let occurrence_scope =
+            format!("browser-bridge-workflow:{session_id}:{sequence}:complete:{correlation_id}");
+        record_provider_protocol_observation(
+            self.protocol_observations.as_deref(),
+            provider_id,
+            None,
+            &occurrence_scope,
+            error,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|error| match error {
+            ProviderProtocolObservationRecordError::Invalid => {
+                BrowserBridgeWorkflowValidationError::InvalidProtocolObservation
+            }
+            ProviderProtocolObservationRecordError::Storage(error) => {
+                BrowserBridgeWorkflowValidationError::Storage(error)
+            }
         })
     }
 }
@@ -215,7 +292,7 @@ pub struct ValidatedBrowserBridgeWorkflow {
 
 /// Core-owned durable processor for one Provider's intermediate and execution
 /// terminal `BrowserBridge` result inboxes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BrowserBridgeWorkflowProcessor<S, C, Q, A> {
     provider_id: ProviderId,
     registry: Arc<ProviderRegistry>,
@@ -224,6 +301,7 @@ pub struct BrowserBridgeWorkflowProcessor<S, C, Q, A> {
     tasks: Q,
     accounts: A,
     config: BrowserBridgeWorkflowProcessorConfig,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<S, C, Q, A> BrowserBridgeWorkflowProcessor<S, C, Q, A> {
@@ -252,7 +330,31 @@ impl<S, C, Q, A> BrowserBridgeWorkflowProcessor<S, C, Q, A> {
             tasks,
             accounts,
             config,
+            protocol_observations: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<S, C, Q, A> std::fmt::Debug for BrowserBridgeWorkflowProcessor<S, C, Q, A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeWorkflowProcessor")
+            .field("provider_id", &self.provider_id)
+            .field("config", &self.config)
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish_non_exhaustive()
     }
 }
 
@@ -369,17 +471,21 @@ where
                 .await;
             return;
         };
-        let validated = BrowserBridgeWorkflowValidationService::new(
+        let mut validation = BrowserBridgeWorkflowValidationService::new(
             self.registry.clone(),
             self.tasks.clone(),
             self.accounts.clone(),
-        )
-        .validate(ValidateBrowserBridgeWorkflowCommand {
-            owner_user_id: candidate.owner_user_id,
-            recovery,
-            access,
-        })
-        .await;
+        );
+        if let Some(observations) = &self.protocol_observations {
+            validation = validation.with_protocol_observations(observations.clone());
+        }
+        let validated = validation
+            .validate(ValidateBrowserBridgeWorkflowCommand {
+                owner_user_id: candidate.owner_user_id,
+                recovery,
+                access,
+            })
+            .await;
         let Ok(validated) = validated else {
             self.record_failure(&candidate, now, "provider_validation", false, report)
                 .await;
@@ -538,6 +644,8 @@ pub enum BrowserBridgeWorkflowValidationError {
     WorkflowContextMissing,
     #[error("BrowserBridge frozen runtime settings no longer match the Provider schema")]
     RuntimeSettingsChanged,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error(transparent)]
@@ -556,7 +664,8 @@ mod tests {
     use asterism_domain::{
         AssessmentClass, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
         BrowserBridgeRuntimeBinding, BrowserBridgeSession, BrowserBridgeSessionCreate,
-        OrchestrationState, ProviderAccount, RemoteState, SourceType, Task,
+        OrchestrationState, ProtocolObservationKind, ProtocolSurface, ProviderAccount, RemoteState,
+        SourceType, Task,
     };
     use asterism_provider_api::{
         BrowserBridgeCapability, BrowserBridgeWorkflowNextCommand, BrowserSessionSpec,
@@ -565,8 +674,9 @@ mod tests {
     };
     use asterism_secrets::{SecretActor, SecretValue};
     use asterism_storage::{
-        ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
-        ResolvedBrowserBridgeWorkflowContext, ResolvedBrowserBridgeWorkflowPlan, TaskPage,
+        Database, ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
+        ResolvedBrowserBridgeWorkflowContext, ResolvedBrowserBridgeWorkflowPlan,
+        SqliteProtocolObservationRepository, TaskPage,
     };
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
@@ -613,6 +723,7 @@ mod tests {
     struct FakeBrowser {
         metadata: ProviderMetadata,
         calls: AtomicU32,
+        protocol_drift: bool,
     }
 
     impl ProviderIdentity for FakeBrowser {
@@ -651,6 +762,21 @@ mod tests {
         ) -> ProviderResult<BrowserBridgeWorkflowResult> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             request.validate()?;
+            if self.protocol_drift {
+                return Err(ProviderError::new(
+                    asterism_provider_api::ProviderErrorKind::ProtocolDrift,
+                    "BrowserBridge workflow result shape changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::BrowserBridge,
+                    ProtocolObservationKind::UnknownResultShape,
+                    serde_json::json!({
+                        "document": "browser_bridge_workflow_result",
+                        "transition": "object"
+                    }),
+                )
+                .unwrap());
+            }
             assert_eq!(settings.schema_version, 1);
             let plan = request.workflow_plan.as_ref().expect("plan is recovered");
             assert_eq!(plan.artifact_type(), "provider-alpha.plan.v1");
@@ -733,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_recovered_context_reaches_provider_and_missing_context_does_not() {
-        let (service, command, provider) = fixture();
+        let (_, service, command, provider) = fixture(false).await;
         let validated = service.validate(command).await.unwrap();
         assert!(matches!(
             validated.transition,
@@ -741,7 +867,7 @@ mod tests {
         ));
         assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
 
-        let (service, mut command, provider) = fixture();
+        let (_, service, mut command, provider) = fixture(false).await;
         command
             .recovery
             .latest
@@ -756,15 +882,45 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
     }
 
+    #[tokio::test]
+    async fn workflow_result_drift_is_observed_without_a_transition() {
+        let (database, service, command, provider) = fixture(true).await;
+        let error = service.validate(command).await.unwrap_err();
+        assert!(matches!(
+            error,
+            BrowserBridgeWorkflowValidationError::Provider(error)
+                if error.kind == asterism_provider_api::ProviderErrorKind::ProtocolDrift
+        ));
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "browser_bridge".to_owned(),
+                "unknown_result_shape".to_owned(),
+                None,
+            )
+        );
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the fixture keeps every session, Task, account, result and encrypted context binding visible"
     )]
-    fn fixture() -> (
+    async fn fixture(
+        protocol_drift: bool,
+    ) -> (
+        Database,
         BrowserBridgeWorkflowValidationService<FakeTasks, FakeAccounts>,
         ValidateBrowserBridgeWorkflowCommand,
         Arc<FakeBrowser>,
     ) {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
         let now = Utc::now();
         let owner = UserId::new();
         let provider_id = ProviderId::new("provider-alpha").unwrap();
@@ -813,6 +969,7 @@ mod tests {
         let provider = Arc::new(FakeBrowser {
             metadata: metadata.clone(),
             calls: AtomicU32::new(0),
+            protocol_drift,
         });
         let mut entry = ProviderEntry::metadata_only(metadata);
         entry.runtime_settings = ProviderRuntimeSettingsSchema::default();
@@ -900,7 +1057,10 @@ mod tests {
                 task: task.clone(),
             },
             FakeAccounts(account),
-        );
+        )
+        .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+            database.clone(),
+        )));
         let command = ValidateBrowserBridgeWorkflowCommand {
             owner_user_id: owner,
             recovery,
@@ -910,6 +1070,6 @@ mod tests {
                 reason: "validate recovered workflow result".to_owned(),
             },
         };
-        (service, command, provider)
+        (database, service, command, provider)
     }
 }

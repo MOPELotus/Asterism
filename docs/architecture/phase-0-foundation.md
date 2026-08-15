@@ -4796,3 +4796,19 @@ Processor retry and dead-letter handling remains unchanged and never replays a
 browser command. Coverage proves both BrowserBridge/UnknownResultShape and
 Authentication/FieldDrift are stored while validation returns no committable
 output.
+
+## Two-hundred-and-sixty-first Phase 0 slice
+
+BrowserBridge workflow-result validation now records a Provider-supplied shape
+under the recovered session, exact exchange sequence, completion stage and
+correlation. The Provider-scoped daemon processor injects the shared SQLite
+repository. The observation has no Task Execution reference because this layer
+interprets an already-durable BrowserBridge result rather than executing the
+Task action itself.
+
+All owner, Task, account, Provider version, result disposition, runtime setting,
+workflow plan, runtime state and artifact bindings remain prerequisites. Core-
+detected frozen-plan corruption stays a Core validation error and is not
+misattributed as Provider evidence. Coverage proves a typed
+BrowserBridge/UnknownResultShape is retained after exactly one Provider call
+while no workflow transition reaches the commit boundary.

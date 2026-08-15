@@ -331,3 +331,7 @@ Observation may diagnose terminal-result parsing or fresh credential-status
 drift, but cannot complete the recovered exchange, commit its derived secret or
 turn the BrowserBridge receipt into authentication, answer or completion
 authority.
+BrowserBridge workflow observations are likewise diagnostic only. They may
+retain the shape of a failed Provider interpretation of an exact recovered
+result, but cannot create the next browser command, commit an intermediate or
+terminal transition, verify remote completion or contribute answer evidence.
