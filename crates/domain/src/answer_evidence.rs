@@ -113,6 +113,34 @@ pub enum CorpusProjectionEligibility {
     Unmatched(UnmatchedEvidenceReason),
 }
 
+impl CorpusProjectionEligibility {
+    pub fn for_question_answer(question: &Question, answer: &NormalizedAnswer) -> Self {
+        if GlobalCorpusQuestionAsset::try_from_question(question).is_ok()
+            && GlobalSemanticAnswer::try_from_answer(question, answer).is_ok()
+        {
+            return Self::Exact;
+        }
+        if matches!(
+            question.kind,
+            QuestionKind::Matching
+                | QuestionKind::Ordering
+                | QuestionKind::Composite
+                | QuestionKind::Unknown
+        ) {
+            Self::Unmatched(UnmatchedEvidenceReason::UnsupportedHierarchy)
+        } else if !question.attachments.is_empty()
+            || question
+                .options
+                .iter()
+                .any(|option| !option.attachments.is_empty())
+        {
+            Self::Unmatched(UnmatchedEvidenceReason::MissingSharedContext)
+        } else {
+            Self::Unmatched(UnmatchedEvidenceReason::IncompleteQuestion)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PrivateAnswerEvidence {
     pub id: PrivateAnswerEvidenceId,

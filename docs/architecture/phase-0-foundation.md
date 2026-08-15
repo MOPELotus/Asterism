@@ -4146,3 +4146,28 @@ current native Provider entries the worker is therefore absent, not polling in
 an idle loop. Once a real Native HTTP, BrowserBridge or Capture-backed adapter
 is registered, the same daemon path becomes active and Storage's Provider
 filter ensures it claims only that adapter's durable first-auth harvests.
+
+## Two-hundred-and-twenty-ninth Phase 0 slice
+
+Normal task execution now incrementally grows the Answer Evidence Corpus at
+the `SubmissionVerify` persistence boundary. Saving a durable
+`SubmissionResult` and projecting its reliable per-Question facts execute in
+the same immediate transaction. The evidence binds the exact owner, Provider
+account, Course, Task, immutable Question snapshot, selected candidate, local
+Execution Attempt and a stable verification digest; any binding or Corpus
+failure rolls back the result and every projection together. The unique result
+per Execution Attempt is the incremental ingestion ledger.
+
+Only explicit per-Question verdicts are evidence. A Confirmed selected answer
+becomes VerifiedHistorical; a Rejected selected answer becomes Negative;
+Unverified and provider skip commands create no Answer Evidence. Overall task
+success or score never invents missing per-Question correctness, and
+`SubmissionVerify` exposes no official answer so this path never labels a
+selection Official. Result status, remote state, score, progress and sanitized
+receipt remain in owner-private provenance.
+
+Corpus projection eligibility is now one Domain rule shared by bootstrap and
+incremental ingestion. Exact choice/text/boolean facts project only when their
+semantic shape is identity-free; attachments, unsupported hierarchies and
+incomplete option content remain durable unmatched private evidence without
+polluting global answer counts.

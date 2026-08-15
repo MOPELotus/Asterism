@@ -3,8 +3,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use asterism_domain::{
     AnswerBootstrapHarvestState, AnswerCandidate, AnswerCandidateId, AnswerEvidenceClass,
     AnswerSource, AuthState, CorpusProjectionEligibility, NormalizedAnswer, PrivateAnswerEvidence,
-    PrivateAnswerEvidenceId, ProviderId, Question, QuestionKind, QuestionSnapshotId, Timestamp,
-    UnmatchedEvidenceReason,
+    PrivateAnswerEvidenceId, ProviderId, Question, QuestionSnapshotId, Timestamp,
 };
 use asterism_provider_api::{
     AnswerHistoryCursor, AnswerHistoryTaskRef, AnswerHistoryTaskRequest, ProviderContext,
@@ -643,7 +642,7 @@ fn push_history_answer(
         .question
         .content_fingerprint()
         .map_err(|_| PageError::InvalidProviderEvidence)?;
-    let mut record = PrivateAnswerEvidence {
+    let record = PrivateAnswerEvidence {
         id: PrivateAnswerEvidenceId::new(),
         owner_user_id: input.harvest.owner_user_id,
         provider_id: input.harvest.provider_id.clone(),
@@ -675,40 +674,15 @@ fn push_history_answer(
             "score": input.provider_evidence.score,
             "retake": input.provider_evidence.retake,
         }),
-        projection: CorpusProjectionEligibility::Exact,
+        projection: CorpusProjectionEligibility::for_question_answer(input.question, input.answer),
         observed_at: input.provider_evidence.observed_at,
         verified_at: input.verified_at,
     };
-    if record.global_projection().is_err() {
-        record.projection =
-            CorpusProjectionEligibility::Unmatched(unmatched_reason(input.question));
-    }
     record
         .validate()
         .map_err(|_| PageError::InvalidProviderEvidence)?;
     evidence.push(record);
     Ok(())
-}
-
-fn unmatched_reason(question: &Question) -> UnmatchedEvidenceReason {
-    if matches!(
-        question.kind,
-        QuestionKind::Matching
-            | QuestionKind::Ordering
-            | QuestionKind::Composite
-            | QuestionKind::Unknown
-    ) {
-        UnmatchedEvidenceReason::UnsupportedHierarchy
-    } else if !question.attachments.is_empty()
-        || question
-            .options
-            .iter()
-            .any(|option| !option.attachments.is_empty())
-    {
-        UnmatchedEvidenceReason::MissingSharedContext
-    } else {
-        UnmatchedEvidenceReason::IncompleteQuestion
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
