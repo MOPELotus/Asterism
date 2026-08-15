@@ -183,8 +183,11 @@ completed/progress-100/profile-score CMI for both flows. Current Fanyuchang
 also requires both fresh session/total-time fields from the post-duration CMI
 to remain byte-identical in final CMI; modular Auto verifies score 0 without
 inventing a zero-time readback predicate that its save-only request does not
-write. Receipt booleans never affect this goal predicate. The verifier performs
-no I/O and still does not register or authorize atomic execution.
+write. Receipt booleans never affect this goal predicate. Only after proof, the
+verifier derives the final save ordinal/acceptance and a domain-separated digest
+over the frozen goal plus exact fresh proof documents. It performs no I/O and
+does not attach verification to start/keep/set or a rejected save; persistence
+still waits for the shared Core boundary.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. WELearn

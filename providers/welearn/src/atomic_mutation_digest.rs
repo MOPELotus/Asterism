@@ -2,10 +2,14 @@ use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 
-use crate::{WellearnAtomicMutationKind, WellearnInventoryDocument};
+use crate::{
+    WellearnAtomicCompletionProfile, WellearnAtomicDurationCompletionDocuments,
+    WellearnAtomicDurationCompletionPlan, WellearnAtomicMutationKind, WellearnInventoryDocument,
+};
 
 const REQUEST_DOMAIN: &[u8] = b"asterism.welearn.atomic-mutation-request.v1\0";
 const RESPONSE_DOMAIN: &[u8] = b"asterism.welearn.atomic-mutation-response.v1\0";
+const COMPLETION_OBSERVATION_DOMAIN: &[u8] = b"asterism.welearn.atomic-completion-observation.v1\0";
 const MAX_MUTATION_ORDINAL: u32 = 100_000;
 const MAX_MUTATION_FIELDS: usize = 16;
 const MAX_URL_BYTES: usize = 4_096;
@@ -47,6 +51,42 @@ pub(crate) fn atomic_mutation_response_digest(
     let mut hash = Sha256::new();
     hash.update(RESPONSE_DOMAIN);
     hash_component(&mut hash, document.as_str().as_bytes())?;
+    Ok(hash.finalize().into())
+}
+
+/// Hashes only the fresh CMI evidence used by the exact compound verifier and
+/// binds it to the frozen goal and final completion-save ordinal.
+pub(crate) fn atomic_completion_observation_digest(
+    plan: WellearnAtomicDurationCompletionPlan,
+    documents: &WellearnAtomicDurationCompletionDocuments,
+    final_save_ordinal: u32,
+) -> ProviderResult<[u8; 32]> {
+    plan.validate()?;
+    documents.validate_for_plan(plan)?;
+    if final_save_ordinal != documents.final_save_ordinal(plan)? {
+        return Err(invalid_digest_input());
+    }
+    let profile = match plan.profile() {
+        WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+            b"fanyuchang_fresh_set_save_100".as_slice()
+        }
+        WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
+            b"auto_zero_time_save_only_0".as_slice()
+        }
+    };
+    let mut hash = Sha256::new();
+    hash.update(COMPLETION_OBSERVATION_DOMAIN);
+    hash.update(final_save_ordinal.to_be_bytes());
+    hash.update(plan.target_seconds().to_be_bytes());
+    hash_component(&mut hash, profile)?;
+    match documents.after_duration() {
+        Some(document) => {
+            hash.update([1]);
+            hash_component(&mut hash, document.as_str().as_bytes())?;
+        }
+        None => hash.update([0]),
+    }
+    hash_component(&mut hash, documents.after_completion().as_str().as_bytes())?;
     Ok(hash.finalize().into())
 }
 

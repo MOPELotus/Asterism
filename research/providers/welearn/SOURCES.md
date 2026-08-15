@@ -112,6 +112,10 @@ The adjacent prepared-child recovery checkpoint repeated the same three remote
 head and tag queries before implementation; all revisions and the sole
 Fanyuchang tag remained unchanged. It adds only strict reconstruction from
 already-audited durable batch/artifact facts and no new protocol behavior.
+The following final-observation identity checkpoint repeated all three head/tag
+queries and again found no revision delta. Its domain-separated digest is an
+Asterism persistence boundary over existing fresh-CMI evidence, not a newly
+observed donor endpoint or result claim.
 
 ## Source selection
 

@@ -13,6 +13,7 @@ use crate::{
     WellearnResourceCompletionSequence, WellearnResourceCompletionTimeMode,
     WellearnResourceCompletionWriteMode, WellearnResourceExecutionPlan,
     WellearnResourceMutationProfile,
+    atomic_mutation_digest::atomic_completion_observation_digest,
     cmi::{parse_mutation_cmi_baseline, parse_sco_identity},
     metadata::development_metadata,
     parse_cmi_snapshot,
@@ -44,11 +45,14 @@ impl WellearnAtomicMutationKind {
 
 /// Sanitized proof returned after exact fresh CMI verification of an atomic
 /// duration-completion result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct WellearnAtomicDurationCompletionVerification {
     profile: WellearnAtomicCompletionProfile,
     score_percent: u8,
     time_preservation_verified: Option<bool>,
+    final_save_ordinal: u32,
+    final_save_accepted: bool,
+    observation_digest: [u8; 32],
 }
 
 impl WellearnAtomicDurationCompletionVerification {
@@ -62,6 +66,35 @@ impl WellearnAtomicDurationCompletionVerification {
 
     pub const fn time_preservation_verified(self) -> Option<bool> {
         self.time_preservation_verified
+    }
+
+    pub const fn final_save_ordinal(self) -> u32 {
+        self.final_save_ordinal
+    }
+
+    pub const fn final_save_accepted(self) -> bool {
+        self.final_save_accepted
+    }
+
+    pub const fn observation_digest(self) -> [u8; 32] {
+        self.observation_digest
+    }
+}
+
+impl fmt::Debug for WellearnAtomicDurationCompletionVerification {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WellearnAtomicDurationCompletionVerification")
+            .field("profile", &self.profile)
+            .field("score_percent", &self.score_percent)
+            .field(
+                "time_preservation_verified",
+                &self.time_preservation_verified,
+            )
+            .field("final_save_ordinal", &self.final_save_ordinal)
+            .field("final_save_accepted", &self.final_save_accepted)
+            .field("observation_digest", &"[HASHED]")
+            .finish()
     }
 }
 
@@ -107,10 +140,16 @@ pub fn verify_atomic_duration_completion(
         }
         WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => None,
     };
+    let final_save_ordinal = documents.final_save_ordinal(plan)?;
+    let observation_digest =
+        atomic_completion_observation_digest(plan, documents, final_save_ordinal)?;
     Ok(WellearnAtomicDurationCompletionVerification {
         profile: plan.profile(),
         score_percent,
         time_preservation_verified,
+        final_save_ordinal,
+        final_save_accepted: documents.receipts().save_accepted(),
+        observation_digest,
     })
 }
 
@@ -342,6 +381,28 @@ impl WellearnAtomicDurationCompletionDocuments {
 
     pub const fn receipts(&self) -> &WellearnAtomicDurationCompletionReceipts {
         &self.receipts
+    }
+
+    /// Returns the exact ordinal issued for the final completion-bearing save.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the frozen lifecycle or ordinal count is
+    /// invalid.
+    pub fn final_save_ordinal(
+        &self,
+        plan: WellearnAtomicDurationCompletionPlan,
+    ) -> ProviderResult<u32> {
+        self.validate_for_plan(plan)?;
+        let heartbeat_count = u32::try_from(self.receipts.heartbeat_acceptances.len())
+            .map_err(|_| invalid_atomic_documents())?;
+        2_u32
+            .checked_add(heartbeat_count)
+            .and_then(|ordinal| {
+                ordinal.checked_add(u32::from(self.receipts.set_accepted.is_some()))
+            })
+            .filter(|ordinal| *ordinal <= 100_000)
+            .ok_or_else(invalid_atomic_documents)
     }
 
     /// Revalidates an evidence bundle before parsing its CMI documents.
@@ -782,6 +843,8 @@ mod tests {
         let verification = verify_atomic_duration_completion(plan, &documents).unwrap();
         assert_eq!(verification.score_percent(), 100);
         assert_eq!(verification.time_preservation_verified(), Some(true));
+        assert_eq!(verification.final_save_ordinal(), 3);
+        assert!(verification.final_save_accepted());
     }
 
     #[test]
@@ -801,6 +864,7 @@ mod tests {
         .unwrap();
         assert!(documents.after_duration().is_none());
         assert_eq!(documents.receipts().heartbeat_acceptances().len(), 2);
+        assert_eq!(documents.final_save_ordinal(plan).unwrap(), 4);
 
         let zero = WellearnAtomicDurationCompletionPlan::try_new(
             WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
@@ -979,6 +1043,12 @@ mod tests {
         assert_eq!(verification.profile(), plan.profile());
         assert_eq!(verification.score_percent(), 100);
         assert_eq!(verification.time_preservation_verified(), Some(true));
+        assert_eq!(verification.final_save_ordinal(), 4);
+        assert!(!verification.final_save_accepted());
+        assert_ne!(verification.observation_digest(), [0; 32]);
+        let debug = format!("{verification:?}");
+        assert!(debug.contains("[HASHED]"));
+        assert!(!debug.contains(&format!("{:?}", verification.observation_digest())));
     }
 
     #[test]
@@ -1000,6 +1070,23 @@ mod tests {
         let verification = verify_atomic_duration_completion(plan, &documents).unwrap();
         assert_eq!(verification.score_percent(), 0);
         assert_eq!(verification.time_preservation_verified(), None);
+        assert_eq!(verification.final_save_ordinal(), 2);
+        assert!(!verification.final_save_accepted());
+
+        let changed_documents = WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            cmi(),
+            None,
+            snapshot_cmi("completed", "1", "0", Some("88"), Some("120")),
+            WellearnAtomicDurationCompletionReceipts::new(false, Vec::new(), None, false),
+        )
+        .unwrap();
+        assert_ne!(
+            verification.observation_digest(),
+            verify_atomic_duration_completion(plan, &changed_documents)
+                .unwrap()
+                .observation_digest()
+        );
     }
 
     #[test]

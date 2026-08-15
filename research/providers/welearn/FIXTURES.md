@@ -317,6 +317,11 @@ only structural field names, response codes and bounded placeholder shapes.
   response text. Response hashing accepts only the bounded native document
   wrapper, and native requests use those hashes for the shared issue/receipt
   boundary.
+- Exact atomic-verifier tests derive the final save ordinal from the complete
+  receipt sequence and return a separate domain-separated observation digest
+  only after fresh CMI proof. A changed but still valid fresh observation
+  changes the digest; Debug remains hash-redacted. The proof also exposes the
+  final receipt acceptance bit without treating a negative receipt as verified.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.

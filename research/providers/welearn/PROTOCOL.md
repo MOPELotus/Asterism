@@ -559,6 +559,15 @@ in final CMI. Modular Auto requires score `0` but does not assert final time is
 zero: its save-only completion request carries no CMI time document, so such a
 predicate would be invented rather than evidenced. Explicit negative mutation
 receipts remain diagnostics and cannot weaken or strengthen the fresh-CMI goal.
+After that exact proof succeeds, the verifier derives the final
+completion-bearing save ordinal from the validated ordered receipt shape and
+returns its explicit acceptance bit plus a domain-separated observation digest.
+The digest binds the frozen profile/target, final-save ordinal and only the
+fresh post-duration/final CMI documents used by the proof; it excludes initial
+state and every credential/route fact. Debug output redacts the digest. This
+Provider value performs no persistence: Core may later record it only against
+an accepted final save, never against start/keep/set or an explicit negative
+receipt.
 
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 `WellearnAtomicMutationKind` has stable operation strings for start,
