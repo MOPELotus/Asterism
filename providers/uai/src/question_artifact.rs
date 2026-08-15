@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use asterism_domain::{Question, QuestionAttachmentKind, QuestionContentFingerprint};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
-use asterism_secrets::SecretValue;
+use asterism_secrets::{SecretString, SecretValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -10,8 +10,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::{
     ParsedUaiQuestion,
     question::{
-        canonical_media_url, media_attachment_id, valid_question_identity,
-        validate_remote_task_identity,
+        canonical_media_url, media_attachment_id, parse_subtitle_transcript,
+        valid_question_identity, validate_remote_task_identity,
     },
 };
 
@@ -1024,6 +1024,45 @@ impl UaiMediaFetchResponse {
     pub fn into_parts(self) -> (UaiMediaFetchPlan, SecretValue) {
         (self.plan, self.body)
     }
+
+    /// Parses one donor-evidenced downloaded VTT/SRT response into a
+    /// response-bound zeroizing transcript.
+    ///
+    /// Audio/video transcription remains a shared model-execution boundary;
+    /// this method accepts only a source already marked as a subtitle in the
+    /// immutable Question manifest.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-subtitle response, invalid UTF-8, oversized subtitle
+    /// source or an empty normalized transcript.
+    pub fn parse_subtitle(self) -> ProviderResult<UaiMediaSubtitleTranscript> {
+        if !self.plan.subtitle || self.plan.kind != QuestionAttachmentKind::File {
+            return Err(protocol_drift(
+                "UAI media response is not an audited subtitle source",
+            ));
+        }
+        let document = std::str::from_utf8(self.body.expose_secret())
+            .map_err(|_| invalid_response("UAI downloaded subtitle is not valid UTF-8"))?;
+        let transcript = parse_subtitle_transcript(document)?;
+        if transcript.is_empty() {
+            return Err(invalid_response(
+                "UAI downloaded subtitle contains no transcript text",
+            ));
+        }
+        let transcript_digest =
+            media_subtitle_transcript_digest(self.response_digest, transcript.as_bytes());
+        if transcript_digest == [0; 32] {
+            return Err(invalid_response(
+                "UAI downloaded subtitle transcript digest is invalid",
+            ));
+        }
+        Ok(UaiMediaSubtitleTranscript {
+            response: self,
+            transcript: SecretString::new(transcript),
+            transcript_digest,
+        })
+    }
 }
 
 impl fmt::Debug for UaiMediaFetchResponse {
@@ -1035,6 +1074,43 @@ impl fmt::Debug for UaiMediaFetchResponse {
             .field("body_len", &self.body_len)
             .field("body_digest", &self.body_digest)
             .field("response_digest", &self.response_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Normalized VTT/SRT text bound to one exact accepted subtitle response.
+pub struct UaiMediaSubtitleTranscript {
+    response: UaiMediaFetchResponse,
+    transcript: SecretString,
+    transcript_digest: [u8; 32],
+}
+
+impl UaiMediaSubtitleTranscript {
+    pub const fn response(&self) -> &UaiMediaFetchResponse {
+        &self.response
+    }
+
+    pub fn expose_transcript(&self) -> &str {
+        self.transcript.expose_secret()
+    }
+
+    pub const fn transcript_digest(&self) -> [u8; 32] {
+        self.transcript_digest
+    }
+
+    pub fn into_parts(self) -> (UaiMediaFetchResponse, SecretString) {
+        (self.response, self.transcript)
+    }
+}
+
+impl fmt::Debug for UaiMediaSubtitleTranscript {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiMediaSubtitleTranscript")
+            .field("binding", &"[REDACTED]")
+            .field("transcript", &"[REDACTED]")
+            .field("response_digest", &self.response.response_digest)
+            .field("transcript_digest", &self.transcript_digest)
             .finish_non_exhaustive()
     }
 }
@@ -1090,6 +1166,14 @@ fn media_fetch_response_digest(
     digest.update(request_digest);
     digest.update(body_digest);
     digest.update(body_len.to_be_bytes());
+    digest.finalize().into()
+}
+
+fn media_subtitle_transcript_digest(response_digest: [u8; 32], transcript: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:media-subtitle-transcript:v1\0");
+    digest.update(response_digest);
+    digest.update(transcript);
     digest.finalize().into()
 }
 
@@ -1700,6 +1784,89 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn downloaded_subtitle_normalizes_into_a_response_bound_secret_transcript() {
+        let task_id = TaskId::new();
+        let (parsed, question) = parsed_question(task_id);
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let source = &artifact.media_sources_for_question("9001").unwrap()[1];
+        let plan = artifact
+            .prepare_media_fetch("9001", source.attachment_id())
+            .unwrap();
+        let url = plan.expose_url().to_owned();
+        let response = plan
+            .accept_response(
+                200,
+                &url,
+                SecretValue::new(
+                    b"WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<p>Hello</p>\n\n2\n00:00:03.000 --> 00:00:04.000\nWorld"
+                        .to_vec(),
+                ),
+            )
+            .unwrap();
+        let response_digest = response.response_digest();
+        let transcript = response.parse_subtitle().unwrap();
+
+        assert_eq!(transcript.expose_transcript(), "Hello\nWorld");
+        assert_eq!(transcript.response().response_digest(), response_digest);
+        assert_ne!(transcript.transcript_digest(), [0; 32]);
+        let debug = format!("{transcript:?}");
+        assert!(!debug.contains("Hello"));
+        assert!(!debug.contains("media.example.edu"));
+        let (response, text) = transcript.into_parts();
+        assert!(response.plan().is_subtitle());
+        assert_eq!(text.expose_secret(), "Hello\nWorld");
+    }
+
+    #[test]
+    fn downloaded_subtitle_rejects_foreign_kind_encoding_empty_and_source_overflow() {
+        let task_id = TaskId::new();
+        let (parsed, question) = parsed_question(task_id);
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let sources = artifact.media_sources_for_question("9001").unwrap();
+        let audio_id = sources[0].attachment_id().to_owned();
+        let audio_url = sources[0].expose_url().to_owned();
+        let subtitle_id = sources[1].attachment_id().to_owned();
+        let subtitle_url = sources[1].expose_url().to_owned();
+
+        assert!(
+            artifact
+                .prepare_media_fetch("9001", &audio_id)
+                .unwrap()
+                .accept_response(200, &audio_url, SecretValue::new(b"audio".to_vec()))
+                .unwrap()
+                .parse_subtitle()
+                .is_err()
+        );
+        for body in [
+            SecretValue::new(vec![0xff, 0xfe]),
+            SecretValue::new(b"WEBVTT\n1\n00:00:01.000 --> 00:00:02.000\n".to_vec()),
+            SecretValue::new("text\n".repeat(300_000).into_bytes()),
+        ] {
+            assert!(
+                artifact
+                    .prepare_media_fetch("9001", &subtitle_id)
+                    .unwrap()
+                    .accept_response(200, &subtitle_url, body)
+                    .unwrap()
+                    .parse_subtitle()
+                    .is_err()
+            );
+        }
     }
 
     #[test]

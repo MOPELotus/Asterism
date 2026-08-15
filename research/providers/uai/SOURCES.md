@@ -276,6 +276,11 @@ AnswerResolve execution remain a shared Core contract gap rather than a
 Provider-side omission. Its subtitle helper also strips WEBVTT/SRT headers,
 numeric cue IDs and timestamp rows before transcription; the Provider applies
 that evidenced normalization to embedded WEBVTT without retaining timing noise.
+The current implementation at `525c7ecfc2b4` still routes `.vtt`/`.srt`
+downloads directly through that line normalizer before the ffmpeg/Whisper
+branch and trims cached/inferred text. Asterism therefore also permits an exact
+bound subtitle response to enter the same bounded normalization, while audio
+and video remain behind the shared transcriber/model provenance contract.
 
 The current Rust donor also performs a separate Course-level progress read at
 `course_progress/{courseInstanceId}/{openid}/default` before the per-Unit

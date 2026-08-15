@@ -94,6 +94,12 @@ fixtures move synthetic bytes into a zeroizing owner, require exact status 200,
 the original final route and a nonempty body within the frozen ceiling, bind
 the byte digest and length to the request digest, redact body/route/binding and
 reject partial status, empty, oversized or route-substituted responses.
+Downloaded-subtitle fixtures reuse the evidenced VTT/SRT line normalizer,
+remove headers, cue ordinals, timestamps and rich-text markup, retain the exact
+response owner and bind the normalized secret-text digest to its response
+digest. Non-subtitle media, invalid UTF-8, empty cue sets and oversized sources
+fail before a transcript owner exists; audio/video transcription remains
+outside this Provider fixture boundary.
 DNS/private-range resolution and bounded streaming execution remain the shared
 downloader boundary.
 

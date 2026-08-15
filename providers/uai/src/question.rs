@@ -932,7 +932,7 @@ fn question_media(
         if let Some(text) = item.get("text").and_then(Value::as_str)
             && text.trim_start().starts_with("WEBVTT")
         {
-            let transcript = parse_embedded_webvtt(text)?;
+            let transcript = parse_subtitle_transcript(text)?;
             if !transcript.is_empty() {
                 transcript_fragments.push(transcript);
             }
@@ -1000,7 +1000,7 @@ fn question_media(
     })
 }
 
-fn parse_embedded_webvtt(document: &str) -> ProviderResult<String> {
+pub(crate) fn parse_subtitle_transcript(document: &str) -> ProviderResult<String> {
     if document.is_empty() || document.len() > MAX_EMBEDDED_TRANSCRIPT_BYTES * 4 {
         return Err(invalid_response(
             "UAI embedded transcript source exceeds the size limit",
@@ -2172,15 +2172,17 @@ mod tests {
             foreign_task.sources[0].attachment_id()
         );
         assert_eq!(
-            parse_embedded_webvtt(
+            parse_subtitle_transcript(
                 "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<p>Hello</p>\n\n2\n00:00:03.000 --> 00:00:04.000\nWorld"
             )
             .unwrap(),
             "Hello\nWorld"
         );
         assert!(
-            parse_embedded_webvtt(&"WEBVTT\ntext\n".repeat(MAX_EMBEDDED_TRANSCRIPT_BYTES / 5 + 1))
-                .is_err()
+            parse_subtitle_transcript(
+                &"WEBVTT\ntext\n".repeat(MAX_EMBEDDED_TRANSCRIPT_BYTES / 5 + 1)
+            )
+            .is_err()
         );
     }
 

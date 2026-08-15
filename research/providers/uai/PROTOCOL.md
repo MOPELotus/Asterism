@@ -794,6 +794,17 @@ donors provide no stable contract for it. The shared downloader must still
 enforce DNS/private-range policy and bounded streaming, then bind the accepted
 bytes plus model credential to the exact Task and AnswerResolve attempt.
 
+The current Rust donor selects downloaded `.vtt`/`.srt` before its
+ffmpeg/Whisper branch and applies the same line semantics already evidenced for
+embedded WEBVTT: trim lines, drop blank/header/numeric-ordinal/timestamp rows
+and join the remaining cues. Asterism permits that path only when the immutable
+manifest marked the accepted response as a subtitle `File`. It requires valid
+UTF-8, the existing bounded source/output limits and nonempty normalized text,
+then retains the response owner beside a zeroizing transcript and hashes the
+response digest with the exact transcript bytes. A non-subtitle response cannot
+select this parser. Audio/video bytes still require the shared transcriber and
+model/configuration provenance contract.
+
 After a durable media submission yields its receipt, session-aware
 SubmissionVerify rebinds that same complete manifest to every immutable Draft
 Question before starting fresh Task or user-module reads. The existing
