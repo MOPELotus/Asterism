@@ -154,6 +154,11 @@ enum ProviderAuthCommand {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Perform one bounded Provider-native interactive authentication poll.
+    Poll {
+        account_id: String,
+        session_id: String,
+    },
     /// Cancel one active authentication attempt.
     Cancel {
         account_id: String,
@@ -704,6 +709,14 @@ async fn handle_provider_auth(
                 None => format!("/api/v1/provider-accounts/{account_id}/auth-sessions/latest"),
             };
             client.get_authorized(&path, token).await?
+        }
+        ProviderAuthCommand::Poll {
+            account_id,
+            session_id,
+        } => {
+            let path =
+                format!("/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/poll");
+            client.post_authorized_empty(&path, token).await?
         }
         ProviderAuthCommand::Cancel {
             account_id,
@@ -1704,6 +1717,30 @@ mod tests {
                     }
                 }
             } if account_id == "account-id"
+        ));
+    }
+
+    #[test]
+    fn provider_auth_poll_requires_exact_account_and_session() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "provider-account",
+            "auth",
+            "poll",
+            "account-id",
+            "session-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::ProviderAccount {
+                command: ProviderAccountCommand::Auth {
+                    command: ProviderAuthCommand::Poll {
+                        account_id,
+                        session_id,
+                    }
+                }
+            } if account_id == "account-id" && session_id == "session-id"
         ));
     }
 }

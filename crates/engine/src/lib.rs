@@ -60,7 +60,7 @@ pub use auth_bootstrap_credential::{
 pub use auth_session::{
     AuthSessionBegin, AuthSessionCredentialCommit, AuthSessionCredentialRequest,
     AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest,
-    ExternalOauthCallbackRequest,
+    ExternalOauthCallbackRequest, InteractiveAuthPollRequest, InteractiveAuthPollResult,
 };
 pub use browser_bridge_credential::{
     BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorConfig,

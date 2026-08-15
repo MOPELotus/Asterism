@@ -7,7 +7,8 @@ use asterism_domain::{
 use asterism_engine::{
     AuthSessionCredentialRequest, AuthSessionService, AuthSessionServiceError,
     AuthSessionStartRequest, CredentialProvisionError, ExternalOauthCallbackRequest,
-    ProviderCredentialService, ProviderScanError, ProviderScanService,
+    InteractiveAuthPollRequest, InteractiveAuthPollResult, ProviderCredentialService,
+    ProviderScanError, ProviderScanService,
 };
 use asterism_provider_api::{
     ProviderCapability, ProviderEntry, ProviderError, ProviderErrorKind, SessionStatus,
@@ -292,25 +293,29 @@ pub(super) async fn begin_auth_session(
     let request = api_json(payload)?;
     let correlation_id = request_id(&headers)?;
     let now = Utc::now();
-    let started = AuthSessionService::new(
+    let mut service = AuthSessionService::new(
         state.providers,
         SqliteProviderAccountRepository::new(state.database.clone()),
         SqliteAuthSessionRepository::new(state.database.clone()),
     )
     .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
-        state.database,
-    )))
-    .begin(AuthSessionStartRequest {
-        owner_user_id: owner_id,
-        provider_account_id: account_id,
-        method: request.method,
-        created_at: now,
-        expires_at: now + Duration::seconds(AUTH_SESSION_TTL_SECONDS),
-        actor: auth.audit_actor(),
-        correlation_id: correlation_id.to_owned(),
-    })
-    .await
-    .map_err(map_auth_session_error)?;
+        state.database.clone(),
+    )));
+    if let Some(secret_store) = state.secret_store {
+        service = service.with_interactive_auth_continuations(Arc::new(secret_store));
+    }
+    let started = service
+        .begin(AuthSessionStartRequest {
+            owner_user_id: owner_id,
+            provider_account_id: account_id,
+            method: request.method,
+            created_at: now,
+            expires_at: now + Duration::seconds(AUTH_SESSION_TTL_SECONDS),
+            actor: auth.audit_actor(),
+            correlation_id: correlation_id.to_owned(),
+        })
+        .await
+        .map_err(map_auth_session_error)?;
     Ok(crate::auth::no_store(
         (
             StatusCode::CREATED,
@@ -321,6 +326,69 @@ pub(super) async fn begin_auth_session(
         )
             .into_response(),
     ))
+}
+
+pub(super) async fn poll_interactive_auth_session(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((account_id, session_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let session_id = parse_auth_session_id(&session_id)?;
+    let secret_store = state.secret_store.ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "the encrypted credential store is not configured",
+        )
+    })?;
+    let access = SecretAccess {
+        actor: auth.secret_actor(),
+        correlation_id: request_id(&headers)?.to_owned(),
+        reason: "poll interactive Provider authentication".to_owned(),
+    };
+    let result = AuthSessionService::new(
+        state.providers,
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteAuthSessionRepository::new(state.database.clone()),
+    )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
+    .with_interactive_auth_continuations(Arc::new(secret_store.clone()))
+    .poll_interactive_authentication(
+        &secret_store,
+        InteractiveAuthPollRequest {
+            owner_user_id: owner_id,
+            provider_account_id: account_id,
+            session_id,
+            access,
+        },
+    )
+    .await
+    .map_err(map_auth_session_error)?;
+    let response = match result {
+        InteractiveAuthPollResult::Waiting { session, challenge } => InteractiveAuthPollResponse {
+            session,
+            challenge: Some(challenge),
+            credential_count: None,
+            status: None,
+        },
+        InteractiveAuthPollResult::Authenticated(commit) => InteractiveAuthPollResponse {
+            session: commit.session,
+            challenge: None,
+            credential_count: Some(commit.credentials.len()),
+            status: Some(commit.status),
+        },
+        InteractiveAuthPollResult::Terminal(session) => InteractiveAuthPollResponse {
+            session,
+            challenge: None,
+            credential_count: None,
+            status: None,
+        },
+    };
+    Ok(crate::auth::no_store(Json(response).into_response()))
 }
 
 pub(super) async fn get_latest_auth_session(
@@ -460,20 +528,24 @@ pub(super) async fn cancel_auth_session(
         .map_err(ApiError::internal)?
         .filter(|session| session.provider_account_id == account_id)
         .ok_or_else(|| ApiError::not_found("auth_session_not_found"))?;
-    let cancelled = AuthSessionService::new(
+    let mut service = AuthSessionService::new(
         state.providers,
         SqliteProviderAccountRepository::new(state.database),
         repository,
-    )
-    .cancel(
-        owner_id,
-        session.id,
-        auth.audit_actor(),
-        request_id(&headers)?,
-        Utc::now(),
-    )
-    .await
-    .map_err(map_auth_session_error)?;
+    );
+    if let Some(secret_store) = state.secret_store {
+        service = service.with_interactive_auth_continuations(Arc::new(secret_store));
+    }
+    let cancelled = service
+        .cancel(
+            owner_id,
+            session.id,
+            auth.audit_actor(),
+            request_id(&headers)?,
+            Utc::now(),
+        )
+        .await
+        .map_err(map_auth_session_error)?;
     Ok(crate::auth::no_store(Json(cancelled).into_response()))
 }
 
@@ -653,6 +725,17 @@ pub(super) struct BeginAuthSessionRequest {
 pub(super) struct AuthSessionBeginResponse {
     session: AuthSession,
     challenge: asterism_provider_api::AuthChallenge,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct InteractiveAuthPollResponse {
+    session: AuthSession,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge: Option<asterism_provider_api::AuthChallenge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<SessionStatus>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1071,6 +1154,7 @@ fn map_auth_session_error(error: AuthSessionServiceError) -> ApiError {
         }
         AuthSessionServiceError::ProviderNotRegistered(_)
         | AuthSessionServiceError::AuthenticationUnavailable
+        | AuthSessionServiceError::InteractiveAuthenticationUnavailable
         | AuthSessionServiceError::UnsupportedAuthMethod(_) => ApiError::conflict(
             "provider_authentication_unavailable",
             "the Provider does not support the requested authentication method",
@@ -1081,6 +1165,8 @@ fn map_auth_session_error(error: AuthSessionServiceError) -> ApiError {
         ),
         AuthSessionServiceError::SessionExpired(_)
         | AuthSessionServiceError::InvalidSessionState(_)
+        | AuthSessionServiceError::InteractivePollBusy(_)
+        | AuthSessionServiceError::InteractivePollExhausted(_)
         | AuthSessionServiceError::RevisionConflict(_) => ApiError::conflict(
             "auth_session_conflict",
             "the authentication session is expired, terminal, or changed concurrently",

@@ -30,10 +30,12 @@ use crate::{
     AuthBootstrapCredentialCommitRequest, AuthBootstrapCredentialRepository,
     AuthenticatedCredentialRepository, BrowserBridgeCredentialCommit,
     BrowserBridgeCredentialCommitOutcome, BrowserBridgeCredentialCommitRequest,
-    BrowserBridgeCredentialRepository, Database,
+    BrowserBridgeCredentialRepository, Database, InteractiveAuthCredentialCommit,
+    InteractiveAuthCredentialCommitOutcome, InteractiveAuthCredentialCommitRequest,
+    InteractiveAuthCredentialRepository,
     answer_harvest::ensure_initial_answer_bootstrap_harvest,
     auth_bootstrap::{authenticate_access_in_transaction, complete_auth_bootstrap_in_transaction},
-    auth_session::update_auth_session_in_transaction,
+    auth_session::{fetch_auth_session, update_auth_session_in_transaction},
     browser_bridge::{fetch_exchange, find_claimed_session_for_exchange, insert_exchange_audit},
 };
 use crate::{QuestionReadContinuationRepositoryFactory, QuestionSessionArtifactRepositoryFactory};
@@ -156,6 +158,19 @@ impl SqliteSecretStore {
         )
     }
 
+    /// Builds a permanently Provider-scoped encrypted continuation repository
+    /// for restart-safe interactive authentication.
+    pub fn interactive_auth_continuations(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteInteractiveAuthContinuationRepository {
+        crate::SqliteInteractiveAuthContinuationRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
     /// Builds a permanently Provider-scoped encrypted `BrowserBridge` command
     /// repository. Core chooses the scope; Provider payloads cannot change it.
     pub fn browser_bridge_commands(
@@ -260,6 +275,15 @@ impl QuestionSessionArtifactRepositoryFactory for SqliteSecretStore {
         provider_id: ProviderId,
     ) -> Arc<dyn crate::QuestionSessionArtifactRepository> {
         Arc::new(self.question_session_artifacts(provider_id))
+    }
+}
+
+impl crate::InteractiveAuthContinuationRepositoryFactory for SqliteSecretStore {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn crate::InteractiveAuthContinuationRepository> {
+        Arc::new(self.interactive_auth_continuations(provider_id))
     }
 }
 
@@ -1331,6 +1355,125 @@ impl AuthenticatedCredentialRepository for SqliteSecretStore {
             access,
         })
         .await
+    }
+}
+
+#[async_trait]
+impl InteractiveAuthCredentialRepository for SqliteSecretStore {
+    #[allow(clippy::too_many_lines)]
+    async fn commit_interactive_auth_credentials(
+        &self,
+        request: InteractiveAuthCredentialCommitRequest<'_>,
+    ) -> Result<InteractiveAuthCredentialCommitOutcome, SecretStoreError> {
+        let InteractiveAuthCredentialCommitRequest {
+            owner_user_id,
+            provider_account_id,
+            authenticated_session,
+            expected_session_revision,
+            continuation,
+            terminal_result_digest,
+            bundle,
+            access,
+        } = request;
+        authorize(owner_user_id, access)?;
+        if terminal_result_digest == [0; 32]
+            || authenticated_session.owner_user_id != owner_user_id
+            || authenticated_session.provider_account_id != provider_account_id
+            || authenticated_session.state != AuthState::Authenticated
+            || authenticated_session.revision != expected_session_revision.saturating_add(1)
+            || continuation.auth_session_id != authenticated_session.id
+            || continuation.provider_id != bundle.provider_id
+            || continuation.revision.saturating_add(1) != expected_session_revision
+            || continuation.terminal_result_digest != Some(terminal_result_digest)
+        {
+            return Err(SecretStoreError::InvalidValue);
+        }
+        let prepared = prepare_credential_bundle(
+            owner_user_id,
+            provider_account_id,
+            bundle,
+            self.keyring.active().0,
+            self.keyring.active().1,
+        )?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        ensure_account_binding(
+            &mut transaction,
+            owner_user_id,
+            provider_account_id,
+            &prepared.provider_id,
+            prepared.tenant.as_deref(),
+        )
+        .await?;
+        let Some(current_session) = fetch_auth_session(&mut transaction, authenticated_session.id)
+            .await
+            .map_err(|_| SecretStoreError::Storage)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(InteractiveAuthCredentialCommitOutcome::BindingConflict);
+        };
+        if current_session.owner_user_id != owner_user_id
+            || current_session.provider_account_id != provider_account_id
+            || current_session.state != AuthState::ValidatingCredential
+            || current_session.revision != expected_session_revision
+            || !crate::interactive_auth::consume_interactive_auth_candidate(
+                &mut transaction,
+                continuation,
+                terminal_result_digest,
+                owner_user_id,
+                access,
+            )
+            .await?
+            || !update_auth_session_in_transaction(
+                &mut transaction,
+                authenticated_session,
+                expected_session_revision,
+                secret_audit_actor(&access.actor).ok_or(SecretStoreError::Unauthorized)?,
+                &access.correlation_id,
+            )
+            .await
+            .map_err(|_| SecretStoreError::Storage)?
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(InteractiveAuthCredentialCommitOutcome::BindingConflict);
+        }
+        let replaced_count =
+            replace_previous_credentials(&mut transaction, provider_account_id, access).await?;
+        persist_prepared_credentials(&mut transaction, &prepared.credentials, access).await?;
+        authenticate_provider_account(
+            &mut transaction,
+            owner_user_id,
+            provider_account_id,
+            &prepared.provider_id,
+            authenticated_session.updated_at,
+        )
+        .await?;
+        insert_bundle_audit(
+            &mut transaction,
+            access,
+            provider_account_id,
+            prepared.auth_method,
+            prepared.session_kind,
+            replaced_count,
+            prepared.credentials.len(),
+        )
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(InteractiveAuthCredentialCommitOutcome::Committed(
+            InteractiveAuthCredentialCommit {
+                session: authenticated_session.clone(),
+                credentials: prepared
+                    .credentials
+                    .into_iter()
+                    .map(|prepared| prepared.credential)
+                    .collect(),
+            },
+        ))
     }
 }
 

@@ -162,6 +162,10 @@ pub fn build_router(state: ApiState) -> Router {
             axum::routing::put(account::put_auth_session_credentials),
         )
         .route(
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/poll",
+            post(account::poll_interactive_auth_session),
+        )
+        .route(
             "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/external-oauth",
             get(account::get_external_oauth_pending),
         )
@@ -684,6 +688,24 @@ pub fn openapi_document() -> Value {
                         "429": {"description": "Provider rate limit reached"},
                         "502": {"description": "Provider returned inconsistent authentication data"},
                         "503": {"description": "Provider or encrypted credential store unavailable"}
+                    }
+                }
+            },
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/poll": {
+                "post": {
+                    "operationId": "pollProviderAccountInteractiveAuthSession",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [
+                        {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                        {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Interactive authentication advanced, completed, or reached a definite terminal state"},
+                        "404": {"description": "Provider account or authentication session not found"},
+                        "409": {"description": "Session changed, expired, is busy, or exhausted its bounded poll budget"},
+                        "429": {"description": "Provider rate limit reached"},
+                        "502": {"description": "Provider returned inconsistent interactive authentication data"},
+                        "503": {"description": "Provider, network, or encrypted credential store unavailable"}
                     }
                 }
             },
@@ -2539,13 +2561,18 @@ mod tests {
         CourseInventoryCapability, CredentialValidation, ExecutionEventSink, ExecutionOutcome,
         ExecutionPlanningRequest, ExecutionRequest as ProviderExecutionRequest,
         ProviderAuthContext, ProviderCapability, ProviderContext, ProviderEntry,
-        ProviderExecutionPlan, ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata,
-        ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior,
-        ProviderSettingDefinition, ProviderSettingKind, ProviderSettingScope, ProviderSettingValue,
-        RemoteCourse, RemoteTask, SessionStatus, TaskExecutionCapability, TaskInventoryCapability,
-        VerificationLevel,
+        ProviderExecutionPlan, ProviderExecutionPlanArtifact, ProviderIdentity,
+        ProviderInteractiveAuthBegin, ProviderInteractiveAuthContinuation,
+        ProviderInteractiveAuthPollOutcome, ProviderMetadata, ProviderResult,
+        ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior, ProviderSettingDefinition,
+        ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask,
+        ResolvedProviderInteractiveAuthContinuation, SessionStatus, TaskExecutionCapability,
+        TaskInventoryCapability, VerificationLevel,
     };
-    use asterism_secrets::{CredentialBundle, SecretAccess, SecretActor, SecretKey, SecretValue};
+    use asterism_secrets::{
+        CredentialAcquisition, CredentialBundle, CredentialField, SecretAccess, SecretActor,
+        SecretKey, SecretValue,
+    };
     use asterism_storage::{
         AnswerCandidateRecord, AnswerCandidateRepository, AnswerEvidenceRepository,
         AnswerHistoryIngestRequest, AnswerHistoryIngestionRepository, CompletionWorkflowRepository,
@@ -2822,6 +2849,10 @@ mod tests {
 
     #[async_trait]
     impl AuthenticationCapability for ApiCredentialAuthentication {
+        fn supports_durable_interactive_authentication(&self) -> bool {
+            true
+        }
+
         fn capture_recipes(&self) -> Vec<CaptureRecipe> {
             vec![test_capture_recipe(3), test_capture_recipe(4)]
         }
@@ -2838,6 +2869,72 @@ mod tests {
                 user_action: None,
                 expires_at: None,
                 external_oauth: None,
+            })
+        }
+
+        async fn begin_interactive_authentication(
+            &self,
+            context: &ProviderAuthContext,
+            method: AuthMethod,
+        ) -> ProviderResult<ProviderInteractiveAuthBegin> {
+            Ok(ProviderInteractiveAuthBegin {
+                challenge: AuthChallenge {
+                    session_id: context.auth_session_id.unwrap_or_default(),
+                    method,
+                    waiting_for: asterism_domain::WaitingUserState::QrScan,
+                    user_action: Some("https://provider-alpha.example/qr/opaque".to_owned()),
+                    expires_at: None,
+                    external_oauth: None,
+                },
+                continuation: ProviderInteractiveAuthContinuation::try_new(
+                    &context.provider_id,
+                    "provider-alpha.qr.v1",
+                    "provider-alpha.qr-scan",
+                    SecretValue::new(b"api-qr-state".to_vec()),
+                    300,
+                    3,
+                )?,
+            })
+        }
+
+        async fn poll_interactive_authentication(
+            &self,
+            context: &ProviderAuthContext,
+            continuation: ResolvedProviderInteractiveAuthContinuation<'_>,
+        ) -> ProviderResult<ProviderInteractiveAuthPollOutcome> {
+            assert_eq!(continuation.value.expose_secret(), b"api-qr-state");
+            Ok(ProviderInteractiveAuthPollOutcome::Authenticated {
+                continuation: ProviderInteractiveAuthContinuation::try_new(
+                    &context.provider_id,
+                    "provider-alpha.qr-terminal.v1",
+                    "provider-alpha.authenticated",
+                    SecretValue::new(b"api-qr-cookie".to_vec()),
+                    300,
+                    3,
+                )?,
+                result_digest: [8; 32],
+            })
+        }
+
+        async fn finalize_interactive_authentication(
+            &self,
+            context: &ProviderAuthContext,
+            continuation: ResolvedProviderInteractiveAuthContinuation<'_>,
+        ) -> ProviderResult<CredentialBundle> {
+            assert_eq!(continuation.value.expose_secret(), b"api-qr-cookie");
+            Ok(CredentialBundle {
+                provider_id: context.provider_id.clone(),
+                tenant: None,
+                auth_method: AuthMethod::QrCode,
+                acquired_via: CredentialAcquisition::NativeProviderLogin,
+                captured_at: Utc::now(),
+                expires_at: None,
+                session_kind: SessionKind::Cookie,
+                fields: vec![CredentialField {
+                    purpose: asterism_secrets::SecretPurpose::ProviderCookie,
+                    value: SecretValue::new(b"api-qr-cookie".to_vec()),
+                }],
+                user_id_hint: Some("remote-account".to_owned()),
             })
         }
 
@@ -2878,7 +2975,11 @@ mod tests {
             scan_min_interval_seconds: None,
             capture_recipe_version: Some(3),
             capabilities: BTreeSet::from([ProviderCapability::Authentication]),
-            auth_methods: BTreeSet::from([AuthMethod::ImportedCookie, AuthMethod::AssistedSession]),
+            auth_methods: BTreeSet::from([
+                AuthMethod::ImportedCookie,
+                AuthMethod::AssistedSession,
+                AuthMethod::QrCode,
+            ]),
             session_kinds: BTreeSet::from([SessionKind::Cookie]),
         };
         let authentication = Arc::new(ApiCredentialAuthentication {
@@ -4730,6 +4831,70 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn interactive_auth_poll_api_commits_without_exposing_continuation() {
+        let (app, database) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let started = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/provider-accounts/{account_id}/auth-sessions"
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(r#"{"method":"qr_code"}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::CREATED);
+        assert_eq!(started.headers()[header::CACHE_CONTROL], "no-store");
+        let started = response_json(started).await;
+        assert_eq!(started["challenge"]["waiting_for"], "qr_scan");
+        let session_id = started["session"]["id"].as_str().unwrap();
+        let response = app
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/poll"
+                ))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        for secret in [b"api-qr-state".as_slice(), b"api-qr-cookie".as_slice()] {
+            assert!(
+                !body
+                    .as_ref()
+                    .windows(secret.len())
+                    .any(|window| window == secret)
+            );
+        }
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["session"]["state"]["state"], "authenticated");
+        assert_eq!(response["credential_count"], 1);
+        assert_eq!(response["status"]["valid"], true);
+        let continuation_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM interactive_auth_continuations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(continuation_count, 0);
     }
 
     #[tokio::test]
@@ -7474,6 +7639,7 @@ mod tests {
             "/api/v1/provider-accounts/{account_id}/auth-sessions/latest",
             "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}",
             "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/credentials",
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/poll",
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             "/api/v1/admin/providers/{provider_id}/runtime-settings/schema",
             "/api/v1/admin/providers/{provider_id}/runtime-settings",

@@ -14,6 +14,7 @@ mod credit;
 mod database;
 mod execution;
 mod external_oauth;
+mod interactive_auth;
 mod lease;
 mod outbox;
 mod protocol_observation;
@@ -47,6 +48,7 @@ pub use course::SqliteCourseProgressRepository;
 pub use credit::{CreditGrant, CreditGrantOutcome, CreditGrantResult, SqliteCreditRepository};
 pub use database::{Database, StorageError};
 pub use execution::SqliteExecutionRepository;
+pub use interactive_auth::SqliteInteractiveAuthContinuationRepository;
 pub use lease::{LeaseAcquireOutcome, SqliteExecutionLeaseRepository};
 pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRepository};
 pub use protocol_observation::SqliteProtocolObservationRepository;
@@ -103,20 +105,28 @@ pub use repository::{
     ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionStrictCompletionRetryConfirmation,
     ExecutionStrictCompletionRetryRequest, ExecutionSubmissionRepository,
     ExecutionVerificationRecoveryRepository, ExternalOauthClaim, GlobalAnswerCorpusEvidence,
-    OutboxRepository, PendingBrowserBridgeResult, PriorAnswerEvidence, ProtocolObservationPage,
-    ProtocolObservationRecordOutcome, ProtocolObservationRecordRequest,
-    ProtocolObservationRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
-    ProviderRuntimeSettingsRecord, ProviderRuntimeSettingsRepository,
-    ProviderRuntimeSettingsTarget, ProviderRuntimeSettingsWriteOutcome,
-    ProviderRuntimeSettingsWriteRequest, QuestionReadAttemptRepository, QuestionReadContinuation,
-    QuestionReadContinuationAttachRequest, QuestionReadContinuationRepository,
-    QuestionReadContinuationRepositoryFactory, QuestionReadMaterializeOutcome,
-    QuestionReadMaterializeRequest, QuestionReadOperation, QuestionReadOperationAcceptRequest,
-    QuestionReadOperationFinishOutcome, QuestionReadOperationIssueOutcome,
-    QuestionReadOperationIssueRequest, QuestionReadOperationState,
-    QuestionSessionArtifactAttachRequest, QuestionSessionArtifactRepository,
-    QuestionSessionArtifactRepositoryFactory, QuestionSessionClaimOutcome,
-    QuestionSessionContinuation, QuestionSessionMaterializeRequest,
+    InteractiveAuthAbortRequest, InteractiveAuthCandidateFailureRequest,
+    InteractiveAuthContinuation, InteractiveAuthContinuationAttachRequest,
+    InteractiveAuthContinuationMutationOutcome, InteractiveAuthContinuationRepository,
+    InteractiveAuthContinuationRepositoryFactory, InteractiveAuthCredentialCommit,
+    InteractiveAuthCredentialCommitOutcome, InteractiveAuthCredentialCommitRequest,
+    InteractiveAuthCredentialRepository, InteractiveAuthPollAuthenticateRequest,
+    InteractiveAuthPollClaim, InteractiveAuthPollClaimOutcome, InteractiveAuthPollClaimRequest,
+    InteractiveAuthPollRotateRequest, InteractiveAuthPollTerminalRequest,
+    InteractiveAuthTerminalState, OutboxRepository, PendingBrowserBridgeResult,
+    PriorAnswerEvidence, ProtocolObservationPage, ProtocolObservationRecordOutcome,
+    ProtocolObservationRecordRequest, ProtocolObservationRepository, ProviderAccountRepository,
+    ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
+    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
+    ProviderRuntimeSettingsWriteOutcome, ProviderRuntimeSettingsWriteRequest,
+    QuestionReadAttemptRepository, QuestionReadContinuation, QuestionReadContinuationAttachRequest,
+    QuestionReadContinuationRepository, QuestionReadContinuationRepositoryFactory,
+    QuestionReadMaterializeOutcome, QuestionReadMaterializeRequest, QuestionReadOperation,
+    QuestionReadOperationAcceptRequest, QuestionReadOperationFinishOutcome,
+    QuestionReadOperationIssueOutcome, QuestionReadOperationIssueRequest,
+    QuestionReadOperationState, QuestionSessionArtifactAttachRequest,
+    QuestionSessionArtifactRepository, QuestionSessionArtifactRepositoryFactory,
+    QuestionSessionClaimOutcome, QuestionSessionContinuation, QuestionSessionMaterializeRequest,
     QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
     QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
     QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
@@ -124,17 +134,17 @@ pub use repository::{
     QuestionSessionTransition, QuestionSnapshot, QuestionSnapshotRepository,
     ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
     ResolvedBrowserBridgeWorkflowContext, ResolvedBrowserBridgeWorkflowPlan,
-    ResolvedQuestionReadContinuation, ResolvedQuestionSessionContinuation, ScanScheduleRepository,
-    SchedulerRepository, ScoreImprovementBeginRequest, ScoreImprovementObserveRequest,
-    ScoreImprovementWorkflowRecord, ServiceTokenPage, ServiceTokenQueryRepository,
-    SessionRepository, StrictCompletionBeginRequest, StrictCompletionExecutionObservationRecord,
-    StrictCompletionExecutionObservationRequest, StrictCompletionObserveRequest,
-    StrictCompletionWorkflowRecord, SubmissionDraftRepository, SubmissionReceiptPersistRequest,
-    SubmissionResultPersistRequest, SubmissionResultRepository, TaskLifecycleMutation,
-    TaskLifecycleMutationOutcome, TaskLifecycleReceipt, TaskLifecycleRepository, TaskPage,
-    TaskQueryRepository, TaskRepository, TaskRuntimeRepository, UserAdminCreate,
-    UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate, UserAdminUpdateOutcome,
-    UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
+    ResolvedInteractiveAuthCandidate, ResolvedQuestionReadContinuation,
+    ResolvedQuestionSessionContinuation, ScanScheduleRepository, SchedulerRepository,
+    ScoreImprovementBeginRequest, ScoreImprovementObserveRequest, ScoreImprovementWorkflowRecord,
+    ServiceTokenPage, ServiceTokenQueryRepository, SessionRepository, StrictCompletionBeginRequest,
+    StrictCompletionExecutionObservationRecord, StrictCompletionExecutionObservationRequest,
+    StrictCompletionObserveRequest, StrictCompletionWorkflowRecord, SubmissionDraftRepository,
+    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
+    TaskLifecycleMutation, TaskLifecycleMutationOutcome, TaskLifecycleReceipt,
+    TaskLifecycleRepository, TaskPage, TaskQueryRepository, TaskRepository, TaskRuntimeRepository,
+    UserAdminCreate, UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate,
+    UserAdminUpdateOutcome, UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

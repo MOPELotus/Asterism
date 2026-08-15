@@ -34,6 +34,9 @@ const MAX_CAPTURE_JSON_FIELDS: usize = 16;
 const MAX_QUESTION_READ_LABEL_BYTES: usize = 96;
 const MAX_QUESTION_READ_ITEMS: usize = 5_000;
 const MAX_QUESTION_READ_TTL_SECONDS: u64 = 24 * 60 * 60;
+const MAX_INTERACTIVE_AUTH_CONTINUATION_BYTES: usize = 1024 * 1024;
+const MAX_INTERACTIVE_AUTH_TTL_SECONDS: u64 = 60 * 60;
+const MAX_INTERACTIVE_AUTH_POLLS: u32 = 10_000;
 
 fn valid_provider_label(provider_id: &ProviderId, value: &str) -> bool {
     !value.is_empty()
@@ -597,6 +600,12 @@ pub trait ProviderIdentity: Send + Sync {
 
 #[async_trait]
 pub trait AuthenticationCapability: ProviderIdentity {
+    /// Declares that Provider-native interactive methods use Core's encrypted
+    /// continuation and serialized poll lifecycle.
+    fn supports_durable_interactive_authentication(&self) -> bool {
+        false
+    }
+
     /// Returns the legacy/default declarative Capture recipe advertised by
     /// metadata. New Providers with more than one valid acquisition route
     /// should override [`AuthenticationCapability::capture_recipes`] instead.
@@ -617,6 +626,47 @@ pub trait AuthenticationCapability: ProviderIdentity {
         context: &ProviderAuthContext,
         method: AuthMethod,
     ) -> ProviderResult<AuthChallenge>;
+
+    /// Starts one Provider-native interactive authentication flow and returns
+    /// the private state Core must encrypt before exposing the challenge.
+    async fn begin_interactive_authentication(
+        &self,
+        _context: &ProviderAuthContext,
+        _method: AuthMethod,
+    ) -> ProviderResult<ProviderInteractiveAuthBegin> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement durable interactive authentication",
+        ))
+    }
+
+    /// Performs exactly one poll against a Core-resolved continuation. Core
+    /// serializes calls and persists the returned replacement before another
+    /// poll can be issued.
+    async fn poll_interactive_authentication(
+        &self,
+        _context: &ProviderAuthContext,
+        _continuation: ResolvedProviderInteractiveAuthContinuation<'_>,
+    ) -> ProviderResult<ProviderInteractiveAuthPollOutcome> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement durable interactive authentication polling",
+        ))
+    }
+
+    /// Deterministically converts a persisted authenticated continuation into
+    /// a candidate credential bundle. Implementations must not repeat the
+    /// interactive remote exchange here.
+    async fn finalize_interactive_authentication(
+        &self,
+        _context: &ProviderAuthContext,
+        _continuation: ResolvedProviderInteractiveAuthContinuation<'_>,
+    ) -> ProviderResult<CredentialBundle> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement interactive authentication finalization",
+        ))
+    }
 
     /// Validates a plaintext candidate before Core permits persistence.
     async fn validate_credential(
@@ -3578,7 +3628,7 @@ impl fmt::Debug for ExternalOauthAuthorization {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuthChallenge {
     pub session_id: AuthSessionId,
     pub method: AuthMethod,
@@ -3586,6 +3636,349 @@ pub struct AuthChallenge {
     pub user_action: Option<String>,
     pub expires_at: Option<Timestamp>,
     pub external_oauth: Option<ExternalOauthAuthorization>,
+}
+
+impl fmt::Debug for AuthChallenge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthChallenge")
+            .field("session_id", &self.session_id)
+            .field("method", &self.method)
+            .field("waiting_for", &self.waiting_for)
+            .field(
+                "user_action",
+                &self.user_action.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("external_oauth", &self.external_oauth)
+            .finish()
+    }
+}
+
+/// Provider-private state for one restart-safe interactive authentication
+/// flow. Core persists the plaintext only through an encrypted, Provider-
+/// scoped continuation repository.
+pub struct ProviderInteractiveAuthContinuation {
+    continuation_type: String,
+    continuation_digest: [u8; 32],
+    phase: String,
+    value: SecretValue,
+    ttl_seconds: u64,
+    maximum_polls: u32,
+}
+
+impl ProviderInteractiveAuthContinuation {
+    /// Creates a bounded continuation and derives its digest from the exact
+    /// plaintext bytes Core will encrypt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign labels, empty or oversized values, unsafe lifetimes and
+    /// unbounded poll counts.
+    pub fn try_new(
+        provider_id: &ProviderId,
+        continuation_type: impl Into<String>,
+        phase: impl Into<String>,
+        value: SecretValue,
+        ttl_seconds: u64,
+        maximum_polls: u32,
+    ) -> ProviderResult<Self> {
+        let continuation_type = continuation_type.into();
+        let phase = phase.into();
+        let value_length = value.expose_secret().len();
+        if !valid_provider_label(provider_id, &continuation_type)
+            || !valid_provider_label(provider_id, &phase)
+            || value_length == 0
+            || value_length > MAX_INTERACTIVE_AUTH_CONTINUATION_BYTES
+            || ttl_seconds == 0
+            || ttl_seconds > MAX_INTERACTIVE_AUTH_TTL_SECONDS
+            || maximum_polls == 0
+            || maximum_polls > MAX_INTERACTIVE_AUTH_POLLS
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider interactive authentication continuation is invalid",
+            ));
+        }
+        let continuation_digest = Sha256::digest(value.expose_secret()).into();
+        Ok(Self {
+            continuation_type,
+            continuation_digest,
+            phase,
+            value,
+            ttl_seconds,
+            maximum_polls,
+        })
+    }
+
+    pub fn continuation_type(&self) -> &str {
+        &self.continuation_type
+    }
+
+    pub const fn continuation_digest(&self) -> [u8; 32] {
+        self.continuation_digest
+    }
+
+    pub fn phase(&self) -> &str {
+        &self.phase
+    }
+
+    pub const fn value(&self) -> &SecretValue {
+        &self.value
+    }
+
+    pub const fn ttl_seconds(&self) -> u64 {
+        self.ttl_seconds
+    }
+
+    pub const fn maximum_polls(&self) -> u32 {
+        self.maximum_polls
+    }
+
+    pub fn into_parts(self) -> (String, String, SecretValue, u64, u32) {
+        (
+            self.continuation_type,
+            self.phase,
+            self.value,
+            self.ttl_seconds,
+            self.maximum_polls,
+        )
+    }
+}
+
+impl fmt::Debug for ProviderInteractiveAuthContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderInteractiveAuthContinuation")
+            .field("continuation_type", &self.continuation_type)
+            .field("continuation_digest", &self.continuation_digest)
+            .field("phase", &self.phase)
+            .field("value", &"[REDACTED]")
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("maximum_polls", &self.maximum_polls)
+            .finish()
+    }
+}
+
+/// Decrypted continuation exposed only during one Provider call authorized by
+/// a Core poll claim.
+pub struct ResolvedProviderInteractiveAuthContinuation<'a> {
+    pub continuation_type: &'a str,
+    pub continuation_digest: [u8; 32],
+    pub phase: &'a str,
+    pub revision: u32,
+    pub poll_sequence: u32,
+    pub value: &'a SecretValue,
+}
+
+impl fmt::Debug for ResolvedProviderInteractiveAuthContinuation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedProviderInteractiveAuthContinuation")
+            .field("continuation_type", &self.continuation_type)
+            .field("continuation_digest", &self.continuation_digest)
+            .field("phase", &self.phase)
+            .field("revision", &self.revision)
+            .field("poll_sequence", &self.poll_sequence)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub struct ProviderInteractiveAuthBegin {
+    pub challenge: AuthChallenge,
+    pub continuation: ProviderInteractiveAuthContinuation,
+}
+
+impl ProviderInteractiveAuthBegin {
+    /// Validates the method/state matrix specific to Provider-native QR flows.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-QR challenges and external-OAuth state mixed into a native
+    /// continuation.
+    pub fn validate(&self) -> ProviderResult<()> {
+        if self.challenge.method != AuthMethod::QrCode
+            || !matches!(
+                self.challenge.waiting_for,
+                WaitingUserState::QrScan | WaitingUserState::QrConfirm
+            )
+            || self.challenge.external_oauth.is_some()
+        {
+            Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider interactive authentication challenge is invalid",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// One definite response to a claimed interactive authentication poll. An
+/// authenticated result carries a terminal continuation so a crash before
+/// credential commit can resume without replaying the remote exchange.
+#[derive(Debug)]
+pub enum ProviderInteractiveAuthPollOutcome {
+    Waiting {
+        waiting_for: WaitingUserState,
+        user_action: Option<String>,
+        continuation: ProviderInteractiveAuthContinuation,
+        result_digest: [u8; 32],
+    },
+    Authenticated {
+        continuation: ProviderInteractiveAuthContinuation,
+        result_digest: [u8; 32],
+    },
+    Rejected {
+        result_digest: [u8; 32],
+    },
+    Expired {
+        result_digest: [u8; 32],
+    },
+}
+
+impl ProviderInteractiveAuthPollOutcome {
+    /// Validates common result and continuation invariants before persistence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero evidence digests and waiting states outside an interactive
+    /// QR flow.
+    pub fn validate(&self) -> ProviderResult<()> {
+        let (result_digest, waiting_for, user_action) = match self {
+            Self::Waiting {
+                waiting_for,
+                user_action,
+                result_digest,
+                ..
+            } => (*result_digest, Some(*waiting_for), user_action.as_deref()),
+            Self::Authenticated { result_digest, .. }
+            | Self::Rejected { result_digest }
+            | Self::Expired { result_digest } => (*result_digest, None, None),
+        };
+        if result_digest == [0; 32]
+            || waiting_for.is_some_and(|waiting_for| {
+                !matches!(
+                    waiting_for,
+                    WaitingUserState::QrScan | WaitingUserState::QrConfirm
+                )
+            })
+            || user_action.is_some_and(|action| {
+                action.is_empty()
+                    || action.len() > 4_096
+                    || action.trim() != action
+                    || action.chars().any(char::is_control)
+            })
+        {
+            Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider interactive authentication poll result is invalid",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_auth_tests {
+    use asterism_domain::{AuthSessionId, ProviderId};
+
+    use super::*;
+
+    #[test]
+    fn continuation_is_bounded_provider_scoped_and_redacted() {
+        let provider_id = ProviderId::new("chaoxing").unwrap();
+        let continuation = ProviderInteractiveAuthContinuation::try_new(
+            &provider_id,
+            "chaoxing.qr.v1",
+            "chaoxing.qr-scan",
+            SecretValue::new(b"uuid-cookie-secret".to_vec()),
+            300,
+            900,
+        )
+        .unwrap();
+        assert_eq!(continuation.maximum_polls(), 900);
+        let debug = format!("{continuation:?}");
+        assert!(!debug.contains("uuid-cookie-secret"));
+        assert!(
+            ProviderInteractiveAuthContinuation::try_new(
+                &provider_id,
+                "uai.qr.v1",
+                "chaoxing.qr-scan",
+                SecretValue::new(b"foreign".to_vec()),
+                300,
+                900,
+            )
+            .is_err()
+        );
+        assert!(
+            ProviderInteractiveAuthContinuation::try_new(
+                &provider_id,
+                "chaoxing.qr.v1",
+                "chaoxing.qr-scan",
+                SecretValue::new(b"unbounded".to_vec()),
+                300,
+                MAX_INTERACTIVE_AUTH_POLLS + 1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn interactive_begin_and_poll_enforce_qr_state_matrix() {
+        let provider_id = ProviderId::new("chaoxing").unwrap();
+        let continuation = || {
+            ProviderInteractiveAuthContinuation::try_new(
+                &provider_id,
+                "chaoxing.qr.v1",
+                "chaoxing.qr-scan",
+                SecretValue::new(b"bound-state".to_vec()),
+                300,
+                10,
+            )
+            .unwrap()
+        };
+        let session_id = AuthSessionId::new();
+        let valid = ProviderInteractiveAuthBegin {
+            challenge: AuthChallenge {
+                session_id,
+                method: AuthMethod::QrCode,
+                waiting_for: WaitingUserState::QrScan,
+                user_action: Some("https://passport2.chaoxing.com/toauthlogin?opaque".to_owned()),
+                expires_at: None,
+                external_oauth: None,
+            },
+            continuation: continuation(),
+        };
+        valid.validate().unwrap();
+        assert!(!format!("{:?}", valid.challenge).contains("toauthlogin"));
+
+        let invalid = ProviderInteractiveAuthBegin {
+            challenge: AuthChallenge {
+                method: AuthMethod::Password,
+                ..valid.challenge.clone()
+            },
+            continuation: continuation(),
+        };
+        assert!(invalid.validate().is_err());
+        let waiting = ProviderInteractiveAuthPollOutcome::Waiting {
+            waiting_for: WaitingUserState::CredentialInput,
+            user_action: None,
+            continuation: continuation(),
+            result_digest: [1; 32],
+        };
+        assert!(waiting.validate().is_err());
+        assert!(
+            ProviderInteractiveAuthPollOutcome::Rejected {
+                result_digest: [0; 32]
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

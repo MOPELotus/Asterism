@@ -7,17 +7,25 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AuthChallenge, ExternalOauthCallbackBinding, ProviderAuthContext, ProviderError,
-    ProviderErrorKind, ProviderRegistry, SessionStatus,
+    ProviderErrorKind, ProviderInteractiveAuthPollOutcome, ProviderRegistry,
+    ResolvedProviderInteractiveAuthContinuation, SessionStatus,
 };
 use asterism_secrets::{
-    CredentialAcquisition, CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError,
-    SecretString,
+    CredentialAcquisition, CredentialBundle, ProviderCredential, SecretAccess, SecretActor,
+    SecretStoreError, SecretString,
 };
 use asterism_storage::{
-    AuthSessionRepository, AuthenticatedCredentialRepository, ProtocolObservationRepository,
-    ProviderAccountRepository, StorageError,
+    AuthSessionRepository, AuthenticatedCredentialRepository, InteractiveAuthAbortRequest,
+    InteractiveAuthCandidateFailureRequest, InteractiveAuthContinuationAttachRequest,
+    InteractiveAuthContinuationMutationOutcome, InteractiveAuthContinuationRepositoryFactory,
+    InteractiveAuthCredentialCommitOutcome, InteractiveAuthCredentialCommitRequest,
+    InteractiveAuthCredentialRepository, InteractiveAuthPollAuthenticateRequest,
+    InteractiveAuthPollClaim, InteractiveAuthPollClaimOutcome, InteractiveAuthPollClaimRequest,
+    InteractiveAuthPollRotateRequest, InteractiveAuthPollTerminalRequest,
+    InteractiveAuthTerminalState, ProtocolObservationRepository, ProviderAccountRepository,
+    StorageError,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 
 use crate::credential::{CredentialProvisionError, validate_candidate};
 use crate::protocol_observation::{
@@ -30,6 +38,7 @@ pub struct AuthSessionService<A, S> {
     accounts: A,
     sessions: S,
     protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
+    interactive_auth_continuations: Option<Arc<dyn InteractiveAuthContinuationRepositoryFactory>>,
 }
 
 impl<A, S> AuthSessionService<A, S> {
@@ -39,6 +48,7 @@ impl<A, S> AuthSessionService<A, S> {
             accounts,
             sessions,
             protocol_observations: None,
+            interactive_auth_continuations: None,
         }
     }
 
@@ -48,6 +58,15 @@ impl<A, S> AuthSessionService<A, S> {
         observations: Arc<dyn ProtocolObservationRepository>,
     ) -> Self {
         self.protocol_observations = Some(observations);
+        self
+    }
+
+    #[must_use]
+    pub fn with_interactive_auth_continuations(
+        mut self,
+        continuations: Arc<dyn InteractiveAuthContinuationRepositoryFactory>,
+    ) -> Self {
+        self.interactive_auth_continuations = Some(continuations);
         self
     }
 }
@@ -62,6 +81,10 @@ impl<A, S> std::fmt::Debug for AuthSessionService<A, S> {
             .field(
                 "protocol_observations",
                 &self.protocol_observations.is_some(),
+            )
+            .field(
+                "interactive_auth_continuations",
+                &self.interactive_auth_continuations.is_some(),
             )
             .finish()
     }
@@ -115,6 +138,11 @@ where
             .authentication
             .as_ref()
             .ok_or(AuthSessionServiceError::AuthenticationUnavailable)?;
+        let durable_interactive = method == AuthMethod::QrCode
+            && authentication.supports_durable_interactive_authentication();
+        if durable_interactive && self.interactive_auth_continuations.is_none() {
+            return Err(AuthSessionServiceError::InteractiveAuthenticationUnavailable);
+        }
         let mut session = AuthSession::starting(
             owner_user_id,
             provider_account_id,
@@ -132,8 +160,22 @@ where
             auth_session_id: Some(session.id),
             correlation_id: correlation_id.clone(),
         };
-        let challenge = match authentication.begin_authentication(&context, method).await {
-            Ok(challenge) => challenge,
+        let provider_begin = if durable_interactive {
+            authentication
+                .begin_interactive_authentication(&context, method)
+                .await
+                .and_then(|begin| {
+                    begin.validate()?;
+                    Ok((begin.challenge, Some(begin.continuation)))
+                })
+        } else {
+            authentication
+                .begin_authentication(&context, method)
+                .await
+                .map(|challenge| (challenge, None))
+        };
+        let (challenge, interactive_continuation) = match provider_begin {
+            Ok(begin) => begin,
             Err(error) => {
                 transition_provider_failure(
                     &self.sessions,
@@ -180,7 +222,8 @@ where
             return Err(AuthSessionServiceError::InvalidChallenge(session.id));
         }
         let expected_revision = session.revision;
-        session.transition(AuthState::WaitingUser(challenge.waiting_for), Utc::now())?;
+        let waiting_at = Utc::now();
+        session.transition(AuthState::WaitingUser(challenge.waiting_for), waiting_at)?;
         if let Some(authorization) = &challenge.external_oauth {
             let binding = authorization.callback_binding;
             let pending = ExternalOauthPending::pending(ExternalOauthPendingCreate {
@@ -202,6 +245,44 @@ where
                     &correlation_id,
                 )
                 .await?;
+        } else if let Some(continuation) = interactive_continuation {
+            let continuation_digest = continuation.continuation_digest();
+            let ttl_seconds = continuation.ttl_seconds();
+            let maximum_polls = continuation.maximum_polls();
+            let (continuation_type, phase, value, _, _) = continuation.into_parts();
+            let ttl = Duration::seconds(
+                i64::try_from(ttl_seconds)
+                    .map_err(|_| AuthSessionServiceError::InvalidChallenge(session.id))?,
+            );
+            let mut continuation_expires_at = waiting_at + ttl;
+            continuation_expires_at = continuation_expires_at.min(session.expires_at);
+            if let Some(challenge_expires_at) = challenge.expires_at {
+                continuation_expires_at = continuation_expires_at.min(challenge_expires_at);
+            }
+            let access = secret_access_from_audit(
+                actor,
+                &correlation_id,
+                "persist interactive authentication continuation",
+            );
+            self.interactive_auth_continuations
+                .as_ref()
+                .ok_or(AuthSessionServiceError::InteractiveAuthenticationUnavailable)?
+                .for_provider(provider_id)
+                .attach_interactive_auth_continuation(InteractiveAuthContinuationAttachRequest {
+                    session: &session,
+                    expected_session_revision: expected_revision,
+                    provider_id: &context.provider_id,
+                    continuation_type: &continuation_type,
+                    continuation_digest,
+                    phase: &phase,
+                    value,
+                    maximum_polls,
+                    expires_at: continuation_expires_at,
+                    attached_at: waiting_at,
+                    access: &access,
+                })
+                .await
+                .map_err(AuthSessionServiceError::CredentialStore)?;
         } else if !self
             .sessions
             .update_auth_session(&session, expected_revision, actor, &correlation_id)
@@ -240,7 +321,38 @@ where
         session
             .transition(next, at)
             .map_err(|_| AuthSessionServiceError::InvalidSessionState(session_id))?;
-        if !self
+        if session.method == AuthMethod::QrCode
+            && let Some(factory) = &self.interactive_auth_continuations
+        {
+            let account = self
+                .accounts
+                .find_provider_account(owner_user_id, session.provider_account_id)
+                .await?
+                .ok_or(AuthSessionServiceError::AccountNotFound(
+                    session.provider_account_id,
+                ))?;
+            let access = secret_access_from_audit(
+                actor,
+                correlation_id,
+                "cancel interactive authentication continuation",
+            );
+            let outcome = factory
+                .for_provider(account.provider_id)
+                .abort_interactive_auth_continuation(InteractiveAuthAbortRequest {
+                    terminal_session: &session,
+                    expected_session_revision: expected_revision,
+                    aborted_at: at,
+                    access: &access,
+                })
+                .await
+                .map_err(AuthSessionServiceError::CredentialStore)?;
+            if !matches!(
+                outcome,
+                InteractiveAuthContinuationMutationOutcome::Terminal(_)
+            ) {
+                return Err(AuthSessionServiceError::RevisionConflict(session_id));
+            }
+        } else if !self
             .sessions
             .update_auth_session(&session, expected_revision, actor, correlation_id)
             .await?
@@ -248,6 +360,612 @@ where
             return Err(AuthSessionServiceError::RevisionConflict(session_id));
         }
         Ok(session)
+    }
+
+    /// Claims and performs one Provider-native interactive authentication poll.
+    /// Definite waiting results rotate the encrypted continuation; definite
+    /// success first persists a terminal candidate and can therefore recover
+    /// credential finalization after a crash without replaying the poll.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed state, Provider, credential or persistence failure.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the poll coordinator keeps claim, Provider classification and every durable terminal transition in one auditable flow"
+    )]
+    pub async fn poll_interactive_authentication<C>(
+        &self,
+        credential_store: &C,
+        request: InteractiveAuthPollRequest,
+    ) -> Result<InteractiveAuthPollResult, AuthSessionServiceError>
+    where
+        C: InteractiveAuthCredentialRepository,
+    {
+        let InteractiveAuthPollRequest {
+            owner_user_id,
+            provider_account_id,
+            session_id,
+            access,
+        } = request;
+        if !access.authorizes(owner_user_id) {
+            return Err(AuthSessionServiceError::Credential(
+                CredentialProvisionError::Unauthorized,
+            ));
+        }
+        audit_actor_from_access(&access)?;
+        let account = self
+            .accounts
+            .find_provider_account(owner_user_id, provider_account_id)
+            .await?
+            .ok_or(AuthSessionServiceError::AccountNotFound(
+                provider_account_id,
+            ))?;
+        let entry = self.registry.get(&account.provider_id).ok_or_else(|| {
+            AuthSessionServiceError::ProviderNotRegistered(account.provider_id.clone())
+        })?;
+        let authentication = entry
+            .authentication
+            .as_ref()
+            .ok_or(AuthSessionServiceError::AuthenticationUnavailable)?;
+        if !authentication.supports_durable_interactive_authentication()
+            || !entry.metadata.auth_methods.contains(&AuthMethod::QrCode)
+        {
+            return Err(AuthSessionServiceError::InteractiveAuthenticationUnavailable);
+        }
+        let continuation_factory = self
+            .interactive_auth_continuations
+            .as_ref()
+            .ok_or(AuthSessionServiceError::InteractiveAuthenticationUnavailable)?;
+        let repository = continuation_factory.for_provider(account.provider_id.clone());
+        let mut session = self
+            .sessions
+            .find_auth_session(owner_user_id, session_id)
+            .await?
+            .filter(|session| session.provider_account_id == provider_account_id)
+            .ok_or(AuthSessionServiceError::SessionNotFound(session_id))?;
+        let context = ProviderAuthContext {
+            provider_id: account.provider_id.clone(),
+            account_id: account.id,
+            auth_session_id: Some(session.id),
+            correlation_id: access.correlation_id.clone(),
+        };
+        if session.state == AuthState::ValidatingCredential {
+            return self
+                .finalize_interactive_auth_candidate(
+                    credential_store,
+                    repository.as_ref(),
+                    authentication.as_ref(),
+                    &context,
+                    owner_user_id,
+                    provider_account_id,
+                    session_id,
+                    access,
+                )
+                .await;
+        }
+        if !matches!(
+            session.state,
+            AuthState::WaitingUser(
+                asterism_domain::WaitingUserState::QrScan
+                    | asterism_domain::WaitingUserState::QrConfirm
+            )
+        ) {
+            return Err(AuthSessionServiceError::InvalidSessionState(session_id));
+        }
+        let claimed_at = Utc::now();
+        if session.is_expired_at(claimed_at) {
+            let expected_revision = session.revision;
+            session.transition(AuthState::Expired, claimed_at)?;
+            repository
+                .abort_interactive_auth_continuation(InteractiveAuthAbortRequest {
+                    terminal_session: &session,
+                    expected_session_revision: expected_revision,
+                    aborted_at: claimed_at,
+                    access: &access,
+                })
+                .await
+                .map_err(AuthSessionServiceError::CredentialStore)?;
+            return Err(AuthSessionServiceError::SessionExpired(session_id));
+        }
+        let claim_expires_at = (claimed_at + Duration::seconds(60)).min(session.expires_at);
+        let (claim, value) = match repository
+            .claim_interactive_auth_poll(InteractiveAuthPollClaimRequest {
+                owner_user_id,
+                provider_account_id,
+                auth_session_id: session_id,
+                claimed_at,
+                claim_expires_at,
+                access: &access,
+            })
+            .await
+            .map_err(AuthSessionServiceError::CredentialStore)?
+        {
+            InteractiveAuthPollClaimOutcome::Claimed { claim, value } => (claim, value),
+            InteractiveAuthPollClaimOutcome::Busy => {
+                return Err(AuthSessionServiceError::InteractivePollBusy(session_id));
+            }
+            InteractiveAuthPollClaimOutcome::Exhausted => {
+                let expected_revision = session.revision;
+                session.transition(AuthState::AuthFailed, claimed_at)?;
+                repository
+                    .abort_interactive_auth_continuation(InteractiveAuthAbortRequest {
+                        terminal_session: &session,
+                        expected_session_revision: expected_revision,
+                        aborted_at: claimed_at,
+                        access: &access,
+                    })
+                    .await
+                    .map_err(AuthSessionServiceError::CredentialStore)?;
+                return Err(AuthSessionServiceError::InteractivePollExhausted(
+                    session_id,
+                ));
+            }
+            InteractiveAuthPollClaimOutcome::Unavailable => {
+                return Err(AuthSessionServiceError::RevisionConflict(session_id));
+            }
+        };
+        let provider_outcome = authentication
+            .poll_interactive_authentication(
+                &context,
+                ResolvedProviderInteractiveAuthContinuation {
+                    continuation_type: &claim.continuation.continuation_type,
+                    continuation_digest: claim.continuation.continuation_digest,
+                    phase: &claim.continuation.phase,
+                    revision: claim.continuation.revision,
+                    poll_sequence: claim.poll_sequence,
+                    value: &value,
+                },
+            )
+            .await;
+        let outcome = match provider_outcome.and_then(|outcome| {
+            outcome.validate()?;
+            Ok(outcome)
+        }) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if matches!(
+                    error.kind,
+                    ProviderErrorKind::RateLimited
+                        | ProviderErrorKind::Network
+                        | ProviderErrorKind::ProviderUnavailable
+                ) {
+                    if !repository
+                        .release_interactive_auth_poll(&claim, Utc::now(), &access)
+                        .await
+                        .map_err(AuthSessionServiceError::CredentialStore)?
+                    {
+                        return Err(AuthSessionServiceError::RevisionConflict(session_id));
+                    }
+                    self.record_protocol_observation(
+                        &context.provider_id,
+                        session_id,
+                        "interactive-poll",
+                        &access.correlation_id,
+                        &error,
+                    )
+                    .await?;
+                } else {
+                    self.persist_claimed_interactive_failure(
+                        repository.as_ref(),
+                        &claim,
+                        &mut session,
+                        &context,
+                        &access,
+                        &error,
+                    )
+                    .await?;
+                }
+                return Err(AuthSessionServiceError::Provider {
+                    session_id,
+                    source: error,
+                });
+            }
+        };
+        let completed_at = Utc::now();
+        if session.is_expired_at(completed_at) {
+            let result_digest = match &outcome {
+                ProviderInteractiveAuthPollOutcome::Waiting { result_digest, .. }
+                | ProviderInteractiveAuthPollOutcome::Authenticated { result_digest, .. }
+                | ProviderInteractiveAuthPollOutcome::Rejected { result_digest }
+                | ProviderInteractiveAuthPollOutcome::Expired { result_digest } => *result_digest,
+            };
+            let expected_session_revision = session.revision;
+            session.transition(AuthState::Expired, completed_at)?;
+            let persisted = repository
+                .finish_interactive_auth_terminal(InteractiveAuthPollTerminalRequest {
+                    claim: &claim,
+                    terminal_session: &session,
+                    expected_session_revision,
+                    terminal_state: InteractiveAuthTerminalState::Expired,
+                    result_digest,
+                    completed_at,
+                    access: &access,
+                })
+                .await
+                .map_err(AuthSessionServiceError::CredentialStore)?;
+            if !matches!(
+                persisted,
+                InteractiveAuthContinuationMutationOutcome::Terminal(_)
+            ) {
+                return Err(AuthSessionServiceError::RevisionConflict(session_id));
+            }
+            return Err(AuthSessionServiceError::SessionExpired(session_id));
+        }
+        match outcome {
+            ProviderInteractiveAuthPollOutcome::Waiting {
+                waiting_for,
+                user_action,
+                continuation,
+                result_digest,
+            } => {
+                if continuation.maximum_polls() != claim.continuation.maximum_polls {
+                    let error = ProviderError::new(
+                        ProviderErrorKind::InvalidResponse,
+                        "Provider changed the interactive authentication poll budget",
+                    );
+                    self.persist_claimed_interactive_failure(
+                        repository.as_ref(),
+                        &claim,
+                        &mut session,
+                        &context,
+                        &access,
+                        &error,
+                    )
+                    .await?;
+                    return Err(AuthSessionServiceError::Provider {
+                        session_id,
+                        source: error,
+                    });
+                }
+                let continuation_digest = continuation.continuation_digest();
+                let (continuation_type, phase, replacement, _, _) = continuation.into_parts();
+                let expected_revision = session.revision;
+                session.transition(AuthState::WaitingUser(waiting_for), completed_at)?;
+                let persisted = repository
+                    .rotate_interactive_auth_continuation(InteractiveAuthPollRotateRequest {
+                        claim: &claim,
+                        waiting_session: &session,
+                        expected_session_revision: expected_revision,
+                        continuation_type: &continuation_type,
+                        continuation_digest,
+                        phase: &phase,
+                        replacement,
+                        result_digest,
+                        completed_at,
+                        access: &access,
+                    })
+                    .await
+                    .map_err(AuthSessionServiceError::CredentialStore)?;
+                if !matches!(
+                    persisted,
+                    InteractiveAuthContinuationMutationOutcome::Rotated(_)
+                ) {
+                    return Err(AuthSessionServiceError::RevisionConflict(session_id));
+                }
+                let challenge = AuthChallenge {
+                    session_id,
+                    method: AuthMethod::QrCode,
+                    waiting_for,
+                    user_action,
+                    expires_at: Some(claim.continuation.expires_at),
+                    external_oauth: None,
+                };
+                if !valid_challenge(&session, &challenge) {
+                    return Err(AuthSessionServiceError::InvalidChallenge(session_id));
+                }
+                Ok(InteractiveAuthPollResult::Waiting { session, challenge })
+            }
+            ProviderInteractiveAuthPollOutcome::Authenticated {
+                continuation,
+                result_digest,
+            } => {
+                if continuation.maximum_polls() != claim.continuation.maximum_polls {
+                    let error = ProviderError::new(
+                        ProviderErrorKind::InvalidResponse,
+                        "Provider changed the interactive authentication poll budget",
+                    );
+                    self.persist_claimed_interactive_failure(
+                        repository.as_ref(),
+                        &claim,
+                        &mut session,
+                        &context,
+                        &access,
+                        &error,
+                    )
+                    .await?;
+                    return Err(AuthSessionServiceError::Provider {
+                        session_id,
+                        source: error,
+                    });
+                }
+                let continuation_digest = continuation.continuation_digest();
+                let (continuation_type, phase, replacement, _, _) = continuation.into_parts();
+                let expected_revision = session.revision;
+                session.transition(AuthState::ValidatingCredential, completed_at)?;
+                let persisted = repository
+                    .persist_interactive_auth_candidate(InteractiveAuthPollAuthenticateRequest {
+                        claim: &claim,
+                        validating_session: &session,
+                        expected_session_revision: expected_revision,
+                        continuation_type: &continuation_type,
+                        continuation_digest,
+                        phase: &phase,
+                        replacement,
+                        result_digest,
+                        completed_at,
+                        access: &access,
+                    })
+                    .await
+                    .map_err(AuthSessionServiceError::CredentialStore)?;
+                if !matches!(
+                    persisted,
+                    InteractiveAuthContinuationMutationOutcome::AuthenticatedCandidate(_)
+                ) {
+                    return Err(AuthSessionServiceError::RevisionConflict(session_id));
+                }
+                self.finalize_interactive_auth_candidate(
+                    credential_store,
+                    repository.as_ref(),
+                    authentication.as_ref(),
+                    &context,
+                    owner_user_id,
+                    provider_account_id,
+                    session_id,
+                    access,
+                )
+                .await
+            }
+            ProviderInteractiveAuthPollOutcome::Rejected { result_digest } => {
+                let expected_revision = session.revision;
+                session.transition(AuthState::AuthFailed, completed_at)?;
+                let persisted = repository
+                    .finish_interactive_auth_terminal(InteractiveAuthPollTerminalRequest {
+                        claim: &claim,
+                        terminal_session: &session,
+                        expected_session_revision: expected_revision,
+                        terminal_state: InteractiveAuthTerminalState::Rejected,
+                        result_digest,
+                        completed_at,
+                        access: &access,
+                    })
+                    .await
+                    .map_err(AuthSessionServiceError::CredentialStore)?;
+                if !matches!(
+                    persisted,
+                    InteractiveAuthContinuationMutationOutcome::Terminal(_)
+                ) {
+                    return Err(AuthSessionServiceError::RevisionConflict(session_id));
+                }
+                Ok(InteractiveAuthPollResult::Terminal(session))
+            }
+            ProviderInteractiveAuthPollOutcome::Expired { result_digest } => {
+                let expected_revision = session.revision;
+                session.transition(AuthState::Expired, completed_at)?;
+                let persisted = repository
+                    .finish_interactive_auth_terminal(InteractiveAuthPollTerminalRequest {
+                        claim: &claim,
+                        terminal_session: &session,
+                        expected_session_revision: expected_revision,
+                        terminal_state: InteractiveAuthTerminalState::Expired,
+                        result_digest,
+                        completed_at,
+                        access: &access,
+                    })
+                    .await
+                    .map_err(AuthSessionServiceError::CredentialStore)?;
+                if !matches!(
+                    persisted,
+                    InteractiveAuthContinuationMutationOutcome::Terminal(_)
+                ) {
+                    return Err(AuthSessionServiceError::RevisionConflict(session_id));
+                }
+                Ok(InteractiveAuthPollResult::Terminal(session))
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "candidate finalization retains every owner, account, session and repository binding explicitly"
+    )]
+    async fn finalize_interactive_auth_candidate<C>(
+        &self,
+        credential_store: &C,
+        repository: &dyn asterism_storage::InteractiveAuthContinuationRepository,
+        authentication: &dyn asterism_provider_api::AuthenticationCapability,
+        context: &ProviderAuthContext,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        session_id: AuthSessionId,
+        access: SecretAccess,
+    ) -> Result<InteractiveAuthPollResult, AuthSessionServiceError>
+    where
+        C: InteractiveAuthCredentialRepository,
+    {
+        let resolved = repository
+            .resolve_interactive_auth_candidate(
+                owner_user_id,
+                provider_account_id,
+                session_id,
+                &access,
+            )
+            .await
+            .map_err(AuthSessionServiceError::CredentialStore)?
+            .ok_or(AuthSessionServiceError::InvalidSessionState(session_id))?;
+        let bundle = authentication
+            .finalize_interactive_authentication(
+                context,
+                ResolvedProviderInteractiveAuthContinuation {
+                    continuation_type: &resolved.continuation.continuation_type,
+                    continuation_digest: resolved.continuation.continuation_digest,
+                    phase: &resolved.continuation.phase,
+                    revision: resolved.continuation.revision,
+                    poll_sequence: resolved.continuation.poll_count,
+                    value: &resolved.value,
+                },
+            )
+            .await
+            .map_err(CredentialProvisionError::Provider)
+            .and_then(|bundle| {
+                if bundle.auth_method == AuthMethod::QrCode
+                    && bundle.provider_id == context.provider_id
+                {
+                    Ok(bundle)
+                } else {
+                    Err(CredentialProvisionError::AccountMismatch)
+                }
+            });
+        let validated = match bundle {
+            Ok(bundle) => {
+                validate_candidate(
+                    self.registry.as_ref(),
+                    &self.accounts,
+                    owner_user_id,
+                    provider_account_id,
+                    bundle,
+                    Some(session_id),
+                    &access,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        let (bundle, status) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                let retryable = matches!(
+                    &error,
+                    CredentialProvisionError::Provider(provider_error)
+                        if matches!(
+                            provider_error.kind,
+                            ProviderErrorKind::RateLimited
+                                | ProviderErrorKind::Network
+                                | ProviderErrorKind::ProviderUnavailable
+                        )
+                ) || matches!(
+                    &error,
+                    CredentialProvisionError::Storage(_) | CredentialProvisionError::SecretStore(_)
+                );
+                if !retryable {
+                    let failed_at = Utc::now();
+                    let mut terminal_session = resolved.session.clone();
+                    let expected_session_revision = terminal_session.revision;
+                    terminal_session.transition(credential_failure_state(&error), failed_at)?;
+                    let persisted = repository
+                        .finish_interactive_auth_candidate_failure(
+                            InteractiveAuthCandidateFailureRequest {
+                                continuation: &resolved.continuation,
+                                terminal_session: &terminal_session,
+                                expected_session_revision,
+                                failed_at,
+                                access: &access,
+                            },
+                        )
+                        .await
+                        .map_err(AuthSessionServiceError::CredentialStore)?;
+                    if !matches!(
+                        persisted,
+                        InteractiveAuthContinuationMutationOutcome::Terminal(_)
+                    ) {
+                        return Err(AuthSessionServiceError::RevisionConflict(session_id));
+                    }
+                }
+                self.record_credential_protocol_observation(
+                    &context.provider_id,
+                    session_id,
+                    "interactive-credential-validation",
+                    &access.correlation_id,
+                    &error,
+                )
+                .await?;
+                return Err(AuthSessionServiceError::Credential(error));
+            }
+        };
+        let terminal_result_digest = resolved
+            .continuation
+            .terminal_result_digest
+            .ok_or(AuthSessionServiceError::InvalidSessionState(session_id))?;
+        let mut authenticated_session = resolved.session;
+        let expected_session_revision = authenticated_session.revision;
+        authenticated_session
+            .transition(AuthState::Authenticated, resolved.continuation.updated_at)?;
+        let committed = credential_store
+            .commit_interactive_auth_credentials(InteractiveAuthCredentialCommitRequest {
+                owner_user_id,
+                provider_account_id,
+                authenticated_session: &authenticated_session,
+                expected_session_revision,
+                continuation: &resolved.continuation,
+                terminal_result_digest,
+                bundle,
+                access: &access,
+            })
+            .await
+            .map_err(AuthSessionServiceError::CredentialStore)?;
+        let InteractiveAuthCredentialCommitOutcome::Committed(committed) = committed else {
+            return Err(AuthSessionServiceError::RevisionConflict(session_id));
+        };
+        Ok(InteractiveAuthPollResult::Authenticated(
+            AuthSessionCredentialCommit {
+                session: committed.session,
+                status,
+                credentials: committed.credentials,
+            },
+        ))
+    }
+
+    async fn persist_claimed_interactive_failure(
+        &self,
+        repository: &dyn asterism_storage::InteractiveAuthContinuationRepository,
+        claim: &InteractiveAuthPollClaim,
+        session: &mut AuthSession,
+        context: &ProviderAuthContext,
+        access: &SecretAccess,
+        error: &ProviderError,
+    ) -> Result<(), AuthSessionServiceError> {
+        let completed_at = Utc::now();
+        let expected_session_revision = session.revision;
+        let expired = session.is_expired_at(completed_at);
+        session.transition(
+            if expired {
+                AuthState::Expired
+            } else {
+                provider_failure_state(error)
+            },
+            completed_at,
+        )?;
+        let persisted = repository
+            .finish_interactive_auth_terminal(InteractiveAuthPollTerminalRequest {
+                claim,
+                terminal_session: session,
+                expected_session_revision,
+                terminal_state: if expired {
+                    InteractiveAuthTerminalState::Expired
+                } else {
+                    InteractiveAuthTerminalState::Failed
+                },
+                result_digest: provider_error_digest(error),
+                completed_at,
+                access,
+            })
+            .await
+            .map_err(AuthSessionServiceError::CredentialStore)?;
+        if !matches!(
+            persisted,
+            InteractiveAuthContinuationMutationOutcome::Terminal(_)
+        ) {
+            return Err(AuthSessionServiceError::RevisionConflict(session.id));
+        }
+        self.record_protocol_observation(
+            &context.provider_id,
+            session.id,
+            "interactive-poll",
+            &access.correlation_id,
+            error,
+        )
+        .await
     }
 
     /// Returns the durable external OAuth callback status after reconciling
@@ -288,6 +1006,7 @@ where
     ///
     /// Provider rejection and availability failures are persisted on the
     /// session. Superseded sessions cannot commit credentials or account state.
+    #[allow(clippy::too_many_lines)]
     pub async fn submit_credentials<C>(
         &self,
         credential_store: &C,
@@ -307,6 +1026,17 @@ where
             return Err(AuthSessionServiceError::Credential(
                 CredentialProvisionError::Unauthorized,
             ));
+        }
+        if bundle.auth_method == AuthMethod::QrCode
+            && self
+                .registry
+                .get(&bundle.provider_id)
+                .and_then(|entry| entry.authentication.as_ref())
+                .is_some_and(|authentication| {
+                    authentication.supports_durable_interactive_authentication()
+                })
+        {
+            return Err(AuthSessionServiceError::InvalidSessionState(session_id));
         }
         let actor = audit_actor_from_access(&access)?;
         let mut session = self
@@ -765,6 +1495,24 @@ pub struct AuthSessionCredentialCommit {
 }
 
 #[derive(Debug)]
+pub struct InteractiveAuthPollRequest {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub session_id: AuthSessionId,
+    pub access: SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InteractiveAuthPollResult {
+    Waiting {
+        session: AuthSession,
+        challenge: AuthChallenge,
+    },
+    Authenticated(AuthSessionCredentialCommit),
+    Terminal(AuthSession),
+}
+
+#[derive(Debug)]
 pub struct ExternalOauthCallbackRequest {
     pub owner_user_id: UserId,
     pub provider_account_id: ProviderAccountId,
@@ -781,6 +1529,12 @@ pub enum AuthSessionServiceError {
     ProviderNotRegistered(ProviderId),
     #[error("provider does not expose authentication")]
     AuthenticationUnavailable,
+    #[error("encrypted interactive authentication continuation storage is unavailable")]
+    InteractiveAuthenticationUnavailable,
+    #[error("interactive authentication poll for session `{0}` is already in progress")]
+    InteractivePollBusy(AuthSessionId),
+    #[error("interactive authentication poll budget for session `{0}` is exhausted")]
+    InteractivePollExhausted(AuthSessionId),
     #[error("provider does not advertise authentication method `{0:?}`")]
     UnsupportedAuthMethod(AuthMethod),
     #[error("provider returned an invalid challenge for authentication session `{0}`")]
@@ -814,8 +1568,18 @@ pub enum AuthSessionServiceError {
 }
 
 fn valid_challenge(session: &AuthSession, challenge: &AuthChallenge) -> bool {
+    let method_state_valid = if challenge.method == AuthMethod::QrCode {
+        matches!(
+            challenge.waiting_for,
+            asterism_domain::WaitingUserState::QrScan
+                | asterism_domain::WaitingUserState::QrConfirm
+        ) && challenge.external_oauth.is_none()
+    } else {
+        true
+    };
     challenge.session_id == session.id
         && challenge.method == session.method
+        && method_state_valid
         && challenge
             .expires_at
             .is_none_or(|expires_at| expires_at > Utc::now() && expires_at <= session.expires_at)
@@ -832,6 +1596,21 @@ fn valid_challenge(session: &AuthSession, challenge: &AuthChallenge) -> bool {
                 ) && challenge.waiting_for == asterism_domain::WaitingUserState::BrowserCallback
                     && authorization.validate()
             })
+}
+
+fn provider_error_digest(error: &ProviderError) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"asterism.interactive-auth-provider-error.v1\0");
+    hasher.update(format!("{:?}", error.kind).as_bytes());
+    hasher.update([0]);
+    hasher.update(error.message.as_bytes());
+    if let Some(reason) = error.human_required_reason {
+        hasher.update([0]);
+        hasher.update(format!("{reason:?}").as_bytes());
+    }
+    hasher.finalize().into()
 }
 
 async fn transition_provider_failure<S: AuthSessionRepository>(
@@ -982,6 +1761,17 @@ fn audit_actor_from_access(access: &SecretAccess) -> Result<AuditActor, AuthSess
     }
 }
 
+fn secret_access_from_audit(actor: AuditActor, correlation_id: &str, reason: &str) -> SecretAccess {
+    SecretAccess {
+        actor: match actor {
+            AuditActor::User(user_id) => SecretActor::User(user_id),
+            AuditActor::ServiceToken(token_id) => SecretActor::ServiceToken(token_id),
+        },
+        correlation_id: correlation_id.to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
 async fn transition_once<S: AuthSessionRepository>(
     sessions: &S,
     session: &mut AuthSession,
@@ -1024,8 +1814,10 @@ mod tests {
     use asterism_provider_api::{
         AuthenticationCapability, CredentialReplacement, CredentialValidation,
         ExternalOauthAuthorization, ExternalOauthCallbackBinding, ProviderCapability,
-        ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
-        SessionStatus, VerificationLevel,
+        ProviderContext, ProviderEntry, ProviderIdentity, ProviderInteractiveAuthBegin,
+        ProviderInteractiveAuthContinuation, ProviderInteractiveAuthPollOutcome, ProviderMetadata,
+        ProviderResult, ResolvedProviderInteractiveAuthContinuation, SessionStatus,
+        VerificationLevel,
     };
     use asterism_secrets::{
         CredentialAcquisition, CredentialBundle, CredentialField, SecretAccess, SecretActor,
@@ -1100,6 +1892,119 @@ mod tests {
                 .unwrap(),
             Some(cancelled)
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn durable_interactive_auth_recovers_terminal_candidate_without_repolling() {
+        let fixture = fixture(true).await;
+        let authentication = Arc::new(DurableTestAuthentication {
+            metadata: fixture.authentication.metadata.clone(),
+            polls: AtomicUsize::new(0),
+            fail_finalize_once: AtomicBool::new(true),
+        });
+        let mut registry = ProviderRegistry::default();
+        registry
+            .register(ProviderEntry {
+                authentication: Some(authentication.clone()),
+                ..ProviderEntry::metadata_only(authentication.metadata.clone())
+            })
+            .unwrap();
+        let service = AuthSessionService::new(
+            Arc::new(registry),
+            fixture.accounts.clone(),
+            fixture.sessions.clone(),
+        )
+        .with_interactive_auth_continuations(Arc::new(fixture.store.clone()));
+        let now = Utc::now();
+        let started = service
+            .begin(AuthSessionStartRequest {
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                method: AuthMethod::QrCode,
+                created_at: now,
+                expires_at: now + Duration::seconds(2),
+                actor: AuditActor::User(fixture.owner),
+                correlation_id: "durable-qr-begin".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            started.session.state,
+            AuthState::WaitingUser(WaitingUserState::QrScan)
+        );
+        let waiting = service
+            .poll_interactive_authentication(
+                &fixture.store,
+                InteractiveAuthPollRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    access: secret_access(fixture.owner, "durable-qr-poll-one"),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            waiting,
+            InteractiveAuthPollResult::Waiting { ref session, ref challenge }
+                if session.state == AuthState::WaitingUser(WaitingUserState::QrConfirm)
+                    && challenge.waiting_for == WaitingUserState::QrConfirm
+        ));
+        let interrupted = service
+            .poll_interactive_authentication(
+                &fixture.store,
+                InteractiveAuthPollRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    access: secret_access(fixture.owner, "durable-qr-poll-two"),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            interrupted,
+            AuthSessionServiceError::Credential(CredentialProvisionError::Provider(ref error))
+                if error.kind == ProviderErrorKind::Network
+        ));
+        let validating = fixture
+            .sessions
+            .find_auth_session(fixture.owner, started.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(validating.state, AuthState::ValidatingCredential);
+        assert_eq!(authentication.polls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+
+        let recovered = service
+            .poll_interactive_authentication(
+                &fixture.store,
+                InteractiveAuthPollRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    access: secret_access(fixture.owner, "durable-qr-recover"),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            recovered,
+            InteractiveAuthPollResult::Authenticated(ref commit)
+                if commit.session.state == AuthState::Authenticated
+                    && commit.credentials.len() == 1
+        ));
+        assert_eq!(authentication.polls.load(Ordering::SeqCst), 2);
+        let continuation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM interactive_auth_continuations WHERE auth_session_id = ?",
+        )
+        .bind(started.session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(continuation_count, 0);
     }
 
     #[tokio::test]
@@ -1733,6 +2638,157 @@ mod tests {
         begin_protocol_drift: AtomicBool,
         credential_protocol_drift: AtomicBool,
         oauth_protocol_drift: AtomicBool,
+    }
+
+    #[derive(Debug)]
+    struct DurableTestAuthentication {
+        metadata: ProviderMetadata,
+        polls: AtomicUsize,
+        fail_finalize_once: AtomicBool,
+    }
+
+    impl ProviderIdentity for DurableTestAuthentication {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl AuthenticationCapability for DurableTestAuthentication {
+        fn supports_durable_interactive_authentication(&self) -> bool {
+            true
+        }
+
+        async fn begin_authentication(
+            &self,
+            _context: &ProviderAuthContext,
+            _method: AuthMethod,
+        ) -> ProviderResult<AuthChallenge> {
+            Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "durable test Provider requires the continuation path",
+            ))
+        }
+
+        async fn begin_interactive_authentication(
+            &self,
+            context: &ProviderAuthContext,
+            method: AuthMethod,
+        ) -> ProviderResult<ProviderInteractiveAuthBegin> {
+            let session_id = context.auth_session_id.expect("Core auth session");
+            Ok(ProviderInteractiveAuthBegin {
+                challenge: AuthChallenge {
+                    session_id,
+                    method,
+                    waiting_for: WaitingUserState::QrScan,
+                    user_action: Some("https://provider.example/qr/initial".to_owned()),
+                    expires_at: None,
+                    external_oauth: None,
+                },
+                continuation: ProviderInteractiveAuthContinuation::try_new(
+                    &context.provider_id,
+                    "provider-alpha.qr.v1",
+                    "provider-alpha.qr-scan",
+                    SecretValue::new(b"durable-initial".to_vec()),
+                    300,
+                    4,
+                )?,
+            })
+        }
+
+        async fn poll_interactive_authentication(
+            &self,
+            context: &ProviderAuthContext,
+            continuation: ResolvedProviderInteractiveAuthContinuation<'_>,
+        ) -> ProviderResult<ProviderInteractiveAuthPollOutcome> {
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+            match poll {
+                1 => {
+                    assert_eq!(continuation.value.expose_secret(), b"durable-initial");
+                    Ok(ProviderInteractiveAuthPollOutcome::Waiting {
+                        waiting_for: WaitingUserState::QrConfirm,
+                        user_action: None,
+                        continuation: ProviderInteractiveAuthContinuation::try_new(
+                            &context.provider_id,
+                            "provider-alpha.qr.v1",
+                            "provider-alpha.qr-confirm",
+                            SecretValue::new(b"durable-waiting".to_vec()),
+                            300,
+                            4,
+                        )?,
+                        result_digest: [1; 32],
+                    })
+                }
+                2 => {
+                    assert_eq!(continuation.value.expose_secret(), b"durable-waiting");
+                    Ok(ProviderInteractiveAuthPollOutcome::Authenticated {
+                        continuation: ProviderInteractiveAuthContinuation::try_new(
+                            &context.provider_id,
+                            "provider-alpha.qr-terminal.v1",
+                            "provider-alpha.authenticated",
+                            SecretValue::new(b"_uid=durable-user".to_vec()),
+                            300,
+                            4,
+                        )?,
+                        result_digest: [2; 32],
+                    })
+                }
+                _ => panic!("authenticated QR status must not be polled again"),
+            }
+        }
+
+        async fn finalize_interactive_authentication(
+            &self,
+            context: &ProviderAuthContext,
+            continuation: ResolvedProviderInteractiveAuthContinuation<'_>,
+        ) -> ProviderResult<CredentialBundle> {
+            if self.fail_finalize_once.swap(false, Ordering::SeqCst) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "synthetic credential validation interruption",
+                ));
+            }
+            assert_eq!(continuation.value.expose_secret(), b"_uid=durable-user");
+            Ok(CredentialBundle {
+                provider_id: context.provider_id.clone(),
+                tenant: None,
+                auth_method: AuthMethod::QrCode,
+                acquired_via: CredentialAcquisition::NativeProviderLogin,
+                captured_at: Utc::now(),
+                expires_at: None,
+                session_kind: SessionKind::Cookie,
+                fields: vec![CredentialField {
+                    purpose: SecretPurpose::ProviderCookie,
+                    value: SecretValue::new(b"_uid=durable-user".to_vec()),
+                }],
+                user_id_hint: Some("durable-user".to_owned()),
+            })
+        }
+
+        async fn validate_credential(
+            &self,
+            _context: &ProviderAuthContext,
+            credential: &CredentialBundle,
+        ) -> ProviderResult<CredentialValidation> {
+            Ok(CredentialValidation::accepted(SessionStatus {
+                valid: true,
+                kind: credential.session_kind,
+                expires_at: None,
+                account_hint: Some("durable-user".to_owned()),
+            }))
+        }
+
+        async fn validate_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<SessionStatus> {
+            Ok(SessionStatus {
+                valid: true,
+                kind: SessionKind::Cookie,
+                expires_at: None,
+                account_hint: Some("durable-user".to_owned()),
+            })
+        }
     }
 
     impl ProviderIdentity for TestAuthentication {

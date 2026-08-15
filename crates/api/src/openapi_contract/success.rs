@@ -56,6 +56,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
         "PutAuthSessionCredentialsResponse",
     ),
     (
+        "pollProviderAccountInteractiveAuthSession",
+        "InteractiveAuthPollResponse",
+    ),
+    (
         "getProviderAccountExternalOauthPending",
         "ExternalOauthPendingResponse",
     ),
@@ -704,6 +708,18 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 &["session", "credential_count", "status"],
                 json!({
                     "session": schema_ref("AuthSession"),
+                    "credential_count": unsigned_integer(),
+                    "status": schema_ref("SessionStatus")
+                }),
+            ),
+        ),
+        (
+            "InteractiveAuthPollResponse",
+            object(
+                &["session"],
+                json!({
+                    "session": schema_ref("AuthSession"),
+                    "challenge": schema_ref("AuthChallenge"),
                     "credential_count": unsigned_integer(),
                     "status": schema_ref("SessionStatus")
                 }),

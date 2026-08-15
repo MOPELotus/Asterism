@@ -451,9 +451,10 @@ read an exact account/session pair, and cancel it. Account and session IDs are
 both checked so an owned session cannot be addressed through another account.
 
 Begin returns the initial bounded Provider challenge once alongside the Core
-session. Polling and cancellation return only the persisted non-secret
+session. Status and cancellation return only the persisted non-secret
 `AuthSession`; every response is marked `no-store`, and OpenAPI describes the
-conflict, Provider failure, expiry, and rate-limit outcomes.
+conflict, Provider failure, expiry, and rate-limit outcomes. A later durable
+Provider-native poll route is specified separately below.
 
 ## Thirty-third Phase 0 slice
 
@@ -4900,3 +4901,34 @@ The WELearn one-time full upstream sweep is also consolidated in
 Release and issue refresh found no donor revision or protocol delta. All four
 first-batch sweep records required by `NEXT_CHECKPOINT.md` are now explicit;
 shared Core gaps and live-validation gates remain active work.
+
+## Two-hundred-and-sixty-seventh Phase 0 slice
+
+Provider-native QR authentication now has a restart-safe Core boundary instead
+of process-local challenge state. A Provider that explicitly opts into the
+contract returns a bounded private continuation with its first QR challenge.
+Core encrypts that value under a permanently Provider-scoped repository and
+atomically advances the exact newest owner/account/AuthSession to `WaitingUser`.
+Ordinary QR credential submission is then rejected so it cannot bypass the
+continuation lifecycle.
+
+`POST /api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/poll`
+claims exactly one bounded poll lease and records every attempt before Provider
+I/O. A transient network failure releases the same continuation revision but
+still consumes the fixed poll budget. An abandoned lease is closed as
+retryable before a later sequence is issued. Definite waiting responses rotate
+the ciphertext and both continuation/AuthSession revisions in one transaction;
+rejection, expiry, invalid protocol and cancellation close the AuthSession and
+delete the private continuation without erasing the hash-only poll ledger.
+
+A definite remote success is first encrypted as a terminal credential
+candidate and moves the session to `ValidatingCredential`. Provider
+finalization is deterministic and cannot repeat the poll. If validation or the
+process is interrupted, the next poll request resolves the same terminal
+candidate and resumes only validation. The final transaction consumes that
+candidate, replaces encrypted Provider credentials, advances both account and
+AuthSession to `Authenticated`, and creates the ordinary initial Answer History
+harvest. Tests prove no secret appears in API output, concurrent poll claims do
+not duplicate I/O, expired leases remain auditable, and recovery does not
+increment the Provider poll count. `asterismctl provider-account auth poll`
+drives the same owner-scoped endpoint.

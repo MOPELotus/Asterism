@@ -1392,6 +1392,241 @@ pub struct ExternalOauthClaim {
     pub auth_session: AuthSession,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InteractiveAuthContinuation {
+    pub auth_session_id: AuthSessionId,
+    pub provider_id: ProviderId,
+    pub continuation_type: String,
+    pub continuation_digest: [u8; 32],
+    pub phase: String,
+    pub revision: u32,
+    pub poll_count: u32,
+    pub maximum_polls: u32,
+    pub terminal_result_digest: Option<[u8; 32]>,
+    pub expires_at: Timestamp,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InteractiveAuthPollClaim {
+    pub continuation: InteractiveAuthContinuation,
+    pub poll_sequence: u32,
+    pub claim_digest: [u8; 32],
+    pub claim_expires_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct ResolvedInteractiveAuthCandidate {
+    pub session: AuthSession,
+    pub continuation: InteractiveAuthContinuation,
+    pub value: SecretValue,
+}
+
+#[derive(Debug)]
+pub struct InteractiveAuthContinuationAttachRequest<'a> {
+    pub session: &'a AuthSession,
+    pub expected_session_revision: u32,
+    pub provider_id: &'a ProviderId,
+    pub continuation_type: &'a str,
+    pub continuation_digest: [u8; 32],
+    pub phase: &'a str,
+    pub value: SecretValue,
+    pub maximum_polls: u32,
+    pub expires_at: Timestamp,
+    pub attached_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct InteractiveAuthPollClaimRequest<'a> {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub auth_session_id: AuthSessionId,
+    pub claimed_at: Timestamp,
+    pub claim_expires_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct InteractiveAuthPollRotateRequest<'a> {
+    pub claim: &'a InteractiveAuthPollClaim,
+    pub waiting_session: &'a AuthSession,
+    pub expected_session_revision: u32,
+    pub continuation_type: &'a str,
+    pub continuation_digest: [u8; 32],
+    pub phase: &'a str,
+    pub replacement: SecretValue,
+    pub result_digest: [u8; 32],
+    pub completed_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct InteractiveAuthPollAuthenticateRequest<'a> {
+    pub claim: &'a InteractiveAuthPollClaim,
+    pub validating_session: &'a AuthSession,
+    pub expected_session_revision: u32,
+    pub continuation_type: &'a str,
+    pub continuation_digest: [u8; 32],
+    pub phase: &'a str,
+    pub replacement: SecretValue,
+    pub result_digest: [u8; 32],
+    pub completed_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractiveAuthTerminalState {
+    Rejected,
+    Expired,
+    Failed,
+}
+
+#[derive(Debug)]
+pub struct InteractiveAuthPollTerminalRequest<'a> {
+    pub claim: &'a InteractiveAuthPollClaim,
+    pub terminal_session: &'a AuthSession,
+    pub expected_session_revision: u32,
+    pub terminal_state: InteractiveAuthTerminalState,
+    pub result_digest: [u8; 32],
+    pub completed_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct InteractiveAuthCandidateFailureRequest<'a> {
+    pub continuation: &'a InteractiveAuthContinuation,
+    pub terminal_session: &'a AuthSession,
+    pub expected_session_revision: u32,
+    pub failed_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct InteractiveAuthAbortRequest<'a> {
+    pub terminal_session: &'a AuthSession,
+    pub expected_session_revision: u32,
+    pub aborted_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub enum InteractiveAuthPollClaimOutcome {
+    Claimed {
+        claim: Box<InteractiveAuthPollClaim>,
+        value: SecretValue,
+    },
+    Busy,
+    Exhausted,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InteractiveAuthContinuationMutationOutcome {
+    Rotated(InteractiveAuthContinuation),
+    AuthenticatedCandidate(InteractiveAuthContinuation),
+    Terminal(AuthSession),
+    Conflict,
+    Unavailable,
+}
+
+/// Provider-scoped encrypted continuation and serialized poll lease for one
+/// owner/account/AuthSession-bound interactive authentication flow.
+#[async_trait]
+pub trait InteractiveAuthContinuationRepository: Send + Sync {
+    async fn attach_interactive_auth_continuation(
+        &self,
+        request: InteractiveAuthContinuationAttachRequest<'_>,
+    ) -> Result<InteractiveAuthContinuation, SecretStoreError>;
+
+    async fn claim_interactive_auth_poll(
+        &self,
+        request: InteractiveAuthPollClaimRequest<'_>,
+    ) -> Result<InteractiveAuthPollClaimOutcome, SecretStoreError>;
+
+    async fn release_interactive_auth_poll(
+        &self,
+        claim: &InteractiveAuthPollClaim,
+        released_at: Timestamp,
+        access: &SecretAccess,
+    ) -> Result<bool, SecretStoreError>;
+
+    async fn resolve_interactive_auth_candidate(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        auth_session_id: AuthSessionId,
+        access: &SecretAccess,
+    ) -> Result<Option<ResolvedInteractiveAuthCandidate>, SecretStoreError>;
+
+    async fn rotate_interactive_auth_continuation(
+        &self,
+        request: InteractiveAuthPollRotateRequest<'_>,
+    ) -> Result<InteractiveAuthContinuationMutationOutcome, SecretStoreError>;
+
+    async fn persist_interactive_auth_candidate(
+        &self,
+        request: InteractiveAuthPollAuthenticateRequest<'_>,
+    ) -> Result<InteractiveAuthContinuationMutationOutcome, SecretStoreError>;
+
+    async fn finish_interactive_auth_terminal(
+        &self,
+        request: InteractiveAuthPollTerminalRequest<'_>,
+    ) -> Result<InteractiveAuthContinuationMutationOutcome, SecretStoreError>;
+
+    async fn finish_interactive_auth_candidate_failure(
+        &self,
+        request: InteractiveAuthCandidateFailureRequest<'_>,
+    ) -> Result<InteractiveAuthContinuationMutationOutcome, SecretStoreError>;
+
+    async fn abort_interactive_auth_continuation(
+        &self,
+        request: InteractiveAuthAbortRequest<'_>,
+    ) -> Result<InteractiveAuthContinuationMutationOutcome, SecretStoreError>;
+}
+
+pub trait InteractiveAuthContinuationRepositoryFactory: Send + Sync {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn InteractiveAuthContinuationRepository>;
+}
+
+#[derive(Debug)]
+pub struct InteractiveAuthCredentialCommitRequest<'a> {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub authenticated_session: &'a AuthSession,
+    pub expected_session_revision: u32,
+    pub continuation: &'a InteractiveAuthContinuation,
+    pub terminal_result_digest: [u8; 32],
+    pub bundle: CredentialBundle,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InteractiveAuthCredentialCommit {
+    pub session: AuthSession,
+    pub credentials: Vec<ProviderCredential>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InteractiveAuthCredentialCommitOutcome {
+    Committed(InteractiveAuthCredentialCommit),
+    BindingConflict,
+}
+
+/// Atomically consumes an authenticated continuation, commits its validated
+/// credential bundle and advances the exact `AuthSession` to `Authenticated`.
+#[async_trait]
+pub trait InteractiveAuthCredentialRepository: Send + Sync {
+    async fn commit_interactive_auth_credentials(
+        &self,
+        request: InteractiveAuthCredentialCommitRequest<'_>,
+    ) -> Result<InteractiveAuthCredentialCommitOutcome, SecretStoreError>;
+}
+
 /// Short-lived Capture pairing sessions with one-time token rotation at claim.
 #[async_trait]
 pub trait AuthBootstrapSessionRepository: Send + Sync {
