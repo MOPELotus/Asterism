@@ -479,15 +479,22 @@ mutation. This does not grant the two atomic profiles singleton authority.
 profiles after validation. The current singleton TaskExecution boundary rejects
 them before fresh detail or transport, while native encoding and non-mutating
 goal verification remain available for the shared atomic executor and recovery
-path. They are active Core-contract work, not removed Provider capabilities.
+path. Core now has the attempt-bound conditional sequence ledger used by that
+executor; parent-batch creation, recovery dispatch and capability registration
+remain open rather than the donor capability being removed.
 
 `WellearnBatchExecutionShape::AtomicDurationCompletion` now marks current
 Fanyuchang duration and modular Auto duration and requires both child
-capabilities. Core still needs one durable atomic/current-step authority and
-recovery boundary so the Provider can issue exactly one start, the evidenced
-keeps and the donor's final completion mutation. Splitting them would add a
-bare save or second start; for modular Auto targets below 60 seconds it can also
-fail an intermediate time-change check before the only completion-bearing save.
+capabilities. `welearn.atomic-duration-completion.v1` projects each exact child
+artifact into Core's durable conditional sequence. Current Fanyuchang freezes
+four phases: accepted start `1..=1`; counter keeps `0|1..=target` that advance
+after one terminal rejection or the maximum; set `1..=1` gated by
+`welearn.atomic-pre-final-observation.v1`; and save `1..=1`. Modular Auto freezes
+accepted-or-rejected start `1..=1`, exactly `floor(target / 60)` implicit keeps,
+and save `1..=1`, with no pre-final observation. Splitting either operation
+would still add a bare save or second start; for modular Auto targets below 60
+seconds it can also fail an intermediate time-change check before the only
+completion-bearing save.
 
 The Provider-owned `WellearnAtomicDurationCompletionPlan` is the typed wire
 payload for that authority. Its constructor derives all fields from one
@@ -517,9 +524,11 @@ negative receipts, omits both the post-duration CMI and set receipt, and has one
 completion-bearing save receipt. Receipt booleans never replace final CMI
 verification, and this returned shape still provides no execution authority.
 
-`WellearnAtomicDurationCompletionTransport` consumes an already validated plan
-plus exact Course/SCO identity; it never accepts mutable runtime settings or an
-ordinary singleton request. Before the first start request it may renew one
+`WellearnAtomicDurationCompletionTransport` consumes the complete validated
+child, derives its plan and exact Course/SCO identity, and never accepts mutable
+runtime settings or an ordinary singleton request. It regenerates the exact
+child artifact and idempotently prepares the conditional sequence before
+session resolution or I/O. Before the first start request it may renew one
 authentication failure during session/route/initial-CMI resolution. The
 initial CMI document must then match the ordinary bounded parser, its explicit
 no-CMI result, or the exact audited uninitialized marker. Any other shape fails
@@ -536,16 +545,20 @@ Modular Auto uses plain/simple-Referer minimal start and implicit keeps, then
 switches only its completion-bearing score-0 save to the task-specific Referer;
 it never emits the singleton bare save. After the final mutation only, an
 authentication failure may renew once for a fresh read-only verification. The
-transport remains absent from capability registration until Core supplies the
-durable composite authority and per-transition persistence boundary.
+transport remains absent from capability registration until Core wires durable
+parent/child creation and recovery dispatch to this already-persistent
+per-transition boundary.
 
 `WellearnAtomicDurationCompletion` now supplies the unregistered high-level
 Provider coordinator for a fully prepared child. It revalidates the rebuilt
 batch/child projection, fetches one complete fresh `TaskDetail`, applies the
 existing exact batch-entry identity/capability/eligibility rebind, expands the
-frozen child into its complete wire plan, invokes the atomic transport once and
-runs `verify_atomic_duration_completion` before returning a sanitized verified
-outcome. Fresh child drift stops before transport. It accepts no ordinary
+frozen child into its complete wire plan, regenerates its exact artifact,
+prepares the same conditional sequence through Core, invokes the atomic
+transport once and runs `verify_atomic_duration_completion` before returning a
+sanitized verified outcome. The coordinator preparation protects injected
+transports; the native boundary repeats it idempotently before I/O. Fresh child
+or artifact drift stops before transport. It accepts no ordinary
 `ExecutionRequest` and does not build selection authority, so this completed
 Provider boundary does not bypass the parent-planning Core gap or register the
 atomic capability prematurely.
@@ -577,8 +590,10 @@ Crash recovery uses a smaller independent proof surface. Current Fanyuchang's
 bounded v1 envelope containing only a nonzero hash. It binds the exact child
 version/ordinal/Course/Task/profile/target and the fresh post-duration
 `session_time`/`total_time`; no raw CMI, route or credential value is encoded or
-rendered by Debug. Core must persist it against the same attempt after the
-post-duration read and before issuing the dependent set. Failure to persist
+rendered by Debug. The native transport adapts it to Core sequence phase 3 and
+persists it against the same attempt after the post-duration read and before
+issuing the dependent set. Core refuses the set issue without that exact
+phase/type record. Failure to persist
 stops the remaining mutations as `HumanRequired`. The observation never grants
 permission to resume a set/save after a crash.
 
@@ -595,6 +610,12 @@ attach it only to the accepted final-save ledger entry and may never replay a
 mutation to obtain the proof.
 
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
+The child-artifact-bound conditional sequence freezes the only legal operation
+families, dynamic occurrence bounds, response-dependent advancement and
+required observation type before session I/O. Exact idempotent preparation is
+allowed; a conflicting plan, out-of-phase issue, excess keep, missing phase-3
+observation or non-contiguous ordinal fails closed in Core. The sequence ledger
+orders a live attempt but never authorizes replay of an issued mutation.
 `WellearnAtomicMutationKind` has stable operation strings for start,
 counter/implicit keep, set and save. Core's generic `ExecutionMutationIssue`
 contains only the 1-based ordinal, operation string and request digest; its

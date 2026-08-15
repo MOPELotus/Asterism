@@ -132,6 +132,11 @@ The pre-final recovery-evidence checkpoint repeated the three remote head/tag
 queries with the same result. Its hash-only time binding and read-only recovery
 verifier preserve the existing Fanyuchang lifecycle; they add no donor request
 or completion claim.
+The conditional-sequence integration checkpoint repeated the same three
+default-head and tag queries after Core commit `f56ee89`; all revisions remain
+unchanged. The artifact-bound phase projection and attempt-bound phase-3
+observation only persist the already-audited response-conditional lifecycle and
+add no donor request, setting or completion claim.
 
 ## Source selection
 
@@ -168,8 +173,9 @@ task Referer for exercise completion. The current route appends `?uid=...` to
 explicit profiles rather than one merged superset request. Current
 Fanyuchang duration and modular Auto duration each reuse one start through the
 final completion mutation; Provider batch plans mark that atomic execution
-shape, while shared durable authority/recovery remains required before claiming
-the combined sequence is executable. They
+shape, and Core now persists the exact receipt-conditional child sequence.
+Shared parent/child creation, recovery dispatch and capability registration
+remain required before claiming the combined flow is production-reachable. They
 also detect authentication challenges but contain no reliable automated solver
 or task BrowserBridge implementation to port. Asterism provides immutable
 Capture v4/v5 alternatives for AssistedSession and ExternalBrowserOauth Cookies

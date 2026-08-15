@@ -15,17 +15,19 @@ use reqwest::{
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    WellearnAtomicDurationCompletionDocuments, WellearnAtomicDurationCompletionPlan,
-    WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionTransport,
+    WellearnAtomicChildPlan, WellearnAtomicDurationCompletionDocuments,
+    WellearnAtomicDurationCompletionPlan, WellearnAtomicDurationCompletionReceipts,
+    WellearnAtomicDurationCompletionTransport, WellearnAtomicPreFinalObservation,
     WellearnCmiDocument, WellearnCmiTransport, WellearnCourseInventoryTransport,
     WellearnDurationReportDocuments, WellearnDurationReportTransport, WellearnInventoryDocument,
     WellearnResourceExecutionDocuments, WellearnResourceExecutionTransport,
     WellearnScoLeavesDocument, WellearnSessionResolver, WellearnTaskInventoryDocuments,
     WellearnTaskInventoryTransport,
     atomic_mutation_digest::{atomic_mutation_request_digest, atomic_mutation_response_digest},
+    build_atomic_mutation_sequence_plan,
     cmi::{
         UNINITIALIZED_CMI_MARKER, WellearnCmiSnapshot, parse_cmi_snapshot,
-        parse_mutation_cmi_baseline,
+        parse_mutation_cmi_baseline, parse_sco_identity,
     },
     course_context::{parse_course_context, parse_course_context_for_id},
     course_inventory::course_id_from_remote,
@@ -458,19 +460,23 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
     async fn complete_duration_atomically(
         &self,
         context: &ProviderContext,
-        course_id: &str,
-        sco_id: &str,
-        plan: WellearnAtomicDurationCompletionPlan,
+        child: &WellearnAtomicChildPlan,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnAtomicDurationCompletionDocuments> {
+        child.validate()?;
+        let plan = child.duration_completion_plan()?;
+        let (course_id, sco_id) = parse_sco_identity(child.remote_task_id())?;
         plan.validate()?;
         let sink = required_atomic_mutation_sink(events)?;
+        let artifact = child.to_provider_execution_plan_artifact()?;
+        let sequence_plan = build_atomic_mutation_sequence_plan(child, &artifact)?;
+        sink.prepare_sequence_plan(&sequence_plan).await?;
         let duration_profile = atomic_http_profile(plan, AtomicMutationPhase::Duration);
         let completion_profile = atomic_http_profile(plan, AtomicMutationPhase::Completion);
         let completion = plan.completion();
         let (mut session, mut renewed) = self.session_for_operation(context).await?;
         let (route, initial) = match self
-            .read_duration_baseline(&session, course_id, sco_id, duration_profile.endpoint)
+            .read_duration_baseline(&session, &course_id, &sco_id, duration_profile.endpoint)
             .await
         {
             Err(error)
@@ -482,15 +488,20 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
             {
                 session = self.sessions.renew_session(context).await?;
                 renewed = true;
-                self.read_duration_baseline(&session, course_id, sco_id, duration_profile.endpoint)
-                    .await?
+                self.read_duration_baseline(
+                    &session,
+                    &course_id,
+                    &sco_id,
+                    duration_profile.endpoint,
+                )
+                .await?
             }
             result => result?,
         };
         crate::atomic_duration_completion::validate_atomic_initial_cmi(&initial)?;
-        let task_referer = study_course_url(&route, sco_id)?;
+        let task_referer = study_course_url(&route, &sco_id)?;
         let start_payload = atomic_start_payload(plan);
-        let start_fields = sco_start_fields(&route, sco_id, start_payload);
+        let start_fields = sco_start_fields(&route, &sco_id, start_payload);
         let mut ordinal = 1_u32;
 
         // The first mutation boundary begins before awaiting the start request.
@@ -531,7 +542,7 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
                         ("action", "keepsco_with_getticket_with_updatecmitime"),
                         ("uid", route.user_id()),
                         ("cid", route.course_id()),
-                        ("scoid", sco_id),
+                        ("scoid", sco_id.as_str()),
                         ("session_time", session_time.as_str()),
                         ("total_time", total_time.as_str()),
                         ("timelimitsec", "0"),
@@ -570,13 +581,22 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
                     .fetch_cmi_for_route_at_endpoint(
                         &session,
                         &route,
-                        sco_id,
+                        &sco_id,
                         duration_profile.endpoint,
                     )
                     .await
                     .map_err(atomic_post_mutation_error)?;
                 let fresh_snapshot =
                     parse_cmi_snapshot(fresh_time.as_str()).map_err(atomic_post_mutation_error)?;
+                let observation = WellearnAtomicPreFinalObservation::capture(child, &fresh_time)
+                    .map_err(atomic_post_mutation_error)?;
+                sink.record_sequence_observation(
+                    observation
+                        .to_sequence_observation()
+                        .map_err(atomic_post_mutation_error)?,
+                )
+                .await
+                .map_err(atomic_post_mutation_error)?;
                 let cmi = resource_completion_cmi(
                     completion.score_percent,
                     completion.time_mode,
@@ -587,7 +607,7 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
                 let fields = [
                     ("action", "setscoinfo"),
                     ("cid", route.course_id()),
-                    ("scoid", sco_id),
+                    ("scoid", sco_id.as_str()),
                     ("uid", route.user_id()),
                     ("data", cmi.as_str()),
                     ("isend", "False"),
@@ -623,7 +643,7 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
                         ("action", "keepsco_with_getticket_with_updatecmitime"),
                         ("uid", route.user_id()),
                         ("cid", route.course_id()),
-                        ("scoid", sco_id),
+                        ("scoid", sco_id.as_str()),
                     ];
                     let accepted = self
                         .send_durable_atomic_mutation(
@@ -663,7 +683,7 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
         let save_fields = [
             ("action", "savescoinfo160928"),
             ("cid", route.course_id()),
-            ("scoid", sco_id),
+            ("scoid", sco_id.as_str()),
             ("uid", route.user_id()),
             ("progress", "100"),
             ("crate", score.as_str()),
@@ -688,7 +708,7 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
             .await?;
 
         let after_completion = match self
-            .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, completion_profile.endpoint)
+            .fetch_cmi_for_route_at_endpoint(&session, &route, &sco_id, completion_profile.endpoint)
             .await
         {
             Err(error)
@@ -704,13 +724,13 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
                     .await
                     .map_err(atomic_post_mutation_error)?;
                 let verification_route = self
-                    .resolve_course_route(&session, course_id)
+                    .resolve_course_route(&session, &course_id)
                     .await
                     .map_err(atomic_post_mutation_error)?;
                 self.fetch_cmi_for_route_at_endpoint(
                     &session,
                     &verification_route,
-                    sco_id,
+                    &sco_id,
                     completion_profile.endpoint,
                 )
                 .await
@@ -2587,14 +2607,20 @@ mod tests {
             credential_refs: Vec::new(),
             correlation_id: "atomic-missing-sink".to_owned(),
         };
-        let plan = WellearnAtomicDurationCompletionPlan::try_new(
-            crate::WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
-            0,
-        )
+        let child: WellearnAtomicChildPlan = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "entry_index": 0,
+            "course_remote_id": "course:course",
+            "remote_task_id": "sco:course:sco",
+            "flow": "auto_duration",
+            "execution_shape": "atomic_duration_completion",
+            "atomic_completion_profile": "auto_zero_time_save_only0",
+            "target_seconds": 0,
+        }))
         .unwrap();
 
         let error = transport
-            .complete_duration_atomically(&context, "course", "sco", plan, &NoMutationEvents)
+            .complete_duration_atomically(&context, &child, &NoMutationEvents)
             .await
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::Internal);

@@ -1,6 +1,8 @@
 use std::fmt;
 
-use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_provider_api::{
+    ExecutionMutationSequenceObservation, ProviderError, ProviderErrorKind, ProviderResult,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -15,6 +17,9 @@ use crate::{
 /// Namespaced Provider-private type for one pre-final Fanyuchang observation.
 pub const WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE: &str =
     "welearn.atomic-pre-final-observation.v1";
+
+/// The Fanyuchang set phase that requires the pre-final time observation.
+pub const WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_PHASE_POSITION: u8 = 3;
 
 const WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_VERSION: u16 = 1;
 const MAX_ATOMIC_PRE_FINAL_OBSERVATION_BYTES: usize = 512;
@@ -75,6 +80,42 @@ impl WellearnAtomicPreFinalObservation {
 
     pub const fn binding_digest(&self) -> [u8; 32] {
         self.binding_digest
+    }
+
+    /// Adapts the hash-only value to Core's attempt-bound sequence record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if this observation no longer validates.
+    pub fn to_sequence_observation(&self) -> ProviderResult<ExecutionMutationSequenceObservation> {
+        self.validate()?;
+        ExecutionMutationSequenceObservation::try_new(
+            WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_PHASE_POSITION,
+            WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE,
+            self.binding_digest,
+        )
+        .map_err(|_| invalid_pre_final_observation())
+    }
+
+    /// Restores the Provider value from Core's exact phase/type/digest record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for a foreign phase, type or zero digest.
+    pub fn from_sequence_observation(
+        observation: &ExecutionMutationSequenceObservation,
+    ) -> ProviderResult<Self> {
+        if observation.phase_position() != WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_PHASE_POSITION
+            || observation.observation_type() != WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE
+        {
+            return Err(invalid_pre_final_observation());
+        }
+        let observation = Self {
+            version: WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_VERSION,
+            binding_digest: observation.observation_digest(),
+        };
+        observation.validate()?;
+        Ok(observation)
     }
 
     /// Encodes the hash-only observation under the bounded v1 schema.
@@ -317,6 +358,17 @@ mod tests {
             WellearnAtomicPreFinalObservation::decode(&encoded).unwrap(),
             observation
         );
+        let sequence_observation = observation.to_sequence_observation().unwrap();
+        assert_eq!(sequence_observation.phase_position(), 3);
+        assert_eq!(
+            sequence_observation.observation_type(),
+            WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE
+        );
+        assert_eq!(
+            WellearnAtomicPreFinalObservation::from_sequence_observation(&sequence_observation)
+                .unwrap(),
+            observation
+        );
         let debug = format!("{observation:?}");
         assert!(debug.contains("[HASHED]"));
         assert!(!debug.contains(&format!("{:?}", observation.binding_digest())));
@@ -397,6 +449,22 @@ mod tests {
             ])
             .is_err()
         );
+        let wrong_phase = ExecutionMutationSequenceObservation::try_new(
+            2,
+            WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE,
+            observation.binding_digest(),
+        )
+        .unwrap();
+        assert!(
+            WellearnAtomicPreFinalObservation::from_sequence_observation(&wrong_phase).is_err()
+        );
+        let wrong_type = ExecutionMutationSequenceObservation::try_new(
+            WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_PHASE_POSITION,
+            "welearn.other-observation.v1",
+            observation.binding_digest(),
+        )
+        .unwrap();
+        assert!(WellearnAtomicPreFinalObservation::from_sequence_observation(&wrong_type).is_err());
     }
 
     #[test]

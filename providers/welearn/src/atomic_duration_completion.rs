@@ -9,15 +9,14 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 
 use crate::{
-    WellearnAtomicCompletionProfile, WellearnCmiDocument, WellearnDurationProtocolMode,
-    WellearnPreparedAtomicChildPlan, WellearnResourceCompletionCmiFormat,
-    WellearnResourceCompletionSequence, WellearnResourceCompletionTimeMode,
-    WellearnResourceCompletionWriteMode, WellearnResourceExecutionPlan,
-    WellearnResourceMutationProfile,
+    WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnCmiDocument,
+    WellearnDurationProtocolMode, WellearnPreparedAtomicChildPlan,
+    WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
+    WellearnResourceCompletionTimeMode, WellearnResourceCompletionWriteMode,
+    WellearnResourceExecutionPlan, WellearnResourceMutationProfile,
     atomic_mutation_digest::atomic_completion_observation_digest,
-    cmi::{parse_mutation_cmi_baseline, parse_sco_identity},
-    metadata::development_metadata,
-    parse_cmi_snapshot,
+    build_atomic_mutation_sequence_plan, cmi::parse_mutation_cmi_baseline,
+    metadata::development_metadata, parse_cmi_snapshot,
     runtime_settings::MAX_DURATION_REPORT_SECONDS,
 };
 
@@ -229,15 +228,23 @@ impl WellearnAtomicDurationCompletion {
         prepared.validate()?;
         let child = prepared.child_plan();
         let plan = child.duration_completion_plan()?;
-        let (course_id, sco_id) = parse_sco_identity(child.remote_task_id())?;
         let detail = self
             .details
             .task_detail(context, child.remote_task_id())
             .await?;
         prepared.validate_fresh_detail(&detail)?;
+        let artifact = prepared.provider_plan_artifact()?;
+        let sequence_plan = build_atomic_mutation_sequence_plan(child, &artifact)?;
+        let sink = events.mutation_sink().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn atomic execution requires a durable Core mutation sink",
+            )
+        })?;
+        sink.prepare_sequence_plan(&sequence_plan).await?;
         let documents = self
             .transport
-            .complete_duration_atomically(context, &course_id, &sco_id, plan, events)
+            .complete_duration_atomically(context, child, events)
             .await?;
         let verification = verify_atomic_duration_completion(plan, &documents)?;
         let final_save_verification_recorded =
@@ -540,9 +547,7 @@ pub trait WellearnAtomicDurationCompletionTransport: Send + Sync {
     async fn complete_duration_atomically(
         &self,
         context: &ProviderContext,
-        course_id: &str,
-        sco_id: &str,
-        plan: WellearnAtomicDurationCompletionPlan,
+        child: &WellearnAtomicChildPlan,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnAtomicDurationCompletionDocuments>;
 }

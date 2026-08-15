@@ -281,7 +281,15 @@ only structural field names, response codes and bounded placeholder shapes.
   occurs before exactly one transport call and exact final CMI verification.
   A foreign fresh child stops before transport; successful Auto and Fanyuchang
   fixtures return only the frozen profile/target, time proof and sanitized
-  receipt diagnostics.
+  receipt diagnostics. They also prove the exact conditional sequence is
+  prepared before transport and that post-mutation verification-persistence
+  failure remains HumanRequired rather than being confused with a missing sink.
+- Atomic sequence fixtures bind `welearn.atomic-duration-completion.v1` to the
+  exact child artifact. Fanyuchang freezes accepted start, a zero-or-target
+  terminal-rejection keep phase, phase-3 observation-gated set and final save;
+  Auto freezes start, exactly `floor(target / 60)` keeps and final save. Zero
+  targets retain the donor-distinct empty keep phases, and a foreign child
+  artifact fails before sequence preparation.
 - Native atomic transport tests bind current duration/completion to the
   query-uid endpoint and simple Referer, while Auto binds its duration phase to
   plain endpoint/simple Referer and switches only final completion to the
@@ -369,8 +377,9 @@ only structural field names, response codes and bounded placeholder shapes.
   and child-artifact substitutions before fresh I/O.
 - Atomic recovery evidence tests round-trip the bounded hash-only Fanyuchang
   pre-final observation, reject schema/zero-digest/child/time substitution,
-  preserve the terminal-rejected-keep ordinal shape, and verify Auto from its
-  deterministic receipts without inventing a pre-final time observation.
+  preserve the terminal-rejected-keep ordinal shape, adapt only the exact Core
+  phase-3/type/digest observation, and verify Auto from its deterministic
+  receipts without inventing a pre-final time observation.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

@@ -2213,9 +2213,9 @@ mod tests {
     use asterism_domain::ProviderAccountId;
     use asterism_provider_api::{
         ExecutionEventSink, ExecutionMutationIssue, ExecutionMutationReceipt,
-        ExecutionMutationSink, ExecutionMutationVerification, ProviderContext,
-        ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
-        TaskDetailCapability,
+        ExecutionMutationSequencePlan, ExecutionMutationSink, ExecutionMutationVerification,
+        ProviderContext, ProviderExecutionLog, ProviderIdentity, ProviderMetadata,
+        ProviderProgress, TaskDetailCapability,
     };
     use async_trait::async_trait;
 
@@ -2316,15 +2316,13 @@ mod tests {
         async fn complete_duration_atomically(
             &self,
             _context: &ProviderContext,
-            course_id: &str,
-            sco_id: &str,
-            plan: WellearnAtomicDurationCompletionPlan,
+            child: &WellearnAtomicChildPlan,
             _events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<WellearnAtomicDurationCompletionDocuments> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((course_id.to_owned(), sco_id.to_owned(), plan));
+            child.validate()?;
+            let plan = child.duration_completion_plan()?;
+            let (course_id, sco_id) = crate::cmi::parse_sco_identity(child.remote_task_id())?;
+            self.calls.lock().unwrap().push((course_id, sco_id, plan));
             let (after_duration, after_completion, receipts) = match plan.profile() {
                 WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => (
                     Some(completed_atomic_cmi("100")),
@@ -2365,11 +2363,21 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct AtomicFixtureEvents {
+        fail_verification: bool,
+        sequence_plans: Mutex<Vec<[u8; 32]>>,
         verifications: Mutex<Vec<ExecutionMutationVerification>>,
     }
 
     #[async_trait]
     impl ExecutionMutationSink for AtomicFixtureEvents {
+        async fn prepare_sequence_plan(
+            &self,
+            plan: &ExecutionMutationSequencePlan,
+        ) -> ProviderResult<()> {
+            self.sequence_plans.lock().unwrap().push(plan.plan_digest());
+            Ok(())
+        }
+
         async fn issue(&self, _issue: &ExecutionMutationIssue) -> ProviderResult<()> {
             Ok(())
         }
@@ -2382,6 +2390,12 @@ mod tests {
             &self,
             verification: ExecutionMutationVerification,
         ) -> ProviderResult<()> {
+            if self.fail_verification {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "fixture verification persistence failed",
+                ));
+            }
             self.verifications.lock().unwrap().push(verification);
             Ok(())
         }
@@ -2399,20 +2413,6 @@ mod tests {
 
         fn mutation_sink(&self) -> Option<&(dyn ExecutionMutationSink + Send + Sync)> {
             Some(self)
-        }
-    }
-
-    #[derive(Debug)]
-    struct AtomicFixtureEventsWithoutSink;
-
-    #[async_trait]
-    impl ExecutionEventSink for AtomicFixtureEventsWithoutSink {
-        async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
-            Ok(())
-        }
-
-        async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
-            Ok(())
         }
     }
 
@@ -3180,6 +3180,7 @@ mod tests {
             false
         );
         assert!(events.verifications.lock().unwrap().is_empty());
+        assert_eq!(events.sequence_plans.lock().unwrap().len(), 1);
         assert_eq!(detail_calls.lock().unwrap().as_slice(), &["sco:1001:301"]);
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
@@ -3236,6 +3237,7 @@ mod tests {
             outcome.result_sanitized["final_save_verification_recorded"],
             true
         );
+        assert_eq!(events.sequence_plans.lock().unwrap().len(), 1);
         let verifications = events.verifications.lock().unwrap();
         assert_eq!(verifications.len(), 1);
         assert_eq!(verifications[0].ordinal(), 4);
@@ -3270,12 +3272,12 @@ mod tests {
         )
         .unwrap();
 
+        let events = AtomicFixtureEvents {
+            fail_verification: true,
+            ..AtomicFixtureEvents::default()
+        };
         let error = executor
-            .execute_prepared(
-                &atomic_context(),
-                &prepared,
-                &AtomicFixtureEventsWithoutSink,
-            )
+            .execute_prepared(&atomic_context(), &prepared, &events)
             .await
             .unwrap_err();
 
