@@ -464,35 +464,43 @@ bound redirect and returned `examAnswerId`, then reads the complete
 dynamic-`enc` mobile preview. The preview's newer `enc`, remaining-time and
 last-update values supersede the start page. Success atomically materializes
 normalized Questions plus the minimal encrypted
-`chaoxing.exam-question-attempt.v2` artifact containing route, attempt/timing
-material, Question count, ordered Question-set fingerprint and next-save
-cursor. No HTML or answer content enters the artifact. Any error after issue
+`chaoxing.exam-question-attempt.v3` artifact containing route, attempt/timing
+material, Question count, ordered QID/position/content-fingerprint bindings,
+the complete Question-set digest, frozen selected original positions and the
+next selected-save cursor. No HTML or answer content enters the artifact. Any error after issue
 remains ambiguous and cannot be auto-replayed. Cover or start responses
 requiring an exam code, face check or captcha return `HumanRequired` for
 BrowserBridge/Capture handoff.
 
 `SubmissionBuild` exposes only the donor's value-free Exam form field names.
-After an immutable Draft claims the v2 artifact, each
+After an immutable Draft claims the v3 artifact, the Provider requires Core's
+complete coverage denominator to equal the artifact Question count, matches
+each selected Draft Question to its original QID/position/content fingerprint,
+and freezes the strictly increasing selected positions. Each
 `chaoxing.exam-answer-save.v1` operation freezes the exact CxKitty-compatible
 `pos`, `rd`, `value`, `_edt`, query and form body once. Core persists the
 complete request digest before Native HTTP sends the POST. A successful save
 must return exactly `lastUpdate|encRemain|enc`; the timestamps may not regress,
-remaining time may not increase, and the cursor advances by exactly one before
-the encrypted continuation rotates. There is no read-only endpoint proving an
+remaining time may not increase, and the selected cursor advances by exactly
+one before the encrypted continuation rotates. A save's `start` is the selected
+Question's original zero-based full-paper position, not its index in the Draft.
+There is no read-only endpoint proving an
 individual temporary save, so ambiguity keeps that operation locked.
 
-Only after every Draft Question is saved does the Provider freeze a separate
+Only after every selected Draft Question is saved does the Provider freeze a separate
 `chaoxing.exam-final-submit.v1` with `tempSave=false`, empty `qid` and
 `start=0`. Its accepted JSON is a Receipt, not completion. `SubmissionVerify`
 rebinds the same Course and exact Exam row. A fresh `Completed` row is task-level
 recovery evidence only; it does not prove answer consistency. Per-Question
 confirmation additionally requires the strictly bound preview result to repeat
-every immutable Draft Question ID exactly once, in DOM/Draft position order,
-with the exact `exam_mobile` type code and a visible allowlisted `我的答案`
-value. Type codes 0, 1 and 3 use bounded single-choice, sorted multi-choice and
-exact boolean grammars. Missing/extra fields, ID/order/type drift, unsupported
-type 2 result text or absent visible answers produce `Inconclusive` with
-`Unverified` Questions; duplicates fail closed. Only a fully bound value
+the v3 artifact's complete ordered QID/position binding with bounded type fields. Every selected
+Draft Question must occur at its original DOM position with the exact
+`exam_mobile` type code and a visible allowlisted `我的答案` value. Type codes 0,
+1 and 3 use bounded single-choice, sorted multi-choice and exact boolean
+grammars. Unselected Questions may use other numeric types or omit visible
+answers; they remain structural count/identity evidence only. Missing/extra
+fields, selected ID/position/type drift or absent selected visible answers
+produce `Inconclusive` with `Unverified` Questions; duplicates fail closed. Only a fully bound value
 mismatch is `Rejected`, and matching Questions can remain individually
 `Confirmed`. Hidden inputs, CSS, score and list state are never answer evidence.
 When the same fresh result exposes a bounded decimal score, the parser retains
@@ -582,12 +590,16 @@ verification again requires the complete count and binds each selected QID/type
 to its original snapshot position before comparing the visible value. Unselected
 rendered controls are not promoted to answer evidence.
 
-The mobile Exam path is not silently generalized by this change. Its encrypted
-v2 artifact binds the complete Question-set digest and advances a sequential
-save cursor, while a partial Draft carries only selected Question bodies.
-Until a versioned artifact preserves every original position and validates a
-selected cursor without weakening the complete-set digest, partial Exam
-execution fails as typed `UnsupportedTask` before fresh inventory or mutation.
+The mobile Exam path remains a separate request family. Its encrypted v3
+artifact binds every original QID/position/content fingerprint and the complete
+Question-set digest, while Core's partial Draft carries selected Question bodies
+plus the complete denominator and unanswered identity partition. On first Draft
+binding the Provider freezes selected original positions; later continuation
+revisions must reproduce the same selection exactly. Saves advance only this
+selected cursor and use the original zero-based paper position in `start`.
+Verification still requires the complete remote result count, but unsupported
+unselected types and missing unselected visible answers do not become evidence
+and do not make otherwise exact selected evidence inconclusive.
 
 Completed historical Chapter Work, independent Work and Exam rows may be
 enumerated read-only. A result fetch must remain bound to

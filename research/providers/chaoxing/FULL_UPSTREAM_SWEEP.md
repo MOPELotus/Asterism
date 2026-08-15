@@ -153,9 +153,11 @@ Core freezes the complete denominator, resolved minimum and exact unanswered
 Question IDs. Chaoxing now consumes that partition for independent Work and
 Chapter Work by re-reading a complete editor, preserving every current control
 in DOM order, sending selected Draft values and rebuilding every unanswered
-value as empty. Partial mobile Exam remains a Provider continuation gap because
-its encrypted v2 state still advances a complete sequential Question cursor.
-The other shared gaps above remain independently tracked.
+value as empty. The Provider continuation gap is also closed: mobile Exam v3
+retains the complete ordered QID/position/content-fingerprint binding, freezes
+the selected original positions, advances only selected saves and verifies
+selected result evidence against the complete remote Question count. The other
+shared gaps above remain independently tracked.
 
 The same checkpoint closes the Provider-owned portion of the recovered CxKitty
 QR chain: bounded Native login/create/single-poll parsing, Chaoxing-scoped

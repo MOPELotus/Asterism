@@ -58,8 +58,8 @@ impl ChaoxingExamSubmissionCommand {
         }
         let index = usize::try_from(artifact.next_answer_index())
             .map_err(|_| protocol_drift("Chaoxing Exam answer index is invalid"))?;
-        let count = usize::try_from(artifact.question_count())
-            .map_err(|_| protocol_drift("Chaoxing Exam Question count is invalid"))?;
+        let count = usize::try_from(artifact.submission_count())
+            .map_err(|_| protocol_drift("Chaoxing Exam submission Question count is invalid"))?;
         if count != draft.items.len() || index > count {
             return Err(protocol_drift(
                 "Chaoxing Exam submission cursor no longer matches its Draft",
@@ -74,6 +74,22 @@ impl ChaoxingExamSubmissionCommand {
             .and_then(|question| question.remote_question_id.as_deref())
             .unwrap_or_default();
         let final_submit = kind == ExamSubmissionKind::Final;
+        let start_index = if let Some(question) = question {
+            let position = artifact.current_question_position().ok_or_else(|| {
+                protocol_drift("Chaoxing Exam submission cursor has no original Question position")
+            })?;
+            if position != question.position {
+                return Err(protocol_drift(
+                    "Chaoxing Exam submission cursor changed its original Question position",
+                ));
+            }
+            usize::try_from(position.checked_sub(1).ok_or_else(|| {
+                protocol_drift("Chaoxing Exam submission Question position is invalid")
+            })?)
+            .map_err(|_| protocol_drift("Chaoxing Exam Question position is invalid"))?
+        } else {
+            0
+        };
         let signature = ExamSignature::derive(
             user_id,
             question_id,
@@ -99,7 +115,8 @@ impl ChaoxingExamSubmissionCommand {
             ("qid".to_owned(), question_id.to_owned()),
             ("version".to_owned(), "1".to_owned()),
         ];
-        let mut body = base_submission_body(&artifact, user_id, index, temp_save, final_submit);
+        let mut body =
+            base_submission_body(&artifact, user_id, start_index, temp_save, final_submit);
         if let Some(question) = question {
             append_question_fields(&mut body, question, &draft.items[index].selected.answer)?;
         }
@@ -170,7 +187,7 @@ impl ChaoxingExamSubmissionCommand {
 fn base_submission_body(
     artifact: &ChaoxingExamQuestionArtifact,
     user_id: &str,
-    index: usize,
+    start_index: usize,
     temp_save: &str,
     final_submit: bool,
 ) -> Vec<(String, String)> {
@@ -205,7 +222,7 @@ fn base_submission_body(
             if final_submit {
                 "0".to_owned()
             } else {
-                index.to_string()
+                start_index.to_string()
             },
         ),
         (
@@ -761,6 +778,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partial_command_preserves_the_selected_questions_original_position() {
+        let (draft, artifact) = partial_exam_draft_and_artifact().await;
+        let prepared_at = Utc.timestamp_millis_opt(1_700_000_000_500).unwrap();
+        let command =
+            ChaoxingExamSubmissionCommand::try_new(artifact, &draft, "9001", [4; 32], prepared_at)
+                .unwrap();
+        assert!(!command.is_final());
+        assert!(
+            command
+                .query()
+                .iter()
+                .any(|field| field == &("qid".to_owned(), "exam-q-2".to_owned()))
+        );
+        assert!(
+            command
+                .body()
+                .iter()
+                .any(|field| field == &("start".to_owned(), "1".to_owned()))
+        );
+        let artifact = accept_save(command, SAVE_1, 1);
+        let final_command =
+            ChaoxingExamSubmissionCommand::try_new(artifact, &draft, "9001", [5; 32], prepared_at)
+                .unwrap();
+        assert!(final_command.is_final());
+    }
+
+    #[tokio::test]
     async fn saved_attempt_state_cannot_regress_or_cross_its_draft_binding() {
         let (draft, artifact) = exam_draft_and_artifact().await;
         let prepared_at = Utc.timestamp_millis_opt(1_700_000_000_500).unwrap();
@@ -899,6 +943,108 @@ mod tests {
                 .iter()
                 .map(|item| item.question.clone())
                 .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let encoded = artifact.encode().unwrap();
+        let digest = encoded.digest();
+        let value = encoded.into_secret_value();
+        let artifact = ChaoxingExamQuestionArtifact::decode_bound(
+            &value,
+            digest,
+            &draft,
+            "exam:100:200:exam-1",
+        )
+        .unwrap();
+        (draft, artifact)
+    }
+
+    async fn partial_exam_draft_and_artifact() -> (SubmissionDraft, ChaoxingExamQuestionArtifact) {
+        let task_id = TaskId::new();
+        let questions = parse_exam_question_page(QUESTIONS)
+            .unwrap()
+            .into_iter()
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let selected_question = questions[1].clone();
+        let selected = selected(selected_question.id, NormalizedAnswer::Boolean(true));
+        let preview = ChaoxingSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                "exam:100:200:exam-1",
+                std::slice::from_ref(&selected_question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 4,
+                minimum_coverage_millis: 250,
+                unanswered_question_ids: vec![questions[0].id, questions[2].id, questions[3].id],
+            },
+            items: vec![SubmissionDraftItem {
+                question: selected_question,
+                selected,
+            }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        };
+        draft.validate().unwrap();
+        let course = RemoteCourse {
+            remote_id: "course:100:200".to_owned(),
+            title: "Exam fixture".to_owned(),
+            term: None,
+            teacher: None,
+            remote_status: None,
+            metadata_sanitized: serde_json::json!({}),
+            route_context: ProviderRouteContext::try_from_pairs([
+                ("chaoxing.course_id".to_owned(), "100".to_owned()),
+                ("chaoxing.class_id".to_owned(), "200".to_owned()),
+                ("chaoxing.cpi".to_owned(), "300".to_owned()),
+            ])
+            .unwrap(),
+        };
+        let route = ChaoxingCourseRoute::from_remote_course(&course).unwrap();
+        let request = ChaoxingExamQuestionRequest::try_new(
+            route,
+            "exam:100:200:exam-1",
+            "goTest('100','exam-1',0,'SAFE_TIME','paper-1',false,'SAFE_ENC_TASK')",
+        )
+        .unwrap();
+        let command = ChaoxingExamStartCommand::from_cover(
+            task_id,
+            "exam:100:200:exam-1",
+            &request,
+            parse_exam_cover(COVER).unwrap(),
+        )
+        .unwrap();
+        let artifact = ChaoxingExamQuestionArtifact::from_materialization(
+            task_id,
+            &command,
+            ChaoxingExamAttemptMaterial {
+                exam_answer_id: Zeroizing::new("answer-1".to_owned()),
+                enc: Zeroizing::new("SAFE_ATTEMPT_ENC".to_owned()),
+                enc_remain_time: 3_600,
+                remain_time: 3_600,
+                last_update_time: 1_700_000_000_000,
+            },
+            &questions,
+        )
+        .unwrap();
+        let encoded = artifact.encode().unwrap();
+        let digest = encoded.digest();
+        let value = encoded.into_secret_value();
+        let artifact = ChaoxingExamQuestionArtifact::decode_bound(
+            &value,
+            digest,
+            &draft,
+            "exam:100:200:exam-1",
         )
         .unwrap();
         (draft, artifact)

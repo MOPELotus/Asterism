@@ -18,8 +18,8 @@ source modules even when their assessments share field names or HTML shapes.
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
 | AnswerResolve | `chaoxing-exam` completed Chapter result | Samueli Tiku, CxKitty searchers, OCS wrappers/cache, agent pre-computed answers | Reference | A typed but unregistered component rebinds fresh completed Chapter Work detail and consumes one abstract bound result document before producing strict ProviderNative candidates; all other donor sources are external/manual/random and no pending Work/Exam standard-answer protocol exists |
 | AnswerHistoryHarvest | `chaoxing-exam` completed Chapter result | Samueli issue #607, OCS result cache | Reference | A typed capability pages only completed Chapter Work references supplied by a bounded read-only transport, binds the audited `workAnswerId` into a Provider attempt digest, hashes the exact result document, applies Core's TaskId to parsed Questions and emits submitted/official/correctness/score/structural `RedoTest` facts. The native development factory does not advertise it until a real BrowserBridge/Capture list/read transport exists |
-| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts, including Core-frozen partial coverage: a fresh editor must retain the complete Question count and every selected QID/type, all unanswered controls are rebuilt empty in original DOM order, and no stale or invented value is forwarded. Exam has a separate value-free preview and durable one-operation-at-a-time native chain, but partial Exam Drafts remain fail-closed until its encrypted full-Question cursor can bind selected original positions. No Exam mutation is routed through Work payloads or replayed after ambiguity |
-| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, confirms Questions solely from exact Draft ID/order/type/value result evidence, and projects the independent bounded result score as fixed thousandths. A fresh explicit Expired state maps to `WindowClosed`; all less specific incomplete states remain conservatively undiagnosed |
+| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work, Chapter Work and Exam execute Core-frozen partial coverage without inventing answers. Work forms preserve the complete current control order and rebuild unanswered values empty. Exam's encrypted v3 continuation retains the complete ordered Question identity/fingerprint set plus the frozen selected original positions; saves traverse only selected Draft Questions and send each donor `start` as its original zero-based paper index. No Exam mutation is routed through Work payloads or replayed after ambiguity |
+| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, requires the full result Question count and unique identities, and confirms/rejects only selected Draft Questions at their original positions from exact type/value evidence. Unselected or unsupported result Questions are not answer evidence. The independent bounded result score remains fixed thousandths. A fresh explicit Expired state maps to `WindowClosed`; all less specific incomplete states remain conservatively undiagnosed |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream. Unknown numeric Question kinds, unknown Chapter resource structures and unknown Work result shapes now attach bounded protocol observations containing only controlled enums, counts and field-presence facts |
 | BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
 
@@ -169,17 +169,19 @@ policy and remains independently guarded.
   a result view must expose the exact submitted answer for every Draft
   Question. This is synthetic/offline evidence only and does not raise the
   Provider above Development.
-- Core-frozen partial coverage is now executable for independent Work and
-  Chapter Work. The short-lived Provider plan retains selected answers plus the
+- Core-frozen partial coverage is now executable for independent Work, Chapter
+  Work and mobile Exam. The short-lived Provider plan retains selected answers plus the
   immutable complete count; the fresh editor must expose that exact count and
   every selected QID/type. `answerwqbid` and `answertype*` preserve the complete
   current DOM order, while unanswered `answer*` values are rebuilt as empty and
   every stale editor answer is discarded. Independent Work result verification
   requires the same complete count and original position for each selected QID,
-  then confirms or rejects only Draft Questions. The encrypted mobile Exam
-  artifact still advances a complete sequential cursor, so partial Exam
-  execution returns typed `UnsupportedTask` before fresh I/O rather than
-  weakening its attempt binding.
+  then confirms or rejects only Draft Questions. The encrypted mobile Exam v3
+  artifact retains the complete ordered QID/position/content-fingerprint set,
+  freezes the selected original positions on first Draft binding, advances only
+  that selected cursor and emits each save's original zero-based `start` value.
+  Result verification likewise requires the full remote count but reads visible
+  answer evidence only for selected Questions.
 - Pending Chapter Work also advertises `SubmissionBuild`, `SubmissionExecute`
   and `SubmissionVerify`. Build supports donor type codes 0-4; Execute rechecks
   the immutable Draft and fresh Course/Chapter/seven-card target, then sends one
@@ -228,18 +230,21 @@ policy and remains independently guarded.
   errors remain locked rather than replayed. Exam-code, face and captcha gates
   return typed `HumanRequired` pending their BrowserBridge/Capture command path.
 - Pending Exam tasks now also advertise `SubmissionExecute` and
-  `SubmissionVerify`. The immutable Draft and encrypted v2 attempt artifact bind
-  the complete ordered Question set and exact save cursor. The Provider freezes
+  `SubmissionVerify`. The immutable Draft and encrypted v3 attempt artifact bind
+  the complete ordered Question set, selected original positions and exact save
+  cursor. The Provider freezes
   CxKitty-compatible `pos/rd/value/_edt` signature parameters and the complete
   form/query digest before Core marks each operation issued. Accepted temporary
   saves must return monotonic `lastUpdate|encRemain|enc` state and atomically
-  rotate the continuation; after every Question is saved, one separate final
+  rotate the continuation; after every selected Draft Question is saved, one separate final
   submit returns a Receipt. Fresh exact Exam inventory must report Completed
   before result verification. Per-Question confirmation then requires a fresh
-  bound preview result whose complete IDs, DOM order, `exam_mobile` types and
-  visible values match the immutable Draft. Missing/extra/unsupported evidence
-  is Inconclusive, duplicates fail closed, and only a fully bound value mismatch
-  is Rejected. The same fresh result's optional 0-100 score is carried as exact
+  bound preview result matching every v3 full-paper QID/original-position binding;
+  each selected Draft ID must retain its original DOM position and exact
+  `exam_mobile` type/visible value. Missing/extra/drifted selected evidence is
+  Inconclusive, duplicates fail closed, and only a fully bound selected value
+  mismatch is Rejected. Unselected unsupported types need no visible answer and
+  are never promoted to answer evidence. The same fresh result's optional 0-100 score is carried as exact
   thousandths on any verification status but never participates in the answer
   decision. An ambiguous temporary save stays locked, while an ambiguous final
   submit may be recovered only from a fresh Completed list state.
@@ -264,8 +269,9 @@ contracts:
   `cover_rate=0.9`. Core now binds the resolved policy, complete snapshot
   denominator and intentional unanswered set into the immutable Draft;
   independent Work and Chapter Work execute that partition through a fresh
-  complete editor. Mobile Exam remains separate because its encrypted cursor
-  still needs a lossless selected-original-position binding;
+  complete editor. Mobile Exam remains a separate request family and now
+  executes the same partition through a lossless encrypted v3
+  selected-original-position binding;
 - result harvesting feeds an owner-level Answer Evidence Corpus only from a
   read-only, strictly rebound result route; task completion, score, `我的答案`,
   `正确答案` and per-Question correctness remain separate facts;

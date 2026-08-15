@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::json;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::ChaoxingExamQuestionArtifact;
 use crate::inventory::{contains_javascript_call, parse_exam_detail_facts};
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
@@ -227,6 +228,7 @@ impl ChaoxingSubmissionPlan {
         self.total_question_count
     }
 
+    #[cfg(test)]
     pub(crate) const fn is_partial(&self) -> bool {
         self.answers.len() != self.total_question_count
     }
@@ -973,8 +975,9 @@ pub fn parse_chapter_work_result_evidence(
     })
 }
 
-/// Compares a fresh Exam result with every immutable Draft Question in exact
-/// DOM order. Score and list completion are never answer evidence.
+/// Compares a fresh Exam result with each selected immutable Draft Question at
+/// its original full-paper position. Score and list completion are never
+/// answer evidence.
 ///
 /// # Errors
 ///
@@ -985,6 +988,24 @@ pub fn parse_exam_verification_snapshot(
     document: &ChaoxingExamVerificationDocument,
     plan: &ChaoxingSubmissionPlan,
     draft: &SubmissionDraft,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
+    parse_exam_verification_snapshot_inner(document, plan, draft, None)
+}
+
+pub(crate) fn parse_bound_exam_verification_snapshot(
+    document: &ChaoxingExamVerificationDocument,
+    plan: &ChaoxingSubmissionPlan,
+    draft: &SubmissionDraft,
+    artifact: &ChaoxingExamQuestionArtifact,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
+    parse_exam_verification_snapshot_inner(document, plan, draft, Some(artifact))
+}
+
+fn parse_exam_verification_snapshot_inner(
+    document: &ChaoxingExamVerificationDocument,
+    plan: &ChaoxingSubmissionPlan,
+    draft: &SubmissionDraft,
+    artifact: Option<&ChaoxingExamQuestionArtifact>,
 ) -> ProviderResult<SubmissionVerificationSnapshot> {
     if plan.len() != draft.items.len() {
         return Err(invalid_response(
@@ -999,40 +1020,22 @@ pub fn parse_exam_verification_snapshot(
             earned_milli_points,
             possible_milli_points: 100_000,
         });
-    let Some(remote_answers) = parse_exam_result_answers(&html)? else {
+    let Some(question_statuses) = parse_selected_exam_result(&html, plan, draft, artifact)? else {
         return exam_inconclusive_snapshot(draft, score);
     };
-    if remote_answers.len() != plan.len()
-        || draft.items.iter().enumerate().any(|(index, item)| {
-            item.question.position != u32::try_from(index + 1).unwrap_or(u32::MAX)
-        })
-    {
-        return exam_inconclusive_snapshot(draft, score);
-    }
-    let planned = plan.answers().collect::<Vec<_>>();
-    if remote_answers
+    let questions = draft
+        .items
         .iter()
-        .zip(&planned)
-        .any(|(actual, (remote_id, type_code, _))| {
-            actual.remote_id != *remote_id || actual.type_code != *type_code
+        .map(|item| SubmissionQuestionVerification {
+            question_id: item.question.id,
+            status: item
+                .question
+                .remote_question_id
+                .as_deref()
+                .and_then(|remote_id| question_statuses.get(remote_id))
+                .copied()
+                .unwrap_or(SubmissionQuestionVerificationStatus::Unverified),
         })
-    {
-        return exam_inconclusive_snapshot(draft, score);
-    }
-    let questions = remote_answers
-        .iter()
-        .zip(planned)
-        .zip(&draft.items)
-        .map(
-            |((actual, (_, _, expected)), item)| SubmissionQuestionVerification {
-                question_id: item.question.id,
-                status: if actual.value == expected {
-                    SubmissionQuestionVerificationStatus::Confirmed
-                } else {
-                    SubmissionQuestionVerificationStatus::Rejected
-                },
-            },
-        )
         .collect::<Vec<_>>();
     let status = if questions
         .iter()
@@ -1233,24 +1236,26 @@ fn parse_chapter_score_milli(value: &str) -> ProviderResult<u32> {
         .ok_or_else(|| protocol_drift("Chaoxing Chapter Work result final score is out of range"))
 }
 
-struct ExamRemoteAnswer {
-    remote_id: String,
-    type_code: String,
-    value: String,
-}
-
-impl Drop for ExamRemoteAnswer {
-    fn drop(&mut self) {
-        self.remote_id.zeroize();
-        self.type_code.zeroize();
-        self.value.zeroize();
-    }
-}
-
-fn parse_exam_result_answers(html: &Html) -> ProviderResult<Option<Vec<ExamRemoteAnswer>>> {
-    let mut answers = Vec::new();
+fn parse_selected_exam_result(
+    html: &Html,
+    plan: &ChaoxingSubmissionPlan,
+    draft: &SubmissionDraft,
+    artifact: Option<&ChaoxingExamQuestionArtifact>,
+) -> ProviderResult<Option<BTreeMap<String, SubmissionQuestionVerificationStatus>>> {
+    let planned = plan
+        .answers()
+        .zip(&draft.items)
+        .map(|((remote_id, type_code, expected), item)| {
+            (remote_id, (type_code, expected, item.question.position))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut remote_ids = BTreeSet::new();
-    for question in html.select(&selector(".questionLi")) {
+    let mut question_statuses = BTreeMap::new();
+    let mut remote_count = 0_usize;
+    for (index, question) in html.select(&selector(".questionLi")).enumerate() {
+        remote_count = remote_count
+            .checked_add(1)
+            .ok_or_else(|| protocol_drift("Chaoxing Exam result Question count is invalid"))?;
         let Some(identity) = unique_result_node(
             question.select(&selector("input[name='questionId']")),
             "Chaoxing Exam result contains duplicate Question identity fields",
@@ -1269,6 +1274,12 @@ fn parse_exam_result_answers(html: &Html) -> ProviderResult<Option<Vec<ExamRemot
                 "Chaoxing Exam result contains duplicate Question identity",
             ));
         }
+        if artifact.is_some_and(|artifact| {
+            artifact.question_binding_at(index)
+                != Some((remote_id, u32::try_from(index + 1).unwrap_or(u32::MAX)))
+        }) {
+            return Ok(None);
+        }
         let type_name = format!("type{remote_id}");
         let Some(type_input) = unique_result_node(
             question
@@ -1279,9 +1290,19 @@ fn parse_exam_result_answers(html: &Html) -> ProviderResult<Option<Vec<ExamRemot
         else {
             return Ok(None);
         };
-        let Some(type_code @ ("0" | "1" | "3")) = type_input.value().attr("value") else {
-            return Ok(None);
+        let type_code = type_input
+            .value()
+            .attr("value")
+            .filter(|value| valid_remote_type_code(value))
+            .ok_or_else(|| protocol_drift("Chaoxing Exam result Question type is malformed"))?;
+        let Some((expected_type, expected, expected_position)) = planned.get(remote_id) else {
+            continue;
         };
+        if type_code != *expected_type
+            || usize::try_from(*expected_position).ok() != index.checked_add(1)
+        {
+            return Ok(None);
+        }
         let Some(answer_node) = unique_result_node(
             question
                 .select(&selector(".mark_answer, .stem_answer, .my-answer"))
@@ -1295,17 +1316,19 @@ fn parse_exam_result_answers(html: &Html) -> ProviderResult<Option<Vec<ExamRemot
         let Some(value) = parse_exam_visible_answer(text.as_str(), type_code)? else {
             return Ok(None);
         };
-        answers.push(ExamRemoteAnswer {
-            remote_id: remote_id.to_owned(),
-            type_code: type_code.to_owned(),
-            value,
-        });
+        question_statuses.insert(
+            remote_id.to_owned(),
+            if value == *expected {
+                SubmissionQuestionVerificationStatus::Confirmed
+            } else {
+                SubmissionQuestionVerificationStatus::Rejected
+            },
+        );
     }
-    if answers.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(answers))
+    if remote_count != plan.total_question_count() || question_statuses.len() != plan.len() {
+        return Ok(None);
     }
+    Ok(Some(question_statuses))
 }
 
 fn unique_result_node<'a>(
@@ -1901,6 +1924,8 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
     const EXAM_RESULT: &str =
         include_str!("../../../fixtures/providers/chaoxing/exam/detail-result.html");
+    const PARTIAL_EXAM_RESULT: &str =
+        include_str!("../../../fixtures/providers/chaoxing/exam/detail-result-partial.html");
 
     #[tokio::test]
     async fn fresh_editor_builds_allowlisted_final_submit_form() {
@@ -2471,6 +2496,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partial_exam_result_checks_only_selected_original_positions() {
+        let draft = partial_exam_draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let result =
+            ChaoxingExamVerificationDocument::try_new(PARTIAL_EXAM_RESULT.to_owned()).unwrap();
+        let snapshot = parse_exam_verification_snapshot(&result, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(snapshot.questions.len(), 1);
+        assert_eq!(
+            snapshot.questions[0].status,
+            SubmissionQuestionVerificationStatus::Confirmed
+        );
+        assert_eq!(snapshot.score.unwrap().earned_milli_points, 25_000);
+
+        let rejected = PARTIAL_EXAM_RESULT.replacen("我的答案：对", "我的答案：错", 1);
+        let rejected = ChaoxingExamVerificationDocument::try_new(rejected).unwrap();
+        let snapshot = parse_exam_verification_snapshot(&rejected, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Rejected);
+
+        let missing = PARTIAL_EXAM_RESULT.replacen(
+            "<p class=\"my-answer\">我的答案：对</p>",
+            "<p class=\"answer-only\">我的答案：对</p>",
+            1,
+        );
+        let missing = ChaoxingExamVerificationDocument::try_new(missing).unwrap();
+        let snapshot = parse_exam_verification_snapshot(&missing, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+    }
+
+    #[tokio::test]
     async fn exam_result_missing_extra_or_drifted_binding_is_inconclusive() {
         let draft = exam_draft().await;
         let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
@@ -2745,6 +2800,55 @@ mod tests {
             payload_preview: preview,
             created_at: Utc::now(),
         }
+    }
+
+    async fn partial_exam_draft() -> SubmissionDraft {
+        let task_id = TaskId::new();
+        let questions = parse_exam_question_page(EXAM_QUESTIONS)
+            .unwrap()
+            .into_iter()
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let question = questions[1].clone();
+        let answer = selected(question.id, NormalizedAnswer::Boolean(true));
+        let context = ProviderContext {
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            account_id: asterism_domain::ProviderAccountId::new(),
+            credential_refs: vec![asterism_domain::SecretId::new()],
+            correlation_id: "chaoxing-partial-exam-verification-support".to_owned(),
+        };
+        let preview = ChaoxingSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context,
+                "exam:100:200:exam-1",
+                std::slice::from_ref(&question),
+                std::slice::from_ref(&answer),
+            )
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            provider_version: crate::metadata::development_metadata()
+                .unwrap()
+                .implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 4,
+                minimum_coverage_millis: 250,
+                unanswered_question_ids: vec![questions[0].id, questions[2].id, questions[3].id],
+            },
+            items: vec![SubmissionDraftItem {
+                question,
+                selected: answer,
+            }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        };
+        draft.validate().unwrap();
+        draft
     }
 
     fn selected(

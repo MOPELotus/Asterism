@@ -245,12 +245,7 @@ impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
                 "Chaoxing Exam submission draft preview is stale or foreign",
             ));
         }
-        if ChaoxingSubmissionPlan::from_draft(draft)?.is_partial() {
-            return Err(ProviderError::new(
-                ProviderErrorKind::UnsupportedTask,
-                "Chaoxing native Exam submission cannot yet rebind a partial Question cursor",
-            ));
-        }
+        ChaoxingSubmissionPlan::from_draft(draft)?;
         validate_fresh_exam_pending(
             self.courses.as_ref(),
             self.inventory.as_ref(),
@@ -323,7 +318,7 @@ impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
             // proves that this exact cursor rotation was accepted.
             return Ok(None);
         }
-        if artifact.next_answer_index() != artifact.question_count() {
+        if artifact.next_answer_index() != artifact.submission_count() {
             return Err(protocol_drift(
                 "Chaoxing ambiguous final submit has an incomplete answer cursor",
             ));

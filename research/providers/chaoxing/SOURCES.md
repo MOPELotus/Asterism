@@ -69,6 +69,13 @@ runtime responsibilities, so metadata does not advertise `QrCode` yet.
 
 ## Refresh log
 
+- 2026-08-15: completed the Provider-owned partial mobile Exam follow-up from
+  the full sweep without changing donor revisions. The encrypted attempt schema
+  is now v3: it preserves the complete ordered Question binding and selected
+  original positions, sends CxKitty's full-paper `start` index for each selected
+  save, and verifies only selected visible answers after requiring the complete
+  result count. Synthetic non-contiguous selection/result coverage is recorded
+  in `FIXTURES.md`.
 - 2026-08-15: re-read the complete pinned CxKitty QR call chain after the
   workspace checkpoint. No donor revision changed. Added a clean-room bounded
   Native QR begin/poll boundary and synthetic state/Cookie fixtures; it remains

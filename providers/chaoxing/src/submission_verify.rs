@@ -26,7 +26,7 @@ use crate::{
     },
     submission_support::{
         SubmissionModule, WorkSubmissionIdentity, inconclusive_snapshot,
-        parse_exam_verification_snapshot, parse_verification_snapshot,
+        parse_verification_snapshot,
     },
     task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
 };
@@ -214,19 +214,17 @@ impl SubmissionVerifyCapability for ChaoxingSubmissionVerify {
             draft,
             remote_task_id,
         )?;
-        if artifact.next_answer_index() != artifact.question_count() {
+        if artifact.next_answer_index() != artifact.submission_count() {
             return Err(remote_changed(
                 "Chaoxing Exam verification was requested before every answer save",
             ));
         }
-        if draft.items.iter().enumerate().any(|(index, item)| {
-            item.question.position != u32::try_from(index + 1).unwrap_or(u32::MAX)
-                || item
-                    .question
-                    .metadata_sanitized
-                    .get("page_kind")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("exam_mobile")
+        if draft.items.iter().any(|item| {
+            item.question
+                .metadata_sanitized
+                .get("page_kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("exam_mobile")
         }) {
             return Err(invalid_response(
                 "Chaoxing Exam verification Draft has a foreign page kind or order",
@@ -251,15 +249,14 @@ impl SubmissionVerifyCapability for ChaoxingSubmissionVerify {
                 "Chaoxing Exam verification Draft preview is stale or foreign",
             ));
         }
-        let plan = ChaoxingSubmissionPlan::from_draft(draft)?;
         fresh_exam_verification(
             self.courses.as_ref(),
             self.inventory.as_ref(),
             self.transport.as_ref(),
             context,
             identity,
-            &plan,
             draft,
+            &artifact,
         )
         .await
     }
@@ -285,8 +282,8 @@ async fn fresh_exam_verification(
     transport: &dyn ChaoxingSubmissionVerificationTransport,
     context: &ProviderContext,
     identity: WorkSubmissionIdentity<'_>,
-    plan: &ChaoxingSubmissionPlan,
     draft: &SubmissionDraft,
+    artifact: &ChaoxingExamQuestionArtifact,
 ) -> ProviderResult<SubmissionVerificationSnapshot> {
     let courses = courses.list_courses(context).await?;
     let course = matching_course(&courses, identity)?;
@@ -313,7 +310,10 @@ async fn fresh_exam_verification(
         return inconclusive_snapshot(draft, RemoteState::Completed);
     };
     let result = transport.fetch_exam_verification(context, request).await?;
-    parse_exam_verification_snapshot(&result, plan, draft)
+    let plan = ChaoxingSubmissionPlan::from_draft(draft)?;
+    crate::submission_support::parse_bound_exam_verification_snapshot(
+        &result, &plan, draft, artifact,
+    )
 }
 
 pub(crate) async fn fresh_exam_state(

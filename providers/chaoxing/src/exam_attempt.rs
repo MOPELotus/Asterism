@@ -21,7 +21,7 @@ const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
 
 pub const CHAOXING_EXAM_PRE_QUESTION_TYPE: &str = "chaoxing.exam-pre-question.v1";
 pub const CHAOXING_EXAM_READY_TO_START_PHASE: &str = "chaoxing.exam-ready-to-start";
-pub const CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE: &str = "chaoxing.exam-question-attempt.v2";
+pub const CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE: &str = "chaoxing.exam-question-attempt.v3";
 pub const CHAOXING_EXAM_QUESTIONS_READY_PHASE: &str = "chaoxing.exam-questions-ready";
 pub const CHAOXING_EXAM_START_OPERATION: &str = "chaoxing.exam-start.v1";
 pub(crate) const CHAOXING_EXAM_CONTINUATION_TTL_SECONDS: u64 = 30 * 60;
@@ -340,6 +340,8 @@ pub struct ChaoxingExamQuestionArtifact {
     last_update_time: u64,
     question_count: u32,
     question_set_digest: Zeroizing<String>,
+    question_bindings: Vec<ExamQuestionBinding>,
+    submission_positions: Vec<u32>,
     next_answer_index: u32,
 }
 
@@ -366,7 +368,7 @@ impl ChaoxingExamQuestionArtifact {
                 "Chaoxing Exam materialization changed its attempt binding",
             ));
         }
-        let (question_count, question_set_digest) =
+        let (question_count, question_set_digest, question_bindings) =
             derive_question_set_binding(task_id, questions.iter())?;
         Ok(Self {
             task_id: Zeroizing::new(task_id.to_string()),
@@ -383,6 +385,8 @@ impl ChaoxingExamQuestionArtifact {
             last_update_time: material.last_update_time,
             question_count,
             question_set_digest: Zeroizing::new(question_set_digest),
+            question_bindings,
+            submission_positions: Vec::new(),
             next_answer_index: 0,
         })
     }
@@ -409,13 +413,11 @@ impl ChaoxingExamQuestionArtifact {
                 "Chaoxing Exam artifact is stale, foreign, or malformed",
             ));
         }
-        let (question_count, question_set_digest) = derive_question_set_binding(
-            draft.task_id,
-            draft.items.iter().map(|item| &item.question),
-        )?;
+        let question_count = validate_question_binding_wire(&wire.question_bindings)?;
+        let question_set_digest = derive_wire_question_set_digest(&wire.question_bindings)?;
         if wire.question_count != question_count
             || wire.question_set_digest != question_set_digest
-            || wire.next_answer_index > question_count
+            || wire.question_count != draft.answer_coverage.total_question_count
             || !valid_component(&wire.course_id)
             || !valid_component(&wire.class_id)
             || !valid_component(&wire.cpi)
@@ -429,6 +431,23 @@ impl ChaoxingExamQuestionArtifact {
                 "Chaoxing Exam artifact no longer matches the immutable Draft",
             ));
         }
+        let submission_positions = derive_submission_positions(draft, &wire.question_bindings)?;
+        if (wire.submission_positions.is_empty() && wire.next_answer_index != 0)
+            || (!wire.submission_positions.is_empty()
+                && wire.submission_positions != submission_positions)
+            || wire.next_answer_index
+                > u32::try_from(submission_positions.len()).map_err(|_| {
+                    invalid_response("Chaoxing Exam submission Question count is unbounded")
+                })?
+        {
+            return Err(protocol_drift(
+                "Chaoxing Exam submission selection or cursor has changed",
+            ));
+        }
+        let question_bindings = std::mem::take(&mut wire.question_bindings)
+            .into_iter()
+            .map(ExamQuestionBinding::from)
+            .collect();
         Ok(Self {
             task_id: Zeroizing::new(std::mem::take(&mut wire.task_id)),
             remote_task_id: Zeroizing::new(std::mem::take(&mut wire.remote_task_id)),
@@ -444,6 +463,8 @@ impl ChaoxingExamQuestionArtifact {
             last_update_time: wire.last_update_time,
             question_count,
             question_set_digest: Zeroizing::new(question_set_digest),
+            question_bindings,
+            submission_positions,
             next_answer_index: wire.next_answer_index,
         })
     }
@@ -466,6 +487,12 @@ impl ChaoxingExamQuestionArtifact {
                 last_update_time: self.last_update_time,
                 question_count: self.question_count,
                 question_set_digest: &self.question_set_digest,
+                question_bindings: self
+                    .question_bindings
+                    .iter()
+                    .map(ExamQuestionBindingWireRef::from)
+                    .collect(),
+                submission_positions: &self.submission_positions,
                 next_answer_index: self.next_answer_index,
             })
             .map_err(|_| invalid_response("Chaoxing Exam artifact could not be encoded"))?,
@@ -479,7 +506,7 @@ impl ChaoxingExamQuestionArtifact {
         enc_remain_time: u64,
         mut enc: String,
     ) -> ProviderResult<Self> {
-        if self.next_answer_index >= self.question_count
+        if self.next_answer_index >= self.submission_count()
             || last_update_time < self.last_update_time
             || enc_remain_time > self.enc_remain_time
             || enc.is_empty()
@@ -505,8 +532,20 @@ impl ChaoxingExamQuestionArtifact {
         self.next_answer_index
     }
 
-    pub(crate) const fn question_count(&self) -> u32 {
-        self.question_count
+    pub(crate) fn submission_count(&self) -> u32 {
+        u32::try_from(self.submission_positions.len()).unwrap_or(u32::MAX)
+    }
+
+    pub(crate) fn current_question_position(&self) -> Option<u32> {
+        usize::try_from(self.next_answer_index)
+            .ok()
+            .and_then(|index| self.submission_positions.get(index).copied())
+    }
+
+    pub(crate) fn question_binding_at(&self, index: usize) -> Option<(&str, u32)> {
+        self.question_bindings
+            .get(index)
+            .map(|binding| (binding.remote_id.as_str(), binding.position))
     }
 
     pub(crate) fn course_id(&self) -> &str {
@@ -638,6 +677,8 @@ struct ExamQuestionArtifactWireRef<'a> {
     last_update_time: u64,
     question_count: u32,
     question_set_digest: &'a str,
+    question_bindings: Vec<ExamQuestionBindingWireRef<'a>>,
+    submission_positions: &'a [u32],
     next_answer_index: u32,
 }
 
@@ -659,7 +700,50 @@ struct ExamQuestionArtifactWire {
     last_update_time: u64,
     question_count: u32,
     question_set_digest: String,
+    question_bindings: Vec<ExamQuestionBindingWire>,
+    submission_positions: Vec<u32>,
     next_answer_index: u32,
+}
+
+struct ExamQuestionBinding {
+    remote_id: Zeroizing<String>,
+    position: u32,
+    fingerprint: Zeroizing<String>,
+}
+
+impl From<ExamQuestionBindingWire> for ExamQuestionBinding {
+    fn from(mut value: ExamQuestionBindingWire) -> Self {
+        Self {
+            remote_id: Zeroizing::new(std::mem::take(&mut value.remote_id)),
+            position: value.position,
+            fingerprint: Zeroizing::new(std::mem::take(&mut value.fingerprint)),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ExamQuestionBindingWireRef<'a> {
+    remote_id: &'a str,
+    position: u32,
+    fingerprint: &'a str,
+}
+
+impl<'a> From<&'a ExamQuestionBinding> for ExamQuestionBindingWireRef<'a> {
+    fn from(value: &'a ExamQuestionBinding) -> Self {
+        Self {
+            remote_id: &value.remote_id,
+            position: value.position,
+            fingerprint: &value.fingerprint,
+        }
+    }
+}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+struct ExamQuestionBindingWire {
+    remote_id: String,
+    position: u32,
+    fingerprint: String,
 }
 
 fn encoded_state(encoded: &mut Zeroizing<Vec<u8>>) -> ProviderResult<EncodedChaoxingExamState> {
@@ -688,7 +772,7 @@ fn validate_encoded_state(bytes: &[u8], expected_digest: [u8; 32]) -> ProviderRe
 fn derive_question_set_binding<'a>(
     task_id: TaskId,
     questions: impl ExactSizeIterator<Item = &'a Question>,
-) -> ProviderResult<(u32, String)> {
+) -> ProviderResult<(u32, String, Vec<ExamQuestionBinding>)> {
     let question_count = u32::try_from(questions.len())
         .map_err(|_| invalid_response("Chaoxing Exam Question count is unbounded"))?;
     if question_count == 0 {
@@ -697,7 +781,11 @@ fn derive_question_set_binding<'a>(
     let mut remote_ids = BTreeSet::new();
     let mut positions = BTreeSet::new();
     let mut question_set_hasher = Sha256::new();
-    for question in questions {
+    let mut question_bindings = Vec::with_capacity(
+        usize::try_from(question_count)
+            .map_err(|_| invalid_response("Chaoxing Exam Question count is unbounded"))?,
+    );
+    for (index, question) in questions.enumerate() {
         question
             .validate()
             .map_err(|_| invalid_response("Chaoxing Exam Question is invalid"))?;
@@ -709,6 +797,7 @@ fn derive_question_set_binding<'a>(
         if question.task_id != task_id
             || !remote_ids.insert(remote_question_id)
             || !positions.insert(question.position)
+            || usize::try_from(question.position).ok() != index.checked_add(1)
         {
             return Err(protocol_drift(
                 "Chaoxing Exam Question set has a stale or duplicate binding",
@@ -721,11 +810,103 @@ fn derive_question_set_binding<'a>(
         hash_bounded_component(&mut question_set_hasher, remote_question_id)?;
         question_set_hasher.update(question.position.to_be_bytes());
         hash_bounded_component(&mut question_set_hasher, &fingerprint)?;
+        question_bindings.push(ExamQuestionBinding {
+            remote_id: Zeroizing::new(remote_question_id.to_owned()),
+            position: question.position,
+            fingerprint: Zeroizing::new(fingerprint),
+        });
     }
     Ok((
         question_count,
         hex_digest(question_set_hasher.finalize().into()),
+        question_bindings,
     ))
+}
+
+fn validate_question_binding_wire(bindings: &[ExamQuestionBindingWire]) -> ProviderResult<u32> {
+    let question_count = u32::try_from(bindings.len())
+        .map_err(|_| invalid_response("Chaoxing Exam Question binding count is unbounded"))?;
+    if question_count == 0 {
+        return Err(protocol_drift(
+            "Chaoxing Exam Question binding set is empty",
+        ));
+    }
+    let mut remote_ids = BTreeSet::new();
+    for (index, binding) in bindings.iter().enumerate() {
+        if !valid_component(&binding.remote_id)
+            || !valid_question_fingerprint(&binding.fingerprint)
+            || !remote_ids.insert(binding.remote_id.as_str())
+            || usize::try_from(binding.position).ok() != index.checked_add(1)
+        {
+            return Err(protocol_drift(
+                "Chaoxing Exam Question binding set is malformed",
+            ));
+        }
+    }
+    Ok(question_count)
+}
+
+fn derive_wire_question_set_digest(bindings: &[ExamQuestionBindingWire]) -> ProviderResult<String> {
+    let mut question_set_hasher = Sha256::new();
+    for binding in bindings {
+        hash_bounded_component(&mut question_set_hasher, &binding.remote_id)?;
+        question_set_hasher.update(binding.position.to_be_bytes());
+        hash_bounded_component(&mut question_set_hasher, &binding.fingerprint)?;
+    }
+    Ok(hex_digest(question_set_hasher.finalize().into()))
+}
+
+fn derive_submission_positions(
+    draft: &SubmissionDraft,
+    bindings: &[ExamQuestionBindingWire],
+) -> ProviderResult<Vec<u32>> {
+    let mut submission_positions = Vec::with_capacity(draft.items.len());
+    for item in &draft.items {
+        let position_index = item
+            .question
+            .position
+            .checked_sub(1)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| protocol_drift("Chaoxing Exam Draft Question position is invalid"))?;
+        let binding = bindings.get(position_index).ok_or_else(|| {
+            protocol_drift("Chaoxing Exam Draft Question is outside the full Question set")
+        })?;
+        let remote_id = item
+            .question
+            .remote_question_id
+            .as_deref()
+            .filter(|value| valid_component(value))
+            .ok_or_else(|| protocol_drift("Chaoxing Exam Draft Question has no remote identity"))?;
+        let fingerprint = Zeroizing::new(
+            item.question
+                .content_fingerprint()
+                .map_err(|_| invalid_response("Chaoxing Exam Question fingerprint failed"))?
+                .to_string(),
+        );
+        if item.question.task_id != draft.task_id
+            || binding.position != item.question.position
+            || binding.remote_id != remote_id
+            || binding.fingerprint != fingerprint.as_str()
+            || submission_positions
+                .last()
+                .is_some_and(|last| *last >= binding.position)
+        {
+            return Err(protocol_drift(
+                "Chaoxing Exam Draft Question no longer matches the full Question set",
+            ));
+        }
+        submission_positions.push(binding.position);
+    }
+    Ok(submission_positions)
+}
+
+fn valid_question_fingerprint(value: &str) -> bool {
+    value.strip_prefix("v1:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn hash_bounded_component(hasher: &mut Sha256, value: &str) -> ProviderResult<()> {

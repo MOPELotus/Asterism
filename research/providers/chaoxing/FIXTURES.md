@@ -44,6 +44,7 @@ fixtures/providers/chaoxing/
     list-mixed.html
     list-mixed.expected.json
     detail-result.html
+    detail-result-partial.html
     cover-ready.html
     start-question.html
     submit-save-1.json
@@ -177,7 +178,8 @@ answer-wrapper, model or random output as Provider-native evidence.
 
 The Exam fixtures cover the cover/start/full-preview attempt rotation and the
 separate CxKitty save/final acknowledgement shapes. They prove that each
-accepted answer save advances exactly one immutable-Draft cursor and replaces
+accepted answer save advances exactly one selected immutable-Draft cursor,
+uses the selected Question's original zero-based full-paper position, and replaces
 only monotonic timing/`enc` state, while the final response remains a Receipt
 until a fresh exact Exam list row reports Completed. `detail-result.html` adds
 two ordered synthetic result Questions with exact IDs, type 0/3 inputs and
@@ -188,6 +190,13 @@ fixed-point projection for 0, 82.5 and 99.999 plus `None` when absent, without
 changing answer status. Unknown compatible JSON extensions are ignored, but
 malformed state, rejection, identity drift and timing regression fail closed.
 All IDs, signatures and crypto-looking values are synthetic placeholders.
+
+`detail-result-partial.html` retains four complete result identities while only
+the second original Question is selected. It proves that v3 continuation
+binding sends one save with `start=1`, reaches final submission after one
+selected save, and verifies that selected visible answer independently. The
+unselected type 11/15 Questions and absent visible values remain structural
+full-paper evidence and are never treated as submitted answers.
 
 ## Required live-sanitized fixture sets
 
@@ -278,9 +287,11 @@ every fixture before staging it.
   rotate the continuation. Temporary-save ambiguity is never replayed, final
   ambiguity needs fresh Completed evidence, and task completion/score does not
   imply per-Question answer verification. Exact result confirmation requires
-  the immutable Draft's full ID/order/type/value set; missing, extra or type-2
-  evidence is Inconclusive, duplicates fail closed, and hidden inputs/CSS are
-  ignored. Optional result scores retain exact thousandths on every answer
+  the complete v3-bound remote QID/order set plus each selected Draft Question's exact
+  original position/type/value; missing, extra or drifted selected evidence is
+  Inconclusive, duplicates fail closed, and hidden inputs/CSS are ignored.
+  Unsupported unselected numeric types and absent unselected visible answers
+  remain non-answer evidence. Optional result scores retain exact thousandths on every answer
   status and never become answer-consistency evidence.
 - Chapter Work result confirmation requires a fresh, bound
   `selectWorkQuestionYiPiYue` iframe document in addition to the completed card.
