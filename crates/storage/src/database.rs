@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 61);
+        assert_eq!(migration_count, 62);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -300,6 +300,82 @@ mod tests {
             .find(|row| row.get::<String, _>("name") == "completion_policy_json")
             .unwrap();
         assert_eq!(completion_column.get::<i64, _>("notnull"), 1);
+    }
+
+    #[tokio::test]
+    async fn strict_completion_observation_migration_preserves_attempt_cardinality() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE executions (id TEXT PRIMARY KEY NOT NULL) STRICT;\
+             CREATE TABLE execution_attempts (\
+                 id TEXT PRIMARY KEY NOT NULL,\
+                 execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE\
+             ) STRICT;\
+             CREATE TABLE strict_completion_workflows (id TEXT PRIMARY KEY NOT NULL) STRICT;\
+             CREATE TABLE strict_completion_execution_observations (\
+                 execution_id TEXT PRIMARY KEY NOT NULL REFERENCES executions(id) ON DELETE CASCADE,\
+                 execution_attempt_id TEXT NOT NULL UNIQUE REFERENCES execution_attempts(id) ON DELETE CASCADE,\
+                 workflow_id TEXT NOT NULL REFERENCES strict_completion_workflows(id) ON DELETE CASCADE,\
+                 workflow_attempt_no INTEGER,\
+                 completion_outcome TEXT,\
+                 diagnosis TEXT,\
+                 observed_at TEXT NOT NULL\
+             ) STRICT;\
+             CREATE INDEX idx_strict_completion_execution_workflow \
+                 ON strict_completion_execution_observations (workflow_id, observed_at, execution_id);\
+             INSERT INTO executions (id) VALUES ('execution-a');\
+             INSERT INTO execution_attempts (id, execution_id) VALUES ('attempt-a', 'execution-a');\
+             INSERT INTO strict_completion_workflows (id) VALUES ('workflow-a');\
+             INSERT INTO strict_completion_execution_observations (\
+                 execution_id, execution_attempt_id, workflow_id, workflow_attempt_no,\
+                 completion_outcome, diagnosis, observed_at\
+             ) VALUES (\
+                 'execution-a', 'attempt-a', 'workflow-a', 1, NULL,\
+                 'duration_insufficient', '2026-08-01T12:00:00.000000000Z'\
+             );",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/062_strict_completion_attempt_observations.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO execution_attempts (id, execution_id) VALUES ('attempt-b', 'execution-a');\
+             INSERT INTO strict_completion_execution_observations (\
+                 execution_id, execution_attempt_id, workflow_id, workflow_attempt_no,\
+                 completion_outcome, diagnosis, observed_at\
+             ) VALUES (\
+                 'execution-a', 'attempt-b', 'workflow-a', 2, 'completed', NULL,\
+                 '2026-08-01T12:01:00.000000000Z'\
+             );",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT execution_attempt_id, completion_outcome, diagnosis \
+             FROM strict_completion_execution_observations ORDER BY execution_attempt_id",
+        )
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "attempt-a".to_owned(),
+                    None,
+                    Some("duration_insufficient".to_owned())
+                ),
+                ("attempt-b".to_owned(), Some("completed".to_owned()), None),
+            ]
+        );
     }
 
     #[tokio::test]

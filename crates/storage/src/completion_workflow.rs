@@ -546,19 +546,21 @@ async fn find_execution_observation(
     execution_attempt_id: ExecutionAttemptId,
 ) -> Result<Option<StrictCompletionExecutionObservationRecord>, StorageError> {
     let Some(row) = sqlx::query(
-        "SELECT execution_attempt_id, workflow_id, workflow_attempt_no, completion_outcome, \
+        "SELECT execution_id, execution_attempt_id, workflow_id, workflow_attempt_no, completion_outcome, \
                 diagnosis, observed_at \
-         FROM strict_completion_execution_observations WHERE execution_id = ?",
+         FROM strict_completion_execution_observations WHERE execution_attempt_id = ?",
     )
-    .bind(execution_id.to_string())
+    .bind(execution_attempt_id.to_string())
     .fetch_optional(&mut **transaction)
     .await?
     else {
         return Ok(None);
     };
+    let actual_execution_id =
+        ExecutionId::from_str(row.try_get("execution_id")?).map_err(|_| invalid_transition())?;
     let actual_attempt_id = ExecutionAttemptId::from_str(row.try_get("execution_attempt_id")?)
         .map_err(|_| invalid_transition())?;
-    if actual_attempt_id != execution_attempt_id {
+    if actual_execution_id != execution_id || actual_attempt_id != execution_attempt_id {
         return Err(invalid_transition());
     }
     let workflow_id = StrictCompletionWorkflowId::from_str(row.try_get("workflow_id")?)

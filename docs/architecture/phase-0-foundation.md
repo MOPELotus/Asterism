@@ -4336,3 +4336,19 @@ through fresh TaskProgress: Completed is recorded as a monotonic completion,
 while Pending/InProgress which schedules another retry remains unrecorded.
 Tests cover final composite uniqueness, recovered completion and the absence of
 an observation on a pending retry.
+
+## Two-hundred-and-thirty-eighth Phase 0 slice
+
+Migration 062 corrects the Strict Completion observation ledger cardinality for
+Core's existing Retry model. A Retry reuses one Execution but creates a new
+ExecutionAttempt, so exactly-once identity now uses `execution_attempt_id` as
+the primary key while retaining a non-unique indexed Execution binding. The
+same attempt cannot be counted twice, but one Execution may accumulate bounded
+observations across distinct retry attempts.
+
+The migration rebuilds and copies the populated migration-061 table before
+recreating workflow and Execution indexes. Its upgrade regression preserves an
+existing first-attempt diagnosis and then inserts a Completed observation for a
+second attempt of the same Execution. Storage lookup now resolves idempotency by
+attempt first and separately verifies the Execution binding, preventing a
+foreign attempt from reusing another Execution's ledger entry.
