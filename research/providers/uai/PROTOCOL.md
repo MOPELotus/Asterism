@@ -1143,13 +1143,37 @@ hash to the fresh Task fingerprint, hierarchy and topic. Native HTTP then refres
 incomplete available `tab_type=task` progress leaf before sending the donor's
 empty `submitType=2` Group mutation once. Its accepted version is a separate
 receipt and only fresh exact Group progress can confirm completion.
-Core's fixed mutation topology can now represent the two stable discussion
-ordinals: the reply request is known at step one, and step two may bind its
-fresh completion request only after exact reply readback verifies step one.
-Cross-Provider registration still requires a scheduling-time immutable
-discussion Draft/artifact/capability binding the zeroizing content to that
-topology so both mutations and their independent readbacks remain durably
-recoverable without ambiguous replay. External media-source
+UAI now projects this topology through a content- and credential-free
+`uai.discussion.reply-plan.v1` scheduling artifact. Its
+`uai.discussion.reply-complete.v1` sequence has exactly two independent,
+single-occurrence `AcceptedMaximumReached` phases: reply submit, then Group
+completion. The second phase requires the namespaced
+`uai.discussion.reply-readback.v1` observation. UAI persists the accepted reply
+receipt first, then records its independently verified readback against ordinal
+one, then records the phase-two observation. The observation digest joins the
+original reply-request digest, the exact verified reply digest and the dynamic
+completion-request digest, so a fresh Task fingerprint or completion-plan
+change cannot reuse an older gate. Normal persistence returns a typed readback
+gate only after both records succeed. If a crash lands between them, exact
+Core recovery evidence authorizes writing only the missing observation; an
+already complete observation can restore the same typed gate without rewriting
+verification. The gate binds the exact phase-two request before issue.
+Reply and completion acknowledgement classifiers create separate response
+digests only after their bounded parsers accept the response. Rejection,
+malformed input and transport ambiguity create no receipt, leaving that exact
+issued ordinal locked.
+
+Core's `ExecutionMutationSequenceRecoverySnapshot` is consumed only as
+read-only evidence. UAI recomputes the artifact/plan, both request identities
+and the completion-bound observation, rejects Core-valid but donor-impossible
+false receipts, and distinguishes no mutation evidence, ambiguous reply,
+accepted reply awaiting readback, verification awaiting its gate, recorded
+gate, ambiguous completion and accepted completion awaiting progress. None of
+those states grants replay, and the sanitized artifact cannot reconstruct the
+reply content. Cross-Provider registration therefore still requires a
+scheduling-time immutable discussion Draft/capability binding the zeroizing
+content to this topology and invoking the Provider adapter; fresh exact Group
+progress remains final completion authority. External media-source
 orchestration still requires the shared downloader/model contracts; ordinary
 QuestionSession persistence, session-aware AnswerResolve and ordinary
 answer-bearing prepared SubmissionExecute handoff are now integrated. The

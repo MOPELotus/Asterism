@@ -20,6 +20,7 @@ mod course_inventory;
 mod course_policy;
 mod course_progress;
 mod discussion;
+mod discussion_sequence;
 mod duration;
 mod encrypted;
 mod inventory_capabilities;
@@ -115,6 +116,12 @@ pub use discussion::{
     build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, parse_discussion_binding, parse_discussion_reply_page,
     parse_discussion_reply_receipt, parse_discussion_topic, prepare_discussion_completion,
+};
+pub use discussion_sequence::{
+    UAI_DISCUSSION_COMPLETION_OPERATION_TYPE, UAI_DISCUSSION_PLAN_ARTIFACT_TYPE,
+    UAI_DISCUSSION_REPLY_OPERATION_TYPE, UAI_DISCUSSION_REPLY_READBACK_OBSERVATION_TYPE,
+    UAI_DISCUSSION_SEQUENCE_TYPE, UaiDiscussionMutationKind, UaiDiscussionMutationOutcome,
+    UaiDiscussionMutationSequence, UaiDiscussionRecoveryState, UaiDiscussionReplyReadbackGate,
 };
 pub use duration::{
     UaiDurationDocument, UaiDurationTransport, UaiTaskDuration, UaiTaskStudyRecord,

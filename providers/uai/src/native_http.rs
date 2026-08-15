@@ -28,11 +28,11 @@ use crate::{
     UaiCompoundUploadVerification, UaiCourseInventoryTransport, UaiCoursePolicyDocument,
     UaiCoursePolicyTransport, UaiCourseProgressDocument, UaiDiscussionBinding,
     UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult, UaiDiscussionEmptySubmission,
-    UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
-    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiOralEmptySubmission,
-    UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiPresetEmptySubmission,
-    UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
-    UaiSessionResolver, UaiSubjectiveEmptySubmission, UaiSubmissionPlan,
+    UaiDiscussionMutationOutcome, UaiDiscussionReplyDraft, UaiDiscussionReplyPage,
+    UaiDiscussionTransport, UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument,
+    UaiJwtSession, UaiOralEmptySubmission, UaiPresetCompletionResult, UaiPresetCompletionTransport,
+    UaiPresetEmptySubmission, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
+    UaiQuestionTransport, UaiSessionResolver, UaiSubjectiveEmptySubmission, UaiSubmissionPlan,
     UaiSubmissionResponseDocument, UaiSubmissionTransport, UaiTaskInventoryDocuments,
     UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent,
     UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification, UaiUploadedArtifact,
@@ -48,9 +48,8 @@ use crate::{
     },
     parse_compound_oral_verification, parse_compound_upload_verification, parse_course_context,
     parse_course_progress, parse_discussion_binding, parse_discussion_reply_page,
-    parse_discussion_reply_receipt, parse_discussion_topic, parse_group_progress,
-    parse_submission_receipt, parse_task_inventory, parse_upload_grant, parse_upload_result,
-    parse_upload_verification,
+    parse_discussion_topic, parse_group_progress, parse_submission_receipt, parse_task_inventory,
+    parse_upload_grant, parse_upload_result, parse_upload_verification,
     progress::validate_progress_route_binding,
     submission_execute::{bind_submission_request_body, valid_submission_version},
     submission_verify::validate_verification_course_binding,
@@ -983,9 +982,9 @@ impl NativeUaiInventoryTransport {
                 true,
             )
             .await?;
-        let receipt = parse_discussion_reply_receipt(&document);
+        let receipt = draft.classify_reply_mutation_response(&document);
         document.zeroize();
-        receipt
+        receipt.map(UaiDiscussionMutationOutcome::into_legacy_result)
     }
 
     async fn request_upload_grant_with_session(

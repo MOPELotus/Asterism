@@ -430,3 +430,12 @@ changed the audited final-submit retry behavior. The bounded sequence therefore
 retains Apache's exact one delayed retry after numeric `600001`/`600002`
 rejection and does not infer retry authority from generic rejection,
 authentication failure, malformed response or ambiguous transport.
+
+The discussion conditional-sequence checkpoint later on 2026-08-15 repeated
+the four default-ref and complete-tag queries. Apache remained
+`bef0d29155ce`, MIT remained `590b4a58fe17`, AutoPlayer remained
+`cc6bdc86a13e` and Rust remained `525c7ecfc2b`; no donor or release delta
+changed the audited reply, exact readback or separate Group-completion order.
+The Core projection therefore retains two non-replayable mutation ordinals and
+uses the already audited current-user/content readback only as the explicit
+gate between them.

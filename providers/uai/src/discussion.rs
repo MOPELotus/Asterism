@@ -310,6 +310,7 @@ pub struct UaiDiscussionCompletionPlan {
     unit_id: String,
     group_id: String,
     topic_id: u64,
+    reply_request_digest: [u8; 32],
     reply_digest: [u8; 32],
     request_digest: [u8; 32],
     fingerprint: String,
@@ -336,6 +337,11 @@ impl UaiDiscussionCompletionPlan {
         self.topic_id
     }
 
+    /// Exact first-mutation intent which the verified reply must satisfy.
+    pub const fn reply_request_digest(&self) -> [u8; 32] {
+        self.reply_request_digest
+    }
+
     pub const fn reply_digest(&self) -> [u8; 32] {
         self.reply_digest
     }
@@ -360,6 +366,7 @@ impl fmt::Debug for UaiDiscussionCompletionPlan {
             .field("unit_id", &self.unit_id)
             .field("group_id", &self.group_id)
             .field("topic_id", &self.topic_id)
+            .field("reply_request_digest", &"[HASHED]")
             .field("reply_digest", &"[HASHED]")
             .field("request_digest", &"[HASHED]")
             .field("fingerprint", &self.fingerprint)
@@ -374,6 +381,7 @@ impl Drop for UaiDiscussionCompletionPlan {
         self.course_resource_id.zeroize();
         self.unit_id.zeroize();
         self.group_id.zeroize();
+        self.reply_request_digest.zeroize();
         self.reply_digest.zeroize();
         self.request_digest.zeroize();
         self.fingerprint.zeroize();
@@ -470,6 +478,8 @@ pub fn prepare_discussion_completion(
     request_digest.update(b"\0");
     request_digest.update(draft.topic_id.to_be_bytes());
     request_digest.update(b"\0");
+    request_digest.update(draft.request_digest());
+    request_digest.update(b"\0");
     request_digest.update(reply_digest);
     let request_digest: [u8; 32] = request_digest.finalize().into();
     Ok(UaiDiscussionCompletionPlan {
@@ -479,6 +489,7 @@ pub fn prepare_discussion_completion(
         unit_id,
         group_id: draft.binding.group.clone(),
         topic_id: draft.topic_id,
+        reply_request_digest: draft.request_digest(),
         reply_digest,
         request_digest,
         fingerprint: format!("uai-discussion-complete-v1:{}", hex_digest(request_digest)),
