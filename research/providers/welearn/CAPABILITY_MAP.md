@@ -218,11 +218,11 @@ response-conditional receipt shape and actual final-save ordinal, then compares
 fresh final time values with that observation. Auto uses its deterministic
 receipt count and exact score-0 final goal without a time observation. This
 closes Provider proof construction and live observation persistence; recovery
-query/dispatch remains Core work. A pure Provider adapter now consumes the exact
-child-bound sequence plan plus contiguous generic issue/receipt records and the
-optional Core observation, rejects operation/ordinal/plan drift, and reuses the
-same fresh-CMI recovery proof. A recovery-only coordinator validates those
-records before discovery, fresh-rebinds the prepared child before the final CMI
+composite dispatch remains Core work. A pure Provider adapter now consumes the
+exact child-bound sequence plan plus contiguous generic issue/receipt records
+and the optional Core observation, rejects operation/ordinal/plan drift, and
+reuses the same fresh-CMI recovery proof. A recovery-only coordinator validates
+those records before discovery, fresh-rebinds the prepared child before the final CMI
 read, and selects the child profile's exact current/legacy endpoint. Core now
 loads artifact, plan, records and observations from one attempt into an
 immutable recovery snapshot. WELearn's snapshot adapter requires a complete
@@ -304,3 +304,14 @@ duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
 remaining plan work is the parent/child Execution and composite dispatch layer,
 not another fixed capability-step approximation of the existing conditional
 sequence.
+
+The minimum remaining shared contract is now concrete. One Core transaction
+must bind the encoded parent authority and bounded complete batch snapshot to a
+parent attempt, then create every ordered child Execution from
+`WellearnAtomicBatchDispatchPlan` with its exact artifact and sequence; recovery
+must reload those parent values rather than rescan. The recovery capability
+result must carry both sanitized `ExecutionOutcome` and the optional exact
+final-save `ExecutionMutationVerification`. Engine must validate that record
+against the same-attempt snapshot and persist it before marking the recovered
+child successful. Provider code must not write Storage or synthesize this
+parent/child ownership.

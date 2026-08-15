@@ -187,6 +187,12 @@ and Fanyuchang-tag queries after shared commit `4d01744`; all full revisions
 remain unchanged. No WELearn donor evidence supports a delayed retry after a
 definite rejection, so the Provider rejects that generic receipt extension and
 adds no new request or scheduling behavior.
+The remaining-contract checkpoint reused that immediately preceding unchanged
+upstream refresh and rechecked the complete sweep ledger against current Core.
+Same-attempt sequence loading is now implemented and no longer listed as a
+missing primitive. The remaining parent/batch transaction, child creation and
+recovery-verification persistence requirements are Asterism architecture work,
+not newly discovered donor behavior.
 
 ## Source selection
 

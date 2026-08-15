@@ -913,6 +913,16 @@ The new Provider encoding supplies the opaque persistence payload for the first
 step, but does not select a parent Execution ID, write Storage, create children
 or grant mutation authority; those bindings remain the same shared Core Gap.
 
+That Core Gap now has an exact integration shape. The parent transaction must
+store the encoded authority plus the independently bounded complete batch
+snapshot, consume the ordered atomic dispatch projection once, and create each
+child with its exact artifact/sequence without rescanning. On recovery, Core
+must reload those parent values and its same-attempt sequence snapshot, then
+persist the optional final-save mutation verification returned with the
+sanitized outcome before finishing success. A generic recovery method returning
+only `ExecutionOutcome` cannot represent that last durable proof; giving the
+Provider direct Storage access would violate ownership instead of closing it.
+
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per
 child from their fixed or independent random settings, while Auto duration
