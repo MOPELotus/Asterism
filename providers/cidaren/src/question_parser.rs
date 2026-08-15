@@ -229,6 +229,7 @@ impl ParsedCidarenAttemptQuestion {
         topic_code: String,
         remote_task_id: String,
         question: &Question,
+        remote_progress: Option<CidarenAttemptProgress>,
     ) -> ProviderResult<Self> {
         let topic_code = Zeroizing::new(topic_code);
         let mut remote_task_id = Zeroizing::new(remote_task_id);
@@ -259,7 +260,7 @@ impl ParsedCidarenAttemptQuestion {
             options: question.options.clone(),
             metadata_sanitized: question.metadata_sanitized.clone(),
             position: question.position,
-            remote_progress: None,
+            remote_progress,
         };
         let rebuilt = parsed.to_question(question.task_id)?;
         let rebuilt_fingerprint = rebuilt

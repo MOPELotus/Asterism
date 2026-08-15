@@ -675,8 +675,10 @@ requires `0 <= topic_done_num <= topic_total <= 100000`; absent/zero pairs mean
 the donor did not publish progress. Positive-without-total, negative,
 fractional, textual, oversized or inverted counters are protocol drift. The
 same observation is retained for ordinary Questions and mode-0 reading cards.
-Core's durable QuestionSession contract must persist/expose it separately from
-the one-shot attempt position when the public capability is integrated.
+The Provider preserves it across both pre-Question reading-card and real-
+Question encrypted continuations, then exposes it again through
+`current_remote_progress` after recovery. It remains separate from the
+one-shot attempt position.
 
 `SubmitChoseWord` is acknowledgement-only in the donor: it validates the
 success envelope but does not decode a next Question. Asterism therefore uses
@@ -817,8 +819,10 @@ fresh verification remain separate capabilities. `topic_code` is redacted and
 zeroized; it never enters a persisted Question or immutable Draft. For durable
 recovery after a Question exists, the Provider encodes only the local/remote
 Task binding, remote Question ID, position, complete content fingerprint and
-one-time code and bounded accepted-Verify count in the versioned
-`cidaren.question-attempt.v2` artifact. Core
+one-time code, bounded accepted-Verify count and optional paired remote
+completed/total observation in the versioned `cidaren.question-attempt.v2`
+artifact. Missing progress fields remain a compatible `None` for artifacts
+created before this extension; partial or invalid pairs fail closed. Core
 checks its stable digest and stores the plaintext only through the encrypted
 QuestionSession continuation boundary; Provider decoding repeats every binding
 check before reuse. For matching Questions, recovery deterministically rebuilds

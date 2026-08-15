@@ -881,6 +881,21 @@ observation. State-only changes do not alter the stable remote Question
 identity. The values remain neither correctness receipts nor history/retake
 authority, and this adds no direct mode-73 answer encoding or mutation retry.
 
+### 2026-08-15 real-Question progress recovery follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged before and after this unit. No
+new progress field, mutation route or current-attempt readback entered scope.
+
+The already audited optional `topic_done_num/topic_total` observation now
+round-trips through the encrypted real-Question continuation as paired
+`progress_completed/progress_total` fields. Decode reuses the parser's bounded
+`completed <= total <= 100000` invariant, rejects incomplete or contradictory
+pairs, and treats their absence in an older v2 artifact as `None`. Initial and
+rotated Question recovery expose the same remote observation again without
+using it as local position, Question identity, answer selection or mutation
+routing. Reading-card recovery retains its existing equivalent boundary.
+
 ## Check procedure
 
 For the next checkpoint:

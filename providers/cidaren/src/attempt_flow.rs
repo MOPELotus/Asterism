@@ -441,6 +441,7 @@ impl CidarenAttemptFlow {
             artifact.topic_code().to_owned(),
             remote_task_id.to_owned(),
             question,
+            artifact.remote_progress(),
         )?;
         let topic_code = Zeroizing::new(artifact.topic_code().to_owned());
         let current = Box::new(CidarenCurrentQuestion {
@@ -1931,6 +1932,9 @@ mod tests {
             restore_materialization(&recovered, initial_materialization, None, None);
         assert_eq!(verified_steps, 0);
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::CurrentQuestion);
+        let remote_progress = flow.current_remote_progress().unwrap();
+        assert_eq!(remote_progress.completed(), 1);
+        assert_eq!(remote_progress.total(), 127);
         let selected = SelectedAnswer {
             candidate_id: AnswerCandidateId::new(),
             question_id: question.id,
@@ -1961,6 +1965,9 @@ mod tests {
         assert_eq!(verified_steps, 1);
         assert_eq!(restored_question.id, question.id);
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToAdvance);
+        let remote_progress = flow.current_remote_progress().unwrap();
+        assert_eq!(remote_progress.completed(), 1);
+        assert_eq!(remote_progress.total(), 127);
         let command = flow.issue_advance(&settings(), request_at()).unwrap();
         assert!((1..=2).contains(&command.delay_before_execute_seconds()));
         let outcome = command.execute(transport.clone(), &context).await.unwrap();

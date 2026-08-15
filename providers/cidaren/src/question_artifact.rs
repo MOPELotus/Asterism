@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::ParsedCidarenAttemptQuestion;
+use crate::{CidarenAttemptProgress, ParsedCidarenAttemptQuestion};
 
 pub const CIDAREN_QUESTION_ARTIFACT_TYPE: &str = "cidaren.question-attempt.v2";
 pub const CIDAREN_QUESTION_ARTIFACT_PHASE: &str = "cidaren.current-question";
@@ -58,6 +58,7 @@ pub struct CidarenQuestionArtifact {
     question_fingerprint: Zeroizing<String>,
     topic_code: Zeroizing<String>,
     verified_steps: u32,
+    remote_progress: Option<CidarenAttemptProgress>,
 }
 
 impl CidarenQuestionArtifact {
@@ -101,6 +102,7 @@ impl CidarenQuestionArtifact {
             question_fingerprint: Zeroizing::new(fingerprint.to_string()),
             topic_code: Zeroizing::new(parsed.topic_code().to_owned()),
             verified_steps: 0,
+            remote_progress: parsed.remote_progress(),
         })
     }
 
@@ -122,6 +124,8 @@ impl CidarenQuestionArtifact {
                 question_fingerprint: &self.question_fingerprint,
                 topic_code: &self.topic_code,
                 verified_steps: self.verified_steps,
+                progress_completed: self.remote_progress.map(CidarenAttemptProgress::completed),
+                progress_total: self.remote_progress.map(CidarenAttemptProgress::total),
             })
             .map_err(|_| invalid_response("Cidaren Question artifact could not be encoded"))?,
         );
@@ -197,6 +201,17 @@ impl CidarenQuestionArtifact {
             .map_err(|_| {
             protocol_drift("Cidaren Question artifact fingerprint is malformed")
         })?;
+        let remote_progress = match (wire.progress_completed, wire.progress_total) {
+            (None, None) => None,
+            (Some(completed), Some(total)) => {
+                Some(CidarenAttemptProgress::from_artifact(completed, total)?)
+            }
+            _ => {
+                return Err(protocol_drift(
+                    "Cidaren Question artifact progress is incomplete",
+                ));
+            }
+        };
         if wire.schema != CIDAREN_QUESTION_ARTIFACT_TYPE
             || !valid_remote_task_id(&wire.remote_task_id)
             || wire.remote_task_id != expected_remote_task_id
@@ -224,6 +239,7 @@ impl CidarenQuestionArtifact {
             question_fingerprint: Zeroizing::new(std::mem::take(&mut wire.question_fingerprint)),
             topic_code: Zeroizing::new(std::mem::take(&mut wire.topic_code)),
             verified_steps: wire.verified_steps,
+            remote_progress,
         })
     }
 
@@ -233,6 +249,10 @@ impl CidarenQuestionArtifact {
 
     pub(crate) const fn verified_steps(&self) -> u32 {
         self.verified_steps
+    }
+
+    pub(crate) const fn remote_progress(&self) -> Option<CidarenAttemptProgress> {
+        self.remote_progress
     }
 }
 
@@ -245,6 +265,7 @@ impl fmt::Debug for CidarenQuestionArtifact {
             .field("question_fingerprint", &self.question_fingerprint)
             .field("topic_code", &"[REDACTED]")
             .field("verified_steps", &self.verified_steps)
+            .field("remote_progress", &self.remote_progress)
             .finish_non_exhaustive()
     }
 }
@@ -259,6 +280,8 @@ struct ArtifactWireRef<'a> {
     question_fingerprint: &'a str,
     topic_code: &'a str,
     verified_steps: u32,
+    progress_completed: Option<u32>,
+    progress_total: Option<u32>,
 }
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -272,6 +295,8 @@ struct ArtifactWire {
     question_fingerprint: String,
     topic_code: String,
     verified_steps: u32,
+    progress_completed: Option<u32>,
+    progress_total: Option<u32>,
 }
 
 fn valid_remote_task_id(value: &str) -> bool {
@@ -332,7 +357,33 @@ mod tests {
                 .unwrap();
         assert_eq!(decoded.topic_code(), "synthetic-topic-code");
         assert_eq!(decoded.verified_steps(), 0);
+        let remote_progress = decoded.remote_progress().unwrap();
+        assert_eq!(remote_progress.completed(), 1);
+        assert_eq!(remote_progress.total(), 127);
         assert!(!format!("{decoded:?}").contains("synthetic-topic-code"));
+
+        let previous_shape = SecretValue::new(
+            serde_json::to_vec(&json!({
+                "schema": CIDAREN_QUESTION_ARTIFACT_TYPE,
+                "task_id": question.task_id.to_string(),
+                "remote_task_id": "class-task:2002",
+                "remote_question_id": question.remote_question_id,
+                "position": 1,
+                "question_fingerprint": question.content_fingerprint().unwrap(),
+                "topic_code": "synthetic-topic-code",
+                "verified_steps": 0
+            }))
+            .unwrap(),
+        );
+        let previous_digest = Sha256::digest(previous_shape.expose_secret()).into();
+        let previous = CidarenQuestionArtifact::decode_bound(
+            &previous_shape,
+            previous_digest,
+            "class-task:2002",
+            &question,
+        )
+        .unwrap();
+        assert_eq!(previous.remote_progress(), None);
 
         let checkpoint = CidarenQuestionArtifact::from_parsed(&parsed, &question)
             .unwrap()
@@ -340,6 +391,7 @@ mod tests {
             .unwrap();
         assert_eq!(checkpoint.topic_code(), "verified-topic-code");
         assert_eq!(checkpoint.verified_steps(), 2);
+        assert_eq!(checkpoint.remote_progress(), Some(remote_progress));
         assert_ne!(checkpoint.encode().unwrap().digest(), digest);
         assert!(
             checkpoint
@@ -459,5 +511,41 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn artifact_rejects_incomplete_inverted_and_oversized_progress() {
+        let (_, question) = parsed_question(TaskId::new());
+        for (progress_completed, progress_total) in [
+            (Some(1), None),
+            (Some(128), Some(127)),
+            (Some(1), Some(100_001)),
+        ] {
+            let invalid_progress = SecretValue::new(
+                serde_json::to_vec(&json!({
+                    "schema": CIDAREN_QUESTION_ARTIFACT_TYPE,
+                    "task_id": question.task_id.to_string(),
+                    "remote_task_id": "class-task:2002",
+                    "remote_question_id": question.remote_question_id,
+                    "position": 1,
+                    "question_fingerprint": question.content_fingerprint().unwrap(),
+                    "topic_code": "synthetic-topic-code",
+                    "verified_steps": 0,
+                    "progress_completed": progress_completed,
+                    "progress_total": progress_total
+                }))
+                .unwrap(),
+            );
+            let digest = Sha256::digest(invalid_progress.expose_secret()).into();
+            assert!(
+                CidarenQuestionArtifact::decode_bound(
+                    &invalid_progress,
+                    digest,
+                    "class-task:2002",
+                    &question,
+                )
+                .is_err()
+            );
+        }
     }
 }

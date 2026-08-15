@@ -325,7 +325,10 @@ placeholder identities, result codes, status values and pagination shape.
 - Typed transport outcomes reject zero response digests and preserve the raw-
   response digest plus observation time; artifact rotation tests prove a fresh
   topic code changes the digest without weakening Task/Question bindings or
-  accepting malformed replacement state.
+  accepting malformed replacement state. Real-Question artifact tests also
+  round-trip the optional remote completed/total pair across initial and
+  rotated recovery, accept an older missing pair as `None`, and reject
+  partial, inverted or oversized progress without confusing it with position.
 - Pre-Question recovery tests cover namespaced selection/start/reading-card
   phases, absence of word-map values from encrypted artifact plaintext, fresh
   plan requirements, local/remote Task rebinding, correlation-independent
