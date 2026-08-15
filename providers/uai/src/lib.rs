@@ -40,6 +40,7 @@ mod task_detail;
 mod task_inventory;
 mod task_type;
 mod upload;
+mod upload_sequence;
 mod user_identity;
 
 pub use aggregate_progress::{
@@ -172,4 +173,10 @@ pub use upload::{
     UaiUploadVerification, UaiUploadedArtifact, build_upload_grant_request, build_upload_multipart,
     build_upload_submission_request, parse_upload_grant, parse_upload_result,
     parse_upload_verification,
+};
+pub use upload_sequence::{
+    UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS, UAI_UPLOAD_FINAL_OPERATION_TYPE,
+    UAI_UPLOAD_FINAL_PLAN_ARTIFACT_TYPE, UAI_UPLOAD_FINAL_RETRY_SECONDS,
+    UAI_UPLOAD_FINAL_SEQUENCE_TYPE, UaiUploadFinalRetryCode, UaiUploadFinalSubmissionKind,
+    UaiUploadFinalSubmissionOutcome, UaiUploadFinalSubmissionSequence,
 };

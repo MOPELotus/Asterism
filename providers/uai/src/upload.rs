@@ -421,8 +421,43 @@ impl UaiUploadSubmission {
         &self.fingerprint
     }
 
+    pub(crate) fn final_sequence_binding_digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        for field in [
+            b"asterism:uai:upload-final-sequence-binding:v1".as_slice(),
+            self.remote_task_id.as_bytes(),
+            self.course_resource_id.as_bytes(),
+            self.unit_id.as_bytes(),
+            self.group_id.as_bytes(),
+            self.file_key.as_bytes(),
+            self.artifact_digest.as_bytes(),
+            self.upload_intent_fingerprint.as_bytes(),
+            self.fingerprint.as_bytes(),
+        ] {
+            digest.update(field);
+            digest.update(b"\0");
+        }
+        digest.update(self.course_publish_version.to_be_bytes());
+        digest.finalize().into()
+    }
+
     pub(crate) fn expose_file_key(&self) -> &str {
         &self.file_key
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(file_key: &str, fingerprint_suffix: &str) -> Self {
+        Self {
+            remote_task_id: "group:2001:unit-1:group-upload".to_owned(),
+            course_resource_id: "2001".to_owned(),
+            unit_id: "unit-1".to_owned(),
+            group_id: "group-upload".to_owned(),
+            file_key: file_key.to_owned(),
+            artifact_digest: "sha256:synthetic-artifact".to_owned(),
+            upload_intent_fingerprint: "uai-upload-v1:synthetic-intent".to_owned(),
+            course_publish_version: 123_290,
+            fingerprint: format!("uai-upload-submit-v1:{fingerprint_suffix}"),
+        }
     }
 }
 
@@ -747,6 +782,7 @@ pub struct UaiUploadSubmissionRequest {
     url: Zeroizing<String>,
     content_type: &'static str,
     body: Zeroizing<String>,
+    sequence_binding_digest: [u8; 32],
     request_digest: [u8; 32],
 }
 
@@ -760,6 +796,10 @@ impl UaiUploadSubmissionRequest {
         self.request_digest
     }
 
+    pub const fn sequence_binding_digest(&self) -> [u8; 32] {
+        self.sequence_binding_digest
+    }
+
     pub(crate) fn expose_url(&self) -> &str {
         self.url.as_str()
     }
@@ -771,6 +811,7 @@ impl UaiUploadSubmissionRequest {
 
 impl Drop for UaiUploadSubmissionRequest {
     fn drop(&mut self) {
+        self.sequence_binding_digest.zeroize();
         self.request_digest.zeroize();
     }
 }
@@ -782,6 +823,7 @@ impl fmt::Debug for UaiUploadSubmissionRequest {
             .field("url", &"[ROUTE]")
             .field("content_type", &self.content_type)
             .field("body", &"[REDACTED]")
+            .field("sequence_binding_digest", &"[HASHED]")
             .field("request_digest", &"[HASHED]")
             .finish()
     }
@@ -1160,6 +1202,7 @@ pub fn build_upload_submission_request(
         url: Zeroizing::new(url.into()),
         content_type: UAI_UPLOAD_SUBMISSION_CONTENT_TYPE,
         body: encoded,
+        sequence_binding_digest: submission.final_sequence_binding_digest(),
         request_digest: digest.finalize().into(),
     })
 }

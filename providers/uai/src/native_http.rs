@@ -1150,7 +1150,9 @@ impl NativeUaiInventoryTransport {
         let document = UaiSubmissionResponseDocument::try_new(
             read_json_response(response, ResponseRoute::Submission).await?,
         )?;
-        parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
+        request
+            .classify_final_response(1, document.as_str(), route.course_instance_id(), &group_id)?
+            .into_legacy_result()
     }
 
     async fn verify_uploaded_artifact_with_session(
@@ -1250,7 +1252,9 @@ impl NativeUaiInventoryTransport {
         let document = UaiSubmissionResponseDocument::try_new(
             read_json_response(response, ResponseRoute::Submission).await?,
         )?;
-        parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
+        request
+            .classify_final_response(1, document.as_str(), route.course_instance_id(), &group_id)?
+            .into_legacy_result()
     }
 
     async fn verify_compound_upload_with_session(

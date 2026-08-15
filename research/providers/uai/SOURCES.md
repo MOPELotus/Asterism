@@ -421,3 +421,12 @@ Asterism may preserve a bounded present hash as encrypted stage evidence, but
 must not require it when the CMS-issued upload policy customizes the response,
 use it instead of the exact donor-required key, or promote the same mutation
 response to independent verification.
+
+The final-upload retry-sequence checkpoint later on 2026-08-15 queried the
+same four default refs and complete tag refs. Apache remained
+`bef0d29155ce`, MIT remained `590b4a58fe17`, AutoPlayer remained
+`cc6bdc86a13e` and Rust remained `525c7ecfc2b`; no new donor commit or tag
+changed the audited final-submit retry behavior. The bounded sequence therefore
+retains Apache's exact one delayed retry after numeric `600001`/`600002`
+rejection and does not infer retry authority from generic rejection,
+authentication failure, malformed response or ambiguous transport.

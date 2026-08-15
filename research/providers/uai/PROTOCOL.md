@@ -1239,6 +1239,25 @@ sequence must therefore remain Provider-private until the shared Artifact/Draft
 and encrypted stage-output capability can bind those bytes, the returned key
 and, for mixed Groups, the ordinary sub-Draft into one durable Attempt.
 
+Once an exact single or compound final plan already exists, UAI now projects a
+credential-free `uai.upload.final-plan.v1` scheduling artifact whose binding
+digest covers the complete semantic plan without exposing the object key or
+ordinary selected answer. Its one-phase `uai.upload.final-submit.v1` sequence
+permits at most two `uai.upload.final-submit` ordinals and uses Core's
+`AcceptedOrMaximumReached` condition. Every concrete single/compound request
+also carries the same semantic binding digest before its exact issue-time wire
+digest is registered. A code-0 version-bearing response produces an accepted
+mutation receipt and immediately closes the phase. Only a structurally valid
+numeric `600001` or `600002` response becomes an `accepted=false` mutation
+receipt with the donor's 120-second retry delay, permitting ordinal two.
+Other rejection codes, malformed responses and transport ambiguity return an
+error without recording a receipt, so the issued ordinal remains locked. Each
+classified outcome also binds its exact ordinal; even an identical second wire
+request cannot reuse the first ordinal's result. The existing Native HTTP
+single/compound paths use this same classifier but retain their legacy typed
+`RateLimited` result until the shared stage-state executor can own the whole
+workflow.
+
 ### Minimal durable upload stage state
 
 The smallest shared contract that closes this gap has one immutable encrypted
@@ -1290,16 +1309,16 @@ exception loop:
 | Qiniu request after durable issue but before an atomic receipt/output commit | Never replay. The result is ambiguous and no audited object-stat authority is available. A new grant is not assumed to produce a different key |
 | Definite rejected Qiniu response | Record the rejection; no successor output is created. A new Attempt may start only from an explicitly reusable input artifact and a fresh grant |
 | Final submit after durable issue but before an atomic receipt/result commit | Never replay. Fresh progress may diagnose completion but cannot recover the receipt version or prove exact answer persistence |
-| Definite final code `600001`/`600002` or definite authentication rejection | Record a rejected receipt and typed retry time before any later issue. The donor permits one delayed retry for the throttle codes; no sleep or replay occurs inside the Provider transport |
+| Definite final code `600001`/`600002` | Record a rejected receipt and typed retry time before any later issue. The donor permits one delayed retry; no sleep or replay occurs inside the Provider transport |
 | Accepted final receipt and durable result | Retry only the receipt-versioned readback and fresh progress reads; never repeat either mutation |
 
-The current Core sequence advance conditions still cannot express "stop on the
-first accepted occurrence, otherwise repeat a definite rejection up to the
-bounded donor maximum". `AcceptedMaximumReached` would force all occurrences
-even when the first submit succeeded. Until Main adds that acceptance-short-
-circuit condition plus durable retry scheduling, UAI must surface the typed
-retry and perform no automatic final-submit retry. This is separate from the
-encrypted stage-output contract above.
+Core's `AcceptedOrMaximumReached` condition now expresses "stop on the first
+accepted occurrence, otherwise repeat a definite rejection up to the bounded
+donor maximum" without forcing a second POST after success. UAI's classifier
+further narrows the repeat authority to the two evidenced throttle codes; a
+generic `accepted=false` result cannot be constructed from any other response.
+Durable retry scheduling and the encrypted stage-output contract above remain
+shared integration work.
 
 The donor's `basic-scoop-content,oral-sentence` path is likewise atomic rather
 than a normal matching submit followed by an unrelated oral completion. The

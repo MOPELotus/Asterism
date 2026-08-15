@@ -173,6 +173,29 @@ impl UaiCompoundUploadSubmission {
         &self.fingerprint
     }
 
+    pub(crate) fn final_sequence_binding_digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        let ordinary_draft_id = self.ordinary_draft_id.to_string();
+        for field in [
+            b"asterism:uai:compound-upload-final-sequence-binding:v1".as_slice(),
+            ordinary_draft_id.as_bytes(),
+            self.remote_task_id.as_bytes(),
+            self.course_resource_id.as_bytes(),
+            self.unit_id.as_bytes(),
+            self.group_id.as_bytes(),
+            self.task_fingerprint.as_bytes(),
+            self.file_key.as_bytes(),
+            self.artifact_digest.as_bytes(),
+            self.upload_intent_fingerprint.as_bytes(),
+            self.fingerprint.as_bytes(),
+        ] {
+            digest.update(field);
+            digest.update(b"\0");
+        }
+        digest.update(self.course_publish_version.to_be_bytes());
+        digest.finalize().into()
+    }
+
     pub(crate) fn expose_file_key(&self) -> &str {
         &self.file_key
     }
@@ -225,6 +248,7 @@ pub struct UaiCompoundUploadSubmissionRequest {
     url: Zeroizing<String>,
     content_type: &'static str,
     body: Zeroizing<String>,
+    sequence_binding_digest: [u8; 32],
     request_digest: [u8; 32],
 }
 
@@ -232,6 +256,10 @@ impl UaiCompoundUploadSubmissionRequest {
     /// Exact pre-dispatch identity over method, route, content type and body.
     pub const fn request_digest(&self) -> [u8; 32] {
         self.request_digest
+    }
+
+    pub const fn sequence_binding_digest(&self) -> [u8; 32] {
+        self.sequence_binding_digest
     }
 
     pub(crate) fn expose_url(&self) -> &str {
@@ -254,6 +282,7 @@ impl fmt::Debug for UaiCompoundUploadSubmissionRequest {
             .field("url", &"[ROUTE]")
             .field("content_type", &self.content_type)
             .field("body", &"[REDACTED]")
+            .field("sequence_binding_digest", &"[HASHED]")
             .field("request_digest", &"[HASHED]")
             .finish()
     }
@@ -261,6 +290,7 @@ impl fmt::Debug for UaiCompoundUploadSubmissionRequest {
 
 impl Drop for UaiCompoundUploadSubmissionRequest {
     fn drop(&mut self) {
+        self.sequence_binding_digest.zeroize();
         self.request_digest.zeroize();
     }
 }
@@ -540,6 +570,7 @@ pub fn build_compound_upload_submission_request(
         url: Zeroizing::new(url.into()),
         content_type: UAI_COMPOUND_UPLOAD_CONTENT_TYPE,
         body,
+        sequence_binding_digest: submission.final_sequence_binding_digest(),
         request_digest: digest.finalize().into(),
     })
 }
@@ -783,6 +814,19 @@ mod tests {
                 .starts_with("uai-compound-upload-v1:")
         );
         assert!(!format!("{submission:?}").contains(uploaded.file_key()));
+        let sequence = crate::UaiUploadFinalSubmissionSequence::for_compound(&submission).unwrap();
+        assert_eq!(
+            sequence.kind(),
+            crate::UaiUploadFinalSubmissionKind::Compound
+        );
+        assert_eq!(
+            sequence.plan().phases()[0].advance_condition(),
+            asterism_provider_api::ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached
+        );
+        let sequence_artifact =
+            serde_json::to_string(sequence.artifact().payload_sanitized()).unwrap();
+        assert!(sequence_artifact.contains(&draft.id.to_string()));
+        assert!(!sequence_artifact.contains(uploaded.file_key()));
 
         let body =
             build_compound_upload_submission_body(&submission, "course-instance-1", "openid-1")
