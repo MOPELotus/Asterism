@@ -188,37 +188,8 @@ impl CompletionWorkflowRepository for SqliteCompletionWorkflowRepository {
         }
 
         let binding = load_execution_observation_binding(&mut transaction, &request).await?;
-        let existing = sqlx::query("SELECT * FROM strict_completion_workflows WHERE task_id = ?")
-            .bind(binding.binding.task_id.to_string())
-            .fetch_optional(&mut *transaction)
-            .await?
-            .as_ref()
-            .map(decode_strict_record)
-            .transpose()?;
-        let workflow_created_at = if request.outcome.is_some() {
-            request.at
-        } else {
-            binding.policy.captured_at
-        };
-        let (mut workflow, revision, created) = match existing {
-            Some(record) => {
-                if record.workflow.binding != binding.binding {
-                    return Err(invalid_transition());
-                }
-                (record.workflow, record.revision, false)
-            }
-            None => (
-                StrictCompletionWorkflow::new(
-                    binding.binding,
-                    binding.policy,
-                    request.outcome,
-                    workflow_created_at,
-                )
-                .map_err(|_| invalid_transition())?,
-                1,
-                true,
-            ),
-        };
+        let (mut workflow, revision, created) =
+            resolve_execution_workflow(&mut transaction, &binding, &request).await?;
 
         let workflow_attempt_no = if created && request.outcome.is_some() {
             None
@@ -233,7 +204,7 @@ impl CompletionWorkflowRepository for SqliteCompletionWorkflowRepository {
             let attempt_no = workflow
                 .begin_attempt(
                     binding.formal_assessment,
-                    request.retry_confirmed,
+                    binding.retry_confirmation.is_some(),
                     binding.attempt_started_at,
                 )
                 .map_err(|_| invalid_transition())?;
@@ -482,6 +453,49 @@ struct ExecutionObservationBinding {
     policy: CompletionPolicySnapshot,
     formal_assessment: bool,
     attempt_started_at: Timestamp,
+    retry_confirmation: Option<(StrictCompletionWorkflowId, u32)>,
+}
+
+async fn resolve_execution_workflow(
+    transaction: &mut Transaction<'_, Sqlite>,
+    binding: &ExecutionObservationBinding,
+    request: &StrictCompletionExecutionObservationRequest<'_>,
+) -> Result<(StrictCompletionWorkflow, u32, bool), StorageError> {
+    let existing = sqlx::query("SELECT * FROM strict_completion_workflows WHERE task_id = ?")
+        .bind(binding.binding.task_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .as_ref()
+        .map(decode_strict_record)
+        .transpose()?;
+    let (workflow, revision, created) = match existing {
+        Some(record) if record.workflow.binding == binding.binding => {
+            (record.workflow, record.revision, false)
+        }
+        Some(_) => return Err(invalid_transition()),
+        None => (
+            StrictCompletionWorkflow::new(
+                binding.binding,
+                binding.policy.clone(),
+                request.outcome,
+                request
+                    .outcome
+                    .map_or(binding.policy.captured_at, |_| request.at),
+            )
+            .map_err(|_| invalid_transition())?,
+            1,
+            true,
+        ),
+    };
+    if binding
+        .retry_confirmation
+        .is_some_and(|(workflow_id, expected_revision)| {
+            created || workflow.id != workflow_id || revision != expected_revision
+        })
+    {
+        return Err(invalid_transition());
+    }
+    Ok((workflow, revision, created))
 }
 
 fn validate_execution_observation(
@@ -501,13 +515,16 @@ async fn load_execution_observation_binding(
     let row = sqlx::query(
         "SELECT execution.task_id, task.provider_account_id, account.owner_user_id, \
                 task.assessment_class, settings.completion_policy_json, settings.captured_at, \
-                attempt.started_at AS attempt_started_at \
+                attempt.started_at AS attempt_started_at, confirmation.workflow_id AS retry_workflow_id, \
+                confirmation.workflow_revision AS retry_workflow_revision \
          FROM executions AS execution \
          INNER JOIN execution_attempts AS attempt ON attempt.execution_id = execution.id \
          INNER JOIN tasks AS task ON task.id = execution.task_id \
          INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
          INNER JOIN execution_runtime_settings AS settings \
                  ON settings.execution_id = execution.id \
+         LEFT JOIN execution_strict_completion_retry_confirmations AS confirmation \
+                ON confirmation.execution_id = execution.id \
          WHERE execution.id = ? AND attempt.id = ? AND attempt.finished_at IS NULL",
     )
     .bind(request.execution_id.to_string())
@@ -526,6 +543,16 @@ async fn load_execution_observation_binding(
     {
         return Err(invalid_transition());
     }
+    let retry_workflow_id = row.try_get::<Option<&str>, _>("retry_workflow_id")?;
+    let retry_workflow_revision = row.try_get::<Option<i64>, _>("retry_workflow_revision")?;
+    let retry_confirmation = match (retry_workflow_id, retry_workflow_revision) {
+        (None, None) => None,
+        (Some(workflow_id), Some(revision)) => Some((
+            StrictCompletionWorkflowId::from_str(workflow_id).map_err(|_| invalid_transition())?,
+            u32::try_from(revision).map_err(|_| invalid_transition())?,
+        )),
+        _ => return Err(invalid_transition()),
+    };
     Ok(ExecutionObservationBinding {
         binding: CompletionWorkflowBinding {
             owner_user_id: UserId::from_str(row.try_get("owner_user_id")?)
@@ -537,6 +564,7 @@ async fn load_execution_observation_binding(
         policy,
         formal_assessment: row.try_get::<&str, _>("assessment_class")? == "formal",
         attempt_started_at,
+        retry_confirmation,
     })
 }
 
@@ -1050,7 +1078,6 @@ mod tests {
             execution_attempt_id: attempt_id,
             scheduler_job_id: job_id,
             worker_id: "completion-worker",
-            retry_confirmed: false,
             outcome: None,
             diagnosis: Some(CompletionDiagnosis::DurationInsufficient),
             at: observed_at,
@@ -1080,7 +1107,6 @@ mod tests {
                     execution_attempt_id: attempt_id,
                     scheduler_job_id: job_id,
                     worker_id: "completion-worker",
-                    retry_confirmed: false,
                     outcome: None,
                     diagnosis: Some(CompletionDiagnosis::DurationInsufficient),
                     at: observed_at,
@@ -1108,7 +1134,6 @@ mod tests {
                     execution_attempt_id: attempt_id,
                     scheduler_job_id: job_id,
                     worker_id: "completion-worker",
-                    retry_confirmed: false,
                     outcome: Some(CompletionOutcome::Completed),
                     diagnosis: None,
                     at: observed_at,

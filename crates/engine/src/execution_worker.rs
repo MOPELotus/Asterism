@@ -230,6 +230,7 @@ mod tests {
                 provider_plan_artifact: None,
                 billing: None,
                 runtime_settings: None,
+                strict_completion_retry: None,
                 expected_task_state: OrchestrationState::Ready,
                 idempotency_scope: "test:execution-worker",
                 idempotency_key: "terminal-execution",

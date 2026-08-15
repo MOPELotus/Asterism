@@ -171,7 +171,6 @@ pub struct StrictCompletionExecutionObservationRequest<'a> {
     pub execution_attempt_id: ExecutionAttemptId,
     pub scheduler_job_id: ScheduleId,
     pub worker_id: &'a str,
-    pub retry_confirmed: bool,
     pub outcome: Option<asterism_domain::CompletionOutcome>,
     pub diagnosis: Option<asterism_domain::CompletionDiagnosis>,
     pub at: Timestamp,
@@ -1881,6 +1880,21 @@ pub struct ExecutionRuntimeSettingsResolution<'a> {
     pub schema: &'a ProviderRuntimeSettingsSchema,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecutionStrictCompletionRetryRequest {
+    pub workflow_id: asterism_domain::StrictCompletionWorkflowId,
+    pub expected_revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecutionStrictCompletionRetryConfirmation {
+    pub execution_id: ExecutionId,
+    pub workflow_id: asterism_domain::StrictCompletionWorkflowId,
+    pub workflow_revision: u32,
+    pub confirmed_by: UserId,
+    pub confirmed_at: Timestamp,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionScheduleRequest<'a> {
     pub execution: &'a Execution,
@@ -1893,6 +1907,7 @@ pub struct ExecutionScheduleRequest<'a> {
     pub provider_plan_artifact: Option<&'a ProviderExecutionPlanArtifact>,
     pub billing: Option<ExecutionBillingReservation<'a>>,
     pub runtime_settings: Option<ExecutionRuntimeSettingsResolution<'a>>,
+    pub strict_completion_retry: Option<ExecutionStrictCompletionRetryRequest>,
     pub expected_task_state: OrchestrationState,
     pub idempotency_scope: &'a str,
     pub idempotency_key: &'a str,
@@ -2064,6 +2079,7 @@ pub enum ExecutionScheduleOutcome {
     SubmissionDraftConflict,
     TaskStateConflict,
     RuntimeSettingsConflict,
+    StrictCompletionRetryConflict,
 }
 
 #[derive(Clone, Debug)]
@@ -2244,6 +2260,11 @@ pub trait ExecutionRepository: Send + Sync {
         &self,
         execution_id: ExecutionId,
     ) -> Result<Option<ExecutionRuntimeSettingsSnapshot>, StorageError>;
+
+    async fn find_execution_strict_completion_retry_confirmation(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionStrictCompletionRetryConfirmation>, StorageError>;
 
     async fn find_execution_provider_plan_artifact(
         &self,

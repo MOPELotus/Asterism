@@ -88,6 +88,7 @@ pub use repository::{
     ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionQuestionStepFinishRequest,
     ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionRuntimeSettingsResolution,
     ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
+    ExecutionStrictCompletionRetryConfirmation, ExecutionStrictCompletionRetryRequest,
     ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, ExternalOauthClaim,
     GlobalAnswerCorpusEvidence, OutboxRepository, PendingBrowserBridgeResult, PriorAnswerEvidence,
     ProviderAccountRepository, ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,

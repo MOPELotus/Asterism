@@ -2,16 +2,17 @@ use std::sync::Arc;
 
 use asterism_domain::{
     AuditActor, Execution, ExecutionId, ExecutionState, OrchestrationState, RemoteState,
-    RequestSource, SubmissionDraft, SubmissionDraftId, Task, TaskCapability, TaskId, Timestamp,
-    UserId,
+    RequestSource, StrictCompletionState, SubmissionDraft, SubmissionDraftId, Task, TaskCapability,
+    TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::{
     ExecutionPlanningRequest, ProviderCapability, ProviderContext, ProviderRegistry,
     ProviderRuntimeSettingsSchema,
 };
 use asterism_storage::{
-    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, ProviderAccountRuntimeRepository,
+    CompletionWorkflowRepository, ExecutionRepository, ExecutionRuntimeSettingsResolution,
+    ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
+    ExecutionStrictCompletionRetryRequest, ProviderAccountRuntimeRepository,
     ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, StorageError,
     SubmissionDraftRepository, TaskQueryRepository,
 };
@@ -27,6 +28,7 @@ pub struct ExecuteTaskCommand {
     pub task_id: TaskId,
     pub requested_capabilities: Vec<TaskCapability>,
     pub submission_draft_id: Option<SubmissionDraftId>,
+    pub strict_completion_retry: Option<ExecutionStrictCompletionRetryRequest>,
     pub request_source: RequestSource,
     pub actor: AuditActor,
     pub idempotency_key: String,
@@ -76,7 +78,7 @@ impl<Q, E, A, S, D> ExecutionRequestService<Q, E, A, S, D> {
 impl<Q, E, A, S, D> ExecutionRequestService<Q, E, A, S, D>
 where
     Q: TaskQueryRepository,
-    E: ExecutionRepository,
+    E: ExecutionRepository + CompletionWorkflowRepository,
     A: ProviderAccountRuntimeRepository,
     S: ProviderRuntimeSettingsRepository,
     D: SubmissionDraftRepository,
@@ -106,7 +108,22 @@ where
             .find_idempotent_execution(&scope, &command.idempotency_key)
             .await?
         {
-            return if existing.task_id == command.task_id
+            let persisted_confirmation = self
+                .executions
+                .find_execution_strict_completion_retry_confirmation(existing.id)
+                .await?;
+            let confirmation_matches =
+                match (persisted_confirmation, command.strict_completion_retry) {
+                    (None, None) => true,
+                    (Some(persisted), Some(requested)) => {
+                        persisted.workflow_id == requested.workflow_id
+                            && persisted.workflow_revision == requested.expected_revision
+                            && persisted.confirmed_by == command.owner_id
+                    }
+                    _ => false,
+                };
+            return if confirmation_matches
+                && existing.task_id == command.task_id
                 && existing.requested_by == Some(command.owner_id)
                 && existing.requested_capabilities == command.requested_capabilities
                 && existing.submission_draft_id == command.submission_draft_id
@@ -125,7 +142,18 @@ where
             .find_owned_task(command.owner_id, command.task_id)
             .await?
             .ok_or(ExecutionRequestError::TaskNotFound)?;
-        validate_task(&task, &command.requested_capabilities, self.formal_policy)?;
+        validate_task(
+            &task,
+            &command.requested_capabilities,
+            command.strict_completion_retry.is_some(),
+            self.formal_policy,
+        )?;
+        self.validate_strict_completion_retry(
+            command.owner_id,
+            &task,
+            command.strict_completion_retry,
+        )
+        .await?;
         let (runtime_settings, runtime_settings_schema, provider_context) = self
             .resolve_runtime_settings(
                 command.owner_id,
@@ -200,6 +228,7 @@ where
                     snapshot: &runtime_settings,
                     schema: &runtime_settings_schema,
                 }),
+                strict_completion_retry: command.strict_completion_retry,
                 expected_task_state: task.orchestration_state,
                 idempotency_scope: &scope,
                 idempotency_key: &command.idempotency_key,
@@ -227,6 +256,9 @@ where
             }
             ExecutionScheduleOutcome::RuntimeSettingsConflict => {
                 Err(ExecutionRequestError::RuntimeSettingsConflict)
+            }
+            ExecutionScheduleOutcome::StrictCompletionRetryConflict => {
+                Err(ExecutionRequestError::StrictCompletionRetryConflict)
             }
         }
     }
@@ -274,6 +306,36 @@ where
             return Err(ExecutionRequestError::SubmissionVerificationUnavailable);
         }
         Ok(Some(draft))
+    }
+
+    async fn validate_strict_completion_retry(
+        &self,
+        owner_id: UserId,
+        task: &Task,
+        confirmation: Option<ExecutionStrictCompletionRetryRequest>,
+    ) -> Result<(), ExecutionRequestError> {
+        let workflow = self
+            .executions
+            .find_owned_strict_completion_workflow(owner_id, task.id)
+            .await?;
+        let retry_required = task.assessment_class == asterism_domain::AssessmentClass::Formal
+            && workflow.as_ref().is_some_and(|record| {
+                record.workflow.state == StrictCompletionState::Active
+                    && record.workflow.attempts_started > 0
+            });
+        let valid = match (retry_required, workflow, confirmation) {
+            (false, _, None) => true,
+            (true, Some(record), Some(confirmation)) => {
+                record.workflow.id == confirmation.workflow_id
+                    && record.revision == confirmation.expected_revision
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(ExecutionRequestError::StrictCompletionRetryConflict)
+        }
     }
 
     async fn resolve_runtime_settings(
@@ -358,12 +420,15 @@ where
 fn validate_task(
     task: &Task,
     requested_capabilities: &[TaskCapability],
+    strict_completion_retry_confirmed: bool,
     formal_policy: FormalAssessmentPolicy,
 ) -> Result<(), ExecutionRequestError> {
-    if !matches!(
+    if !(matches!(
         task.orchestration_state,
         OrchestrationState::Ready | OrchestrationState::Failed
-    ) {
+    ) || strict_completion_retry_confirmed
+        && task.orchestration_state == OrchestrationState::HumanRequired)
+    {
         return Err(ExecutionRequestError::TaskStateConflict);
     }
     if requested_capabilities.is_empty()
@@ -583,6 +648,8 @@ pub enum ExecutionRequestError {
     ProviderRuntimeUnavailable,
     #[error("Provider runtime settings changed while the execution was being scheduled")]
     RuntimeSettingsConflict,
+    #[error("the Strict Completion retry confirmation is missing, stale, or invalid")]
+    StrictCompletionRetryConflict,
     #[error(transparent)]
     Assessment(#[from] AssessmentGuardError),
     #[error(transparent)]
@@ -706,6 +773,7 @@ mod tests {
             validate_task(
                 &valid,
                 &[TaskCapability::ResourceExecution],
+                false,
                 FormalAssessmentPolicy::default(),
             )
             .is_ok()
@@ -722,6 +790,7 @@ mod tests {
             validate_task(
                 &without_progress,
                 &[TaskCapability::ResourceExecution],
+                false,
                 FormalAssessmentPolicy::default(),
             )
             .is_ok()
@@ -739,6 +808,7 @@ mod tests {
             validate_task(
                 &multiple_actions,
                 &[TaskCapability::DurationReport],
+                false,
                 FormalAssessmentPolicy::default(),
             )
             .is_ok()
@@ -760,6 +830,7 @@ mod tests {
                     TaskCapability::ResourceExecution,
                     TaskCapability::SubmissionExecute,
                 ],
+                false,
                 FormalAssessmentPolicy::default(),
             ),
             Err(ExecutionRequestError::ExecutionVerificationUnavailable)

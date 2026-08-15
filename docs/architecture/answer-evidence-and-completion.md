@@ -157,6 +157,18 @@ counter twice. `Stopped` ends automatic work but is not negative completion:
 a later fresh Completed/Passed observation monotonically closes the workflow as
 Completed and clears the obsolete diagnosis.
 
+A formal Strict Completion retry is authorized by a durable record bound to
+one new Execution, the exact Strict workflow ID and expected revision, the
+confirming owner and confirmation time. A request boolean is not authority.
+The scheduling transaction requires the workflow to remain owner/Task-bound,
+Active and already attempted, and rejects missing or stale confirmation before
+any Provider work. This exact confirmation is the only Strict retry path which
+may move a HumanRequired Task back to Scheduled. For SubmissionExecute, the
+new immutable Draft and its QuestionSnapshot must both have been created after
+the workflow's prior observation; an unused Draft over an old Snapshot is not
+a fresh attempt. The worker derives confirmation only from the persisted
+Execution binding when applying the next observation.
+
 ## Score Improvement / Retake
 
 Score Improvement is separate from Completion and is explicit opt-in after the

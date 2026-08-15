@@ -1374,7 +1374,17 @@ fn task_execute_path() -> Value {
                         "description": "Exact executable Task capability subset frozen onto this Execution.",
                         "items": {"type": "string", "enum": ["resource_execution", "submission_execute", "duration_report", "discussion", "practice"]}
                     },
-                    "submission_draft_id": {"type": "string", "format": "uuid", "description": "Required only for Tasks advertising submission_execute; binds this Execution to one immutable draft."}
+                    "submission_draft_id": {"type": "string", "format": "uuid", "description": "Required only for Tasks advertising submission_execute; binds this Execution to one immutable draft."},
+                    "strict_completion_retry_confirmation": {
+                        "type": "object",
+                        "required": ["workflow_id", "expected_revision"],
+                        "additionalProperties": false,
+                        "description": "Explicitly confirms one Formal Strict Completion retry against the current owner-scoped workflow revision. Submission retries also require a newly captured QuestionSnapshot and unused Draft.",
+                        "properties": {
+                            "workflow_id": {"type": "string", "format": "uuid"},
+                            "expected_revision": {"type": "integer", "format": "int64", "minimum": 1}
+                        }
+                    }
                 }
             }}}
         },
@@ -6035,6 +6045,111 @@ mod tests {
         let frozen_plan: Value = serde_json::from_str(&frozen_plan.1).unwrap();
         assert_eq!(frozen_plan["execution_id"], execution_id);
         assert_eq!(frozen_plan["task_id"], routine_task.to_string());
+    }
+
+    #[tokio::test]
+    async fn formal_strict_retry_api_requires_current_workflow_revision() {
+        let (app, database, _, cookie, _, _, formal_task, _) = execution_action_fixture().await;
+        let (owner_id, account_id): (UserId, ProviderAccountId) = {
+            let (owner_id, account_id): (String, String) = sqlx::query_as(
+                "SELECT account.owner_user_id, account.id FROM tasks AS task \
+                 INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+                 WHERE task.id = ?",
+            )
+            .bind(formal_task.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+            (owner_id.parse().unwrap(), account_id.parse().unwrap())
+        };
+        let now = Utc::now();
+        let mut workflow = StrictCompletionWorkflow::new(
+            CompletionWorkflowBinding {
+                owner_user_id: owner_id,
+                provider_account_id: account_id,
+                task_id: formal_task,
+            },
+            CompletionPolicySnapshot {
+                captured_at: now - ChronoDuration::seconds(3),
+                ..CompletionPolicySnapshot::default()
+            },
+            None,
+            now - ChronoDuration::seconds(3),
+        )
+        .unwrap();
+        workflow
+            .begin_attempt(true, false, now - ChronoDuration::seconds(2))
+            .unwrap();
+        workflow
+            .observe(
+                None,
+                Some(asterism_domain::CompletionDiagnosis::DurationInsufficient),
+                now - ChronoDuration::seconds(1),
+            )
+            .unwrap();
+        SqliteCompletionWorkflowRepository::new(database.clone())
+            .create_strict_completion_workflow(&workflow)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET orchestration_state = 'human_required' WHERE id = ?")
+            .bind(formal_task.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        let workflow_id = workflow.id;
+        let post_retry = |idempotency_key: &'static str, expected_revision: u32| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
+                    Request::post(format!("/api/v1/tasks/{formal_task}/execute"))
+                        .header(header::COOKIE, cookie)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("x-request-id", format!("request-{idempotency_key}"))
+                        .header("idempotency-key", idempotency_key)
+                        .body(Body::from(
+                            serde_json::json!({
+                                "requested_capabilities": ["resource_execution"],
+                                "strict_completion_retry_confirmation": {
+                                    "workflow_id": workflow_id,
+                                    "expected_revision": expected_revision,
+                                }
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let stale = post_retry("formal-retry-stale", 2).await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(stale).await["error"]["code"],
+            "strict_completion_retry_conflict"
+        );
+
+        let confirmed = post_retry("formal-retry-confirmed", 1).await;
+        assert_eq!(confirmed.status(), StatusCode::CREATED);
+        let confirmed = response_json(confirmed).await;
+        let execution_id = confirmed["execution"]["id"].as_str().unwrap();
+        let replay = post_retry("formal-retry-confirmed", 1).await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(response_json(replay).await["execution"]["id"], execution_id);
+        let persisted: (String, i64, String) = sqlx::query_as(
+            "SELECT workflow_id, workflow_revision, confirmed_by \
+             FROM execution_strict_completion_retry_confirmations WHERE execution_id = ?",
+        )
+        .bind(execution_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted,
+            (workflow.id.to_string(), 1, owner_id.to_string())
+        );
     }
 
     #[tokio::test]

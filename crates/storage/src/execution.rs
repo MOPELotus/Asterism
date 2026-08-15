@@ -4,7 +4,8 @@ use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, CreditReservationState, Execution, ExecutionAttempt,
     ExecutionAttemptId, ExecutionId, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
     ExecutionState, LogLevel, OrchestrationState, ProviderAccountId, ProviderId, ScheduleId,
-    SubmissionAttemptReceipt, SubmissionDraft, TaskCapability, TaskId, Timestamp, UserId,
+    StrictCompletionState, StrictCompletionWorkflow, SubmissionAttemptReceipt, SubmissionDraft,
+    TaskCapability, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
@@ -33,7 +34,8 @@ use crate::{
     ExecutionCapabilityStepState, ExecutionLogAppendRequest, ExecutionProgressUpdate,
     ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
     ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionSubmissionRepository,
+    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionStrictCompletionRetryConfirmation,
+    ExecutionStrictCompletionRetryRequest, ExecutionSubmissionRepository,
     ExecutionVerificationRecoveryRepository, StorageError, SubmissionDraftRepository,
     SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
     VerificationRecoveryStartRequest,
@@ -103,8 +105,14 @@ impl ExecutionRepository for SqliteExecutionRepository {
         )
         .await?
         {
+            let same_confirmation = persisted_strict_retry_matches(
+                &mut transaction,
+                existing.id,
+                request.strict_completion_retry,
+            )
+            .await?;
             transaction.commit().await?;
-            return if same_request(&existing, request.execution) {
+            return if same_request(&existing, request.execution) && same_confirmation {
                 Ok(ExecutionScheduleOutcome::Existing(existing))
             } else {
                 Ok(ExecutionScheduleOutcome::IdempotencyConflict)
@@ -114,6 +122,11 @@ impl ExecutionRepository for SqliteExecutionRepository {
         if !submission_draft_is_available(&mut transaction, request.execution).await? {
             transaction.rollback().await?;
             return Ok(ExecutionScheduleOutcome::SubmissionDraftConflict);
+        }
+
+        if !strict_completion_retry_is_valid(&mut transaction, &request).await? {
+            transaction.rollback().await?;
+            return Ok(ExecutionScheduleOutcome::StrictCompletionRetryConflict);
         }
 
         if let Some(resolution) = request.runtime_settings
@@ -161,6 +174,26 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .bind(request.idempotency_key)
         .execute(&mut *transaction)
         .await?;
+
+        if let Some(confirmation) = request.strict_completion_retry {
+            sqlx::query(
+                "INSERT INTO execution_strict_completion_retry_confirmations \
+                 (execution_id, workflow_id, workflow_revision, confirmed_by, confirmed_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(execution.id.to_string())
+            .bind(confirmation.workflow_id.to_string())
+            .bind(i64::from(confirmation.expected_revision))
+            .bind(
+                execution
+                    .requested_by
+                    .expect("validated retry confirmation owner")
+                    .to_string(),
+            )
+            .bind(encode_timestamp(execution.created_at))
+            .execute(&mut *transaction)
+            .await?;
+        }
 
         if !claim_optional_question_session_for_scheduled_execution(
             &mut transaction,
@@ -330,6 +363,13 @@ impl ExecutionRepository for SqliteExecutionRepository {
                     .map_err(|error| StorageError::InvalidData(error.to_string()))
             })
             .transpose()
+    }
+
+    async fn find_execution_strict_completion_retry_confirmation(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionStrictCompletionRetryConfirmation>, StorageError> {
+        find_strict_retry_confirmation(self.database.pool(), execution_id).await
     }
 
     async fn start_attempt(
@@ -2652,6 +2692,134 @@ async fn submission_draft_is_available(
     }))
 }
 
+async fn strict_completion_retry_is_valid(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request: &ExecutionScheduleRequest<'_>,
+) -> Result<bool, StorageError> {
+    let execution = request.execution;
+    let Some((assessment_class, owner_user_id)) = sqlx::query_as::<_, (String, String)>(
+        "SELECT task.assessment_class, account.owner_user_id FROM tasks AS task \
+         INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         WHERE task.id = ?",
+    )
+    .bind(execution.task_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    else {
+        return Ok(false);
+    };
+    let workflow_row: Option<(String, i64)> = sqlx::query_as(
+        "SELECT workflow_json, revision FROM strict_completion_workflows WHERE task_id = ?",
+    )
+    .bind(execution.task_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((workflow_json, revision)) = workflow_row else {
+        return Ok(request.strict_completion_retry.is_none());
+    };
+    let workflow: StrictCompletionWorkflow = serde_json::from_str(&workflow_json)?;
+    if workflow.validate().is_err()
+        || workflow.binding.task_id != execution.task_id
+        || workflow.binding.owner_user_id.to_string() != owner_user_id
+        || i64::from(revision_u32(revision)?) != revision
+    {
+        return Err(StorageError::InvalidData(
+            "strict completion retry workflow binding is invalid".to_owned(),
+        ));
+    }
+    let retry_required = assessment_class == "formal"
+        && workflow.state == StrictCompletionState::Active
+        && workflow.attempts_started > 0;
+    let Some(confirmation) = request.strict_completion_retry else {
+        return Ok(!retry_required);
+    };
+    if !retry_required
+        || confirmation.expected_revision != revision_u32(revision)?
+        || confirmation.workflow_id != workflow.id
+        || execution.requested_by != Some(workflow.binding.owner_user_id)
+    {
+        return Ok(false);
+    }
+    if execution.requested_capabilities != [TaskCapability::SubmissionExecute] {
+        return Ok(true);
+    }
+    let Some(draft_id) = execution.submission_draft_id else {
+        return Ok(false);
+    };
+    let freshness: Option<(String, String)> = sqlx::query_as(
+        "SELECT snapshot.captured_at, draft.created_at FROM submission_drafts AS draft \
+         INNER JOIN question_snapshots AS snapshot ON snapshot.id = draft.question_snapshot_id \
+         WHERE draft.id = ? AND draft.task_id = ?",
+    )
+    .bind(draft_id.to_string())
+    .bind(execution.task_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((snapshot_captured_at, draft_created_at)) = freshness else {
+        return Ok(false);
+    };
+    Ok(
+        decode_timestamp(&snapshot_captured_at)? > workflow.updated_at
+            && decode_timestamp(&draft_created_at)? > workflow.updated_at,
+    )
+}
+
+fn revision_u32(revision: i64) -> Result<u32, StorageError> {
+    u32::try_from(revision).map_err(|_| {
+        StorageError::InvalidData("strict completion workflow revision is invalid".to_owned())
+    })
+}
+
+async fn persisted_strict_retry_matches(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    requested: Option<ExecutionStrictCompletionRetryRequest>,
+) -> Result<bool, StorageError> {
+    let persisted: Option<(String, i64)> = sqlx::query_as(
+        "SELECT workflow_id, workflow_revision \
+         FROM execution_strict_completion_retry_confirmations WHERE execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    match (persisted, requested) {
+        (None, None) => Ok(true),
+        (Some((workflow_id, revision)), Some(requested)) => Ok(workflow_id
+            == requested.workflow_id.to_string()
+            && revision_u32(revision)? == requested.expected_revision),
+        _ => Ok(false),
+    }
+}
+
+async fn find_strict_retry_confirmation(
+    pool: &sqlx::SqlitePool,
+    execution_id: ExecutionId,
+) -> Result<Option<ExecutionStrictCompletionRetryConfirmation>, StorageError> {
+    let row: Option<(String, i64, String, String)> = sqlx::query_as(
+        "SELECT workflow_id, workflow_revision, confirmed_by, confirmed_at \
+         FROM execution_strict_completion_retry_confirmations WHERE execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(pool)
+    .await?;
+    row.map(|(workflow_id, revision, confirmed_by, confirmed_at)| {
+        Ok(ExecutionStrictCompletionRetryConfirmation {
+            execution_id,
+            workflow_id: workflow_id.parse().map_err(|_| {
+                StorageError::InvalidData(
+                    "strict completion retry workflow ID is invalid".to_owned(),
+                )
+            })?,
+            workflow_revision: revision_u32(revision)?,
+            confirmed_by: confirmed_by.parse().map_err(|_| {
+                StorageError::InvalidData("strict completion retry owner is invalid".to_owned())
+            })?,
+            confirmed_at: decode_timestamp(&confirmed_at)?,
+        })
+    })
+    .transpose()
+}
+
 async fn transition_task_to_scheduled(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     request: &ExecutionScheduleRequest<'_>,
@@ -2992,6 +3160,11 @@ async fn insert_request_audit(
             "provider_id": artifact.provider_id(),
             "artifact_type": artifact.artifact_type(),
             "artifact_digest": "[HASHED]",
+        })),
+        "strict_completion_retry_confirmation": request.strict_completion_retry.map(|confirmation| serde_json::json!({
+            "workflow_id": confirmation.workflow_id,
+            "workflow_revision": confirmation.expected_revision,
+            "confirmed_by": request.execution.requested_by,
         })),
     });
     sqlx::query(
@@ -3484,8 +3657,9 @@ mod tests {
     use std::{collections::BTreeSet, sync::Arc};
 
     use asterism_domain::{
-        CreditAmount, CreditReservation, CreditReservationId, PriceQuote, PriceQuoteId,
-        ProviderAccountId, ProviderId, QuestionSession, QuestionSnapshotId, RequestSource,
+        CompletionDiagnosis, CompletionPolicySnapshot, CompletionWorkflowBinding, CreditAmount,
+        CreditReservation, CreditReservationId, PriceQuote, PriceQuoteId, ProviderAccountId,
+        ProviderId, QuestionSession, QuestionSnapshotId, RequestSource, StrictCompletionWorkflow,
         SubmissionAttemptReceipt, SubmissionDraftId, SubmissionReceipt, TaskId,
     };
     use asterism_provider_api::{
@@ -3498,8 +3672,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        QuestionSessionArtifactRepository, QuestionSessionRepository,
-        SqliteQuestionSessionRepository,
+        CompletionWorkflowRepository, QuestionSessionArtifactRepository, QuestionSessionRepository,
+        SqliteCompletionWorkflowRepository, SqliteQuestionSessionRepository,
     };
 
     #[tokio::test]
@@ -3515,6 +3689,7 @@ mod tests {
             provider_plan_artifact: None,
             billing: None,
             runtime_settings: None,
+            strict_completion_retry: None,
             expected_task_state: OrchestrationState::Ready,
             idempotency_scope: "user:test-owner",
             idempotency_key: "request-1",
@@ -3555,6 +3730,128 @@ mod tests {
                 .get("count");
             assert_eq!(count, 1, "unexpected row count in {table}");
         }
+    }
+
+    #[tokio::test]
+    async fn formal_strict_retry_requires_exact_persisted_confirmation() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let workflow = insert_active_formal_workflow(&database, owner, task_id, now).await;
+
+        let execution = scheduled_execution(owner, task_id, now);
+        assert_eq!(
+            repository
+                .schedule_execution(test_request(&execution, owner, "formal-retry-missing"))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::StrictCompletionRetryConflict
+        );
+        let mut confirmed = test_request(&execution, owner, "formal-retry-confirmed");
+        confirmed.strict_completion_retry = Some(ExecutionStrictCompletionRetryRequest {
+            workflow_id: workflow.id,
+            expected_revision: 1,
+        });
+        assert_eq!(
+            repository
+                .schedule_execution(confirmed.clone())
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::Created(execution.clone())
+        );
+        assert_eq!(
+            repository.schedule_execution(confirmed).await.unwrap(),
+            ExecutionScheduleOutcome::Existing(execution.clone())
+        );
+        assert_eq!(
+            repository
+                .find_execution_strict_completion_retry_confirmation(execution.id)
+                .await
+                .unwrap(),
+            Some(ExecutionStrictCompletionRetryConfirmation {
+                execution_id: execution.id,
+                workflow_id: workflow.id,
+                workflow_revision: 1,
+                confirmed_by: owner,
+                confirmed_at: now,
+            })
+        );
+        let audit_metadata: String = sqlx::query_scalar(
+            "SELECT metadata_sanitized_json FROM audit_records \
+             WHERE action = 'execution_requested' AND resource_id = ?",
+        )
+        .bind(execution.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(audit_metadata.contains(&workflow.id.to_string()));
+        assert!(audit_metadata.contains("\"workflow_revision\":1"));
+        insert_execution_completion_policy(&database, execution.id, now).await;
+        let job_id = claim_execution(&database, &execution, "formal-retry-worker", now).await;
+        let attempt = repository
+            .start_attempt(ExecutionAttemptStartRequest {
+                execution_id: execution.id,
+                scheduler_job_id: job_id,
+                worker_id: "formal-retry-worker",
+                at: now + chrono::Duration::seconds(1),
+                correlation_id: "formal-retry-attempt",
+            })
+            .await
+            .unwrap();
+        let observation = repository
+            .record_strict_completion_execution_observation(
+                crate::StrictCompletionExecutionObservationRequest {
+                    execution_id: execution.id,
+                    execution_attempt_id: attempt.id,
+                    scheduler_job_id: job_id,
+                    worker_id: "formal-retry-worker",
+                    outcome: None,
+                    diagnosis: Some(CompletionDiagnosis::DurationInsufficient),
+                    at: now + chrono::Duration::seconds(2),
+                    correlation_id: "formal-retry-observation",
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(observation.workflow_attempt_no, Some(2));
+        assert_eq!(observation.workflow.revision, 2);
+        assert_eq!(observation.workflow.workflow.attempts_started, 2);
+    }
+
+    #[tokio::test]
+    async fn formal_submission_retry_requires_fresh_snapshot_and_draft() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let workflow = insert_active_formal_workflow(&database, owner, task_id, now).await;
+        let old_draft =
+            insert_submission_draft(&database, task_id, now - chrono::Duration::seconds(2)).await;
+        let mut old_execution = scheduled_execution(owner, task_id, now);
+        old_execution.requested_capabilities = vec![TaskCapability::SubmissionExecute];
+        old_execution.submission_draft_id = Some(old_draft);
+        let mut old_request = test_request(&old_execution, owner, "formal-old-draft");
+        old_request.strict_completion_retry = Some(ExecutionStrictCompletionRetryRequest {
+            workflow_id: workflow.id,
+            expected_revision: 1,
+        });
+        assert_eq!(
+            repository.schedule_execution(old_request).await.unwrap(),
+            ExecutionScheduleOutcome::StrictCompletionRetryConflict
+        );
+
+        let fresh_draft = insert_submission_draft(&database, task_id, now).await;
+        let mut fresh_execution = scheduled_execution(owner, task_id, now);
+        fresh_execution.requested_capabilities = vec![TaskCapability::SubmissionExecute];
+        fresh_execution.submission_draft_id = Some(fresh_draft);
+        let mut fresh_request = test_request(&fresh_execution, owner, "formal-fresh-draft");
+        fresh_request.strict_completion_retry = Some(ExecutionStrictCompletionRetryRequest {
+            workflow_id: workflow.id,
+            expected_revision: 1,
+        });
+        assert_eq!(
+            repository.schedule_execution(fresh_request).await.unwrap(),
+            ExecutionScheduleOutcome::Created(fresh_execution)
+        );
     }
 
     #[tokio::test]
@@ -5131,6 +5428,7 @@ mod tests {
             provider_plan_artifact: None,
             billing: None,
             runtime_settings: None,
+            strict_completion_retry: None,
             expected_task_state: OrchestrationState::Ready,
             idempotency_scope: "user:test-owner",
             idempotency_key,
@@ -5153,6 +5451,7 @@ mod tests {
             provider_plan_artifact: None,
             billing: Some(ExecutionBillingReservation { quote, reservation }),
             runtime_settings: None,
+            strict_completion_retry: None,
             expected_task_state: OrchestrationState::Ready,
             idempotency_scope: "user:test-owner",
             idempotency_key,
@@ -5378,6 +5677,56 @@ mod tests {
         (database, owner, task_id)
     }
 
+    async fn insert_active_formal_workflow(
+        database: &Database,
+        owner: UserId,
+        task_id: TaskId,
+        now: Timestamp,
+    ) -> StrictCompletionWorkflow {
+        sqlx::query("UPDATE tasks SET assessment_class = 'formal' WHERE id = ?")
+            .bind(task_id.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let account_id: ProviderAccountId =
+            sqlx::query_scalar::<_, String>("SELECT provider_account_id FROM tasks WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap()
+                .parse()
+                .unwrap();
+        let mut workflow = StrictCompletionWorkflow::new(
+            CompletionWorkflowBinding {
+                owner_user_id: owner,
+                provider_account_id: account_id,
+                task_id,
+            },
+            CompletionPolicySnapshot {
+                captured_at: now - chrono::Duration::seconds(3),
+                ..CompletionPolicySnapshot::default()
+            },
+            None,
+            now - chrono::Duration::seconds(3),
+        )
+        .unwrap();
+        workflow
+            .begin_attempt(true, false, now - chrono::Duration::seconds(2))
+            .unwrap();
+        workflow
+            .observe(
+                None,
+                Some(CompletionDiagnosis::DurationInsufficient),
+                now - chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        SqliteCompletionWorkflowRepository::new(database.clone())
+            .create_strict_completion_workflow(&workflow)
+            .await
+            .unwrap();
+        workflow
+    }
+
     async fn insert_submission_draft(
         database: &Database,
         task_id: TaskId,
@@ -5386,6 +5735,28 @@ mod tests {
         insert_submission_draft_with_snapshot(database, task_id, now)
             .await
             .0
+    }
+
+    async fn insert_execution_completion_policy(
+        database: &Database,
+        execution_id: ExecutionId,
+        captured_at: Timestamp,
+    ) {
+        let policy = CompletionPolicySnapshot {
+            captured_at,
+            ..CompletionPolicySnapshot::default()
+        };
+        sqlx::query(
+            "INSERT INTO execution_runtime_settings \
+             (execution_id, provider_id, schema_version, resolved_settings_json, sources_json, \
+              completion_policy_json, captured_at) VALUES (?, 'test', 1, '{}', '{}', ?, ?)",
+        )
+        .bind(execution_id.to_string())
+        .bind(serde_json::to_string(&policy).unwrap())
+        .bind(encode_timestamp(captured_at))
+        .execute(database.pool())
+        .await
+        .unwrap();
     }
 
     async fn insert_submission_draft_with_snapshot(

@@ -4401,3 +4401,30 @@ back its owner binding, Active state and revision while Score Improvement
 remains independently absent. This observable revision boundary is required
 before later confirmation and fresh Snapshot/Draft retry commands can safely
 use compare-and-swap semantics.
+
+## Two-hundred-and-forty-first Phase 0 slice
+
+Migration 063 adds a separate durable Formal Strict Completion retry
+confirmation. Each record binds one Execution to the exact Strict workflow ID
+and expected revision, confirming owner and timestamp. Confirmation is not an
+Execution request boolean and cannot be supplied by a worker at observation
+time. Idempotent scheduling compares the persisted confirmation as part of the
+original request identity.
+
+The scheduling transaction now reads the current owner/Task workflow before it
+moves the Task or creates an Execution. A Formal workflow which is Active after
+at least one attempt requires an exact current-revision confirmation; missing,
+foreign, stale, terminal or unnecessary confirmations roll back as a typed
+conflict. This confirmed path is the sole exception which lets an owner move a
+HumanRequired Task back to Scheduled. The worker later derives retry authority
+from the stored Execution confirmation and verifies the workflow ID/revision
+again before advancing the attempt counter.
+
+Formal Submission retry also proves freshness at the transaction boundary.
+Both the immutable SubmissionDraft and its QuestionSnapshot must be newer than
+the workflow's previous observation, and the existing one-Draft/one-Execution
+constraint remains in force. Storage tests reject a reused/late-built Draft
+over an old Snapshot, accept a fully fresh pair, and carry the persisted
+confirmation through a live claimed Attempt into workflow attempt two. API
+coverage rejects a stale revision, accepts the exact confirmation and returns
+the original Execution on an exact idempotent replay.

@@ -3,8 +3,9 @@ use std::{str::FromStr, sync::Arc};
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, Execution, NormalizedAnswer,
     ProviderAccountId, ProviderId, Question, QuestionId, QuestionSnapshotId,
-    ScoreImprovementWorkflow, StrictCompletionWorkflow, SubmissionDraftId, SubmissionResultId,
-    Task, TaskCapability, TaskId, TaskLifecycleAction, Timestamp,
+    ScoreImprovementWorkflow, StrictCompletionWorkflow, StrictCompletionWorkflowId,
+    SubmissionDraftId, SubmissionResultId, Task, TaskCapability, TaskId, TaskLifecycleAction,
+    Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
@@ -25,11 +26,12 @@ use asterism_provider_api::{
     BrowserSessionSpec, ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail,
 };
 use asterism_storage::{
-    AnswerCandidateRepository, CompletionWorkflowRepository, QuestionSnapshotRepository,
-    SqliteCompletionWorkflowRepository, SqliteExecutionRepository, SqliteProviderAccountRepository,
-    SqliteProviderRuntimeSettingsRepository, SqliteQuestionReadAttemptRepository,
-    SqliteQuestionSnapshotRepository, SqliteTaskLifecycleRepository, SqliteTaskQueryRepository,
-    SubmissionDraftRepository, SubmissionResultRepository, TaskQueryRepository,
+    AnswerCandidateRepository, CompletionWorkflowRepository, ExecutionStrictCompletionRetryRequest,
+    QuestionSnapshotRepository, SqliteCompletionWorkflowRepository, SqliteExecutionRepository,
+    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
+    SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository,
+    SqliteTaskLifecycleRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
+    SubmissionResultRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -679,6 +681,28 @@ pub(super) async fn execute_task(
                 "SubmissionDraft ID is invalid",
             )
         })?;
+    let strict_completion_retry = request
+        .strict_completion_retry_confirmation
+        .map(|confirmation| {
+            let workflow_id = StrictCompletionWorkflowId::from_str(&confirmation.workflow_id)
+                .map_err(|_| {
+                    ApiError::bad_request(
+                        "invalid_strict_completion_workflow_id",
+                        "Strict Completion workflow ID is invalid",
+                    )
+                })?;
+            if confirmation.expected_revision == 0 {
+                return Err(ApiError::bad_request(
+                    "invalid_strict_completion_workflow_revision",
+                    "Strict Completion workflow revision must be positive",
+                ));
+            }
+            Ok(ExecutionStrictCompletionRetryRequest {
+                workflow_id,
+                expected_revision: confirmation.expected_revision,
+            })
+        })
+        .transpose()?;
     let service = ExecutionRequestService::new(
         SqliteTaskQueryRepository::new(state.database.clone()),
         SqliteExecutionRepository::new(state.database.clone()),
@@ -686,7 +710,12 @@ pub(super) async fn execute_task(
         SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
         SqliteQuestionSnapshotRepository::new(state.database),
         state.providers,
-        FormalAssessmentPolicy::default(),
+        strict_completion_retry.map_or_else(FormalAssessmentPolicy::default, |_| {
+            FormalAssessmentPolicy {
+                allow_execution: true,
+                allow_submission: true,
+            }
+        }),
     );
     let result = service
         .execute(ExecuteTaskCommand {
@@ -694,6 +723,7 @@ pub(super) async fn execute_task(
             task_id,
             requested_capabilities: request.requested_capabilities,
             submission_draft_id,
+            strict_completion_retry,
             request_source,
             actor: auth.audit_actor(),
             idempotency_key: idempotency_key.to_owned(),
@@ -929,6 +959,10 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
         ExecutionRequestError::RuntimeSettingsConflict => ApiError::conflict(
             "runtime_settings_revision_conflict",
             "Provider runtime settings changed while the execution was being scheduled",
+        ),
+        ExecutionRequestError::StrictCompletionRetryConflict => ApiError::conflict(
+            "strict_completion_retry_conflict",
+            "the Strict Completion retry confirmation is missing, stale, or invalid",
         ),
         ExecutionRequestError::Assessment(_) => ApiError::conflict(
             "formal_assessment_blocked",
@@ -1588,6 +1622,14 @@ pub(super) struct DelayTaskRequest {
 pub(super) struct ExecuteTaskRequest {
     requested_capabilities: Vec<TaskCapability>,
     submission_draft_id: Option<String>,
+    strict_completion_retry_confirmation: Option<StrictCompletionRetryConfirmationRequest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct StrictCompletionRetryConfirmationRequest {
+    workflow_id: String,
+    expected_revision: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
