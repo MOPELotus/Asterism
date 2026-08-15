@@ -322,3 +322,7 @@ Credential validation follows the same separation. A safe authentication shape
 may enter the Inbox after a candidate is rejected, but no candidate field or
 secret is stored, the account is not authenticated, and the observation cannot
 serve as answer evidence or completion authority.
+AuthSession observation additionally preserves the session state machine and
+one-shot OAuth receipt ordering. Recording a shape happens only after the
+corresponding failure state is durable; it cannot reopen a callback, retry an
+exchange, commit a replacement credential or authenticate the account.

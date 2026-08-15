@@ -14,18 +14,22 @@ use asterism_secrets::{
     SecretString,
 };
 use asterism_storage::{
-    AuthSessionRepository, AuthenticatedCredentialRepository, ProviderAccountRepository,
-    StorageError,
+    AuthSessionRepository, AuthenticatedCredentialRepository, ProtocolObservationRepository,
+    ProviderAccountRepository, StorageError,
 };
 use chrono::Utc;
 
 use crate::credential::{CredentialProvisionError, validate_candidate};
+use crate::protocol_observation::{
+    ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AuthSessionService<A, S> {
     registry: Arc<ProviderRegistry>,
     accounts: A,
     sessions: S,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<A, S> AuthSessionService<A, S> {
@@ -34,7 +38,32 @@ impl<A, S> AuthSessionService<A, S> {
             registry,
             accounts,
             sessions,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<A, S> std::fmt::Debug for AuthSessionService<A, S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthSessionService")
+            .field("registry", &self.registry)
+            .field("accounts", &"configured")
+            .field("sessions", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -112,6 +141,14 @@ where
                     &error,
                     actor,
                     &correlation_id,
+                )
+                .await?;
+                self.record_protocol_observation(
+                    &provider_id,
+                    session.id,
+                    "begin",
+                    &correlation_id,
+                    &error,
                 )
                 .await?;
                 return Err(AuthSessionServiceError::Provider {
@@ -282,6 +319,7 @@ where
                 &access.correlation_id,
             )
             .await?;
+        let provider_id = bundle.provider_id.clone();
         let (bundle, status) = match validate_candidate(
             self.registry.as_ref(),
             &self.accounts,
@@ -295,14 +333,8 @@ where
         {
             Ok(validated) => validated,
             Err(error) => {
-                transition_once(
-                    &self.sessions,
-                    &mut session,
-                    credential_failure_state(&error),
-                    actor,
-                    &access.correlation_id,
-                )
-                .await?;
+                self.finish_credential_failure(&mut session, &provider_id, &access, &error)
+                    .await?;
                 return Err(AuthSessionServiceError::Credential(error));
             }
         };
@@ -449,6 +481,14 @@ where
                     &access.correlation_id,
                 )
                 .await?;
+                self.record_protocol_observation(
+                    &account.provider_id,
+                    session_id,
+                    "oauth-exchange",
+                    &access.correlation_id,
+                    &error,
+                )
+                .await?;
                 return Err(AuthSessionServiceError::Provider {
                     session_id,
                     source: error,
@@ -464,7 +504,7 @@ where
         )
         .await?;
         let bundle = CredentialBundle {
-            provider_id: account.provider_id,
+            provider_id: account.provider_id.clone(),
             tenant: account.tenant,
             auth_method: claim.auth_session.method,
             acquired_via: CredentialAcquisition::NativeProviderLogin,
@@ -494,6 +534,14 @@ where
                     &error,
                     actor,
                     &access.correlation_id,
+                )
+                .await?;
+                self.record_credential_protocol_observation(
+                    &account.provider_id,
+                    session_id,
+                    "oauth-credential-validation",
+                    &access.correlation_id,
+                    &error,
                 )
                 .await?;
                 return Err(AuthSessionServiceError::Credential(error));
@@ -607,6 +655,80 @@ where
         }
         Ok(session)
     }
+
+    async fn record_protocol_observation(
+        &self,
+        provider_id: &ProviderId,
+        session_id: AuthSessionId,
+        stage: &str,
+        correlation_id: &str,
+        error: &ProviderError,
+    ) -> Result<(), AuthSessionServiceError> {
+        let occurrence_scope = format!("auth-session:{session_id}:{stage}:{correlation_id}");
+        record_provider_protocol_observation(
+            self.protocol_observations.as_deref(),
+            provider_id,
+            None,
+            &occurrence_scope,
+            error,
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| match error {
+            ProviderProtocolObservationRecordError::Invalid => {
+                AuthSessionServiceError::InvalidProtocolObservation
+            }
+            ProviderProtocolObservationRecordError::Storage(error) => {
+                AuthSessionServiceError::Storage(error)
+            }
+        })
+    }
+
+    async fn record_credential_protocol_observation(
+        &self,
+        provider_id: &ProviderId,
+        session_id: AuthSessionId,
+        stage: &str,
+        correlation_id: &str,
+        error: &CredentialProvisionError,
+    ) -> Result<(), AuthSessionServiceError> {
+        if let CredentialProvisionError::Provider(provider_error) = error {
+            self.record_protocol_observation(
+                provider_id,
+                session_id,
+                stage,
+                correlation_id,
+                provider_error,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_credential_failure(
+        &self,
+        session: &mut AuthSession,
+        provider_id: &ProviderId,
+        access: &SecretAccess,
+        error: &CredentialProvisionError,
+    ) -> Result<(), AuthSessionServiceError> {
+        transition_once(
+            &self.sessions,
+            session,
+            credential_failure_state(error),
+            audit_actor_from_access(access)?,
+            &access.correlation_id,
+        )
+        .await?;
+        self.record_credential_protocol_observation(
+            provider_id,
+            session.id,
+            "credential-validation",
+            &access.correlation_id,
+            error,
+        )
+        .await
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -677,6 +799,8 @@ pub enum AuthSessionServiceError {
         #[source]
         source: ProviderError,
     },
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error(transparent)]
     Credential(#[from] CredentialProvisionError),
     #[error("authenticated credential commit failed: {0}")]
@@ -889,11 +1013,14 @@ mod tests {
         collections::{BTreeMap, BTreeSet},
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
-    use asterism_domain::{ProviderAccount, Role, SessionKind, WaitingUserState};
+    use asterism_domain::{
+        ProtocolObservationKind, ProtocolSurface, ProviderAccount, Role, SessionKind,
+        WaitingUserState,
+    };
     use asterism_provider_api::{
         AuthenticationCapability, CredentialReplacement, CredentialValidation,
         ExternalOauthAuthorization, ExternalOauthCallbackBinding, ProviderCapability,
@@ -905,8 +1032,8 @@ mod tests {
         SecretKey, SecretPurpose, SecretStore, SecretValue,
     };
     use asterism_storage::{
-        Database, SecretKeyring, SqliteAuthSessionRepository, SqliteProviderAccountRepository,
-        SqliteSecretStore,
+        Database, SecretKeyring, SqliteAuthSessionRepository, SqliteProtocolObservationRepository,
+        SqliteProviderAccountRepository, SqliteSecretStore,
     };
     use async_trait::async_trait;
     use chrono::Duration;
@@ -1007,6 +1134,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn begin_drift_is_observed_after_session_failure_is_persisted() {
+        let fixture = fixture(true).await;
+        fixture
+            .authentication
+            .begin_protocol_drift
+            .store(true, Ordering::Relaxed);
+        let now = Utc::now();
+        let error = fixture
+            .service
+            .begin(AuthSessionStartRequest {
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                method: AuthMethod::QrCode,
+                created_at: now,
+                expires_at: now + Duration::minutes(10),
+                actor: AuditActor::User(fixture.owner),
+                correlation_id: "auth-begin-drift".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthSessionServiceError::Provider { source, .. }
+                if source.kind == ProviderErrorKind::ProtocolDrift
+        ));
+        let stored = fixture
+            .sessions
+            .find_latest_account_auth_session(fixture.owner, fixture.account)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, AuthState::AuthFailed);
+        assert_observation(&fixture, "authentication", "endpoint_version_drift").await;
+    }
+
+    #[tokio::test]
     async fn validated_credentials_and_authenticated_session_commit_together() {
         let fixture = fixture(true).await;
         let started = begin_session(&fixture, "auth-credential-start").await;
@@ -1097,6 +1260,50 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn credential_drift_is_observed_after_session_failure_without_secret_commit() {
+        let fixture = fixture(true).await;
+        let started = begin_session(&fixture, "auth-credential-drift-start").await;
+        fixture
+            .authentication
+            .credential_protocol_drift
+            .store(true, Ordering::Relaxed);
+        let error = fixture
+            .service
+            .submit_credentials(
+                &fixture.store,
+                AuthSessionCredentialRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    bundle: credential_bundle(b"uncommitted-cookie"),
+                    access: secret_access(fixture.owner, "auth-credential-drift-submit"),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthSessionServiceError::Credential(CredentialProvisionError::Provider(error))
+                if error.kind == ProviderErrorKind::ProtocolDrift
+        ));
+        let stored = fixture
+            .sessions
+            .find_auth_session(fixture.owner, started.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, AuthState::AuthFailed);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM secret_blobs")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_observation(&fixture, "authentication", "field_drift").await;
     }
 
     #[tokio::test]
@@ -1280,6 +1487,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn oauth_drift_is_observed_after_one_shot_pending_is_finished() {
+        let fixture = fixture(true).await;
+        let now = Utc::now();
+        let started = fixture
+            .service
+            .begin(AuthSessionStartRequest {
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                method: AuthMethod::ExternalBrowserOauth,
+                created_at: now,
+                expires_at: now + Duration::minutes(5),
+                actor: AuditActor::User(fixture.owner),
+                correlation_id: "oauth-drift-start".to_owned(),
+            })
+            .await
+            .unwrap();
+        fixture
+            .authentication
+            .oauth_protocol_drift
+            .store(true, Ordering::Relaxed);
+        let error = fixture
+            .service
+            .submit_external_oauth_callback(
+                &fixture.store,
+                ExternalOauthCallbackRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    callback_url: SecretString::new("https://provider.example/callback?code=drift"),
+                    access: secret_access(fixture.owner, "oauth-drift-submit"),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthSessionServiceError::Provider { source, .. }
+                if source.kind == ProviderErrorKind::ProtocolDrift
+        ));
+        let pending = fixture
+            .sessions
+            .find_external_oauth_pending(fixture.owner, fixture.account, started.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.state, ExternalOauthState::Failed);
+        assert_eq!(fixture.oauth_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM secret_blobs")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_observation(&fixture, "authentication", "unknown_result_shape").await;
+    }
+
     struct Fixture {
         database: Database,
         owner: UserId,
@@ -1289,6 +1554,7 @@ mod tests {
         store: SqliteSecretStore,
         service: AuthSessionService<SqliteProviderAccountRepository, SqliteAuthSessionRepository>,
         oauth_calls: Arc<AtomicUsize>,
+        authentication: Arc<TestAuthentication>,
     }
 
     async fn fixture(echo_session_id: bool) -> Fixture {
@@ -1358,11 +1624,14 @@ mod tests {
             validation_gate,
             oauth_calls: Arc::clone(&oauth_calls),
             oauth_network_failure,
+            begin_protocol_drift: AtomicBool::new(false),
+            credential_protocol_drift: AtomicBool::new(false),
+            oauth_protocol_drift: AtomicBool::new(false),
         });
         let mut registry = ProviderRegistry::default();
         registry
             .register(ProviderEntry {
-                authentication: Some(authentication),
+                authentication: Some(authentication.clone()),
                 ..ProviderEntry::metadata_only(metadata)
             })
             .unwrap();
@@ -1378,7 +1647,10 @@ mod tests {
             ),
         );
         let service =
-            AuthSessionService::new(Arc::new(registry), accounts.clone(), sessions.clone());
+            AuthSessionService::new(Arc::new(registry), accounts.clone(), sessions.clone())
+                .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+                    database.clone(),
+                )));
         Fixture {
             database,
             owner,
@@ -1388,7 +1660,17 @@ mod tests {
             store,
             service,
             oauth_calls,
+            authentication,
         }
+    }
+
+    async fn assert_observation(fixture: &Fixture, surface: &str, kind: &str) {
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!(observation, (surface.to_owned(), kind.to_owned(), None));
     }
 
     async fn begin_session(fixture: &Fixture, correlation_id: &str) -> AuthSessionBegin {
@@ -1441,6 +1723,9 @@ mod tests {
         validation_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         oauth_calls: Arc<AtomicUsize>,
         oauth_network_failure: bool,
+        begin_protocol_drift: AtomicBool,
+        credential_protocol_drift: AtomicBool,
+        oauth_protocol_drift: AtomicBool,
     }
 
     impl ProviderIdentity for TestAuthentication {
@@ -1456,6 +1741,12 @@ mod tests {
             context: &ProviderAuthContext,
             method: AuthMethod,
         ) -> ProviderResult<AuthChallenge> {
+            if self.begin_protocol_drift.load(Ordering::Relaxed) {
+                return Err(protocol_drift(
+                    ProtocolObservationKind::EndpointVersionDrift,
+                    serde_json::json!({"document": "auth_challenge", "version": 2}),
+                ));
+            }
             let external_oauth =
                 (method == AuthMethod::ExternalBrowserOauth).then(|| ExternalOauthAuthorization {
                     authorization_url: "https://provider.example/oauth?opaque=redacted".to_owned(),
@@ -1498,6 +1789,12 @@ mod tests {
                     "synthetic ambiguous exchange",
                 ));
             }
+            if self.oauth_protocol_drift.load(Ordering::Relaxed) {
+                return Err(protocol_drift(
+                    ProtocolObservationKind::UnknownResultShape,
+                    serde_json::json!({"document": "oauth_exchange", "result": "object"}),
+                ));
+            }
             Ok(CredentialReplacement {
                 session_kind: SessionKind::Composite,
                 fields: vec![
@@ -1523,6 +1820,12 @@ mod tests {
                 entered.notify_one();
                 release.notified().await;
             }
+            if self.credential_protocol_drift.load(Ordering::Relaxed) {
+                return Err(protocol_drift(
+                    ProtocolObservationKind::FieldDrift,
+                    serde_json::json!({"document": "session_status", "missing": "valid"}),
+                ));
+            }
             Ok(CredentialValidation::accepted(SessionStatus {
                 valid: self.credential_valid,
                 kind: credential.session_kind,
@@ -1542,5 +1845,14 @@ mod tests {
                 account_hint: None,
             })
         }
+    }
+
+    fn protocol_drift(kind: ProtocolObservationKind, shape: serde_json::Value) -> ProviderError {
+        ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "authentication shape changed",
+        )
+        .try_with_protocol_observation(ProtocolSurface::Authentication, kind, shape)
+        .unwrap()
     }
 }

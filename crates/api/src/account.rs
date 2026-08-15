@@ -253,8 +253,11 @@ pub(super) async fn put_auth_session_credentials(
     let committed = AuthSessionService::new(
         state.providers,
         accounts,
-        SqliteAuthSessionRepository::new(state.database),
+        SqliteAuthSessionRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .submit_credentials(
         &secret_store,
         AuthSessionCredentialRequest {
@@ -292,8 +295,11 @@ pub(super) async fn begin_auth_session(
     let started = AuthSessionService::new(
         state.providers,
         SqliteProviderAccountRepository::new(state.database.clone()),
-        SqliteAuthSessionRepository::new(state.database),
+        SqliteAuthSessionRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .begin(AuthSessionStartRequest {
         owner_user_id: owner_id,
         provider_account_id: account_id,
@@ -411,8 +417,11 @@ pub(super) async fn submit_external_oauth_callback(
     let committed = AuthSessionService::new(
         state.providers,
         SqliteProviderAccountRepository::new(state.database.clone()),
-        SqliteAuthSessionRepository::new(state.database),
+        SqliteAuthSessionRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .submit_external_oauth_callback(
         &secret_store,
         ExternalOauthCallbackRequest {
@@ -1077,6 +1086,10 @@ fn map_auth_session_error(error: AuthSessionServiceError) -> ApiError {
             "the authentication session is expired, terminal, or changed concurrently",
         ),
         AuthSessionServiceError::Provider { source, .. } => map_credential_provider_error(source),
+        AuthSessionServiceError::InvalidProtocolObservation => ApiError::bad_gateway(
+            "provider_authentication_invalid",
+            "the Provider returned inconsistent authentication data",
+        ),
         AuthSessionServiceError::Credential(error) => map_credential_error(error),
         AuthSessionServiceError::CredentialStore(error) => map_secret_store_error(error),
         AuthSessionServiceError::Domain(error) => {

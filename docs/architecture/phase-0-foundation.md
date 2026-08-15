@@ -4762,3 +4762,20 @@ existing inconsistent-authentication bad-gateway boundary, while observation
 storage failures remain internal. Coverage proves a typed
 Authentication/FieldDrift shape is retained with zero secret blobs and no
 account-state mutation.
+
+## Two-hundred-and-fifty-ninth Phase 0 slice
+
+The durable AuthSession flow now records Provider-supplied authentication
+shapes from challenge creation, session-bound credential validation, external
+OAuth exchange and OAuth replacement validation. Every occurrence binds the
+AuthSession, stage and correlation and carries no Task Execution provenance.
+The account API injects the shared SQLite observation repository at each route
+that can call the Provider.
+
+Existing state ordering remains authoritative. Challenge and credential
+failures transition the AuthSession before observation; a claimed OAuth
+callback first finishes its one-shot pending record as Failed or Ambiguous and
+transitions the AuthSession, then records the shape. Observation failure cannot
+reopen or replay the callback. Coverage proves typed challenge, credential and
+OAuth exchange drift is retained only after those durable transitions, with a
+single OAuth Provider call and zero secret writes.
