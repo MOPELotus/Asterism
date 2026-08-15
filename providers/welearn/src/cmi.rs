@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::RemoteState;
+use asterism_domain::{ProtocolObservationKind, ProtocolSurface, RemoteState};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
     ProviderResult, RemoteProgress, TaskProgressCapability,
@@ -13,6 +13,7 @@ use zeroize::Zeroize;
 use crate::{
     course_inventory::{protocol_drift, required_remote_component},
     metadata::development_metadata,
+    protocol_observation::{json_value_kind, protocol_drift_with_observation},
 };
 
 const MAX_CMI_DOCUMENT_BYTES: usize = 1_024 * 1_024;
@@ -219,13 +220,19 @@ pub fn parse_cmi_snapshot(document: &str) -> ProviderResult<WellearnCmiSnapshot>
             "WELearn CMI response is not valid JSON",
         )
     })?;
-    let outer = outer
-        .as_object()
-        .ok_or_else(|| protocol_drift("WELearn CMI response is not an object"))?;
-    if outer.get("ret").and_then(Value::as_i64) != Some(0) {
-        return Err(protocol_drift("WELearn CMI read did not succeed"));
+    let Some(outer_object) = outer.as_object() else {
+        return Err(cmi_result_shape_drift(
+            "WELearn CMI response is not an object",
+            &outer,
+        ));
+    };
+    if outer_object.get("ret").and_then(Value::as_i64) != Some(0) {
+        return Err(cmi_result_shape_drift(
+            "WELearn CMI read did not succeed",
+            &outer,
+        ));
     }
-    let comment = outer
+    let comment = outer_object
         .get("comment")
         .and_then(Value::as_str)
         .ok_or_else(|| protocol_drift("WELearn CMI response has no comment document"))?;
@@ -287,6 +294,28 @@ pub fn parse_cmi_snapshot(document: &str) -> ProviderResult<WellearnCmiSnapshot>
         score_scaled_raw,
         success_status_raw: optional_scalar(cmi, "success_status")?,
     })
+}
+
+fn cmi_result_shape_drift(message: &'static str, root: &Value) -> ProviderError {
+    let result = root.get("ret");
+    let result_state = match result.and_then(Value::as_i64) {
+        Some(0) => "accepted",
+        Some(_) => "integer_nonzero",
+        None if result.is_none() => "missing",
+        None => "not_integer",
+    };
+    protocol_drift_with_observation(
+        message,
+        ProtocolSurface::TaskProgress,
+        ProtocolObservationKind::UnknownResultShape,
+        serde_json::json!({
+            "document": "cmi_outer",
+            "root_type": json_value_kind(Some(root)),
+            "result_field": "ret",
+            "result_type": json_value_kind(result),
+            "result_state": result_state,
+        }),
+    )
 }
 
 /// Parses a pre-mutation CMI read while retaining the donor's exact explicit
@@ -484,6 +513,51 @@ mod tests {
         assert_eq!(absent.remote_state(), RemoteState::Pending);
         assert_eq!(absent.percent(), Some(0));
         assert!(!absent.cmi_present());
+    }
+
+    #[test]
+    fn outer_result_drift_attaches_type_and_state_without_the_result_value() {
+        let string_error =
+            parse_cmi_snapshot(r#"{"ret":"must-not-cross","comment":"{}"}"#).unwrap_err();
+        let string_observation = string_error.protocol_observation.unwrap();
+        assert_eq!(string_observation.surface, ProtocolSurface::TaskProgress);
+        assert_eq!(
+            string_observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(
+            string_observation.shape_sanitized,
+            serde_json::json!({
+                "document": "cmi_outer",
+                "root_type": "object",
+                "result_field": "ret",
+                "result_type": "string",
+                "result_state": "not_integer",
+            })
+        );
+        assert!(
+            !string_observation
+                .shape_sanitized
+                .to_string()
+                .contains("must-not-cross")
+        );
+
+        let nonzero = parse_cmi_snapshot(r#"{"ret":7,"comment":"{}"}"#).unwrap_err();
+        assert_eq!(
+            nonzero.protocol_observation.unwrap().shape_sanitized["result_state"],
+            "integer_nonzero"
+        );
+        let non_object = parse_cmi_snapshot(r"[]").unwrap_err();
+        assert_eq!(
+            non_object.protocol_observation.unwrap().shape_sanitized,
+            serde_json::json!({
+                "document": "cmi_outer",
+                "root_type": "array",
+                "result_field": "ret",
+                "result_type": "missing",
+                "result_state": "missing",
+            })
+        );
     }
 
     #[tokio::test]

@@ -140,6 +140,12 @@ or cross-Unit response rejects the whole scan. Authentication and both inventory
 slots can be composed into a registry-consistent Development entry using
 injected transports.
 
+The Provider emits a bounded protocol observation only for three audited
+inventory-envelope failures: Course `clist`, Unit `info` and SCO-leaves `info`
+missing or not being arrays. Each shape contains a fixed document label, fixed
+field label, expected type and observed root/field JSON type. It never copies a
+field value, unknown object member, response body or route/session fact.
+
 Fresh TaskDetail parses only the stable `sco:{cid}:{scoid}` identity, re-lists
 the current Courses, requires exactly one matching Course, then re-runs that
 Course's complete Unit/SCO scan and requires exactly one matching SCO. It never
@@ -188,6 +194,11 @@ completion, progress and both time strings remain independent. Missing `cmi`
 means the donor-observed not-attempted zero-progress state. The outer `ret`
 must be the integer `0`; a missing, non-integer or non-zero result, a non-string
 `comment`, malformed nested JSON or an unsafe scalar fails closed.
+The outer-object/`ret` failure carries `UnknownResultShape` with only the fixed
+`cmi_outer`/`ret` labels, root/result JSON types and one of `missing`,
+`not_integer` or `integer_nonzero`. The numeric/string result itself and the
+nested `comment` are never copied. Other CMI failures remain ordinary
+fail-closed errors until a separately reviewed minimal structural shape exists.
 The native adapter uses the same bounded authenticated session and one
 Authentication-only renewal retry as inventory. It does not call `startsco160928`
 when CMI is absent or malformed, because a read capability must never mutate
@@ -782,6 +793,9 @@ and does not repair, reorder or redistribute the frozen plan.
   facts, never persisted normalized metadata. Fresh Course route values and
   parsed CMI preservation scalars are redacted from Debug output where exposed
   and explicitly zeroized when their operation-local containers are dropped.
+- Protocol observations are an explicit parser-branch allowlist, not a generic
+  response sanitizer. Current shapes contain only fixed labels, JSON type
+  categories and bounded result-state categories, never raw values.
 - Only the audited HTTPS hosts may be contacted; unexpected OIDC redirects fail
   closed as protocol drift.
 - QQ/WeChat/Apple are allowlisted only at the three exact origins established

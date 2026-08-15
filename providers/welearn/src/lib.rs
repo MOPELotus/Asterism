@@ -21,6 +21,7 @@ mod inventory_capabilities;
 mod metadata;
 mod native_authentication;
 mod native_http;
+mod protocol_observation;
 mod provider;
 mod resource_execution;
 mod runtime_settings;

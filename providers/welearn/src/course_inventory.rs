@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
+use asterism_domain::{ProtocolObservationKind, ProtocolSurface};
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, ProviderRouteContext, RemoteCourse,
 };
 use serde_json::Value;
+
+use crate::protocol_observation::{array_field_shape, protocol_drift_with_observation};
 
 const MAX_COURSE_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_COURSES: usize = 2_048;
@@ -27,10 +30,14 @@ pub fn parse_course_inventory(document: &str) -> ProviderResult<Vec<RemoteCourse
     }
     let root: Value = serde_json::from_str(document)
         .map_err(|_| invalid_response("WELearn Course inventory is not valid JSON"))?;
-    let rows = root
-        .get("clist")
-        .and_then(Value::as_array)
-        .ok_or_else(|| protocol_drift("WELearn Course inventory has no clist array"))?;
+    let Some(rows) = root.get("clist").and_then(Value::as_array) else {
+        return Err(protocol_drift_with_observation(
+            "WELearn Course inventory has no clist array",
+            ProtocolSurface::CourseInventory,
+            ProtocolObservationKind::FieldDrift,
+            array_field_shape("course_list", &root, "clist"),
+        ));
+    };
     if rows.len() > MAX_COURSES {
         return Err(invalid_response(
             "WELearn Course inventory exceeds the item limit",
@@ -216,5 +223,30 @@ mod tests {
         assert!(parse_course_inventory(r#"{"clist":[{"cid":"bad/id","name":"A"}]}"#).is_err());
         assert!(parse_course_inventory(r#"{"clist":[{"cid":true,"name":"A"}]}"#).is_err());
         assert!(parse_course_inventory(r#"{"clist":[{"cid":1,"name":"A","per":101}]}"#).is_err());
+    }
+
+    #[test]
+    fn clist_field_drift_attaches_only_the_sanitized_json_shape() {
+        let error = parse_course_inventory(r#"{"clist":"must-not-cross"}"#).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::CourseInventory);
+        assert_eq!(observation.kind, ProtocolObservationKind::FieldDrift);
+        assert_eq!(
+            observation.shape_sanitized,
+            serde_json::json!({
+                "document": "course_list",
+                "root_type": "object",
+                "field": "clist",
+                "field_type": "string",
+                "expected_type": "array",
+            })
+        );
+        assert!(
+            !observation
+                .shape_sanitized
+                .to_string()
+                .contains("must-not-cross")
+        );
     }
 }

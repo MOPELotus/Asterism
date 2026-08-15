@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, fmt};
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
+use asterism_domain::{
+    AssessmentClass, ProtocolObservationKind, ProtocolSurface, RemoteState, SourceType,
+    TaskCapability,
+};
 use asterism_provider_api::{ProviderError, ProviderResult, RemoteCourse, RemoteTask};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -10,6 +13,7 @@ use crate::course_inventory::{
     course_id_from_remote, invalid_response, optional_scalar_text, protocol_drift,
     required_remote_component, required_text,
 };
+use crate::protocol_observation::{array_field_shape, protocol_drift_with_observation};
 
 const MAX_UNIT_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_LEAVES_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -167,10 +171,14 @@ pub fn parse_unit_inventory(document: &str) -> ProviderResult<Vec<WellearnUnitOb
     }
     let root: Value = serde_json::from_str(document)
         .map_err(|_| invalid_response("WELearn Unit inventory is not valid JSON"))?;
-    let rows = root
-        .get("info")
-        .and_then(Value::as_array)
-        .ok_or_else(|| protocol_drift("WELearn Unit inventory has no info array"))?;
+    let Some(rows) = root.get("info").and_then(Value::as_array) else {
+        return Err(protocol_drift_with_observation(
+            "WELearn Unit inventory has no info array",
+            ProtocolSurface::TaskInventory,
+            ProtocolObservationKind::FieldDrift,
+            array_field_shape("unit_inventory", &root, "info"),
+        ));
+    };
     if rows.len() > MAX_UNITS {
         return Err(invalid_response(
             "WELearn Unit inventory exceeds the item limit",
@@ -205,10 +213,14 @@ fn parse_leaves(
 ) -> ProviderResult<Vec<RemoteTask>> {
     let root: Value = serde_json::from_str(document)
         .map_err(|_| invalid_response("WELearn SCO-leaves response is not valid JSON"))?;
-    let rows = root
-        .get("info")
-        .and_then(Value::as_array)
-        .ok_or_else(|| protocol_drift("WELearn SCO-leaves response has no info array"))?;
+    let Some(rows) = root.get("info").and_then(Value::as_array) else {
+        return Err(protocol_drift_with_observation(
+            "WELearn SCO-leaves response has no info array",
+            ProtocolSurface::TaskInventory,
+            ProtocolObservationKind::FieldDrift,
+            array_field_shape("sco_leaves", &root, "info"),
+        ));
+    };
     let mut tasks = Vec::with_capacity(rows.len());
     for (sco_index, row) in rows.iter().enumerate() {
         let object = row.as_object().ok_or_else(|| {
@@ -446,6 +458,54 @@ mod tests {
                     visible: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn inventory_info_drift_distinguishes_unit_and_sco_shapes_without_values() {
+        let unit_error = parse_unit_inventory(r#"{"info":"must-not-cross"}"#).unwrap_err();
+        let unit_observation = unit_error.protocol_observation.unwrap();
+        assert_eq!(unit_observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(unit_observation.kind, ProtocolObservationKind::FieldDrift);
+        assert_eq!(
+            unit_observation.shape_sanitized,
+            serde_json::json!({
+                "document": "unit_inventory",
+                "root_type": "object",
+                "field": "info",
+                "field_type": "string",
+                "expected_type": "array",
+            })
+        );
+
+        let course = &parse_course_inventory(COURSES).unwrap()[0];
+        let invalid =
+            WellearnScoLeavesDocument::try_new(0, r#"{"info":{"answer":"must-not-cross"}}"#)
+                .unwrap();
+        let empty = WellearnScoLeavesDocument::try_new(1, r#"{"info":[]}"#).unwrap();
+        let error = parse_task_inventory(course, UNITS, &[invalid, empty]).unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(
+            observation.shape_sanitized,
+            serde_json::json!({
+                "document": "sco_leaves",
+                "root_type": "object",
+                "field": "info",
+                "field_type": "object",
+                "expected_type": "array",
+            })
+        );
+        assert!(
+            !unit_observation
+                .shape_sanitized
+                .to_string()
+                .contains("must-not-cross")
+        );
+        assert!(
+            !observation
+                .shape_sanitized
+                .to_string()
+                .contains("must-not-cross")
         );
     }
 

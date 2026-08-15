@@ -47,6 +47,10 @@ independent completion/progress/session/total facts, unknown-field dropping and
 separate generic progress and DurationRead conversion. Inline negative cases
 reject missing envelopes, non-zero result codes, malformed nested JSON,
 unsupported scalars and out-of-range progress.
+Three precise observation regressions cover Course `clist`, Unit/SCO `info` and
+CMI outer/`ret` drift. They assert exact surface/kind/shape values and use
+sentinel strings plus nested `answer` content to prove no field value, answer or
+raw document crosses the Provider error boundary.
 
 The duration pair is a synthetic before/after readback. It keeps completion,
 progress, score and success status identical while changing only opaque raw time
@@ -176,7 +180,11 @@ only structural field names, response codes and bounded placeholder shapes.
   and fails before keep instead of synthesizing donor defaults. Every other
   malformed baseline and every malformed post-start read fails closed.
 - A missing, string-valued or non-zero outer CMI `ret` fails closed before the
-  nested `comment` document can be treated as an observation.
+  nested `comment` document can be treated as an observation. Its attached
+  `UnknownResultShape` contains only fixed labels, JSON types and a bounded
+  result-state category.
+- Missing/non-array Course `clist` and Unit/SCO `info` fail closed with exact
+  `FieldDrift` shapes containing no source values or unknown object members.
 - A post-start baseline or final readback without the complete preservation set
   fails closed; missing facts are never replaced with mutation defaults.
 - Unknown fields are dropped from sanitized normalized data. The normalized

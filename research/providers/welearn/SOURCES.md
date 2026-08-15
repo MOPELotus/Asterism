@@ -86,6 +86,11 @@ input and duration worker recovered an existing protocol fact: literal zero is
 accepted, yields no client-counter keep, and still reaches fresh-CMI completion
 set/save. Asterism now preserves that atomic shape without widening singleton
 `DurationReport` below its evidenced one-second success boundary.
+The protocol-observation checkpoint again queried all three default heads and
+Fanyuchang's sole tag. Revisions remain `afa87fb7c86d`, `bd160e91d045` and
+`85918caaccd9`, with `v4.0.0` still at `5d1df60cb007`; no upstream delta was
+available. This checkpoint therefore adds only value-free observations to
+already-audited fail-closed Course/Unit/SCO envelope and CMI-result branches.
 
 ## Source selection
 
