@@ -102,6 +102,12 @@ default-head queries plus tag, Release and issue enumeration. Heads remain
 Release remain older `v4.0.0@5d1df60cb007`, while YZBRH and Auto_WeLearn still
 have neither tags nor Releases. No protocol or capability delta was available.
 The consolidated result is recorded in `FULL_UPSTREAM_SWEEP.md`.
+The next ordinary 2026-08-15 Provider checkpoint repeated the three default
+head and tag queries and enumerated Releases and all public issues. Revisions,
+the sole older Fanyuchang Release and issue counts `1/9/0` remain unchanged, so
+no new donor commit, protocol or capability delta was available. The resulting
+implementation slice only closes a fail-closed initial-CMI validation gap in
+the already-audited atomic lifecycle.
 
 ## Source selection
 

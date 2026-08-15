@@ -12,8 +12,11 @@ use crate::{
     WellearnPreparedAtomicChildPlan, WellearnResourceCompletionCmiFormat,
     WellearnResourceCompletionSequence, WellearnResourceCompletionTimeMode,
     WellearnResourceCompletionWriteMode, WellearnResourceExecutionPlan,
-    WellearnResourceMutationProfile, cmi::parse_sco_identity, metadata::development_metadata,
-    parse_cmi_snapshot, runtime_settings::MAX_DURATION_REPORT_SECONDS,
+    WellearnResourceMutationProfile,
+    cmi::{parse_mutation_cmi_baseline, parse_sco_identity},
+    metadata::development_metadata,
+    parse_cmi_snapshot,
+    runtime_settings::MAX_DURATION_REPORT_SECONDS,
 };
 
 /// Stable Provider operation type for one remote mutation inside the atomic
@@ -305,8 +308,9 @@ impl WellearnAtomicDurationCompletionDocuments {
     ///
     /// # Errors
     ///
-    /// Returns an internal error when the document slots or ordered mutation
-    /// receipts cannot have been produced by the selected donor lifecycle.
+    /// Returns a typed protocol error for an unknown initial CMI document, or
+    /// an internal error when the document slots or ordered mutation receipts
+    /// cannot have been produced by the selected donor lifecycle.
     pub fn try_new(
         plan: WellearnAtomicDurationCompletionPlan,
         initial: WellearnCmiDocument,
@@ -350,6 +354,7 @@ impl WellearnAtomicDurationCompletionDocuments {
         plan: WellearnAtomicDurationCompletionPlan,
     ) -> ProviderResult<()> {
         plan.validate()?;
+        validate_atomic_initial_cmi(&self.initial)?;
         let valid = match plan.profile() {
             WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
                 self.after_duration.is_some()
@@ -374,6 +379,10 @@ impl WellearnAtomicDurationCompletionDocuments {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_atomic_initial_cmi(document: &WellearnCmiDocument) -> ProviderResult<()> {
+    parse_mutation_cmi_baseline(document.as_str()).map(|_| ())
 }
 
 fn valid_client_counter_receipts(receipts: &[bool], target_seconds: u64) -> bool {
@@ -876,6 +885,36 @@ mod tests {
     }
 
     #[test]
+    fn documents_reject_unknown_initial_cmi_before_goal_verification() {
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
+            0,
+        )
+        .unwrap();
+        let malformed = WellearnCmiDocument::try_new("not-json".to_owned()).unwrap();
+        let error = WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            malformed,
+            None,
+            cmi(),
+            WellearnAtomicDurationCompletionReceipts::new(true, Vec::new(), None, true),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+
+        let uninitialized =
+            WellearnCmiDocument::try_new("学习数据不正确，请先开始学习".to_owned()).unwrap();
+        WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            uninitialized,
+            None,
+            cmi(),
+            WellearnAtomicDurationCompletionReceipts::new(true, Vec::new(), None, true),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn documents_reject_impossible_auto_lifecycles() {
         let plan = WellearnAtomicDurationCompletionPlan::try_new(
             WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
@@ -1002,7 +1041,7 @@ mod tests {
     }
 
     fn cmi() -> WellearnCmiDocument {
-        WellearnCmiDocument::try_new("{}".to_owned()).unwrap()
+        WellearnCmiDocument::try_new(r#"{"ret":0,"comment":"{}"}"#.to_owned()).unwrap()
     }
 
     fn snapshot_cmi(

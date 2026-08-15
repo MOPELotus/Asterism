@@ -163,7 +163,9 @@ no post-duration/set slot and supports an empty zero-target keep list. Explicit
 negative receipts remain diagnostics; no bundle grants mutation authority.
 An unregistered Provider-owned native transport now consumes only this
 validated plan and emits the combined bundle in one session/route lifecycle.
-It implements the exact request sequence and no-replay error boundary. An
+It implements the exact request sequence and no-replay error boundary, and
+rejects an unknown initial CMI shape before durable issue/start; the returned
+bundle repeats that initial-state validation. An
 unregistered high-level `WellearnAtomicDurationCompletion` coordinator now also
 revalidates one prepared batch child, fresh-rebinds its complete TaskDetail,
 calls that transport once and applies the exact verifier before returning a

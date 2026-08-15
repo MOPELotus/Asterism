@@ -520,8 +520,13 @@ verification, and this returned shape still provides no execution authority.
 `WellearnAtomicDurationCompletionTransport` consumes an already validated plan
 plus exact Course/SCO identity; it never accepts mutable runtime settings or an
 ordinary singleton request. Before the first start request it may renew one
-authentication failure during session/route/initial-CMI resolution. The first
-start send is the mutation boundary: every later request, parse, event or
+authentication failure during session/route/initial-CMI resolution. The
+initial CMI document must then match the ordinary bounded parser, its explicit
+no-CMI result, or the exact audited uninitialized marker. Any other shape fails
+before durable issue or remote mutation. The returned combined evidence bundle
+repeats that validation so an injected or restored transport result cannot hide
+unknown pre-mutation state. The first start send is the mutation boundary:
+every later request, parse, event or
 intermediate read error becomes non-retryable `HumanRequired`, with no renewal
 or mutation replay. An already-attached mutation-result observation survives
 that disposition change but does not create a receipt or verification fact.

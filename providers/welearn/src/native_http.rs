@@ -487,6 +487,7 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
             }
             result => result?,
         };
+        crate::atomic_duration_completion::validate_atomic_initial_cmi(&initial)?;
         let task_referer = study_course_url(&route, sco_id)?;
         let start_payload = atomic_start_payload(plan);
         let start_fields = sco_start_fields(&route, sco_id, start_payload);

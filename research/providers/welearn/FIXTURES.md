@@ -294,6 +294,10 @@ only structural field names, response codes and bounded placeholder shapes.
   arbitrary observed time while requiring score 0 because its save-only final
   does not write a zero-time CMI payload. False mutation receipts remain
   diagnostic when the independent fresh readback proves the exact goal.
+- Atomic initial-CMI tests accept initialized CMI, explicit no-CMI and the
+  audited uninitialized marker, but reject any other document before durable
+  issue/start. The combined document constructor repeats the same check so an
+  injected transport cannot bypass the pre-mutation protocol gate.
 - Shared atomic sink-value tests freeze the generic ordinal/digest bounds and
   Debug redaction, while WELearn tests freeze its five operation type strings.
   Native durable-boundary tests prove exact `issue → send → receipt` ordering

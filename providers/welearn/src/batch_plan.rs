@@ -2083,7 +2083,7 @@ mod tests {
             };
             WellearnAtomicDurationCompletionDocuments::try_new(
                 plan,
-                WellearnCmiDocument::try_new("{}".to_owned()).unwrap(),
+                WellearnCmiDocument::try_new(r#"{"ret":0,"comment":"{}"}"#.to_owned()).unwrap(),
                 after_duration,
                 after_completion,
                 receipts,
