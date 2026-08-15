@@ -238,6 +238,12 @@ placeholder identities, result codes, status values and pagination shape.
   selected-Course drift. Observations retain only field kinds, numeric success
   code and profile-field count; student name/code/school/class and Course ID
   values remain inside the zeroizing response owner.
+- Answer-evidence shape tests cover malformed `StudyTask/Info`, public
+  Course-page, `StudyWordInfo` and `SearchWord` data. They assert that only the
+  fixed family, field kinds and bounded object/array counts cross the
+  observation boundary; synthetic words, meanings and Course/list identities
+  remain absent, while a valid-shape identity change remains `RemoteChanged`
+  with no observation.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

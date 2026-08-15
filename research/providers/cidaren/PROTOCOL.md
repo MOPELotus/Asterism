@@ -551,7 +551,7 @@ establishes the `2_1254` family, but its
 textbook word payload is not retained as a fixture. Missing `jv=99` context is
 Authentication; malformed framing/tag/plaintext is InvalidResponse.
 
-Five high-value fail-closed branches attach Core protocol observations without
+High-value fail-closed branches attach Core protocol observations without
 retaining response or user data:
 
 - an unknown numeric `topic_mode` records only `{ "topic_mode": i64 }` on
@@ -579,6 +579,11 @@ retaining response or user data:
   record only account-envelope value kinds, numeric success code and profile
   field count on `Authentication / UnknownResultShape` or `FieldDrift`;
   well-formed rejected credentials remain unobserved ordinary Authentication.
+- malformed answer-evidence envelopes and decoded inventory/word shapes record
+  only the fixed `StudyTask/Info`, Course-page, `StudyWordInfo` or `SearchWord`
+  family, JSON value kinds, optional numeric code and bounded structural counts
+  on `AnswerResolve / UnknownResultShape`; answer text and binding identities
+  stay excluded, and `RemoteChanged` is not relabeled as drift.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting

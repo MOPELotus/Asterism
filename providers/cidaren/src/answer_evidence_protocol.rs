@@ -1,9 +1,13 @@
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
+use asterism_domain::{ProtocolObservationKind, ProtocolSurface};
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, RemoteTask, RemoteTaskDetail,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -11,6 +15,7 @@ use crate::{
     CidarenAnswerEvidence, CidarenAssessmentBinding, CidarenCryptoContext,
     CidarenStudyTaskDocument, CidarenWordEvidence, decode_response_data,
     parse_study_task_inventory, parse_word_evidence,
+    protocol_observation::{error_with_protocol_observation, json_value_kind},
 };
 
 const STUDY_TASK_INFO_PATH: &str = "StudyTask/Info";
@@ -703,20 +708,26 @@ pub fn parse_study_task_info_response(
         ));
     };
     let payload = decode_success_envelope(document, crypto, "StudyTask/Info")?;
-    let object = payload
-        .as_value()
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren StudyTask/Info data is not an object"))?;
-    let exist_little_task = object
-        .get("exist_little_task")
-        .filter(|value| !value.is_null())
-        .map(|value| required_small_u8(Some(value), "small-task state"))
-        .transpose()?;
-    let words = parse_word_locations(object.get("word_list"), list_id.as_deref())?;
+    let parsed = (|| {
+        let object = payload
+            .as_value()
+            .as_object()
+            .ok_or_else(|| protocol_drift("Cidaren StudyTask/Info data is not an object"))?;
+        let exist_little_task = object
+            .get("exist_little_task")
+            .filter(|value| !value.is_null())
+            .map(|value| required_small_u8(Some(value), "small-task state"))
+            .transpose()?;
+        let words = parse_word_locations(object.get("word_list"), list_id.as_deref())?;
+        Ok((exist_little_task, words))
+    })()
+    .map_err(|error| {
+        answer_evidence_payload_observation(error, "study_task_info", payload.as_value())
+    })?;
     Ok(CidarenWordInventory {
         course_id: course_id.clone(),
-        words,
-        exist_little_task,
+        words: parsed.1,
+        exist_little_task: parsed.0,
     })
 }
 
@@ -745,7 +756,9 @@ pub fn parse_course_page_response(
         serde_json::from_slice(document)
             .map_err(|_| invalid_response("Cidaren Course-page response is not valid JSON"))?,
     );
-    let words = parse_word_locations(Some(payload.as_value()), None)?;
+    let words = parse_word_locations(Some(payload.as_value()), None).map_err(|error| {
+        answer_evidence_payload_observation(error, "course_page", payload.as_value())
+    })?;
     Ok(CidarenWordInventory {
         course_id: course_id.clone(),
         words,
@@ -766,19 +779,24 @@ pub fn parse_word_info_response(
     crypto: Option<&CidarenCryptoContext>,
 ) -> ProviderResult<CidarenWordEvidence> {
     let payload = decode_success_envelope(document, crypto, "StudyWordInfo")?;
-    let object = payload
-        .as_value()
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren word-info data is not an object"))?;
-    if required_component(object.get("course_id"), "Course ID")? != lookup.course_id
-        || required_component(object.get("list_id"), "list ID")? != lookup.list_id
-        || required_text(object.get("word"), "word")? != lookup.word
-    {
-        return Err(remote_changed(
-            "Cidaren word-info response changed its inventory binding",
-        ));
-    }
-    parse_word_evidence(payload.as_value())
+    (|| {
+        let object = payload
+            .as_value()
+            .as_object()
+            .ok_or_else(|| protocol_drift("Cidaren word-info data is not an object"))?;
+        if required_component(object.get("course_id"), "Course ID")? != lookup.course_id
+            || required_component(object.get("list_id"), "list ID")? != lookup.list_id
+            || required_text(object.get("word"), "word")? != lookup.word
+        {
+            return Err(remote_changed(
+                "Cidaren word-info response changed its inventory binding",
+            ));
+        }
+        parse_word_evidence(payload.as_value())
+    })()
+    .map_err(|error| {
+        answer_evidence_payload_observation(error, "study_word_info", payload.as_value())
+    })
 }
 
 /// Parses the donor's HTML-wrapped word-prototype result. Absence of a span is
@@ -798,13 +816,18 @@ pub fn parse_word_prototype_response(document: &[u8]) -> ProviderResult<Option<S
         serde_json::from_slice(document)
             .map_err(|_| invalid_response("Cidaren SearchWord response is not valid JSON"))?,
     );
-    let object = root
-        .as_value()
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren SearchWord response is not an object"))?;
+    let Some(object) = root.as_value().as_object() else {
+        return Err(answer_evidence_envelope_observation(
+            protocol_drift("Cidaren SearchWord response is not an object"),
+            "search_word",
+            root.as_value(),
+        ));
+    };
     if object.get("code").and_then(Value::as_i64) != Some(1) {
-        return Err(invalid_response(
-            "Cidaren SearchWord endpoint returned a non-success code",
+        return Err(answer_evidence_envelope_observation(
+            invalid_response("Cidaren SearchWord endpoint returned a non-success code"),
+            "search_word",
+            root.as_value(),
         ));
     }
     let meaning = object
@@ -815,7 +838,13 @@ pub fn parse_word_prototype_response(document: &[u8]) -> ProviderResult<Option<S
         .and_then(|word_mean| word_mean.get("meaning"))
         .and_then(Value::as_str)
         .filter(|value| value.len() <= 64 * 1_024)
-        .ok_or_else(|| protocol_drift("Cidaren SearchWord response has no bounded meaning"))?;
+        .ok_or_else(|| {
+            answer_evidence_envelope_observation(
+                protocol_drift("Cidaren SearchWord response has no bounded meaning"),
+                "search_word",
+                root.as_value(),
+            )
+        })?;
     let decoded_markup = if meaning.contains("<span>") {
         None
     } else {
@@ -904,29 +933,158 @@ fn decode_success_envelope(
         ZeroizingJsonValue::new(serde_json::from_slice(document).map_err(|_| {
             invalid_response(format!("Cidaren {label} response is not valid JSON"))
         })?);
-    let object = root
-        .as_value()
-        .as_object()
-        .ok_or_else(|| protocol_drift(format!("Cidaren {label} response is not an object")))?;
+    let Some(object) = root.as_value().as_object() else {
+        return Err(answer_evidence_envelope_observation(
+            protocol_drift(format!("Cidaren {label} response is not an object")),
+            label,
+            root.as_value(),
+        ));
+    };
     if object.get("code").and_then(Value::as_i64) != Some(1) {
-        return Err(invalid_response(format!(
-            "Cidaren {label} endpoint returned a non-success code"
-        )));
+        return Err(answer_evidence_envelope_observation(
+            invalid_response(format!(
+                "Cidaren {label} endpoint returned a non-success code"
+            )),
+            label,
+            root.as_value(),
+        ));
     }
     let data = object
         .get("data")
         .filter(|value| !value.is_null())
-        .ok_or_else(|| protocol_drift(format!("Cidaren {label} response has no data")))?;
+        .ok_or_else(|| {
+            answer_evidence_envelope_observation(
+                protocol_drift(format!("Cidaren {label} response has no data")),
+                label,
+                root.as_value(),
+            )
+        })?;
     let jv = match object.get("jv") {
         None | Some(Value::Null) => "0",
         Some(Value::String(value)) if !value.is_empty() && value.len() <= 64 => value,
         _ => {
-            return Err(protocol_drift(format!(
-                "Cidaren {label} response has an invalid jv"
-            )));
+            return Err(answer_evidence_envelope_observation(
+                protocol_drift(format!("Cidaren {label} response has an invalid jv")),
+                label,
+                root.as_value(),
+            ));
         }
     };
     decode_response_data(data, jv, crypto).map(ZeroizingJsonValue::new)
+}
+
+fn answer_evidence_envelope_observation(
+    error: ProviderError,
+    family: &'static str,
+    root: &Value,
+) -> ProviderError {
+    let object = root.as_object();
+    let data = object.and_then(|object| object.get("data"));
+    let word_mean = data
+        .and_then(Value::as_object)
+        .and_then(|data| data.get("word_mean"));
+    attach_answer_evidence_observation(
+        error,
+        json!({
+            "schema": "cidaren.answer-evidence-envelope-observation.v1",
+            "family": family,
+            "root_kind": json_value_kind(Some(root)),
+            "code_kind": json_value_kind(object.and_then(|object| object.get("code"))),
+            "code_value": object
+                .and_then(|object| object.get("code"))
+                .and_then(Value::as_i64),
+            "data_kind": json_value_kind(data),
+            "data_fields": data.and_then(Value::as_object).map(Map::len),
+            "jv_kind": json_value_kind(object.and_then(|object| object.get("jv"))),
+            "word_mean_kind": json_value_kind(word_mean),
+            "meaning_kind": json_value_kind(
+                word_mean
+                    .and_then(Value::as_object)
+                    .and_then(|word_mean| word_mean.get("meaning"))
+            ),
+        }),
+    )
+}
+
+fn answer_evidence_payload_observation(
+    error: ProviderError,
+    family: &'static str,
+    payload: &Value,
+) -> ProviderError {
+    let object = payload.as_object();
+    let word_list = object.and_then(|object| object.get("word_list"));
+    let word_rows = if payload.is_array() {
+        Some(payload)
+    } else {
+        word_list
+    };
+    let means = object.and_then(|object| object.get("means"));
+    let options = object.and_then(|object| object.get("options"));
+    attach_answer_evidence_observation(
+        error,
+        json!({
+            "schema": "cidaren.answer-evidence-payload-observation.v1",
+            "family": family,
+            "root_kind": json_value_kind(Some(payload)),
+            "object_fields": object.map(Map::len),
+            "exist_little_task_kind": json_value_kind(
+                object.and_then(|object| object.get("exist_little_task"))
+            ),
+            "word_list_kind": json_value_kind(word_list),
+            "word_count": word_rows.and_then(Value::as_array).map(Vec::len),
+            "word_row_kinds": array_value_kind_counts(word_rows),
+            "word_field_kinds": array_field_kind_counts(word_rows, "word"),
+            "list_id_field_kinds": array_field_kind_counts(word_rows, "list_id"),
+            "course_id_kind": json_value_kind(
+                object.and_then(|object| object.get("course_id"))
+            ),
+            "list_id_kind": json_value_kind(object.and_then(|object| object.get("list_id"))),
+            "word_kind": json_value_kind(object.and_then(|object| object.get("word"))),
+            "means_kind": json_value_kind(means),
+            "means_count": means.and_then(Value::as_array).map(Vec::len),
+            "options_kind": json_value_kind(options),
+            "options_count": options.and_then(Value::as_array).map(Vec::len),
+        }),
+    )
+}
+
+fn attach_answer_evidence_observation(error: ProviderError, shape: Value) -> ProviderError {
+    if error.protocol_observation.is_some()
+        || !matches!(
+            error.kind,
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
+        )
+    {
+        return error;
+    }
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::AnswerResolve,
+        ProtocolObservationKind::UnknownResultShape,
+        shape,
+    )
+}
+
+fn array_value_kind_counts(value: Option<&Value>) -> Option<BTreeMap<&'static str, usize>> {
+    let values = value.and_then(Value::as_array)?;
+    let mut counts = BTreeMap::new();
+    for value in values {
+        *counts.entry(json_value_kind(Some(value))).or_default() += 1;
+    }
+    Some(counts)
+}
+
+fn array_field_kind_counts(
+    value: Option<&Value>,
+    field: &'static str,
+) -> Option<BTreeMap<&'static str, usize>> {
+    let values = value.and_then(Value::as_array)?;
+    let mut counts = BTreeMap::new();
+    for value in values {
+        let field_value = value.as_object().and_then(|object| object.get(field));
+        *counts.entry(json_value_kind(field_value)).or_default() += 1;
+    }
+    Some(counts)
 }
 
 struct ZeroizingJsonValue(Value);
@@ -1095,7 +1253,9 @@ fn remote_changed(message: impl Into<String>) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::{AssessmentClass, RemoteState, SourceType};
+    use asterism_domain::{
+        AssessmentClass, ProtocolObservationKind, ProtocolSurface, RemoteState, SourceType,
+    };
     use asterism_provider_api::RemoteTask;
     use serde_json::json;
 
@@ -1212,12 +1372,166 @@ mod tests {
             parse_study_task_info_response(STUDY_INFO.as_bytes(), &binding, None).unwrap();
         let lookup = inventory.lookup("alpha").unwrap();
         let changed = WORD_INFO.replace("course-a_02", "course-a_03");
+        let error = parse_word_info_response(changed.as_bytes(), &lookup, None).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+        assert!(error.protocol_observation.is_none());
+    }
+
+    #[test]
+    fn inventory_shape_drift_excludes_words_and_bindings() {
+        let units = study_document();
+        let task_detail = detail("class-task:2002", "test", -1, "Synthetic List 02");
+        let binding = CidarenAnswerEvidenceBinding::from_fresh_detail(
+            "class-task:2002",
+            &task_detail,
+            &units,
+        )
+        .unwrap();
+
+        let malformed_envelope = json!({
+            "code": "must-not-cross-code",
+            "data": "must-not-cross-data",
+            "jv": "must-not-cross-jv"
+        });
+        let error = parse_study_task_info_response(
+            &serde_json::to_vec(&malformed_envelope).unwrap(),
+            &binding,
+            None,
+        )
+        .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["family"], "StudyTask/Info");
+        assert_eq!(observation.shape_sanitized["code_kind"], "string");
+        assert_eq!(observation.shape_sanitized["code_value"], Value::Null);
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
+
+        let malformed_inventory = json!({
+            "code": 1,
+            "data": {
+                "exist_little_task": "must-not-cross-state",
+                "word_list": [
+                    {"word": "must-not-cross-word", "list_id": false},
+                    "must-not-cross-row"
+                ]
+            },
+            "jv": "0"
+        });
+        let error = parse_study_task_info_response(
+            &serde_json::to_vec(&malformed_inventory).unwrap(),
+            &binding,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::AnswerResolve);
         assert_eq!(
-            parse_word_info_response(changed.as_bytes(), &lookup, None)
-                .unwrap_err()
-                .kind,
-            ProviderErrorKind::RemoteChanged
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
         );
+        assert_eq!(observation.shape_sanitized["family"], "study_task_info");
+        assert_eq!(observation.shape_sanitized["word_count"], 2);
+        assert_eq!(
+            observation.shape_sanitized["word_row_kinds"],
+            json!({"object": 1, "string": 1})
+        );
+        assert_eq!(
+            observation.shape_sanitized["list_id_field_kinds"],
+            json!({"boolean": 1, "missing": 1})
+        );
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
+
+        let self_built = detail("class-task:2002", "test", -1, "Self Built Test");
+        let course_binding =
+            CidarenAnswerEvidenceBinding::from_fresh_detail("class-task:2002", &self_built, &units)
+                .unwrap();
+        let malformed_course_page = json!([
+            {"word": "must-not-cross-course-word", "list_id": {"raw": "must-not-cross-id"}}
+        ]);
+        let error = parse_course_page_response(
+            &serde_json::to_vec(&malformed_course_page).unwrap(),
+            &course_binding,
+        )
+        .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["family"], "course_page");
+        assert_eq!(observation.shape_sanitized["word_count"], 1);
+        assert_eq!(
+            observation.shape_sanitized["list_id_field_kinds"],
+            json!({"object": 1})
+        );
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
+    }
+
+    #[test]
+    fn word_evidence_shape_drift_excludes_meanings_and_bindings() {
+        let units = study_document();
+        let task_detail = detail("class-task:2002", "test", -1, "Synthetic List 02");
+        let binding = CidarenAnswerEvidenceBinding::from_fresh_detail(
+            "class-task:2002",
+            &task_detail,
+            &units,
+        )
+        .unwrap();
+        let inventory =
+            parse_study_task_info_response(STUDY_INFO.as_bytes(), &binding, None).unwrap();
+        let lookup = inventory.lookup("alpha").unwrap();
+        let malformed_word_info = json!({
+            "code": 1,
+            "data": {
+                "course_id": "course-a",
+                "list_id": "course-a_02",
+                "word": "alpha",
+                "means": "must-not-cross-meaning",
+                "options": null
+            },
+            "jv": "0"
+        });
+        let error = parse_word_info_response(
+            &serde_json::to_vec(&malformed_word_info).unwrap(),
+            &lookup,
+            None,
+        )
+        .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["family"], "study_word_info");
+        assert_eq!(observation.shape_sanitized["means_kind"], "string");
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("alpha"));
+        assert!(!sanitized.contains("course-a"));
+        assert!(!sanitized.contains("must-not-cross"));
+
+        let unknown_jv = json!({
+            "code": 1,
+            "data": {},
+            "jv": "must-not-cross-version"
+        });
+        let error =
+            parse_word_info_response(&serde_json::to_vec(&unknown_jv).unwrap(), &lookup, None)
+                .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::EndpointVersionDrift
+        );
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross-version"));
+
+        let malformed_search_word = json!({
+            "code": 1,
+            "data": {"word_mean": {"meaning": ["must-not-cross-prototype"]}}
+        });
+        let error =
+            parse_word_prototype_response(&serde_json::to_vec(&malformed_search_word).unwrap())
+                .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.shape_sanitized["family"], "search_word");
+        assert_eq!(observation.shape_sanitized["meaning_kind"], "array");
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
     }
 
     #[test]

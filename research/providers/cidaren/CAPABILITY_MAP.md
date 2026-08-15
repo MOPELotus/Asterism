@@ -248,6 +248,12 @@ The current checkpoint (not a completion boundary):
     profile field count are retained; profile keys/values, student identity,
     Course ID and credential material remain excluded. Imported, Capture and
     native OAuth sessions continue through the same fresh account validation.
+49. observes malformed answer-evidence envelopes and decoded inventory/word
+    shapes across `StudyTask/Info`, public Course-page, `StudyWordInfo` and
+    `SearchWord`. Only the fixed route family, JSON kinds, optional numeric
+    code, object/array counts and known word/list/evidence field-kind counts are
+    retained. Word, meaning, example, Course/list identity and raw response
+    values remain excluded; binding changes stay unobserved `RemoteChanged`.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

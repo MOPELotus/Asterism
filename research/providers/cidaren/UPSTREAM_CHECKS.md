@@ -743,6 +743,22 @@ student name/code, school, class and Course ID values; none enters the shape.
 ImportedToken, captured token/Composite and native OAuth Composite validation
 all continue through this same fresh account readback before use or commit.
 
+### 2026-08-15 answer-evidence observation follow-up
+
+The donor refs, public/historical tags and releases and public issue update head
+remained unchanged after the account-validation unit. No new evidence route,
+answer family or direct mode-73 encoding entered scope.
+
+The four implemented answer-evidence reads now attach a bounded
+`AnswerResolve / UnknownResultShape` observation when a valid JSON envelope or
+decoded inventory/word shape fails closed. The shape retains only the fixed
+route family, root/code/data/version value kinds, optional numeric code,
+object/array counts and known word/list/evidence field-kind counts. Word,
+meaning, example, Course ID, list ID and raw response values remain owned by the
+zeroizing document and do not cross the observation boundary. Fresh binding
+changes remain `RemoteChanged` with no protocol observation, and existing
+unknown-`jv` observations are preserved rather than overwritten.
+
 ## Check procedure
 
 For the next checkpoint:
