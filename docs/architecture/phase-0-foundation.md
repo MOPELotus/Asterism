@@ -4779,3 +4779,20 @@ transitions the AuthSession, then records the shape. Observation failure cannot
 reopen or replay the callback. Coverage proves typed challenge, credential and
 OAuth exchange drift is retained only after those durable transitions, with a
 single OAuth Provider call and zero secret writes.
+
+## Two-hundred-and-sixtieth Phase 0 slice
+
+BrowserBridge credential-result validation now records Provider-supplied
+shapes from both terminal-result interpretation and fresh validation of the
+derived credential. Occurrences bind the BrowserBridge session, exact exchange
+sequence, validation stage and correlation; they carry no Task Execution
+reference. The daemon injects the shared SQLite repository into every
+Provider-scoped credential processor.
+
+The durable BrowserBridge result and command are recovered and rebound before
+either Provider call. A retained shape cannot complete the exchange, produce a
+validated credential bundle or reach the atomic credential commit service.
+Processor retry and dead-letter handling remains unchanged and never replays a
+browser command. Coverage proves both BrowserBridge/UnknownResultShape and
+Authentication/FieldDrift are stored while validation returns no committable
+output.

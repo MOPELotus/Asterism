@@ -721,7 +721,12 @@ async fn run_browser_bridge_credential_processor(
                     claim_ttl,
                     retry_policy,
                 },
-            );
+            )
+            .map(|processor| {
+                processor.with_protocol_observations(Arc::new(
+                    SqliteProtocolObservationRepository::new(database.clone()),
+                ))
+            });
             let Ok(processor) = processor else {
                 tracing::error!(
                     provider = %provider_id,

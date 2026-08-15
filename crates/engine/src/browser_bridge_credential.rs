@@ -15,23 +15,28 @@ use asterism_secrets::{
 use asterism_storage::{
     BrowserBridgeCommandArtifactRepository, BrowserBridgeCredentialCommitOutcome,
     BrowserBridgeCredentialRepository, BrowserBridgeResultAttemptFinishRequest,
-    BrowserBridgeSessionRepository, PendingBrowserBridgeResult, ProviderAccountRepository,
-    ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository,
+    BrowserBridgeSessionRepository, PendingBrowserBridgeResult, ProtocolObservationRepository,
+    ProviderAccountRepository, ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository,
 };
 
 use crate::{
     BrowserBridgeCredentialCommitRequest, BrowserBridgeCredentialCommitService,
     BrowserBridgeRuntimeRecoveryRequest, BrowserBridgeRuntimeRecoveryService,
-    BrowserBridgeRuntimeRecoverySnapshot, CredentialProvisionError, credential::validate_candidate,
+    BrowserBridgeRuntimeRecoverySnapshot, CredentialProvisionError,
+    credential::validate_candidate,
+    protocol_observation::{
+        ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+    },
 };
 
 /// Core-owned validation of one recovered terminal `BrowserBridge` credential
 /// result before the existing atomic commit boundary.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BrowserBridgeCredentialValidationService<Q, A> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<Q, A> BrowserBridgeCredentialValidationService<Q, A> {
@@ -40,7 +45,32 @@ impl<Q, A> BrowserBridgeCredentialValidationService<Q, A> {
             registry,
             tasks,
             accounts,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<Q, A> std::fmt::Debug for BrowserBridgeCredentialValidationService<Q, A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeCredentialValidationService")
+            .field("registry", &self.registry)
+            .field("tasks", &"configured")
+            .field("accounts", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -122,6 +152,8 @@ where
         let recovered = recovery
             .latest
             .ok_or(BrowserBridgeCredentialValidationError::ResultMissing)?;
+        let session_id = recovery.session.id;
+        let sequence = recovered.command.exchange.sequence;
         if recovered.command.runtime_state.is_some() {
             return Err(BrowserBridgeCredentialValidationError::UnexpectedRuntimeState);
         }
@@ -152,15 +184,31 @@ where
                 },
                 request,
             )
-            .await?;
+            .await;
+        let accepted = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                self.record_protocol_observation(
+                    &account.provider_id,
+                    session_id,
+                    sequence,
+                    "complete-result",
+                    &access.correlation_id,
+                    &error,
+                )
+                .await?;
+                return Err(BrowserBridgeCredentialValidationError::Provider(error));
+            }
+        };
         let (replacement, completed_exchange) = accepted.into_parts();
         require_exact_completion(
             &recovered.command.exchange,
             &completed_exchange,
             &result.metadata,
         )?;
+        let provider_id = account.provider_id;
         let bundle = CredentialBundle {
-            provider_id: account.provider_id,
+            provider_id: provider_id.clone(),
             tenant: account.tenant,
             auth_method: AuthMethod::AssistedSession,
             acquired_via: CredentialAcquisition::CaptureTool,
@@ -170,7 +218,7 @@ where
             fields: replacement.fields,
             user_id_hint: None,
         };
-        let (bundle, status) = validate_candidate(
+        let validation = validate_candidate(
             self.registry.as_ref(),
             &self.accounts,
             owner_user_id,
@@ -179,7 +227,25 @@ where
             None,
             &access,
         )
-        .await?;
+        .await;
+        let (bundle, status) = match validation {
+            Ok(validated) => validated,
+            Err(CredentialProvisionError::Provider(error)) => {
+                self.record_protocol_observation(
+                    &provider_id,
+                    session_id,
+                    sequence,
+                    "validate-credential",
+                    &access.correlation_id,
+                    &error,
+                )
+                .await?;
+                return Err(BrowserBridgeCredentialValidationError::Credential(
+                    CredentialProvisionError::Provider(error),
+                ));
+            }
+            Err(error) => return Err(BrowserBridgeCredentialValidationError::Credential(error)),
+        };
         Ok(ValidatedBrowserBridgeCredential {
             owner_user_id,
             provider_account_id: recovery.session.provider_account_id,
@@ -187,6 +253,36 @@ where
             completed_exchange,
             bundle,
             status,
+        })
+    }
+
+    async fn record_protocol_observation(
+        &self,
+        provider_id: &ProviderId,
+        session_id: asterism_domain::BrowserBridgeSessionId,
+        sequence: u64,
+        stage: &str,
+        correlation_id: &str,
+        error: &ProviderError,
+    ) -> Result<(), BrowserBridgeCredentialValidationError> {
+        let occurrence_scope =
+            format!("browser-bridge-credential:{session_id}:{sequence}:{stage}:{correlation_id}");
+        record_provider_protocol_observation(
+            self.protocol_observations.as_deref(),
+            provider_id,
+            None,
+            &occurrence_scope,
+            error,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|error| match error {
+            ProviderProtocolObservationRecordError::Invalid => {
+                BrowserBridgeCredentialValidationError::InvalidProtocolObservation
+            }
+            ProviderProtocolObservationRecordError::Storage(error) => {
+                BrowserBridgeCredentialValidationError::Storage(error)
+            }
         })
     }
 }
@@ -232,7 +328,7 @@ pub struct ValidatedBrowserBridgeCredential {
 
 /// Core-owned durable processor for one Provider's credential-terminal
 /// `BrowserBridge` result inbox.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
     provider_id: ProviderId,
     registry: Arc<ProviderRegistry>,
@@ -242,6 +338,7 @@ pub struct BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
     accounts: A,
     credentials: R,
     config: BrowserBridgeCredentialProcessorConfig,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<S, C, Q, A, R> BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
@@ -275,7 +372,31 @@ impl<S, C, Q, A, R> BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
             accounts,
             credentials,
             config,
+            protocol_observations: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<S, C, Q, A, R> std::fmt::Debug for BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeCredentialProcessor")
+            .field("provider_id", &self.provider_id)
+            .field("config", &self.config)
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish_non_exhaustive()
     }
 }
 
@@ -365,17 +486,21 @@ where
                     .await;
                 continue;
             };
-            let validated = BrowserBridgeCredentialValidationService::new(
+            let mut validation = BrowserBridgeCredentialValidationService::new(
                 self.registry.clone(),
                 self.tasks.clone(),
                 self.accounts.clone(),
-            )
-            .validate(ValidateBrowserBridgeCredentialCommand {
-                owner_user_id: candidate.owner_user_id,
-                recovery,
-                access: access.clone(),
-            })
-            .await;
+            );
+            if let Some(observations) = &self.protocol_observations {
+                validation = validation.with_protocol_observations(observations.clone());
+            }
+            let validated = validation
+                .validate(ValidateBrowserBridgeCredentialCommand {
+                    owner_user_id: candidate.owner_user_id,
+                    recovery,
+                    access: access.clone(),
+                })
+                .await;
             let Ok(validated) = validated else {
                 self.record_failure(&candidate, now, "provider_validation", false, &mut report)
                     .await;
@@ -525,6 +650,8 @@ pub enum BrowserBridgeCredentialValidationError {
     UnexpectedRuntimeState,
     #[error("Provider completion does not match the recovered result")]
     ProviderCompletionMismatch,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error(transparent)]
@@ -542,8 +669,8 @@ mod tests {
     use asterism_domain::{
         AssessmentClass, AuditActor, AuthState, BrowserBridgeResultArtifactMetadata,
         BrowserBridgeRuntimeBinding, BrowserBridgeSession, BrowserBridgeSessionCreate,
-        OrchestrationState, ProviderAccount, ProviderAccountId, RemoteState, SourceType, Task,
-        TaskId, Timestamp,
+        OrchestrationState, ProtocolObservationKind, ProtocolSurface, ProviderAccount,
+        ProviderAccountId, RemoteState, SourceType, Task, TaskId, Timestamp,
     };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, BrowserBridgeCapability,
@@ -552,7 +679,10 @@ mod tests {
         ProviderRuntimeSettingsSchema, VerificationLevel,
     };
     use asterism_secrets::{CredentialField, SecretActor, SecretPurpose, SecretValue};
-    use asterism_storage::{ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, TaskPage};
+    use asterism_storage::{
+        Database, ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
+        SqliteProtocolObservationRepository, TaskPage,
+    };
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
     use sha2::Digest;
@@ -594,11 +724,15 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FakeProvider(ProviderMetadata);
+    struct FakeProvider {
+        metadata: ProviderMetadata,
+        credential_result_drift: bool,
+        credential_validation_drift: bool,
+    }
 
     impl ProviderIdentity for FakeProvider {
         fn metadata(&self) -> &ProviderMetadata {
-            &self.0
+            &self.metadata
         }
     }
 
@@ -618,6 +752,21 @@ mod tests {
             request: BrowserBridgeCredentialResultRequest<'_>,
         ) -> ProviderResult<BrowserBridgeCredentialResult> {
             request.validate()?;
+            if self.credential_result_drift {
+                return Err(ProviderError::new(
+                    asterism_provider_api::ProviderErrorKind::ProtocolDrift,
+                    "BrowserBridge credential result shape changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::BrowserBridge,
+                    ProtocolObservationKind::UnknownResultShape,
+                    serde_json::json!({
+                        "document": "browser_bridge_credential_result",
+                        "result": "object"
+                    }),
+                )
+                .unwrap());
+            }
             let mut exchange = request.issued_exchange.clone();
             exchange
                 .complete(
@@ -654,6 +803,21 @@ mod tests {
             _context: &asterism_provider_api::ProviderAuthContext,
             credential: &CredentialBundle,
         ) -> ProviderResult<asterism_provider_api::CredentialValidation> {
+            if self.credential_validation_drift {
+                return Err(ProviderError::new(
+                    asterism_provider_api::ProviderErrorKind::ProtocolDrift,
+                    "BrowserBridge derived credential status changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::Authentication,
+                    ProtocolObservationKind::FieldDrift,
+                    serde_json::json!({
+                        "document": "session_status",
+                        "missing": "valid"
+                    }),
+                )
+                .unwrap());
+            }
             Ok(CredentialValidation::accepted(SessionStatus {
                 valid: true,
                 kind: credential.session_kind,
@@ -768,7 +932,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovered_result_is_freshly_validated_without_persistence() {
-        let (service, command) = fixture("https://provider.example");
+        let (_, service, command) = fixture("https://provider.example", false, false).await;
         let validated = service.validate(command).await.unwrap();
         assert_eq!(
             validated.completed_exchange.state,
@@ -783,23 +947,73 @@ mod tests {
 
     #[tokio::test]
     async fn foreign_runtime_origin_fails_before_provider_validation() {
-        let (service, command) = fixture("https://foreign.example");
+        let (_, service, command) = fixture("https://foreign.example", false, false).await;
         assert!(matches!(
             service.validate(command).await,
             Err(BrowserBridgeCredentialValidationError::InvalidRecovery)
         ));
     }
 
+    #[tokio::test]
+    async fn credential_result_drift_is_observed_without_validated_output() {
+        let (database, service, command) = fixture("https://provider.example", true, false).await;
+        let error = service.validate(command).await.unwrap_err();
+        assert!(matches!(
+            error,
+            BrowserBridgeCredentialValidationError::Provider(error)
+                if error.kind == asterism_provider_api::ProviderErrorKind::ProtocolDrift
+        ));
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "browser_bridge".to_owned(),
+                "unknown_result_shape".to_owned(),
+                None,
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn derived_credential_drift_is_observed_without_validated_output() {
+        let (database, service, command) = fixture("https://provider.example", false, true).await;
+        let error = service.validate(command).await.unwrap_err();
+        assert!(matches!(
+            error,
+            BrowserBridgeCredentialValidationError::Credential(
+                CredentialProvisionError::Provider(error)
+            ) if error.kind == asterism_provider_api::ProviderErrorKind::ProtocolDrift
+        ));
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            ("authentication".to_owned(), "field_drift".to_owned(), None,)
+        );
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the integration fixture constructs every durable BrowserBridge, Task, account, artifact and Provider binding explicitly"
     )]
-    fn fixture(
+    async fn fixture(
         observed_origin: &str,
+        credential_result_drift: bool,
+        credential_validation_drift: bool,
     ) -> (
+        Database,
         BrowserBridgeCredentialValidationService<FakeTasks, FakeAccounts>,
         ValidateBrowserBridgeCredentialCommand,
     ) {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
         let now = Utc::now();
         let owner = UserId::new();
         let provider_id = ProviderId::new("provider-alpha").unwrap();
@@ -848,7 +1062,11 @@ mod tests {
             auth_methods: BTreeSet::from([AuthMethod::AssistedSession]),
             session_kinds: BTreeSet::from([asterism_domain::SessionKind::Composite]),
         };
-        let provider = Arc::new(FakeProvider(metadata.clone()));
+        let provider = Arc::new(FakeProvider {
+            metadata: metadata.clone(),
+            credential_result_drift,
+            credential_validation_drift,
+        });
         let mut entry = ProviderEntry::metadata_only(metadata);
         entry.runtime_settings = ProviderRuntimeSettingsSchema::default();
         entry.authentication = Some(provider.clone());
@@ -925,6 +1143,7 @@ mod tests {
             reason: "validate BrowserBridge result".to_owned(),
         };
         (
+            database.clone(),
             BrowserBridgeCredentialValidationService::new(
                 Arc::new(registry),
                 FakeTasks {
@@ -932,7 +1151,10 @@ mod tests {
                     task: task.clone(),
                 },
                 FakeAccounts(account),
-            ),
+            )
+            .with_protocol_observations(Arc::new(
+                SqliteProtocolObservationRepository::new(database),
+            )),
             ValidateBrowserBridgeCredentialCommand {
                 owner_user_id: owner,
                 recovery,

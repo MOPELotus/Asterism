@@ -326,3 +326,8 @@ AuthSession observation additionally preserves the session state machine and
 one-shot OAuth receipt ordering. Recording a shape happens only after the
 corresponding failure state is durable; it cannot reopen a callback, retry an
 exchange, commit a replacement credential or authenticate the account.
+Recovered BrowserBridge credential results remain subject to the same rule.
+Observation may diagnose terminal-result parsing or fresh credential-status
+drift, but cannot complete the recovered exchange, commit its derived secret or
+turn the BrowserBridge receipt into authentication, answer or completion
+authority.
