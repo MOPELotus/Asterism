@@ -214,8 +214,10 @@ optional Core observation, rejects operation/ordinal/plan drift, and reuses the
 same fresh-CMI recovery proof. A recovery-only coordinator validates those
 records before discovery, fresh-rebinds the prepared child before the final CMI
 read, and selects the child profile's exact current/legacy endpoint. Core still
-loads same-attempt records and stores the returned verification. Neither path
-resumes or replays mutation.
+loads same-attempt records and stores the returned verification. Its durable
+entry jointly restores encoded parent authority, complete batch snapshot and
+child artifact before the same record/fresh-read path. Neither path resumes or
+replays mutation.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. Both the

@@ -148,6 +148,9 @@ or mutation claim.
 The shared verification-record adapter checkpoint found the same heads and tag.
 It only normalizes Asterism's accepted-final-save proof handoff between
 immediate and recovery paths and adds no donor protocol behavior.
+The durable recovery-entry checkpoint repeated those queries with no delta.
+Joint parent/batch/child restoration before existing read-only verification is
+an Asterism persistence composition and adds no donor request or result claim.
 
 ## Source selection
 

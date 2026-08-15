@@ -3350,10 +3350,27 @@ mod tests {
 
         assert_eq!(verification.final_save_ordinal(), 4);
         assert_eq!(verification.time_preservation_verified(), Some(true));
-        assert_eq!(detail_calls.lock().unwrap().as_slice(), &["sco:1001:301"]);
+        let durable_verification = recovery
+            .verify_durable_artifacts(
+                &atomic_context(),
+                &authority.encode().unwrap(),
+                &prepared.batch_plan().encode_snapshot().unwrap(),
+                &prepared.provider_plan_artifact().unwrap(),
+                &sequence_plan,
+                &issues,
+                &receipts,
+                Some(&observation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(durable_verification, verification);
+        assert_eq!(
+            detail_calls.lock().unwrap().as_slice(),
+            &["sco:1001:301", "sco:1001:301"]
+        );
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
-            &["sco:1001:301"]
+            &["sco:1001:301", "sco:1001:301"]
         );
     }
 
@@ -3428,6 +3445,24 @@ mod tests {
                 .verify_prepared(
                     &atomic_context(),
                     &prepared,
+                    &sequence_plan,
+                    &issues,
+                    &receipts,
+                    Some(&observation),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(detail_calls.lock().unwrap().len(), 1);
+        assert!(transport.calls.lock().unwrap().is_empty());
+
+        assert!(
+            recovery
+                .verify_durable_artifacts(
+                    &atomic_context(),
+                    b"{}",
+                    &prepared.batch_plan().encode_snapshot().unwrap(),
+                    &prepared.provider_plan_artifact().unwrap(),
                     &sequence_plan,
                     &issues,
                     &receipts,

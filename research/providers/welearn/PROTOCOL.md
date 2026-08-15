@@ -632,6 +632,11 @@ transport derives current Fanyuchang's full/simple-Referer profile or Auto's
 legacy minimal/task-Referer profile from the child instead of using one generic
 endpoint. It returns the sanitized verification value only; Core still owns
 same-attempt record loading, recovery dispatch and final verification storage.
+Its `verify_durable_artifacts` entry accepts the encoded parent authority,
+complete batch snapshot and exact child artifact alongside the sequence records,
+jointly restores all Provider-private values first, and then enters the same
+record-first/fresh-rebind path. Malformed or cross-attempt artifacts therefore
+cannot reach Task discovery or CMI I/O.
 
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 The child-artifact-bound conditional sequence freezes the only legal operation

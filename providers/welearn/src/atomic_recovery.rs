@@ -3,7 +3,8 @@ use std::{fmt, sync::Arc};
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
     ExecutionMutationSequencePlan, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderIdentity, ProviderMetadata, ProviderResult, TaskDetailCapability,
+    ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderResult,
+    TaskDetailCapability,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -115,6 +116,44 @@ impl WellearnAtomicDurationCompletionRecovery {
             pre_final.as_ref(),
             &fresh_final,
         )
+    }
+
+    /// Restores all Provider-private durable artifacts together, then enters
+    /// the same record-first, fresh-rebind, read-only verification path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for any parent, batch, child, sequence, receipt,
+    /// observation, fresh-detail or final-CMI inconsistency.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the boundary keeps each independently stored recovery value explicit"
+    )]
+    pub async fn verify_durable_artifacts(
+        &self,
+        context: &ProviderContext,
+        encoded_parent_authority: &[u8],
+        encoded_batch_snapshot: &[u8],
+        child_artifact: &ProviderExecutionPlanArtifact,
+        sequence_plan: &ExecutionMutationSequencePlan,
+        issues: &[ExecutionMutationIssue],
+        receipts: &[ExecutionMutationReceipt],
+        observation: Option<&ExecutionMutationSequenceObservation>,
+    ) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+        let prepared = WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+            encoded_parent_authority,
+            encoded_batch_snapshot,
+            child_artifact,
+        )?;
+        self.verify_prepared(
+            context,
+            &prepared,
+            sequence_plan,
+            issues,
+            receipts,
+            observation,
+        )
+        .await
     }
 }
 

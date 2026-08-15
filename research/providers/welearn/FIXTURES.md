@@ -393,6 +393,8 @@ only structural field names, response codes and bounded placeholder shapes.
   Fanyuchang attempt performs exactly one detail rebind followed by one
   read-only final fetch. Transport-profile tests keep current Fanyuchang's
   full/simple-Referer read separate from Auto's legacy minimal/task-Referer read.
+  The durable entry produces the identical proof from encoded parent/batch/child
+  values, while malformed parent authority stops before either read boundary.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility
