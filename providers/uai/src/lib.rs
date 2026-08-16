@@ -42,6 +42,7 @@ mod task_inventory;
 mod task_type;
 mod upload;
 mod upload_final_plan;
+mod upload_grant_state;
 mod upload_object_state;
 mod upload_sequence;
 mod user_identity;
@@ -181,10 +182,14 @@ pub use upload::{
     UaiUploadObjectResult, UaiUploadPreparation, UaiUploadSubmission, UaiUploadSubmissionRequest,
     UaiUploadTransport, UaiUploadVerification, UaiUploadedArtifact, build_upload_grant_request,
     build_upload_multipart, build_upload_submission_request, parse_upload_grant,
-    parse_upload_object_result, parse_upload_result, parse_upload_verification,
+    parse_upload_grant_bound, parse_upload_object_result, parse_upload_result,
+    parse_upload_verification,
 };
 pub use upload_final_plan::{
     EncodedUaiUploadFinalPlanState, UAI_UPLOAD_FINAL_PLAN_STATE_TYPE, UaiUploadFinalPlanState,
+};
+pub use upload_grant_state::{
+    EncodedUaiUploadGrantState, UAI_UPLOAD_GRANT_STATE_TYPE, UaiUploadGrantState,
 };
 pub use upload_object_state::{
     EncodedUaiUploadObjectState, UAI_UPLOAD_OBJECT_STATE_TYPE, UaiUploadObjectState,

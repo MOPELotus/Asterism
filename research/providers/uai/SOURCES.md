@@ -499,3 +499,12 @@ the primary API documents optional normal `hash`/ETag evidence. Asterism now
 preserves a valid bounded present hash and exact response digest in typed
 Provider state, keeps key-only customized responses compatible and continues
 to treat the response as a mutation receipt rather than independent readback.
+
+The grant-state checkpoint later on 2026-08-16 queried all four default refs
+and complete tag refs again. Apache remained `bef0d29155ce`, MIT remained
+`590b4a58fe17`, AutoPlayer remained `cc6bdc86a13e` and Rust remained
+`525c7ecfc2b`; their tag sets were unchanged. No donor added a token TTL,
+independent grant verification or cross-request grant-recovery protocol. The
+new bounded `uai.upload.grant.v1` codec therefore preserves the already audited
+token/key prerequisite together with exact request/response and Task/artifact
+lineage; it adds no donor wire behavior or Task mutation evidence.

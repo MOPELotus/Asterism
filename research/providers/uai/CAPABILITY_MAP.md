@@ -39,6 +39,17 @@ copied forward. This closes Provider output recovery but not Core's atomic
 receipt-plus-encrypted-state persistence, and the response remains a mutation
 receipt rather than verification.
 
+The preceding CMS stage now has the same exact Provider recovery boundary.
+Production parsing binds a code-200 grant to the materialized request's intent
+fingerprint and the complete response digest. Bounded zeroizing
+`uai.upload.grant.v1` bytes retain token/key plus the complete
+Task/artifact/intent hierarchy and decode only against independent
+state/request/response digests. Foreign requests, changed responses and legacy
+unbound grants fail closed; a recovered grant authorizes only its exact
+artifact and remains prerequisite credential state rather than mutation or
+verification evidence. Core still must persist this encrypted state under the
+owner/account/Task/Attempt chain before the Qiniu issue.
+
 ## Current implementation checkpoint
 
 The current crate advertises Authentication, CourseInventory, TaskInventory,

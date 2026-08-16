@@ -1265,7 +1265,19 @@ evidence.
 Core's receipt-conditional atomic sequence now covers the bounded stage-advance
 rules for staged upload. Each mutating phase can advance only from its definite
 parsed receipt, while its exact request digest is persisted at issue time. The
-Qiniu POST response repeating the exact key remains a mutation receipt; no
+production CMS parser additionally binds a code-200 grant to the exact
+already-materialized account/Course request and complete response digest. The
+bounded zeroizing `uai.upload.grant.v1` codec retains the exact token, object
+key, intent/artifact lineage and Task/Course/Unit/Group/module binding, and
+decodes only against the independently retained state, request and response
+digests. A request prepared for another otherwise-valid intent, changed
+response, changed state or legacy grant without transport lineage fails before
+the token is exposed. A recovered grant is reused for only its exact artifact;
+it is never silently replaced and Asterism does not guess token TTL. Grant
+acquisition is prerequisite credential state, not a Task mutation receipt or
+verification.
+
+The Qiniu POST response repeating the exact key remains a mutation receipt; no
 audited donor route performs a separate object-store readback, and Asterism does
 not relabel that response as verification. UAI can now reconstruct the exact
 Provider output from encrypted `uai.upload.object.v1`, but Core still has no

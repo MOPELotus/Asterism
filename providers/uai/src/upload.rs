@@ -82,6 +82,8 @@ pub struct UaiUploadGrant {
     unit_id: String,
     group_id: String,
     upload_position: u32,
+    grant_request_digest: [u8; 32],
+    grant_response_digest: [u8; 32],
 }
 
 impl UaiUploadGrant {
@@ -93,6 +95,46 @@ impl UaiUploadGrant {
         &self.file_key
     }
 
+    pub(crate) fn intent_fingerprint(&self) -> &str {
+        &self.intent_fingerprint
+    }
+
+    pub(crate) fn artifact_digest(&self) -> &str {
+        &self.artifact_digest
+    }
+
+    pub(crate) fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub(crate) fn task_fingerprint(&self) -> &str {
+        &self.task_fingerprint
+    }
+
+    pub(crate) fn course_resource_id(&self) -> &str {
+        &self.course_resource_id
+    }
+
+    pub(crate) fn unit_id(&self) -> &str {
+        &self.unit_id
+    }
+
+    pub(crate) fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    pub(crate) const fn upload_position(&self) -> u32 {
+        self.upload_position
+    }
+
+    pub const fn grant_request_digest(&self) -> [u8; 32] {
+        self.grant_request_digest
+    }
+
+    pub const fn grant_response_digest(&self) -> [u8; 32] {
+        self.grant_response_digest
+    }
+
     fn validate_for_artifact(&self, artifact: &UaiUploadArtifact) -> ProviderResult<()> {
         if self.artifact_digest == artifact.digest() {
             Ok(())
@@ -102,6 +144,72 @@ impl UaiUploadGrant {
                 "UAI upload grant is foreign to the selected artifact",
             ))
         }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the encrypted grant state restores every independent upload binding"
+    )]
+    pub(crate) fn restore_grant_state(
+        token: Zeroizing<String>,
+        mut file_key: String,
+        mut intent_fingerprint: String,
+        mut artifact_digest: String,
+        mut remote_task_id: String,
+        mut task_fingerprint: String,
+        mut course_resource_id: String,
+        mut unit_id: String,
+        mut group_id: String,
+        upload_position: u32,
+        grant_request_digest: [u8; 32],
+        grant_response_digest: [u8; 32],
+    ) -> ProviderResult<Self> {
+        let expected_remote_task_id = format!("group:{course_resource_id}:{unit_id}:{group_id}");
+        if token.is_empty()
+            || token.len() > MAX_UPLOAD_TOKEN_BYTES
+            || token.chars().any(char::is_control)
+            || file_key.is_empty()
+            || file_key.len() > MAX_UPLOAD_KEY_BYTES
+            || file_key.chars().any(char::is_control)
+            || !valid_private_binding(&intent_fingerprint, "uai-upload-v1:", 256)
+            || !valid_private_binding(&artifact_digest, "sha256:", 256)
+            || !is_remote_component(&course_resource_id)
+            || !is_remote_component(&unit_id)
+            || !is_remote_component(&group_id)
+            || remote_task_id != expected_remote_task_id
+            || remote_task_id.len() > 512
+            || !valid_private_binding(&task_fingerprint, "v1:", 512)
+            || !(1..=2).contains(&upload_position)
+            || grant_request_digest == [0; 32]
+            || grant_response_digest == [0; 32]
+        {
+            file_key.zeroize();
+            intent_fingerprint.zeroize();
+            artifact_digest.zeroize();
+            remote_task_id.zeroize();
+            task_fingerprint.zeroize();
+            course_resource_id.zeroize();
+            unit_id.zeroize();
+            group_id.zeroize();
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI recovered upload grant state is invalid",
+            ));
+        }
+        Ok(Self {
+            token,
+            file_key,
+            intent_fingerprint,
+            artifact_digest,
+            remote_task_id,
+            task_fingerprint,
+            course_resource_id,
+            unit_id,
+            group_id,
+            upload_position,
+            grant_request_digest,
+            grant_response_digest,
+        })
     }
 }
 
@@ -119,6 +227,8 @@ impl fmt::Debug for UaiUploadGrant {
             .field("unit_id", &self.unit_id)
             .field("group_id", &self.group_id)
             .field("upload_position", &self.upload_position)
+            .field("grant_request_digest", &"[HASHED]")
+            .field("grant_response_digest", &"[HASHED]")
             .finish()
     }
 }
@@ -133,6 +243,8 @@ impl Drop for UaiUploadGrant {
         self.course_resource_id.zeroize();
         self.unit_id.zeroize();
         self.group_id.zeroize();
+        self.grant_request_digest.zeroize();
+        self.grant_response_digest.zeroize();
     }
 }
 
@@ -894,6 +1006,7 @@ impl Drop for UaiUploadArtifact {
 pub struct UaiUploadGrantRequest {
     url: Zeroizing<String>,
     referer: &'static str,
+    intent_fingerprint: String,
     request_digest: [u8; 32],
 }
 
@@ -910,10 +1023,15 @@ impl UaiUploadGrantRequest {
     pub(crate) const fn referer(&self) -> &'static str {
         self.referer
     }
+
+    pub(crate) fn intent_fingerprint(&self) -> &str {
+        &self.intent_fingerprint
+    }
 }
 
 impl Drop for UaiUploadGrantRequest {
     fn drop(&mut self) {
+        self.intent_fingerprint.zeroize();
         self.request_digest.zeroize();
     }
 }
@@ -965,6 +1083,7 @@ pub fn build_upload_grant_request(
     Ok(UaiUploadGrantRequest {
         url: Zeroizing::new(url.into()),
         referer: UAI_UPLOAD_REFERER,
+        intent_fingerprint: intent.fingerprint.clone(),
         request_digest: digest.finalize().into(),
     })
 }
@@ -1097,8 +1216,8 @@ pub fn parse_upload_grant(
     }
     let token = required_string(root.get("upToken"), MAX_UPLOAD_TOKEN_BYTES, "upload token")?;
     let file_key = required_string(root.get("fileKey"), MAX_UPLOAD_KEY_BYTES, "upload file key")?;
-    if file_key.chars().any(char::is_control) {
-        return Err(protocol_drift("UAI upload file key is unsafe"));
+    if token.chars().any(char::is_control) || file_key.chars().any(char::is_control) {
+        return Err(protocol_drift("UAI upload token or file key is unsafe"));
     }
     Ok(UaiUploadGrant {
         token: Zeroizing::new(token),
@@ -1111,7 +1230,33 @@ pub fn parse_upload_grant(
         unit_id: intent.unit_id.clone(),
         group_id: intent.group_id.clone(),
         upload_position: intent.upload_position,
+        grant_request_digest: [0; 32],
+        grant_response_digest: [0; 32],
     })
+}
+
+/// Parses one CMS grant and binds it to the exact already-materialized request
+/// plus complete response bytes.
+///
+/// # Errors
+///
+/// Rejects a request from another upload intent or any malformed grant before
+/// retaining its request/response lineage.
+pub fn parse_upload_grant_bound(
+    document: &str,
+    intent: &UaiUploadIntent,
+    request: &UaiUploadGrantRequest,
+) -> ProviderResult<UaiUploadGrant> {
+    if request.intent_fingerprint() != intent.fingerprint() || request.request_digest() == [0; 32] {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI upload grant request is foreign to the upload intent",
+        ));
+    }
+    let mut grant = parse_upload_grant(document, intent)?;
+    grant.grant_request_digest = request.request_digest();
+    grant.grant_response_digest = Sha256::digest(document.as_bytes()).into();
+    Ok(grant)
 }
 
 /// Builds a bounded multipart body containing only token, exact key and the
@@ -1803,14 +1948,31 @@ mod tests {
             )
             .is_err()
         );
-        let grant = parse_upload_grant(
-            r#"{"code":200,"upToken":"secret-upload-token","fileKey":"course/42/nothing.mp3"}"#,
-            &intent,
-        )
-        .unwrap();
+        let document =
+            r#"{"code":200,"upToken":"secret-upload-token","fileKey":"course/42/nothing.mp3"}"#;
+        let grant = parse_upload_grant_bound(document, &intent, &request).unwrap();
         assert_eq!(grant.expose_token(), "secret-upload-token");
         assert_eq!(grant.file_key(), "course/42/nothing.mp3");
+        assert_eq!(grant.grant_request_digest(), request_digest);
+        assert_eq!(
+            grant.grant_response_digest(),
+            <[u8; 32]>::from(Sha256::digest(document.as_bytes()))
+        );
         assert!(!format!("{grant:?}").contains("secret-upload-token"));
+        let foreign_intent = build_upload_intent(
+            &upload_detail(&["multiFileUpload"]),
+            "group:2001:unit-1:group-upload",
+            &foreign_artifact,
+        )
+        .unwrap();
+        let foreign_request = build_upload_grant_request(
+            &foreign_intent,
+            &foreign_artifact,
+            "course-instance-1",
+            "app-user-1",
+        )
+        .unwrap();
+        assert!(parse_upload_grant_bound(document, &intent, &foreign_request).is_err());
         assert!(parse_upload_grant(r#"{"code":500}"#, &intent).is_err());
     }
 

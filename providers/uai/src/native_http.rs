@@ -49,7 +49,7 @@ use crate::{
     parse_compound_oral_verification, parse_compound_upload_verification, parse_course_context,
     parse_course_progress, parse_discussion_binding, parse_discussion_reply_page,
     parse_discussion_topic, parse_group_progress, parse_submission_receipt, parse_task_inventory,
-    parse_upload_grant, parse_upload_object_result, parse_upload_verification,
+    parse_upload_grant_bound, parse_upload_object_result, parse_upload_verification,
     progress::validate_progress_route_binding,
     submission_execute::{bind_submission_request_body, valid_submission_version},
     submission_verify::validate_verification_course_binding,
@@ -1050,7 +1050,7 @@ impl NativeUaiInventoryTransport {
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
         let mut document = read_json_response(response, ResponseRoute::UploadGrant).await?;
-        let grant = parse_upload_grant(&document, intent);
+        let grant = parse_upload_grant_bound(&document, intent, &request);
         document.zeroize();
         grant
     }
