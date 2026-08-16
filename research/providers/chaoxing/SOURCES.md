@@ -109,6 +109,11 @@ validation is still required.
   `testUserRelationId` is sent as `examAnswerId`. Asterism's encrypted
   pre-Question command is now v2, includes that zeroizing actor in its digest
   and rejects an execution-time `_uid|UID` change before the one-shot start.
+  CxKitty also creates one process/session `secrets.token_hex(16)` IMEI, embeds
+  it in the mobile User-Agent and sends the same value through Exam
+  start/preview/submit. The current Asterism placeholder and independently
+  configurable Core User-Agent cannot satisfy that coupling; a persisted
+  account/device profile is recorded as a Main-owned live-validation gap.
 - 2026-08-16: re-read Samueli's web `addStudentWorkNew` POST at
   `9699e632b492`. The exact donor request uses the fresh editor route as Referer
   and `X-Requested-With: XMLHttpRequest`. Asterism had accidentally reused the

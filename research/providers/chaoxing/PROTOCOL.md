@@ -597,6 +597,14 @@ before the one-shot send, Native HTTP resolves the Cookie again and requires the
 same exact actor. Missing, duplicate or changed identity Cookies fail before
 dispatch rather than using another account's session with the durable command.
 
+Device identity is still a live-validation blocker. CxKitty creates one random
+32-hex IMEI, incorporates it into its mobile User-Agent signature and reuses it
+in start, preview and submit. Native currently uses the explicit
+`asterism-native` placeholder while its shared User-Agent is resolved
+independently by Core. A correct replacement must therefore be one persisted,
+account-bound device profile covering both values; changing only the form/query
+field would preserve an internally inconsistent request family.
+
 `SubmissionBuild` exposes only the donor's value-free Exam form field names.
 After an immutable Draft claims the v3 artifact, the Provider requires Core's
 complete coverage denominator to equal the artifact Question count, matches

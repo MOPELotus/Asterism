@@ -308,7 +308,8 @@ policy and remains independently guarded.
 - Pending independent Exam rows with a structural `goTest` entry now advertise
   `QuestionInventory` and `QuestionParse`. The fresh read rebinds the exact
   course/class/exam identity and `enc_task`, obtains the donor cover, freezes a
-  versioned exact `phone/start` command bound to the cover actor and hands it to Core's durable
+  versioned exact `phone/start` command bound to the cover actor and hands it to
+  Core's durable
   pre-Question attempt ledger. Before sending, the Provider repeats the
   read-only discovery and requires the encrypted command digest to remain
   identical. Core records the operation type/request digest first; the Native
@@ -329,6 +330,9 @@ policy and remains independently guarded.
   read uniquely from the redirect URL and form; if both exist they must match.
   `encRemainTime`, `remainTime` and `encLastUpdateTime` are unique raw decimal
   inputs, so padding or duplicate timing state fails before artifact creation.
+  CxKitty's single random IMEI is coupled to both its mobile User-Agent and all
+  Exam request fields. Native's `asterism-native` plus an independently resolved
+  shared User-Agent remains an explicit Main-owned device-profile/live gate.
 - Pending Exam tasks now also advertise `SubmissionExecute` and
   `SubmissionVerify`. The immutable Draft and encrypted v3 attempt artifact bind
   the complete ordered Question set, selected original positions and exact save
