@@ -37,6 +37,9 @@ Its request owner separately retains a complete semantic-plan digest covering
 the same-ID Draft answer, ordinary judges and every oral value/extra in addition
 to the dynamic wire digest. Course/openid substitution changes the wire digest
 without changing semantics; a same-Draft-ID answer substitution changes both.
+A compact `uai.compound-oral.plan.v1` Core artifact exposes only Task, Draft ID,
+Course version and that semantic digest; selected answers, oral evidence and
+dynamic route/account material remain private.
 
 The object-upload checkpoint additionally preserves Qiniu's optional bounded
 `hash`/ETag beside the exact donor-required key and hashes the complete accepted

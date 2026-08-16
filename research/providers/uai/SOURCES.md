@@ -549,3 +549,9 @@ The compound-oral semantic-binding checkpoint later on 2026-08-16 reused the
 same unchanged donor result. It separates existing immutable matching/oral plan
 identity from dynamic Course/openid wire identity and adds no route or answer
 shape. This is local persistence hardening for the already audited atomic body.
+
+The compound-oral compact-artifact checkpoint later on 2026-08-16 reused that
+unchanged donor result. The new credential-free projection carries only stable
+Task/Draft/version/digest identity and omits all executable matching/oral and
+dynamic account material. It adds scheduling representation, not donor
+behavior.

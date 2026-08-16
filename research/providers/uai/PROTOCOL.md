@@ -1496,6 +1496,11 @@ request digest, while changing the matching answer under the same Draft ID
 changes both semantic binding and request digest. Every
 judge uses the fresh Course publish version and the oral judge retains exact
 `oral-sentence` labels. An
+independent credential-free `uai.compound-oral.plan.v1` artifact projects only
+the Provider/Task, immutable Draft ID, Course version and semantic binding
+digest. It contains no matching answer, oral instance/value/extra or dynamic
+Course/account request material; a same-Draft-ID answer substitution still
+changes its artifact digest. An
 accepted version is only a receipt. Verification reads exactly that version
 and requires the complete ordered two-module user-module state, exact ordinary
 answer equality, the same oral instance, and every exact scalar-empty,

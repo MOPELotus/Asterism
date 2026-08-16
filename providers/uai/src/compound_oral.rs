@@ -1,11 +1,11 @@
 use std::{fmt, sync::Arc};
 
 use asterism_domain::{
-    SubmissionDraft, SubmissionDraftId, SubmissionReceipt, SubmissionScore, Timestamp,
+    ProviderId, SubmissionDraft, SubmissionDraftId, SubmissionReceipt, SubmissionScore, Timestamp,
 };
 use asterism_provider_api::{
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, SubmissionBuildCapability,
-    TaskDetailCapability,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact,
+    ProviderResult, SubmissionBuildCapability, TaskDetailCapability,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -18,7 +18,7 @@ use crate::{
     UaiAnswerTransport, UaiSubmissionBuild, UaiSubmissionPlan,
     answer::decrypt_answer_entries,
     encrypted::ZeroizingJsonValue,
-    metadata::development_metadata,
+    metadata::{PROVIDER_ID, development_metadata},
     submission_execute::{UaiSubmissionQuestionPlan, valid_submission_version},
     submission_verify::{
         UaiSubmissionPolicyEvidence, bound_verification_state, parse_remote_question,
@@ -37,6 +37,7 @@ const MAX_ORAL_CHILD_EXTRA_BYTES: usize = 64 * 1_024;
 const UAI_COMPOUND_ORAL_SUBMISSION_ROUTE: &str =
     "https://ucontent.unipus.cn/course/api/v3/newExploration/submit";
 const UAI_COMPOUND_ORAL_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+pub const UAI_COMPOUND_ORAL_PLAN_ARTIFACT_TYPE: &str = "uai.compound-oral.plan.v1";
 
 /// Provider-private native boundary for the donor's atomic
 /// `basic-scoop-content,oral-sentence` mutation and receipt-authorized
@@ -245,6 +246,30 @@ impl UaiCompoundOralSubmission {
             digest.update(b"\0");
         }
         Ok(digest.finalize().into())
+    }
+
+    /// Projects the exact private semantic plan into a bounded credential-free
+    /// Core artifact without exposing matching answers or oral evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a plan whose complete semantic binding or Core projection can
+    /// no longer be represented by the shared artifact contract.
+    pub fn plan_artifact(&self) -> ProviderResult<ProviderExecutionPlanArtifact> {
+        let binding_digest = self.plan_binding_digest()?;
+        ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new(PROVIDER_ID)
+                .map_err(|_| invalid_response("UAI compound oral Provider identity is invalid"))?,
+            UAI_COMPOUND_ORAL_PLAN_ARTIFACT_TYPE,
+            serde_json::json!({
+                "schema": UAI_COMPOUND_ORAL_PLAN_ARTIFACT_TYPE,
+                "remote_task_id": self.remote_task_id.as_str(),
+                "ordinary_draft_id": self.ordinary_draft_id.to_string(),
+                "course_publish_version": self.course_publish_version,
+                "plan_binding_digest": hex_digest(binding_digest),
+            }),
+        )
+        .map_err(|_| invalid_response("UAI compound oral plan artifact is invalid"))
     }
 
     fn ordinary_question(&self) -> ProviderResult<&UaiSubmissionQuestionPlan> {
@@ -727,6 +752,16 @@ fn json_truthy(value: &Value) -> bool {
         Value::Array(values) => !values.is_empty(),
         Value::Object(values) => !values.is_empty(),
     }
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        write!(encoded, "{byte:02x}").expect("writing into String cannot fail");
+    }
+    encoded
 }
 
 /// Builds the exact ordered matching-plus-oral body only inside the
@@ -1232,6 +1267,15 @@ mod tests {
             &answer,
         )
         .unwrap();
+        let plan_artifact = submission.plan_artifact().unwrap();
+        assert_eq!(
+            plan_artifact.artifact_type(),
+            UAI_COMPOUND_ORAL_PLAN_ARTIFACT_TYPE
+        );
+        assert_eq!(plan_artifact.provider_id().as_str(), "uai");
+        let projected = serde_json::to_string(plan_artifact.payload_sanitized()).unwrap();
+        assert!(!projected.contains("6001"));
+        assert!(!projected.contains("right"));
         let request =
             build_compound_oral_submission_request(&submission, "course-instance-1", "openid-1")
                 .unwrap();
@@ -1293,6 +1337,8 @@ mod tests {
             &answer,
         )
         .unwrap();
+        let first_artifact = first.plan_artifact().unwrap();
+        let changed_artifact = changed.plan_artifact().unwrap();
         let first = build_compound_oral_submission_request(&first, "course-instance-1", "openid-1")
             .unwrap();
         let changed =
@@ -1300,6 +1346,10 @@ mod tests {
                 .unwrap();
         assert_ne!(first.request_digest(), changed.request_digest());
         assert_ne!(first.plan_binding_digest(), changed.plan_binding_digest());
+        assert_ne!(
+            first_artifact.artifact_digest(),
+            changed_artifact.artifact_digest()
+        );
     }
 
     #[test]

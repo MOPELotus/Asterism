@@ -97,9 +97,9 @@ pub use browser_cursor::{
     UaiBrowserDurationReadback, UaiBrowserResidenceCheckpoint, UaiBrowserResidenceCursor,
 };
 pub use compound_oral::{
-    UaiCompoundOralPreparation, UaiCompoundOralSubmission, UaiCompoundOralSubmissionRequest,
-    UaiCompoundOralTransport, UaiCompoundOralVerification, build_compound_oral_submission_request,
-    parse_compound_oral_verification,
+    UAI_COMPOUND_ORAL_PLAN_ARTIFACT_TYPE, UaiCompoundOralPreparation, UaiCompoundOralSubmission,
+    UaiCompoundOralSubmissionRequest, UaiCompoundOralTransport, UaiCompoundOralVerification,
+    build_compound_oral_submission_request, parse_compound_oral_verification,
 };
 pub use compound_upload::{
     UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest,
