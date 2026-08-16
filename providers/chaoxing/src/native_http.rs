@@ -743,7 +743,14 @@ impl NativeChaoxingInventoryTransport {
         }
         let identity =
             crate::submission_support::WorkSubmissionIdentity::parse(request.remote_task_id())?;
-        let form = ChaoxingSubmissionForm::parse(document.as_str(), identity, plan)?;
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Work submission requires one identity Cookie",
+            )
+        })?;
+        let form =
+            ChaoxingSubmissionForm::parse(document.as_str(), identity, plan)?.bind_user(user_id)?;
         Ok((url, form))
     }
 
@@ -1258,7 +1265,14 @@ impl ChaoxingSubmissionTransport for NativeChaoxingInventoryTransport {
             target.job_id()
         );
         let identity = crate::submission_support::WorkSubmissionIdentity::parse(&remote_task_id)?;
-        let form = ChaoxingSubmissionForm::parse(document.as_str(), identity, plan)?;
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Chapter Work submission requires one identity Cookie",
+            )
+        })?;
+        let form =
+            ChaoxingSubmissionForm::parse(document.as_str(), identity, plan)?.bind_user(user_id)?;
         self.post_work_submission_once(&session, &referer, &form)
             .await
     }

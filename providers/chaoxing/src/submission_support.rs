@@ -347,6 +347,35 @@ impl ChaoxingSubmissionForm {
     pub(crate) fn fields(&self) -> &[(String, String)] {
         &self.fields
     }
+
+    pub(crate) fn bind_user(mut self, user_id: &str) -> ProviderResult<Self> {
+        if valid_component(Some(user_id)).is_err() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Work submission has no valid session identity",
+            ));
+        }
+        match self
+            .fields
+            .iter()
+            .find(|(name, _)| name == "userId")
+            .map(|(_, value)| value.as_str())
+        {
+            Some(bound) if bound != user_id => {
+                return Err(remote_changed(
+                    "Chaoxing Work editor belongs to a different account",
+                ));
+            }
+            Some(_) => {}
+            None if self.fields.len() == MAX_FORM_FIELDS => {
+                return Err(invalid_response(
+                    "Chaoxing Work submission form exceeds the field limit",
+                ));
+            }
+            None => self.fields.push(("userId".to_owned(), user_id.to_owned())),
+        }
+        Ok(self)
+    }
 }
 
 fn validate_remote_question_partition(
@@ -2031,7 +2060,10 @@ mod tests {
         let draft = draft().await;
         let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
         let identity = WorkSubmissionIdentity::parse("work:100:200:work-1").unwrap();
-        let form = ChaoxingSubmissionForm::parse(EDITOR, identity, &plan).unwrap();
+        let form = ChaoxingSubmissionForm::parse(EDITOR, identity, &plan)
+            .unwrap()
+            .bind_user("SAFE_UID")
+            .unwrap();
         let fields = form.fields().iter().cloned().collect::<BTreeMap<_, _>>();
 
         assert_eq!(fields.get("courseId").map(String::as_str), Some("100"));
@@ -2051,6 +2083,12 @@ mod tests {
         );
         assert!(!fields.contains_key("ignoredFutureField"));
         assert!(!format!("{form:?}").contains("SAFE_EPHEMERAL_TOKEN"));
+
+        let foreign = ChaoxingSubmissionForm::parse(EDITOR, identity, &plan)
+            .unwrap()
+            .bind_user("OTHER_UID")
+            .unwrap_err();
+        assert_eq!(foreign.kind, ProviderErrorKind::RemoteChanged);
     }
 
     #[tokio::test]
@@ -2181,9 +2219,13 @@ mod tests {
         let draft = chapter_draft().await;
         let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
         let identity = WorkSubmissionIdentity::parse("resource:100:200:4001:job-work").unwrap();
-        let form = ChaoxingSubmissionForm::parse(CHAPTER_EDITOR, identity, &plan).unwrap();
+        let form = ChaoxingSubmissionForm::parse(CHAPTER_EDITOR, identity, &plan)
+            .unwrap()
+            .bind_user("9001")
+            .unwrap();
         let fields = form.fields().iter().cloned().collect::<BTreeMap<_, _>>();
         assert_eq!(fields.get("knowledgeid").map(String::as_str), Some("4001"));
+        assert_eq!(fields.get("userId").map(String::as_str), Some("9001"));
         assert_eq!(
             fields.get("answerwqbid").map(String::as_str),
             Some("work-q-1,work-q-2,work-q-3,work-q-4,")

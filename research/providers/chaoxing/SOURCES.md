@@ -112,6 +112,10 @@ validation is still required.
   POSTs. Work now has a separate web-AJAX constant and a built-request regression
   covering that header, the retained Referer, the same-origin `Origin` and the
   donor's `application/x-www-form-urlencoded; charset=UTF-8` media type.
+  Samueli's submitted body also derives `userId` from the current session actor.
+  Native Work/Chapter Work now requires one unique `_uid|UID` Cookie, rejects a
+  conflicting fresh-editor `userId`, and fills an omitted field only from that
+  same resolved session before the one-shot POST.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence
   and explicitly audits empty answer rows, not arbitrary substring-derived

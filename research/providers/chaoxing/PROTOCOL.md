@@ -325,7 +325,10 @@ POST is replayed after an ambiguous send, and the JSON success flag is only a
 Receipt. This web request family retains the donor-observed editor Referer and
 same-origin `Origin`, sends the UTF-8 form media type and
 `X-Requested-With: XMLHttpRequest`; it does not reuse the separate mobile Exam
-header. Independent `SubmissionVerify` refetches seven cards and confirms only
+header. Before building that request, the Provider requires one unique
+`_uid|UID` Cookie. A fresh editor `userId`, when present, must equal that actor;
+when omitted, the same session identity supplies the field. Independent
+`SubmissionVerify` refetches seven cards and confirms only
 when the exact attachment is Completed. Per-Question facts stay Unverified when
 the card exposes no answer readback. Answer resolution and live validation
 remain active work; Exam keeps its separate attempt/gate/verification family.
