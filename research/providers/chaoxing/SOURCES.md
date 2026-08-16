@@ -109,6 +109,8 @@ validation is still required.
   `testUserRelationId` is sent as `examAnswerId`. Asterism's encrypted
   pre-Question command is now v2, includes that zeroizing actor in its digest
   and rejects an execution-time `_uid|UID` change before the one-shot start.
+  The durable operation label is correspondingly `chaoxing.exam-start.v2`, so
+  v1 ledger rows cannot be confused with the actor-bound request identity.
   CxKitty also creates one process/session `secrets.token_hex(16)` IMEI, embeds
   it in the mobile User-Agent and sends the same value through Exam
   start/preview/submit. The current Asterism placeholder and independently

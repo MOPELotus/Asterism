@@ -575,7 +575,7 @@ value may fall back to the exact form value. `encRemainTime`, `remainTime` and
 after those identities and timing facts agree is the encrypted attempt artifact
 materialized.
 
-Core persists `chaoxing.exam-start.v1` and the canonical request digest before
+Core persists `chaoxing.exam-start.v2` and the canonical actor-bound request digest before
 the Provider performs one `phone/start`. The Native transport accepts only the
 bound redirect and returned `examAnswerId`, then reads the complete
 dynamic-`enc` mobile preview. The preview's newer `enc`, remaining-time and

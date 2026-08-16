@@ -23,7 +23,7 @@ pub const CHAOXING_EXAM_PRE_QUESTION_TYPE: &str = "chaoxing.exam-pre-question.v2
 pub const CHAOXING_EXAM_READY_TO_START_PHASE: &str = "chaoxing.exam-ready-to-start";
 pub const CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE: &str = "chaoxing.exam-question-attempt.v3";
 pub const CHAOXING_EXAM_QUESTIONS_READY_PHASE: &str = "chaoxing.exam-questions-ready";
-pub const CHAOXING_EXAM_START_OPERATION: &str = "chaoxing.exam-start.v1";
+pub const CHAOXING_EXAM_START_OPERATION: &str = "chaoxing.exam-start.v2";
 pub(crate) const CHAOXING_EXAM_CONTINUATION_TTL_SECONDS: u64 = 30 * 60;
 
 /// Fresh Exam entry facts carried from one task inventory into the mutating

@@ -1172,7 +1172,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(operation.operation_type(), "chaoxing.exam-start.v1");
+        assert_eq!(operation.operation_type(), "chaoxing.exam-start.v2");
         assert_ne!(operation.request_digest(), [0; 32]);
         let outcome = operation.execute(&exam_context).await.unwrap();
         let ProviderQuestionReadStepOutcome::Materialize(materialization) = outcome else {
