@@ -399,6 +399,10 @@ only structural field names, response codes and bounded placeholder shapes.
   grouped DurationReport+ResourceExecution call, artifact and sequence, and
   reject malformed private bytes or a substituted Fanyuchang expected-child
   target before Core child creation.
+- Prepared parent-call tests return the private snapshot and Core ordered batch
+  plan from one function, prove both digest pairs remain equal before and after
+  moving the parts out, redact all Course/SCO/target material from Debug, and
+  cover both Fanyuchang target vectors and Auto aggregate-derived children.
 - Durable atomic-child recovery tests decode the parent authority and complete
   batch snapshot together, accept both Fanyuchang and Auto target shapes, and
   reject cross-attempt Course, flow, Unit selection, aggregate, expected-child

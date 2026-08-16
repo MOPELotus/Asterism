@@ -34,7 +34,8 @@ mod task_inventory;
 
 pub use atomic_dispatch::{
     WellearnAtomicBatchDispatchPlan, WellearnAtomicChildDispatchPlan,
-    materialize_atomic_batch_dispatch_plan,
+    WellearnPreparedAtomicBatchPlan, materialize_atomic_batch_dispatch_plan,
+    prepare_atomic_execution_batch_plan,
 };
 pub use atomic_duration_completion::{
     WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionDocuments,

@@ -889,6 +889,12 @@ frozen child target. Each child then becomes a one-based
 artifact-bound conditional sequence. Core's generic constructor rechecks
 contiguous positions, unique remote Tasks/artifacts/sequences and Provider
 namespaces. This still grants no local Task or mutation authority.
+`prepare_atomic_execution_batch_plan` is the single-call composition boundary:
+it constructs the encrypted parent snapshot, materializes the exact dispatch,
+projects Core children against that same snapshot, and returns both as
+`WellearnPreparedAtomicBatchPlan`. Its custom Debug exposes only Provider and
+child count plus hash placeholders. Moving the two parts out preserves their
+equal authority/batch digests; it cannot create a Core parent or child row.
 `WellearnPreparedAtomicChildPlan::restore_from_provider_execution_plan_artifact`
 is the lower-level in-memory recovery constructor. It consumes a validated
 complete batch, ordinal, frozen target authority and exact Core artifact,

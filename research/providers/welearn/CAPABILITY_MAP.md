@@ -296,6 +296,10 @@ snapshot, requires its decoded complete batch to equal the dispatch batch,
 rechecks the authority-selected Fanyuchang child target, and constructs Core
 `ProviderExecutionBatchPlan` children with a one-based position, exact remote
 Task, grouped DurationReport+ResourceExecution call, artifact and sequence.
+`prepare_atomic_execution_batch_plan` returns that Core plan together with the
+private snapshot whose authority/batch digests it carries, so a future parent
+planning hook consumes one Provider result rather than independently assembling
+the two values.
 This remains pure Provider planning evidence: it does not create, persist,
 restore or authorize any parent/child Execution.
 The parent authority itself now has a credential-free, versioned v1 encoding

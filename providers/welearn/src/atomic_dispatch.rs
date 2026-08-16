@@ -60,6 +60,42 @@ pub struct WellearnAtomicBatchDispatchPlan {
     children: Vec<WellearnAtomicChildDispatchPlan>,
 }
 
+/// Provider-complete output for one future Core parent planning call.
+///
+/// The private snapshot and public ordered child projection are constructed
+/// together and are bound by the same authority/batch digests. This value still
+/// does not persist or create a Core parent or child Execution.
+pub struct WellearnPreparedAtomicBatchPlan {
+    parent_snapshot: ExecutionParentBatchSnapshot,
+    execution_batch_plan: ProviderExecutionBatchPlan,
+}
+
+impl WellearnPreparedAtomicBatchPlan {
+    pub const fn parent_snapshot(&self) -> &ExecutionParentBatchSnapshot {
+        &self.parent_snapshot
+    }
+
+    pub const fn execution_batch_plan(&self) -> &ProviderExecutionBatchPlan {
+        &self.execution_batch_plan
+    }
+
+    pub fn into_parts(self) -> (ExecutionParentBatchSnapshot, ProviderExecutionBatchPlan) {
+        (self.parent_snapshot, self.execution_batch_plan)
+    }
+}
+
+impl std::fmt::Debug for WellearnPreparedAtomicBatchPlan {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WellearnPreparedAtomicBatchPlan")
+            .field("provider_id", self.parent_snapshot.provider_id())
+            .field("authority_digest", &"[HASHED]")
+            .field("batch_digest", &"[HASHED]")
+            .field("child_count", &self.execution_batch_plan.children().len())
+            .finish()
+    }
+}
+
 impl WellearnAtomicBatchDispatchPlan {
     pub const fn batch_plan(&self) -> &WellearnBatchPlan {
         &self.batch_plan
@@ -262,6 +298,28 @@ pub fn materialize_atomic_batch_dispatch_plan(
     };
     plan.validate()?;
     Ok(plan)
+}
+
+/// Prepares the exact private parent snapshot and ordered Core child plan as
+/// one Provider result.
+///
+/// # Errors
+///
+/// Returns the parent/batch encoding error, atomic dispatch projection error,
+/// expected-child target mismatch, or generic Core batch-plan validation error.
+pub fn prepare_atomic_execution_batch_plan(
+    authority: &WellearnAtomicBatchPlanningAuthority,
+    batch_plan: WellearnBatchPlan,
+    frozen_fanyuchang_target_seconds: Option<Vec<u64>>,
+) -> ProviderResult<WellearnPreparedAtomicBatchPlan> {
+    let parent_snapshot = authority.to_execution_parent_batch_snapshot(&batch_plan)?;
+    let dispatch_plan =
+        materialize_atomic_batch_dispatch_plan(batch_plan, frozen_fanyuchang_target_seconds)?;
+    let execution_batch_plan = dispatch_plan.to_provider_execution_batch_plan(&parent_snapshot)?;
+    Ok(WellearnPreparedAtomicBatchPlan {
+        parent_snapshot,
+        execution_batch_plan,
+    })
 }
 
 fn invalid_atomic_batch_dispatch_plan() -> ProviderError {
@@ -493,6 +551,75 @@ mod tests {
             dispatch
                 .to_provider_execution_batch_plan(&malformed)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn prepared_core_batch_returns_digest_bound_private_and_child_parts() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            batch.course_remote_id.clone(),
+            WellearnBatchFlow::FanyuchangDuration,
+            batch.selection.clone(),
+            batch.entries[1].remote_task_id.clone(),
+            Some(37),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_execution_batch_plan(&authority, batch, Some(vec![0, 37, 19_800]))
+                .unwrap();
+        assert_eq!(
+            prepared.parent_snapshot().authority_digest(),
+            prepared.execution_batch_plan().authority_digest()
+        );
+        assert_eq!(
+            prepared.parent_snapshot().batch_digest(),
+            prepared.execution_batch_plan().batch_digest()
+        );
+        assert_eq!(prepared.execution_batch_plan().children().len(), 3);
+        let debug = format!("{prepared:?}");
+        assert!(!debug.contains("course:1001"));
+        assert!(!debug.contains("sco:1001"));
+        assert!(!debug.contains("19800"));
+
+        let (parent, children) = prepared.into_parts();
+        assert_eq!(parent.authority_digest(), children.authority_digest());
+        assert_eq!(parent.batch_digest(), children.batch_digest());
+    }
+
+    #[test]
+    fn prepared_core_batch_accepts_auto_aggregate_without_external_targets() {
+        let batch = build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            batch.course_remote_id.clone(),
+            WellearnBatchFlow::AutoDuration,
+            batch.selection.clone(),
+            batch.entries[0].remote_task_id.clone(),
+            None,
+            Some(crate::WellearnAutoDurationBudget::try_new(1, 0, 0).unwrap()),
+        )
+        .unwrap();
+        let prepared = prepare_atomic_execution_batch_plan(&authority, batch, None).unwrap();
+        let decoded_batch =
+            WellearnBatchPlan::decode_snapshot(prepared.parent_snapshot().batch().expose_secret())
+                .unwrap();
+        assert_eq!(prepared.execution_batch_plan().children().len(), 3);
+        assert!(
+            prepared
+                .execution_batch_plan()
+                .children()
+                .iter()
+                .all(|child| {
+                    WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                        child.execution_plan().artifact().unwrap(),
+                        &decoded_batch,
+                        usize::try_from(child.position() - 1).unwrap(),
+                        None,
+                    )
+                    .is_ok()
+                })
         );
     }
 }

@@ -215,6 +215,9 @@ The adjacent ordered-child-plan integration checkpoint reused that immediately
 preceding unchanged upstream refresh after Core `217c1f6`. Projecting the
 already-audited WELearn child artifacts and conditional sequences into Core's
 generic batch plan adds no donor route, setting, completion or retry behavior.
+The paired parent-preparation checkpoint also reuses that refresh. Returning
+the private snapshot and digest-bound Core child plan as one Provider result is
+only an Asterism call-boundary hardening over the same audited batch semantics.
 
 ## Source selection
 
