@@ -380,7 +380,8 @@ placeholder identities, result codes, status values and pagination shape.
   Debug. Flow and public-adapter tests require the exact rejection to produce a
   response-bound `cidaren.ready-to-start` continuation, reject another
   `SubmitChoseWord`, restore only after fresh Task/allocation rebinding and
-  issue `StartAnswer` as the next operation. The same exact response on a
+  expose the non-zero response digest/receive time before issuing `StartAnswer`
+  as the next operation. The same exact response on a
   self-built class or direct `StudyTask` plan remains
   `ProtocolDrift`/FailedClosed. No blocked artifact or completion diagnosis is
   fabricated.

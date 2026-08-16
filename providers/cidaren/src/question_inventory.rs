@@ -704,12 +704,17 @@ mod tests {
             .unwrap();
         let prepared = prepare_operation(&capability, &context, task_id, initial, &settings).await;
 
-        let ProviderQuestionReadStepOutcome::Continue { continuation, .. } =
-            prepared.execute(&context).await.unwrap()
+        let ProviderQuestionReadStepOutcome::Continue {
+            continuation,
+            response_digest,
+            received_at,
+        } = prepared.execute(&context).await.unwrap()
         else {
             panic!("known existing-selection rejection must continue to StartAnswer");
         };
         assert_eq!(continuation.phase(), crate::CIDAREN_READY_TO_START_PHASE);
+        assert_ne!(response_digest, [0; 32]);
+        assert!(received_at <= Utc::now());
 
         let prepared =
             prepare_operation(&capability, &context, task_id, continuation, &settings).await;
