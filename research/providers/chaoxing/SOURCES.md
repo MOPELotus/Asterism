@@ -95,6 +95,8 @@ validation is still required.
   The same cover/start audit now binds `testUserRelationId` without trimming or
   first-match selection: cover requires one exact value, while start may omit
   it but may not supply a padded, foreign or duplicate replacement.
+  Start continuation parsing now also requires unique agreeing URL/form `enc`
+  and unique untrimmed decimal timing inputs before artifact creation.
   The donor revision is unchanged and no challenge-solving path was added.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence

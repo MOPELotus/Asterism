@@ -271,6 +271,12 @@ require ProtocolDrift rather than trimming or taking the first match. The cover
 must contain the field. The start page may omit it and safely retain the exact
 already-bound cover ID; if it is present, its raw value must match.
 
+Start-material regressions also require one URL `enc`, one form `enc` and exact
+equality when both are present. Duplicate query/form values, conflicting or
+padded `enc`, padded timing text and duplicate timing inputs fail closed. A URL
+without `enc` may use the one exact form value. All three timing fields remain
+untrimmed bounded decimals.
+
 `detail-result-partial.html` retains four complete result identities while only
 the second original Question is selected. It proves that v3 continuation
 binding sends one save with `start=1`, reaches final submission after one

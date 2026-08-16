@@ -549,6 +549,14 @@ existing fallback contract; if the field is present, exactly one element must
 exist and its untrimmed value must equal the bound identity. Padded or duplicate
 attempt IDs are ProtocolDrift before dynamic `enc` state is accepted.
 
+Dynamic start continuation material is also lossless. The redirect URL may
+carry one `enc`, and the start form may carry one `enc`; duplicates are drift,
+and if both sources exist their decoded values must be identical. A missing URL
+value may fall back to the exact form value. `encRemainTime`, `remainTime` and
+`encLastUpdateTime` each require one raw decimal input with no trimming. Only
+after those identities and timing facts agree is the encrypted attempt artifact
+materialized.
+
 Core persists `chaoxing.exam-start.v1` and the canonical request digest before
 the Provider performs one `phone/start`. The Native transport accepts only the
 bound redirect and returned `examAnswerId`, then reads the complete

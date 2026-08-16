@@ -1033,17 +1033,20 @@ pub(crate) fn parse_exam_attempt(
     expected_answer_id: &str,
 ) -> ProviderResult<ChaoxingExamAttemptMaterial> {
     bounded_html(html)?;
-    let enc = final_url
-        .query_pairs()
-        .find(|(key, _)| key.eq_ignore_ascii_case("enc"))
-        .map(|(_, value)| value.into_owned())
-        .or_else(|| {
-            let document = Html::parse_document(html);
-            input_value(&document, "form#submitTest input#enc")
-        })
-        .filter(|value| !value.is_empty() && value.len() <= MAX_ATTEMPT_ENC_BYTES)
-        .ok_or_else(|| protocol_drift("Chaoxing Exam start returned no bounded enc"))?;
     let document = Html::parse_document(html);
+    let query_enc = unique_query_value(final_url, "enc")?;
+    let input_enc = unique_input_value(&document, "form#submitTest input#enc")?;
+    let enc = match (query_enc, input_enc) {
+        (Some(query), Some(input)) if query != input => {
+            return Err(protocol_drift(
+                "Chaoxing Exam start returned conflicting enc material",
+            ));
+        }
+        (Some(query), _) => Some(query),
+        (None, input) => input,
+    }
+    .filter(|value| !value.is_empty() && value.len() <= MAX_ATTEMPT_ENC_BYTES)
+    .ok_or_else(|| protocol_drift("Chaoxing Exam start returned no bounded enc"))?;
     let exam_answer_id = unique_input_value(&document, "#testUserRelationId")?
         .unwrap_or_else(|| expected_answer_id.to_owned());
     if exam_answer_id != expected_answer_id || !valid_component(&exam_answer_id) {
@@ -1149,21 +1152,35 @@ fn unique_input_value(document: &Html, selector_text: &str) -> ProviderResult<Op
     };
     if nodes.next().is_some() {
         return Err(protocol_drift(
-            "Chaoxing Exam page duplicated an attempt identity field",
+            "Chaoxing Exam page duplicated an input field",
         ));
     }
     node.value()
         .attr("value")
         .map(str::to_owned)
         .map(Some)
-        .ok_or_else(|| protocol_drift("Chaoxing Exam attempt identity has no value"))
+        .ok_or_else(|| protocol_drift("Chaoxing Exam input field has no value"))
 }
 
 fn bounded_u64_input(document: &Html, selector_text: &str) -> ProviderResult<u64> {
-    input_value(document, selector_text)
+    unique_input_value(document, selector_text)?
         .ok_or_else(|| protocol_drift("Chaoxing Exam attempt omitted a timing field"))?
         .parse::<u64>()
         .map_err(|_| protocol_drift("Chaoxing Exam attempt has an invalid timing field"))
+}
+
+fn unique_query_value(url: &Url, key: &str) -> ProviderResult<Option<String>> {
+    let mut values = url
+        .query_pairs()
+        .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.into_owned());
+    let value = values.next();
+    if values.next().is_some() {
+        return Err(protocol_drift(
+            "Chaoxing Exam start URL duplicated dynamic material",
+        ));
+    }
+    Ok(value)
 }
 
 fn required_binary_input_flag(
@@ -1441,6 +1458,67 @@ mod tests {
                 .exam_answer_id
                 .as_str(),
             "answer-1"
+        );
+    }
+
+    #[test]
+    fn start_requires_unique_exact_dynamic_material() {
+        let url = Url::parse(
+            "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew?courseId=100&classId=200&tId=exam-1&id=answer-1&enc=SAFE_ATTEMPT_ENC",
+        )
+        .unwrap();
+        for start in [
+            START.replace(r#"value="SAFE_ATTEMPT_ENC""#, r#"value=" SAFE_ATTEMPT_ENC""#),
+            START.replace(
+                r#"<input id="enc" value="SAFE_ATTEMPT_ENC">"#,
+                r#"<input id="enc" value="SAFE_ATTEMPT_ENC"><input id="enc" value="SAFE_ATTEMPT_ENC">"#,
+            ),
+            START.replace(r#"value="3600""#, r#"value=" 3600""#),
+            START.replace(
+                r#"<input id="remainTime" value="3600">"#,
+                r#"<input id="remainTime" value="3600"><input id="remainTime" value="3600">"#,
+            ),
+        ] {
+            assert_eq!(
+                parse_exam_attempt(&url, &start, "answer-1")
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+
+        let duplicate_url = Url::parse(
+            "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew?courseId=100&classId=200&tId=exam-1&id=answer-1&enc=SAFE_ATTEMPT_ENC&enc=OTHER",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_exam_attempt(&duplicate_url, START, "answer-1")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        let conflicting_url = Url::parse(
+            "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew?courseId=100&classId=200&tId=exam-1&id=answer-1&enc=OTHER",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_exam_attempt(&conflicting_url, START, "answer-1")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        let html_only_url = Url::parse(
+            "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew?courseId=100&classId=200&tId=exam-1&id=answer-1",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_exam_attempt(&html_only_url, START, "answer-1")
+                .unwrap()
+                .enc
+                .as_str(),
+            "SAFE_ATTEMPT_ENC"
         );
     }
 
