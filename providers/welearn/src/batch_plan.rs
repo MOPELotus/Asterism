@@ -8,6 +8,7 @@ use asterism_provider_api::{
 };
 use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     WellearnUnitObservation, metadata::PROVIDER_ID, task_detail::validate_fresh_execution_detail,
@@ -21,7 +22,10 @@ pub const WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE: &str = "welearn.batch-plan.v1";
 
 /// Namespaced Provider-private type for one frozen atomic parent authority.
 pub const WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE: &str =
-    "welearn.atomic-batch-planning-authority.v1";
+    "welearn.atomic-batch-planning-authority.v2";
+
+/// Namespaced Provider-private type for one target-authorized atomic batch.
+pub const WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE: &str = "welearn.atomic-batch-snapshot.v2";
 
 /// Audited donor batch flow. This is a pure membership/target boundary; it
 /// does not create or schedule Core executions.
@@ -98,6 +102,8 @@ const MAX_BATCH_ID_COMPONENT_BYTES: usize = 128;
 const WELLEARN_BATCH_PLAN_SNAPSHOT_VERSION: u16 = 1;
 const MAX_BATCH_PLAN_SNAPSHOT_BYTES: usize = 8 * 1_024 * 1_024;
 const WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_VERSION: u16 = 1;
+const WELLEARN_COMPLETE_ATOMIC_BATCH_AUTHORITY_VERSION: u16 = 2;
+const WELLEARN_COMPLETE_ATOMIC_BATCH_SNAPSHOT_VERSION: u16 = 2;
 const MAX_ATOMIC_BATCH_PLANNING_AUTHORITY_BYTES: usize = 4_096;
 const WELLEARN_ATOMIC_CHILD_PLAN_VERSION: u16 = 1;
 const MAX_ATOMIC_CHILD_PLAN_BYTES: usize = 1_024;
@@ -396,6 +402,14 @@ struct WellearnBatchPlanWire {
     discarded_remainder_seconds: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnCompleteAtomicBatchSnapshotWire {
+    version: u16,
+    batch_plan: WellearnBatchPlanWire,
+    frozen_fanyuchang_target_seconds: Option<Vec<u64>>,
+}
+
 impl TryFrom<&WellearnBatchPlan> for WellearnBatchPlanWire {
     type Error = ProviderError;
 
@@ -561,6 +575,19 @@ struct WellearnAtomicBatchPlanningAuthorityWire {
     frozen_auto_duration_budget: Option<WellearnAutoDurationBudgetWire>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnCompleteAtomicBatchAuthorityWire {
+    version: u16,
+    course_remote_id: String,
+    flow: WellearnBatchFlow,
+    selection: WellearnBatchUnitSelectionWire,
+    expected_remote_task_id: String,
+    frozen_fanyuchang_target_count: Option<u32>,
+    frozen_fanyuchang_targets_digest: Option<[u8; 32]>,
+    frozen_auto_duration_budget: Option<WellearnAutoDurationBudgetWire>,
+}
+
 impl From<&WellearnAtomicBatchPlanningAuthority> for WellearnAtomicBatchPlanningAuthorityWire {
     fn from(authority: &WellearnAtomicBatchPlanningAuthority) -> Self {
         Self {
@@ -654,13 +681,13 @@ impl WellearnAtomicBatchPlanningAuthority {
             .map(|budget| u64::from(budget.actual_minutes()))
     }
 
-    /// Converts this authority and its complete validated batch into Core's
-    /// encrypted parent-attempt snapshot value.
+    /// Converts this authority and its complete target-authorized batch into
+    /// Core's encrypted parent-attempt snapshot value.
     ///
-    /// The conversion repeats the same Course, flow, Unit selection, expected
-    /// child and aggregate binding used by durable recovery. The returned
-    /// value contains private zeroizing bytes and grants no child scheduling or
-    /// mutation authority by itself.
+    /// Current Fanyuchang targets are stored in the independently bounded
+    /// complete-batch value while this four-KiB authority stores their ordered
+    /// count and domain-separated digest. Auto retains only its aggregate
+    /// budget because every child target is already derivable from the batch.
     ///
     /// # Errors
     ///
@@ -670,14 +697,48 @@ impl WellearnAtomicBatchPlanningAuthority {
     pub fn to_execution_parent_batch_snapshot(
         &self,
         batch_plan: &WellearnBatchPlan,
+        frozen_fanyuchang_target_seconds: Option<&[u64]>,
     ) -> ProviderResult<ExecutionParentBatchSnapshot> {
-        validate_atomic_parent_batch_binding(self, batch_plan)?;
+        validate_complete_atomic_parent_batch_binding(
+            self,
+            batch_plan,
+            frozen_fanyuchang_target_seconds,
+        )?;
+        let target_count = frozen_fanyuchang_target_seconds
+            .map(|targets| u32::try_from(targets.len()))
+            .transpose()
+            .map_err(|_| invalid_atomic_recovery_artifacts())?;
+        let target_digest = frozen_fanyuchang_target_seconds.map(digest_fanyuchang_targets);
+        let authority = WellearnCompleteAtomicBatchAuthorityWire {
+            version: WELLEARN_COMPLETE_ATOMIC_BATCH_AUTHORITY_VERSION,
+            course_remote_id: self.course_remote_id.clone(),
+            flow: self.flow,
+            selection: WellearnBatchUnitSelectionWire::from(&self.selection),
+            expected_remote_task_id: self.expected_remote_task_id.clone(),
+            frozen_fanyuchang_target_count: target_count,
+            frozen_fanyuchang_targets_digest: target_digest,
+            frozen_auto_duration_budget: self.frozen_auto_duration_budget.map(Into::into),
+        };
+        let authority = serde_json::to_vec(&authority)
+            .map_err(|_| invalid_serialized_atomic_planning_authority())?;
+        if authority.is_empty() || authority.len() > MAX_ATOMIC_BATCH_PLANNING_AUTHORITY_BYTES {
+            return Err(invalid_serialized_atomic_planning_authority());
+        }
+        let batch = serde_json::to_vec(&WellearnCompleteAtomicBatchSnapshotWire {
+            version: WELLEARN_COMPLETE_ATOMIC_BATCH_SNAPSHOT_VERSION,
+            batch_plan: WellearnBatchPlanWire::try_from(batch_plan)?,
+            frozen_fanyuchang_target_seconds: frozen_fanyuchang_target_seconds.map(<[u64]>::to_vec),
+        })
+        .map_err(|_| invalid_serialized_batch_plan())?;
+        if batch.is_empty() || batch.len() > MAX_BATCH_PLAN_SNAPSHOT_BYTES {
+            return Err(invalid_serialized_batch_plan());
+        }
         ExecutionParentBatchSnapshot::try_new(
             welearn_provider_id()?,
             WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE,
-            SecretValue::new(self.encode()?),
-            WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE,
-            SecretValue::new(batch_plan.encode_snapshot()?),
+            SecretValue::new(authority),
+            WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE,
+            SecretValue::new(batch),
         )
     }
 
@@ -911,6 +972,140 @@ fn validate_atomic_parent_batch_binding(
         .iter()
         .position(|entry| entry.remote_task_id == authority.expected_remote_task_id)
         .ok_or_else(invalid_atomic_recovery_artifacts)
+}
+
+fn validate_complete_atomic_parent_batch_binding(
+    authority: &WellearnAtomicBatchPlanningAuthority,
+    batch_plan: &WellearnBatchPlan,
+    frozen_fanyuchang_target_seconds: Option<&[u64]>,
+) -> ProviderResult<usize> {
+    let expected_entry_index = validate_atomic_parent_batch_binding(authority, batch_plan)?;
+    match (authority.flow, frozen_fanyuchang_target_seconds) {
+        (WellearnBatchFlow::FanyuchangDuration, Some(targets))
+            if targets.len() == batch_plan.entries.len()
+                && targets.iter().copied().all(|target| {
+                    crate::WellearnAtomicDurationCompletionPlan::try_new(
+                        WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+                        target,
+                    )
+                    .is_ok()
+                })
+                && targets.get(expected_entry_index).copied()
+                    == authority.frozen_fanyuchang_target_seconds =>
+        {
+            Ok(expected_entry_index)
+        }
+        (WellearnBatchFlow::AutoDuration, None) => Ok(expected_entry_index),
+        _ => Err(invalid_atomic_recovery_artifacts()),
+    }
+}
+
+fn digest_fanyuchang_targets(targets: &[u64]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"asterism.welearn.fanyuchang-batch-targets.v2\0");
+    digest.update(
+        u32::try_from(targets.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    for (index, target) in targets.iter().copied().enumerate() {
+        digest.update(u32::try_from(index).unwrap_or(u32::MAX).to_be_bytes());
+        digest.update(target.to_be_bytes());
+    }
+    digest.finalize().into()
+}
+
+pub(crate) fn decode_execution_parent_batch_snapshot(
+    parent: &ExecutionParentBatchSnapshot,
+) -> ProviderResult<(
+    WellearnAtomicBatchPlanningAuthority,
+    WellearnBatchPlan,
+    Option<Vec<u64>>,
+)> {
+    if parent.provider_id() != &welearn_provider_id()?
+        || parent.authority_type() != WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE
+        || parent.batch_type() != WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE
+    {
+        return Err(invalid_atomic_recovery_artifacts());
+    }
+    let authority: WellearnCompleteAtomicBatchAuthorityWire =
+        serde_json::from_slice(parent.authority().expose_secret())
+            .map_err(|_| invalid_serialized_atomic_planning_authority())?;
+    let snapshot: WellearnCompleteAtomicBatchSnapshotWire =
+        serde_json::from_slice(parent.batch().expose_secret())
+            .map_err(|_| invalid_serialized_batch_plan())?;
+    if authority.version != WELLEARN_COMPLETE_ATOMIC_BATCH_AUTHORITY_VERSION
+        || snapshot.version != WELLEARN_COMPLETE_ATOMIC_BATCH_SNAPSHOT_VERSION
+    {
+        return Err(invalid_atomic_recovery_artifacts());
+    }
+    let batch_plan = WellearnBatchPlan::try_from(snapshot.batch_plan)
+        .map_err(|_| invalid_serialized_batch_plan())?;
+    let auto_budget = authority
+        .frozen_auto_duration_budget
+        .map(WellearnAutoDurationBudget::try_from)
+        .transpose()?;
+    let expected_entry_index = batch_plan
+        .entries
+        .iter()
+        .position(|entry| entry.remote_task_id == authority.expected_remote_task_id)
+        .ok_or_else(invalid_atomic_recovery_artifacts)?;
+    let expected_fanyuchang_target = match authority.flow {
+        WellearnBatchFlow::FanyuchangDuration => {
+            let targets = snapshot
+                .frozen_fanyuchang_target_seconds
+                .as_deref()
+                .ok_or_else(invalid_atomic_recovery_artifacts)?;
+            let count =
+                u32::try_from(targets.len()).map_err(|_| invalid_atomic_recovery_artifacts())?;
+            if authority.frozen_fanyuchang_target_count != Some(count)
+                || authority.frozen_fanyuchang_targets_digest
+                    != Some(digest_fanyuchang_targets(targets))
+                || auto_budget.is_some()
+            {
+                return Err(invalid_atomic_recovery_artifacts());
+            }
+            targets
+                .get(expected_entry_index)
+                .copied()
+                .ok_or_else(invalid_atomic_recovery_artifacts)?
+        }
+        WellearnBatchFlow::AutoDuration => {
+            if snapshot.frozen_fanyuchang_target_seconds.is_some()
+                || authority.frozen_fanyuchang_target_count.is_some()
+                || authority.frozen_fanyuchang_targets_digest.is_some()
+            {
+                return Err(invalid_atomic_recovery_artifacts());
+            }
+            0
+        }
+        WellearnBatchFlow::FanyuchangCompletion
+        | WellearnBatchFlow::YzbrhCompletion
+        | WellearnBatchFlow::YzbrhDuration
+        | WellearnBatchFlow::AutoCompletion
+        | WellearnBatchFlow::AutoLegacyDuration => {
+            return Err(invalid_atomic_recovery_artifacts());
+        }
+    };
+    let restored_authority = WellearnAtomicBatchPlanningAuthority::try_new(
+        authority.course_remote_id,
+        authority.flow,
+        authority.selection.into(),
+        authority.expected_remote_task_id,
+        (authority.flow == WellearnBatchFlow::FanyuchangDuration)
+            .then_some(expected_fanyuchang_target),
+        auto_budget,
+    )?;
+    validate_complete_atomic_parent_batch_binding(
+        &restored_authority,
+        &batch_plan,
+        snapshot.frozen_fanyuchang_target_seconds.as_deref(),
+    )?;
+    Ok((
+        restored_authority,
+        batch_plan,
+        snapshot.frozen_fanyuchang_target_seconds,
+    ))
 }
 
 /// Versioned Provider-private payload for one exact atomic batch child.
@@ -3160,30 +3355,37 @@ mod tests {
         .unwrap();
         let prepared =
             prepare_atomic_child_plan_from_fresh_inventory(&tasks(), &units(), &authority).unwrap();
+        let targets = [0, 37, 19_800];
 
         let snapshot = authority
-            .to_execution_parent_batch_snapshot(prepared.batch_plan())
+            .to_execution_parent_batch_snapshot(prepared.batch_plan(), Some(&targets))
             .unwrap();
         assert_eq!(snapshot.provider_id().as_str(), PROVIDER_ID);
         assert_eq!(
             snapshot.authority_type(),
             WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE
         );
-        assert_eq!(snapshot.batch_type(), WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE);
-        assert_eq!(
-            WellearnAtomicBatchPlanningAuthority::decode(snapshot.authority().expose_secret())
-                .unwrap(),
-            authority
+        assert_eq!(snapshot.batch_type(), WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE);
+        let authority_value: serde_json::Value =
+            serde_json::from_slice(snapshot.authority().expose_secret()).unwrap();
+        assert_eq!(authority_value["version"], 2);
+        assert_eq!(authority_value["frozen_fanyuchang_target_count"], 3);
+        assert!(authority_value["frozen_fanyuchang_targets_digest"].is_array());
+        assert!(
+            authority_value
+                .get("frozen_fanyuchang_target_seconds")
+                .is_none()
         );
-        assert_eq!(
-            WellearnBatchPlan::decode_snapshot(snapshot.batch().expose_secret()).unwrap(),
-            prepared.batch_plan().clone()
-        );
+        let (restored_authority, restored_batch, restored_targets) =
+            decode_execution_parent_batch_snapshot(&snapshot).unwrap();
+        assert_eq!(restored_authority, authority);
+        assert_eq!(restored_batch, prepared.batch_plan().clone());
+        assert_eq!(restored_targets.as_deref(), Some(targets.as_slice()));
         assert_ne!(snapshot.authority_digest(), [0; 32]);
         assert_ne!(snapshot.batch_digest(), [0; 32]);
 
         let replay = authority
-            .to_execution_parent_batch_snapshot(prepared.batch_plan())
+            .to_execution_parent_batch_snapshot(prepared.batch_plan(), Some(&targets))
             .unwrap();
         assert_eq!(snapshot.authority_digest(), replay.authority_digest());
         assert_eq!(snapshot.batch_digest(), replay.batch_digest());
@@ -3192,6 +3394,67 @@ mod tests {
         assert!(!debug.contains("course:1001"));
         assert!(!debug.contains("sco:1001:301"));
         assert!(!debug.contains("37"));
+    }
+
+    #[test]
+    fn complete_parent_snapshot_rejects_any_fanyuchang_target_substitution() {
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            Some(0),
+            None,
+        )
+        .unwrap();
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let targets = [0, 37, 19_800];
+        let snapshot = authority
+            .to_execution_parent_batch_snapshot(&batch, Some(&targets))
+            .unwrap();
+        let original: serde_json::Value =
+            serde_json::from_slice(snapshot.batch().expose_secret()).unwrap();
+
+        for drifted_targets in [
+            serde_json::json!([0, 37, 19_799]),
+            serde_json::json!([37, 0, 19_800]),
+        ] {
+            let mut drifted = original.clone();
+            drifted["frozen_fanyuchang_target_seconds"] = drifted_targets;
+            let drifted = ExecutionParentBatchSnapshot::try_new(
+                ProviderId::new(PROVIDER_ID).unwrap(),
+                WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE,
+                SecretValue::new(snapshot.authority().expose_secret().to_vec()),
+                WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE,
+                SecretValue::new(serde_json::to_vec(&drifted).unwrap()),
+            )
+            .unwrap();
+            assert!(decode_execution_parent_batch_snapshot(&drifted).is_err());
+        }
+
+        let original_authority: serde_json::Value =
+            serde_json::from_slice(snapshot.authority().expose_secret()).unwrap();
+        for (field, value) in [
+            ("frozen_fanyuchang_target_count", serde_json::json!(2)),
+            (
+                "frozen_fanyuchang_targets_digest",
+                serde_json::Value::Array(vec![serde_json::json!(0); 32]),
+            ),
+            ("version", serde_json::json!(3)),
+        ] {
+            let mut drifted = original_authority.clone();
+            drifted[field] = value;
+            let drifted = ExecutionParentBatchSnapshot::try_new(
+                ProviderId::new(PROVIDER_ID).unwrap(),
+                WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE,
+                SecretValue::new(serde_json::to_vec(&drifted).unwrap()),
+                WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE,
+                SecretValue::new(snapshot.batch().expose_secret().to_vec()),
+            )
+            .unwrap();
+            assert!(decode_execution_parent_batch_snapshot(&drifted).is_err());
+        }
     }
 
     #[test]
@@ -3209,7 +3472,7 @@ mod tests {
             build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
         assert!(
             fanyuchang
-                .to_execution_parent_batch_snapshot(&all_units)
+                .to_execution_parent_batch_snapshot(&all_units, Some(&[0, 37, 19_800]))
                 .is_err()
         );
 
@@ -3225,7 +3488,7 @@ mod tests {
         let wrong_aggregate =
             build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
         assert!(
-            auto.to_execution_parent_batch_snapshot(&wrong_aggregate)
+            auto.to_execution_parent_batch_snapshot(&wrong_aggregate, None)
                 .is_err()
         );
     }

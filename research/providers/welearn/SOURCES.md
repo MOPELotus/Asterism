@@ -220,6 +220,15 @@ the private snapshot and digest-bound Core child plan as one Provider result is
 only an Asterism call-boundary hardening over the same audited batch semantics.
 The adjacent 8,192-child scale regression uses the same immediately preceding
 refresh and adds no protocol or capability claim.
+The full Fanyuchang target-authority checkpoint on 2026-08-16 repeated all
+three default-head/tag, Release and public-issue queries. Heads remain
+`afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2`,
+`bd160e91d0452b8bf483087fbdd3bdd58d855e13` and
+`85918caaccd93b73b1e41fe537b4e9a11377b759`; the sole Fanyuchang tag/Release and
+release/issue counts remain unchanged at `v4.0.0@5d1df60cb007`, `1/1`, `0/9`
+and `0/0`. Splitting arbitrary full targets between a four-KiB digest authority
+and eight-MiB complete snapshot is Asterism recovery hardening over existing
+audited duration semantics, not a donor protocol delta.
 
 ## Source selection
 

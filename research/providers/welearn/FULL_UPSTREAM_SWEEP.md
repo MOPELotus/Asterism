@@ -85,13 +85,14 @@ Consequently:
    authority and up-to-8-MiB complete batch snapshot to one parent attempt, then
    create every ordered child Execution with its exact Provider artifact and
    conditional sequence. Child retries/recovery must not rescan or redistribute
-   membership.
-2. Core now owns the conditional ledger, attempt-bound observations and
-   same-attempt recovery snapshot loading. It still needs WELearn composite
-   registration/dispatch plus a recovery result contract that carries the
-   optional final `ExecutionMutationVerification`; Engine must validate and
-   persist that proof on the same accepted final-save row before finishing the
-   recovered child.
+   membership. Provider v2 now binds every ordered Fanyuchang target through a
+   four-KiB count/digest authority plus the full vector in the complete batch;
+   Auto remains aggregate-derived.
+2. Core now owns the conditional ledger, attempt-bound observations,
+   same-attempt recovery snapshot loading and recovered final-verification
+   persistence. It still needs WELearn composite registration/dispatch, parent
+   planning input, transactional child creation and resolved private-snapshot
+   injection into execution/recovery.
 3. Capture/BrowserBridge still needs active browser session injection, action
    dispatch, callback handling and bounded recovery for interactive login.
 4. Cross-account bulk import/export and queueing are shared product surfaces and

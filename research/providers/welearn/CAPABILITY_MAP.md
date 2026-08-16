@@ -293,7 +293,7 @@ Provider child plan, exact Core artifact and artifact-bound conditional
 sequence, and whole-plan validation rejects cardinality, ordinal, artifact or
 sequence mixing. Its Core adapter now re-authenticates the encrypted parent
 snapshot, requires its decoded complete batch to equal the dispatch batch,
-rechecks the authority-selected Fanyuchang child target, and constructs Core
+recomputes the ordered full Fanyuchang target digest/count, and constructs Core
 `ProviderExecutionBatchPlan` children with a one-based position, exact remote
 Task, grouped DurationReport+ResourceExecution call, artifact and sequence.
 `prepare_atomic_execution_batch_plan` returns that Core plan together with the
@@ -302,22 +302,25 @@ planning hook consumes one Provider result rather than independently assembling
 the two values.
 This remains pure Provider planning evidence: it does not create, persist,
 restore or authorize any parent/child Execution.
-The parent authority itself now has a credential-free, versioned v1 encoding
-bounded to 4 KiB. Restore rejects unknown fields, version drift, malformed or
-duplicate Unit selections, cross-flow target mixtures and an Auto `actual`
-minute value that does not equal its frozen configured/range/offset derivation.
-`to_execution_parent_batch_snapshot` now reuses the same joint Course, flow,
-selection, expected-child and aggregate validation before constructing Core's
-`ExecutionParentBatchSnapshot` with exact Provider-private type names and
-zeroizing authority/batch bytes. Core `fe63910` supplies encrypted same-Attempt
-storage and resolve semantics for that value; Provider code still neither
-writes Storage nor gains scheduling authority.
+The child-planning authority retains its credential-free v1 representation for
+the existing exact-child recovery boundary. Core parent persistence now uses a
+separate `welearn.atomic-batch-planning-authority.v2` value bounded to 4 KiB.
+For Fanyuchang it stores the complete ordered target count plus a
+domain-separated SHA-256 digest; the corresponding
+`welearn.atomic-batch-snapshot.v2` value stores every target beside the complete
+batch under the independent 8 MiB bound. Joint decode rejects count, digest,
+order, any child target, expected-child, selection, flow or schema drift and can
+reconstruct the complete dispatch using only the encrypted pair. Auto stores no
+redundant vector: its existing configured/range/sample/aggregate authority and
+validated batch deterministically rebuild every equal-floor target. Core
+`fe63910` supplies encrypted same-Attempt storage and resolve semantics;
+Provider code still neither writes Storage nor gains scheduling authority.
 The complete Provider batch also encodes as bounded deny-unknown
 `welearn.batch-plan.v1` bytes and fully revalidates on decode; all seven flows
 and the 8,192-child maximum are covered. This supplies the complete
 membership/derived-fact persistence value, but Core must still atomically bind
-it with parent selection/entropy authority and each child artifact rather than
-treating the snapshot alone as scheduling or mutation permission.
+the v2 target-authorized parent pair with each child artifact rather than
+treating either base snapshot alone as scheduling or mutation permission.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
 remaining plan work is the parent/child Execution and composite dispatch layer,

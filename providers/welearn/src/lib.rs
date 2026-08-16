@@ -35,7 +35,7 @@ mod task_inventory;
 pub use atomic_dispatch::{
     WellearnAtomicBatchDispatchPlan, WellearnAtomicChildDispatchPlan,
     WellearnPreparedAtomicBatchPlan, materialize_atomic_batch_dispatch_plan,
-    prepare_atomic_execution_batch_plan,
+    prepare_atomic_execution_batch_plan, restore_atomic_batch_dispatch_plan,
 };
 pub use atomic_duration_completion::{
     WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionDocuments,
@@ -60,14 +60,15 @@ pub use authentication::{
     classify_password_login_response, encode_password_at,
 };
 pub use batch_plan::{
-    WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE, WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE,
-    WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE, WellearnAtomicBatchPlanningAuthority,
-    WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnAutoDurationBudget,
-    WellearnBatchDispatch, WellearnBatchEntry, WellearnBatchExecutionShape, WellearnBatchFlow,
-    WellearnBatchPlan, WellearnBatchTargetStrategy, WellearnBatchUnitSelection,
-    WellearnPreparedAtomicChildPlan, build_batch_plan, build_selected_batch_plan,
-    materialize_atomic_child_plan, prepare_atomic_child_plan_from_fresh_inventory,
-    validate_batch_plan_integrity, validate_fresh_batch_entry,
+    WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE, WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE,
+    WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE, WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE,
+    WellearnAtomicBatchPlanningAuthority, WellearnAtomicChildPlan, WellearnAtomicCompletionProfile,
+    WellearnAutoDurationBudget, WellearnBatchDispatch, WellearnBatchEntry,
+    WellearnBatchExecutionShape, WellearnBatchFlow, WellearnBatchPlan, WellearnBatchTargetStrategy,
+    WellearnBatchUnitSelection, WellearnPreparedAtomicChildPlan, build_batch_plan,
+    build_selected_batch_plan, materialize_atomic_child_plan,
+    prepare_atomic_child_plan_from_fresh_inventory, validate_batch_plan_integrity,
+    validate_fresh_batch_entry,
 };
 pub use cmi::{
     WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport, WellearnTaskProgress,

@@ -6,10 +6,9 @@ use asterism_provider_api::{
 };
 
 use crate::batch_plan::{
-    WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE, WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE,
     WellearnAtomicBatchPlanningAuthority, WellearnAtomicChildPlan, WellearnBatchExecutionShape,
-    WellearnBatchFlow, WellearnBatchPlan, materialize_atomic_child_plan_for_validated_batch,
-    validate_batch_plan_integrity,
+    WellearnBatchFlow, WellearnBatchPlan, decode_execution_parent_batch_snapshot,
+    materialize_atomic_child_plan_for_validated_batch, validate_batch_plan_integrity,
 };
 use crate::{build_atomic_mutation_sequence_plan, metadata::PROVIDER_ID};
 
@@ -181,42 +180,12 @@ impl WellearnAtomicBatchDispatchPlan {
         parent: &ExecutionParentBatchSnapshot,
     ) -> ProviderResult<ProviderExecutionBatchPlan> {
         self.validate()?;
+        let restored = restore_atomic_batch_dispatch_plan(parent)?;
+        if &restored != self {
+            return Err(invalid_atomic_batch_dispatch_plan());
+        }
         let provider_id =
             ProviderId::new(PROVIDER_ID).map_err(|_| invalid_atomic_batch_dispatch_plan())?;
-        if parent.provider_id() != &provider_id
-            || parent.authority_type() != WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE
-            || parent.batch_type() != WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE
-        {
-            return Err(invalid_atomic_batch_dispatch_plan());
-        }
-
-        let authority =
-            WellearnAtomicBatchPlanningAuthority::decode(parent.authority().expose_secret())?;
-        let batch_plan = WellearnBatchPlan::decode_snapshot(parent.batch().expose_secret())?;
-        if batch_plan != self.batch_plan {
-            return Err(invalid_atomic_batch_dispatch_plan());
-        }
-        let reconstructed = authority.to_execution_parent_batch_snapshot(&batch_plan)?;
-        if reconstructed.authority_digest() != parent.authority_digest()
-            || reconstructed.batch_digest() != parent.batch_digest()
-        {
-            return Err(invalid_atomic_batch_dispatch_plan());
-        }
-
-        if authority.flow() == WellearnBatchFlow::FanyuchangDuration {
-            let expected = self
-                .children
-                .iter()
-                .find(|child| {
-                    child.child_plan().remote_task_id() == authority.expected_remote_task_id()
-                })
-                .ok_or_else(invalid_atomic_batch_dispatch_plan)?;
-            if expected.frozen_fanyuchang_target_seconds()
-                != authority.frozen_fanyuchang_target_seconds()
-            {
-                return Err(invalid_atomic_batch_dispatch_plan());
-            }
-        }
 
         let children = self
             .children
@@ -300,6 +269,21 @@ pub fn materialize_atomic_batch_dispatch_plan(
     Ok(plan)
 }
 
+/// Restores the complete ordered dispatch using only Core's encrypted parent
+/// authority plus complete batch snapshot.
+///
+/// # Errors
+///
+/// Rejects foreign/private schema drift, target count/digest substitution,
+/// batch inconsistency or any reconstructed child/artifact/sequence drift.
+pub fn restore_atomic_batch_dispatch_plan(
+    parent: &ExecutionParentBatchSnapshot,
+) -> ProviderResult<WellearnAtomicBatchDispatchPlan> {
+    let (_, batch_plan, frozen_fanyuchang_target_seconds) =
+        decode_execution_parent_batch_snapshot(parent)?;
+    materialize_atomic_batch_dispatch_plan(batch_plan, frozen_fanyuchang_target_seconds)
+}
+
 /// Prepares the exact private parent snapshot and ordered Core child plan as
 /// one Provider result.
 ///
@@ -309,12 +293,12 @@ pub fn materialize_atomic_batch_dispatch_plan(
 /// expected-child target mismatch, or generic Core batch-plan validation error.
 pub fn prepare_atomic_execution_batch_plan(
     authority: &WellearnAtomicBatchPlanningAuthority,
-    batch_plan: WellearnBatchPlan,
-    frozen_fanyuchang_target_seconds: Option<Vec<u64>>,
+    batch_plan: &WellearnBatchPlan,
+    frozen_fanyuchang_target_seconds: Option<&[u64]>,
 ) -> ProviderResult<WellearnPreparedAtomicBatchPlan> {
-    let parent_snapshot = authority.to_execution_parent_batch_snapshot(&batch_plan)?;
-    let dispatch_plan =
-        materialize_atomic_batch_dispatch_plan(batch_plan, frozen_fanyuchang_target_seconds)?;
+    let parent_snapshot = authority
+        .to_execution_parent_batch_snapshot(batch_plan, frozen_fanyuchang_target_seconds)?;
+    let dispatch_plan = restore_atomic_batch_dispatch_plan(&parent_snapshot)?;
     let execution_batch_plan = dispatch_plan.to_provider_execution_batch_plan(&parent_snapshot)?;
     Ok(WellearnPreparedAtomicBatchPlan {
         parent_snapshot,
@@ -492,7 +476,7 @@ mod tests {
         )
         .unwrap();
         let parent = authority
-            .to_execution_parent_batch_snapshot(&batch)
+            .to_execution_parent_batch_snapshot(&batch, Some(targets.as_slice()))
             .unwrap();
         let dispatch =
             materialize_atomic_batch_dispatch_plan(batch.clone(), Some(targets)).unwrap();
@@ -532,8 +516,9 @@ mod tests {
             None,
         )
         .unwrap();
+        let parent_targets = [1, 37, 19_800];
         let parent = authority
-            .to_execution_parent_batch_snapshot(&batch)
+            .to_execution_parent_batch_snapshot(&batch, Some(&parent_targets))
             .unwrap();
         let dispatch =
             materialize_atomic_batch_dispatch_plan(batch, Some(vec![0, 37, 19_800])).unwrap();
@@ -541,9 +526,9 @@ mod tests {
 
         let malformed = ExecutionParentBatchSnapshot::try_new(
             ProviderId::new(PROVIDER_ID).unwrap(),
-            WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE,
+            crate::WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE,
             asterism_secrets::SecretValue::new(b"not-json".to_vec()),
-            WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE,
+            crate::WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE,
             asterism_secrets::SecretValue::new(b"not-json".to_vec()),
         )
         .unwrap();
@@ -567,9 +552,9 @@ mod tests {
             None,
         )
         .unwrap();
+        let targets = [0, 37, 19_800];
         let prepared =
-            prepare_atomic_execution_batch_plan(&authority, batch, Some(vec![0, 37, 19_800]))
-                .unwrap();
+            prepare_atomic_execution_batch_plan(&authority, &batch, Some(&targets)).unwrap();
         assert_eq!(
             prepared.parent_snapshot().authority_digest(),
             prepared.execution_batch_plan().authority_digest()
@@ -579,6 +564,16 @@ mod tests {
             prepared.execution_batch_plan().batch_digest()
         );
         assert_eq!(prepared.execution_batch_plan().children().len(), 3);
+        let restored_dispatch =
+            restore_atomic_batch_dispatch_plan(prepared.parent_snapshot()).unwrap();
+        assert_eq!(
+            restored_dispatch
+                .children()
+                .iter()
+                .map(WellearnAtomicChildDispatchPlan::frozen_fanyuchang_target_seconds)
+                .collect::<Vec<_>>(),
+            [Some(0), Some(37), Some(19_800)]
+        );
         let debug = format!("{prepared:?}");
         assert!(!debug.contains("course:1001"));
         assert!(!debug.contains("sco:1001"));
@@ -601,10 +596,10 @@ mod tests {
             Some(crate::WellearnAutoDurationBudget::try_new(1, 0, 0).unwrap()),
         )
         .unwrap();
-        let prepared = prepare_atomic_execution_batch_plan(&authority, batch, None).unwrap();
-        let decoded_batch =
-            WellearnBatchPlan::decode_snapshot(prepared.parent_snapshot().batch().expose_secret())
-                .unwrap();
+        let prepared = prepare_atomic_execution_batch_plan(&authority, &batch, None).unwrap();
+        let (_, decoded_batch, decoded_targets) =
+            decode_execution_parent_batch_snapshot(prepared.parent_snapshot()).unwrap();
+        assert_eq!(decoded_targets, None);
         assert_eq!(prepared.execution_batch_plan().children().len(), 3);
         assert!(
             prepared
@@ -647,8 +642,9 @@ mod tests {
             None,
         )
         .unwrap();
+        let targets = vec![1; MAXIMUM_CHILDREN];
         let prepared =
-            prepare_atomic_execution_batch_plan(&authority, batch, Some(vec![1; MAXIMUM_CHILDREN]))
+            prepare_atomic_execution_batch_plan(&authority, &batch, Some(targets.as_slice()))
                 .unwrap();
 
         assert_eq!(
@@ -664,6 +660,7 @@ mod tests {
                 .position(),
             u32::try_from(MAXIMUM_CHILDREN).unwrap()
         );
+        assert!(prepared.parent_snapshot().authority().expose_secret().len() <= 4 * 1_024);
         assert!(prepared.parent_snapshot().batch().expose_secret().len() <= 8 * 1_024 * 1_024);
     }
 }

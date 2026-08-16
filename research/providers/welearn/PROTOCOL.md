@@ -881,17 +881,17 @@ persist attempts, create/recover children or grant mutation permission.
 `to_provider_execution_batch_plan` is the final Provider-to-Core projection.
 It requires the exact `welearn` private type names, decodes both encrypted
 snapshot values, demands that the decoded complete batch equals the dispatch
-batch, reconstructs and digest-compares the parent snapshot, and for current
-Fanyuchang also proves that the authority's expected Task retains its exact
-frozen child target. Each child then becomes a one-based
+batch, reconstructs the whole dispatch from that pair, and for current
+Fanyuchang proves the count and domain-separated digest of every ordered frozen
+child target before comparing the projection. Each child then becomes a one-based
 `ProviderExecutionChildPlan` carrying the grouped
 `DurationReport + ResourceExecution` call, exact namespaced artifact and its
 artifact-bound conditional sequence. Core's generic constructor rechecks
 contiguous positions, unique remote Tasks/artifacts/sequences and Provider
 namespaces. This still grants no local Task or mutation authority.
 `prepare_atomic_execution_batch_plan` is the single-call composition boundary:
-it constructs the encrypted parent snapshot, materializes the exact dispatch,
-projects Core children against that same snapshot, and returns both as
+it constructs the encrypted parent snapshot, restores the exact dispatch from
+that snapshot alone, projects Core children against it, and returns both as
 `WellearnPreparedAtomicBatchPlan`. Its custom Debug exposes only Provider and
 child count plus hash placeholders. Moving the two parts out preserves their
 equal authority/batch digests; it cannot create a Core parent or child row.
@@ -909,7 +909,7 @@ being cross-assembled. Neither boundary performs I/O or grants mutation
 authority; a complete fresh TaskDetail rebind remains mandatory before
 transport.
 
-`WellearnAtomicBatchPlanningAuthority` now expresses the minimum input that
+`WellearnAtomicBatchPlanningAuthority` expresses the minimum exact-child input that
 cannot be recovered from one Task: parent remote Course, exact donor flow,
 ordered all/explicit Unit selection, expected child remote identity, and either
 one already-frozen Fanyuchang child target or Auto's complete configured base,
@@ -918,14 +918,19 @@ credential-free v1 JSON encoding bounded to 4 KiB. Decode uses private wire
 types, denies unknown fields, checks the version and derived Auto aggregate,
 then re-enters the ordinary strict constructor so serialized Unit/flow/target
 facts cannot bypass semantic validation.
-Its `to_execution_parent_batch_snapshot` adapter first applies the same joint
-parent/batch validator used by durable recovery, including Course, flow, exact
-Unit selection, Auto aggregate and expected-child membership. Only then does it
-encode `welearn.atomic-batch-planning-authority.v1` plus
-`welearn.batch-plan.v1` into Core's zeroizing `ExecutionParentBatchSnapshot`.
-This makes persistence-time and recovery-time consistency one rule instead of
-two parallel checks. The value itself performs no Storage write and grants no
-child or mutation authority.
+Its Core parent adapter upgrades the persisted pair rather than trying to place
+arbitrary full targets in that four-KiB document. For current Fanyuchang,
+`welearn.atomic-batch-planning-authority.v2` stores the ordered target count and
+SHA-256 digest, while `welearn.atomic-batch-snapshot.v2` stores the full target
+vector plus deny-unknown base batch. An arbitrary 8,192-entry target vector
+cannot fit the authority ceiling even with compact bit packing, so the bounded
+complete-batch value is the only lossless location. Joint decode verifies every
+target through count/digest/order, derives the expected child target, re-enters
+the legacy authority constructor and full batch validator, then
+`restore_atomic_batch_dispatch_plan` rebuilds all child plans, artifacts and
+conditional sequences without a rescan. Auto retains only its aggregate budget
+and derives targets from the validated batch. Neither value performs Storage I/O
+or grants child/mutation authority.
 `prepare_atomic_child_plan_from_fresh_inventory` accepts that authority
 plus one complete fresh Unit/SCO inventory, rebuilds the selected batch once,
 locates the expected child without widening selection, then materializes and
@@ -1020,6 +1025,12 @@ artifact ceiling. This snapshot does not replace parent selection/entropy
 authority or per-child artifacts: Core must persist all three atomically so an
 Auto aggregate cannot masquerade as its configured base/range/sample and a
 Fanyuchang child cannot lose its independently frozen target.
+For atomic parent persistence, `welearn.atomic-batch-snapshot.v2` nests that
+validated plan and adds the complete ordered Fanyuchang target vector. The
+four-KiB authority carries only its count and digest, so changing even one
+non-expected child target or reordering two targets fails joint restoration.
+The maximum 8,192-child fixture keeps the authority below 4 KiB and the combined
+batch below 8 MiB. Auto omits the redundant vector and remains aggregate-derived.
 Core `fe63910` now provides the encrypted authority/batch half of that boundary;
 the Provider adapter supplies locally bounded zeroizing bytes and stable type
 names after joint semantic validation. Ordered child creation and composite
