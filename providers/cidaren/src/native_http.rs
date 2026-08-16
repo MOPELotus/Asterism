@@ -1426,6 +1426,12 @@ mod tests {
             start.headers().get(AUTHORIZATION_V).unwrap(),
             AUTHORIZATION_V_READ
         );
+        assert!(
+            start
+                .url()
+                .query()
+                .is_some_and(|query| query.contains("opt_font_c=%2523000000"))
+        );
 
         let verify = build_verify_answer_request(
             &binding,

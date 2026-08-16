@@ -1135,6 +1135,20 @@ still targets `7e29ee43692f4c0807fae8cf7f74a5a674793097`. The scoped Provider
 suite retained 190 unit tests plus two doctests, and all-target/all-feature
 Clippy remained warning-free.
 
+### 2026-08-16 StartAnswer query-encoding follow-up
+
+All three frozen donor lines pass the literal string `%23000000` as
+`opt_font_c` in their `StartAnswer` params. Their standard Python requests
+encoder escapes the percent sign, so the raw URL contains
+`opt_font_c=%2523000000`; the decoded application-level query value remains
+`%23000000`. Asterism previously substituted semantic `#000000`, which emitted
+only `%23000000` on the wire and changed the durable request digest.
+
+`build_start_answer_request` now freezes the donor literal for both ClassTask
+and StudyTask. The protocol-vector test checks the value before transport, and
+the Native HTTP boundary checks the double-encoded raw URL. No credential,
+mutation scheduling or response semantics changed.
+
 ## Check procedure
 
 For the next checkpoint:

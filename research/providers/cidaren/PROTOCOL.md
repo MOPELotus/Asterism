@@ -640,6 +640,8 @@ The current clean-room protocol layer additionally freezes:
 
 - fresh class/study identity rebinding before using mutable `task_id`;
 - exact `StartAnswer` query family and class `release_id` / study `course_id`;
+  its donor literal `opt_font_c=%23000000` is passed as a query value, so the
+  actual URL contains `%2523000000` after standard percent encoding;
 - `VerifyAnswer` answer/topic/timestamp/version signing;
 - `SubmitAnswerAndSave` and `SkipAnswer` duration/topic signing;
 - compact `SubmitChoseWord` word-map signing;

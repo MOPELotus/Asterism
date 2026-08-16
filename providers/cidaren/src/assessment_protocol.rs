@@ -8,6 +8,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::CidarenAttemptResponseIdentity;
 
 const START_VERSION: &str = "2.6.1.240122";
+const START_OPTION_FONT_COLOR: &str = "%23000000";
 const VERIFY_VERSION: &str = "2.6.1.231204";
 const ADVANCE_VERSION: &str = "2.6.2.24031302";
 const SIGNING_SUFFIX: &str = "ajfajfamsnfaflfasakljdlalkflak";
@@ -225,7 +226,7 @@ pub fn build_start_answer_request(
         ),
         ("opt_img_w".to_owned(), "684".to_owned()),
         ("opt_font_size".to_owned(), "37".to_owned()),
-        ("opt_font_c".to_owned(), "#000000".to_owned()),
+        ("opt_font_c".to_owned(), START_OPTION_FONT_COLOR.to_owned()),
         ("it_img_w".to_owned(), "804".to_owned()),
         ("it_font_size".to_owned(), "42".to_owned()),
         ("timestamp".to_owned(), timestamp_millis.to_string()),
@@ -660,6 +661,7 @@ mod tests {
         assert_eq!(query(&request, "task_id"), Some("-1"));
         assert_eq!(query(&request, "task_type"), Some("2"));
         assert_eq!(query(&request, "release_id"), Some("2002"));
+        assert_eq!(query(&request, "opt_font_c"), Some(START_OPTION_FONT_COLOR));
         assert_eq!(query(&request, "version"), Some(START_VERSION));
 
         let study = study_binding();
