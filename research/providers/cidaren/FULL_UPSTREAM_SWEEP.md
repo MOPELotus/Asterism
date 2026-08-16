@@ -39,7 +39,7 @@ README screenshots, public issue payloads/logs and packaged-release bytecode.
 | `Course/StudyWordInfo` | bounded meaning/phrase/example evidence | Implemented |
 | `Course/SearchWord` | prototype alias fallback | Implemented |
 | `SubmitChoseWord` | durable one-shot pre-Question mutation | Implemented |
-| `StartAnswer` | durable non-idempotent attempt start | Implemented |
+| `StartAnswer` | durable non-idempotent attempt start; class request selector is donor-fixed at `task_type=2` while the decoded current-step echo retains class row type 1/2 | Implemented; request selector and response-row identity are validated as separate facts |
 | `VerifyAnswer` | one answer/relation per durable operation with rotated token | Implemented |
 | `SubmitAnswerAndSave` | durable answer/reading-card advance | Implemented |
 | `SkipAnswer` | distinct explicit Skip operation | Implemented |
