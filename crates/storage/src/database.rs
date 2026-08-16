@@ -101,6 +101,12 @@ pub enum StorageError {
     ExecutionStateConflict,
     #[error("execution attempt is missing, finished, or belongs to another execution")]
     ExecutionAttemptNotActive,
+    #[error("batch execution worker no longer owns both the scheduler claim and batch lease")]
+    BatchExecutionClaimLost,
+    #[error("batch execution state conflicts with the requested worker transition")]
+    BatchExecutionStateConflict,
+    #[error("batch execution attempt is missing, finished, or belongs to another parent")]
+    BatchExecutionAttemptNotActive,
     #[error("outbox claim is no longer owned by this worker")]
     OutboxClaimLost,
     #[error("outbox claim expiry must be in the future and its batch must be non-zero")]
@@ -139,7 +145,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 74);
+        assert_eq!(migration_count, 75);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -308,6 +314,35 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(course_indexes, 1);
+    }
+
+    #[tokio::test]
+    async fn batch_parent_snapshot_migration_is_present_on_a_fresh_database() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let columns = sqlx::query("PRAGMA table_info(batch_execution_parent_snapshots)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        let names = columns
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "batch_execution_id",
+                "batch_execution_attempt_id",
+                "provider_id",
+                "authority_type",
+                "authority_digest",
+                "authority_secret_blob_id",
+                "batch_type",
+                "batch_digest",
+                "batch_secret_blob_id",
+                "bound_at",
+            ]
+        );
     }
 
     #[tokio::test]

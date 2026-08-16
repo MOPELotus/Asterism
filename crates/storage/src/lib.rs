@@ -7,6 +7,7 @@ mod answer_history_ingest;
 mod auth_bootstrap;
 mod auth_session;
 mod batch_execution;
+mod batch_execution_parent_snapshot;
 mod browser_bridge;
 mod browser_bridge_command;
 mod completion_workflow;
@@ -44,6 +45,7 @@ pub use answer_history_ingest::SqliteAnswerHistoryIngestionRepository;
 pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
 pub use batch_execution::SqliteBatchExecutionRepository;
+pub use batch_execution_parent_snapshot::SqliteBatchExecutionParentSnapshotRepository;
 pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
 pub use browser_bridge_command::SqliteBrowserBridgeCommandArtifactRepository;
 pub use completion_workflow::SqliteCompletionWorkflowRepository;
@@ -75,27 +77,30 @@ pub use repository::{
     AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
-    AuthenticatedCredentialRepository, BatchExecutionRepository, BatchExecutionScheduleOutcome,
-    BatchExecutionScheduleRequest, BrowserBridgeCommandArtifactRepository,
-    BrowserBridgeCommandDispatchRecord, BrowserBridgeCommandDispatchRequest,
-    BrowserBridgeCommandIssueRequest, BrowserBridgeCommandResolveRequest,
-    BrowserBridgeCredentialCommit, BrowserBridgeCredentialCommitOutcome,
-    BrowserBridgeCredentialCommitRequest, BrowserBridgeCredentialRepository,
-    BrowserBridgeExchangeRecord, BrowserBridgeResultArtifactRecord,
-    BrowserBridgeResultAttemptFinishRequest, BrowserBridgeResultReceiveRequest,
-    BrowserBridgeResultResolveRequest, BrowserBridgeRuntimeBindingRecord,
-    BrowserBridgeRuntimeStateIssue, BrowserBridgeSessionRepository,
-    BrowserBridgeWorkflowCommitOutcome, BrowserBridgeWorkflowCommitRequest,
-    BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue,
-    ClaimedAnswerBootstrapHarvest, CompletionWorkflowCreateOutcome, CompletionWorkflowRepository,
-    CourseAggregateProgressRecord, CourseProgressRepository, CreditQueryRepository,
-    CreditRepository, CreditReservationDetail, CreditReservationPage, CreditTransactionPage,
-    DispatchedBrowserBridgeCommand, ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
-    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
-    ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationPlanRecord,
-    ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
-    ExecutionAtomicMutationRecoveryVerificationRequest, ExecutionAtomicMutationRepository,
-    ExecutionAtomicMutationSequenceObservationOutcome,
+    AuthenticatedCredentialRepository, BatchExecutionAttemptStartRequest,
+    BatchExecutionParentSnapshotBindOutcome, BatchExecutionParentSnapshotBindRequest,
+    BatchExecutionParentSnapshotRecord, BatchExecutionParentSnapshotRepository,
+    BatchExecutionParentSnapshotResolveRequest, BatchExecutionRepository,
+    BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest,
+    BrowserBridgeCommandArtifactRepository, BrowserBridgeCommandDispatchRecord,
+    BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandIssueRequest,
+    BrowserBridgeCommandResolveRequest, BrowserBridgeCredentialCommit,
+    BrowserBridgeCredentialCommitOutcome, BrowserBridgeCredentialCommitRequest,
+    BrowserBridgeCredentialRepository, BrowserBridgeExchangeRecord,
+    BrowserBridgeResultArtifactRecord, BrowserBridgeResultAttemptFinishRequest,
+    BrowserBridgeResultReceiveRequest, BrowserBridgeResultResolveRequest,
+    BrowserBridgeRuntimeBindingRecord, BrowserBridgeRuntimeStateIssue,
+    BrowserBridgeSessionRepository, BrowserBridgeWorkflowCommitOutcome,
+    BrowserBridgeWorkflowCommitRequest, BrowserBridgeWorkflowContextIssue,
+    BrowserBridgeWorkflowPlanIssue, ClaimedAnswerBootstrapHarvest, CompletionWorkflowCreateOutcome,
+    CompletionWorkflowRepository, CourseAggregateProgressRecord, CourseProgressRepository,
+    CreditQueryRepository, CreditRepository, CreditReservationDetail, CreditReservationPage,
+    CreditTransactionPage, DispatchedBrowserBridgeCommand, ExecutionAtomicMutation,
+    ExecutionAtomicMutationIssueOutcome, ExecutionAtomicMutationIssueRequest,
+    ExecutionAtomicMutationPlanPrepareOutcome, ExecutionAtomicMutationPlanPrepareRequest,
+    ExecutionAtomicMutationPlanRecord, ExecutionAtomicMutationReceiptOutcome,
+    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRecoveryVerificationRequest,
+    ExecutionAtomicMutationRepository, ExecutionAtomicMutationSequenceObservationOutcome,
     ExecutionAtomicMutationSequenceObservationRecord,
     ExecutionAtomicMutationSequenceObservationRequest,
     ExecutionAtomicMutationSequencePlanPrepareOutcome,
@@ -141,7 +146,8 @@ pub use repository::{
     QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
     QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionRepository,
     QuestionSessionTransition, QuestionSnapshot, QuestionSnapshotRepository,
-    ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
+    ResolvedBatchExecutionParentSnapshot, ResolvedBrowserBridgeCommand,
+    ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
     ResolvedBrowserBridgeWorkflowContext, ResolvedBrowserBridgeWorkflowPlan,
     ResolvedExecutionParentBatchSnapshot, ResolvedInteractiveAuthCandidate,
     ResolvedQuestionReadContinuation, ResolvedQuestionSessionContinuation, ScanScheduleRepository,

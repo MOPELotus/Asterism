@@ -7,8 +7,8 @@ use asterism_auth::TokenDigest;
 use asterism_domain::{
     AccountHealth, AnswerBootstrapHarvest, AnswerCandidate, AnswerCandidateId, AttemptResult,
     AuditActor, AuditRecord, AuthBootstrapClientEvent, AuthBootstrapSession,
-    AuthBootstrapSessionId, AuthSession, AuthSessionId, BatchExecution, BrowserBridgeExchange,
-    BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
+    AuthBootstrapSessionId, AuthSession, AuthSessionId, BatchExecution, BatchExecutionAttempt,
+    BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
     BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession, BrowserBridgeSessionId,
     CompletionPolicySnapshot, Course, CourseAggregateProgress, CourseId, CreditAccount,
     CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId, Execution,
@@ -2213,6 +2213,15 @@ pub struct BatchExecutionScheduleRequest<'a> {
     pub correlation_id: &'a str,
 }
 
+#[derive(Clone, Debug)]
+pub struct BatchExecutionAttemptStartRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub at: Timestamp,
+    pub correlation_id: &'a str,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BatchExecutionScheduleOutcome {
     Created(BatchExecution),
@@ -2241,6 +2250,16 @@ pub trait BatchExecutionRepository: Send + Sync {
         &self,
         batch_execution_id: asterism_domain::BatchExecutionId,
     ) -> Result<Option<BatchExecution>, StorageError>;
+
+    async fn start_batch_execution_attempt(
+        &self,
+        request: BatchExecutionAttemptStartRequest<'_>,
+    ) -> Result<BatchExecutionAttempt, StorageError>;
+
+    async fn find_active_batch_execution_attempt(
+        &self,
+        batch_execution_id: asterism_domain::BatchExecutionId,
+    ) -> Result<Option<BatchExecutionAttempt>, StorageError>;
 }
 
 #[derive(Clone, Debug)]
@@ -2683,6 +2702,69 @@ pub trait ExecutionParentBatchSnapshotRepository: Send + Sync {
         &self,
         request: ExecutionParentBatchSnapshotResolveRequest<'_>,
     ) -> Result<Option<ResolvedExecutionParentBatchSnapshot>, SecretStoreError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchExecutionParentSnapshotRecord {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub provider_id: ProviderId,
+    pub authority_type: String,
+    pub authority_digest: [u8; 32],
+    pub batch_type: String,
+    pub batch_digest: [u8; 32],
+    pub bound_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct BatchExecutionParentSnapshotBindRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub snapshot: ExecutionParentBatchSnapshot,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchExecutionParentSnapshotResolveRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct ResolvedBatchExecutionParentSnapshot {
+    pub metadata: BatchExecutionParentSnapshotRecord,
+    pub snapshot: ExecutionParentBatchSnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchExecutionParentSnapshotBindOutcome {
+    Bound(BatchExecutionParentSnapshotRecord),
+    AlreadyBound(BatchExecutionParentSnapshotRecord),
+}
+
+/// Provider-scoped encrypted parent authority for a Course batch Attempt.
+/// Binding and resolution both require the dedicated batch scheduler claim,
+/// live parent lease and exact active parent Attempt.
+#[async_trait]
+pub trait BatchExecutionParentSnapshotRepository: Send + Sync {
+    async fn bind_batch_execution_parent_snapshot(
+        &self,
+        request: BatchExecutionParentSnapshotBindRequest<'_>,
+    ) -> Result<BatchExecutionParentSnapshotBindOutcome, SecretStoreError>;
+
+    async fn resolve_batch_execution_parent_snapshot(
+        &self,
+        request: BatchExecutionParentSnapshotResolveRequest<'_>,
+    ) -> Result<Option<ResolvedBatchExecutionParentSnapshot>, SecretStoreError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

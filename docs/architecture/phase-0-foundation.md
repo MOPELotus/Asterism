@@ -5097,3 +5097,33 @@ private planning material. The next transaction must claim the dedicated job
 and lease, create the exact Attempt, invoke Provider parent planning, encrypt
 and bind its authority/snapshot, then map and create every ordered child from
 the digest-bound dispatch plan.
+
+## Two-hundred-and-seventy-sixth Phase 0 slice
+
+The dedicated batch worker can now turn one live `batch_execution` scheduler
+claim into the exact parent Attempt and lease without touching any Task-scoped
+execution state. Starting validates the claimed job kind and payload, worker
+ownership and expiry, Scheduled parent state and bounded attempt number, then
+atomically creates the lease and Attempt, advances the parent to Running and
+writes sanitized audit/outbox evidence. A restart by the same worker under the
+same live claim returns the already-active Attempt instead of creating another
+one; a lost claim, expired lease or different active Attempt fails closed.
+
+The parent authority and complete Provider-private batch are now stored under
+that Course-scoped Attempt rather than an ordinary Task Execution. Migration
+075 binds their two independent encrypted `ProviderExecutionState` secret
+blobs to the `(BatchExecution, BatchExecutionAttempt)` pair. Bind and resolve
+both require the exact live scheduler claim, parent lease, active Attempt,
+Provider/account ownership and authorized Core or matching Provider runtime
+access. The first immutable binding wins; exact replay is idempotent, changed
+metadata conflicts, ciphertext authentication and both frozen digests are
+checked before private bytes are returned, and audit metadata contains only
+type names plus hash placeholders.
+
+Coverage proves scheduling through Attempt start, idempotent worker restart,
+Task isolation, ciphertext non-disclosure and fail-closed tampering on a fresh
+database. Provider parent planning is not invoked yet, and this slice does not
+map remote identities, create child Tasks/Executions, reserve child credit or
+enqueue child jobs. The next shared transaction must call the Provider parent
+planning hook, verify its digest-bound ordered child plan and atomically create
+or recover every child before any mutation can be issued.

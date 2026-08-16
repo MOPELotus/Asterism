@@ -1,8 +1,9 @@
 use std::str::FromStr;
 
 use asterism_domain::{
-    AuditActor, AuditRecordId, BatchExecution, BatchExecutionId, ExecutionState, ProviderAccountId,
-    TaskCapability, Timestamp, UserId,
+    AttemptResult, AuditActor, AuditRecordId, BatchExecution, BatchExecutionAttempt,
+    BatchExecutionAttemptId, BatchExecutionId, ExecutionState, ProviderAccountId,
+    ProviderErrorClass, TaskCapability, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_scheduler::ScheduledJobKind;
@@ -11,8 +12,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::Row;
 
 use crate::{
-    BatchExecutionRepository, BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest,
-    Database, StorageError, outbox::enqueue_in_transaction,
+    BatchExecutionAttemptStartRequest, BatchExecutionRepository, BatchExecutionScheduleOutcome,
+    BatchExecutionScheduleRequest, Database, StorageError, outbox::enqueue_in_transaction,
 };
 
 #[derive(Clone, Debug)]
@@ -172,6 +173,152 @@ impl BatchExecutionRepository for SqliteBatchExecutionRepository {
             .map(decode_batch_execution)
             .transpose()
     }
+
+    async fn start_batch_execution_attempt(
+        &self,
+        request: BatchExecutionAttemptStartRequest<'_>,
+    ) -> Result<BatchExecutionAttempt, StorageError> {
+        validate_worker_context(request.worker_id, request.correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let claim_expires_at = assert_batch_scheduler_claim(
+            &mut transaction,
+            request.batch_execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+        )
+        .await?;
+        let row = sqlx::query(BATCH_EXECUTION_SELECT_BY_ID)
+            .bind(request.batch_execution_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::BatchExecutionStateConflict)?;
+        let mut batch = decode_batch_execution(&row)?;
+        if batch.state == ExecutionState::Running {
+            assert_batch_lease(&mut transaction, batch.id, request.worker_id, request.at).await?;
+            let attempt = find_active_attempt(&mut transaction, batch.id)
+                .await?
+                .ok_or(StorageError::BatchExecutionAttemptNotActive)?;
+            transaction.commit().await?;
+            return Ok(attempt);
+        }
+        if batch.state != ExecutionState::Scheduled {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        let live_other: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM batch_execution_leases \
+             WHERE batch_execution_id = ? AND expires_at > ? AND worker_id <> ?",
+        )
+        .bind(batch.id.to_string())
+        .bind(encode_timestamp(request.at))
+        .bind(request.worker_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if live_other != 0 {
+            return Err(StorageError::BatchExecutionClaimLost);
+        }
+        sqlx::query(
+            "INSERT INTO batch_execution_leases (batch_execution_id, worker_id, expires_at) \
+             VALUES (?, ?, ?) \
+             ON CONFLICT(batch_execution_id) DO UPDATE SET worker_id = excluded.worker_id, \
+                expires_at = excluded.expires_at \
+             WHERE batch_execution_leases.expires_at <= ? \
+                OR batch_execution_leases.worker_id = excluded.worker_id",
+        )
+        .bind(batch.id.to_string())
+        .bind(request.worker_id)
+        .bind(encode_timestamp(claim_expires_at))
+        .bind(encode_timestamp(request.at))
+        .execute(&mut *transaction)
+        .await?;
+        assert_batch_lease(&mut transaction, batch.id, request.worker_id, request.at).await?;
+        let next_attempt_no: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM batch_execution_attempts \
+             WHERE batch_execution_id = ?",
+        )
+        .bind(batch.id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let attempt = BatchExecutionAttempt {
+            id: BatchExecutionAttemptId::new(),
+            batch_execution_id: batch.id,
+            attempt_no: u32::try_from(next_attempt_no).map_err(|_| {
+                StorageError::InvalidData("batch execution attempt number is invalid".to_owned())
+            })?,
+            started_at: request.at,
+            finished_at: None,
+            result: None,
+            error_class: None,
+            provider_trace_id: None,
+        };
+        if attempt.attempt_no > 1_000 {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        sqlx::query(
+            "INSERT INTO batch_execution_attempts \
+             (id, batch_execution_id, attempt_no, started_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(attempt.id.to_string())
+        .bind(attempt.batch_execution_id.to_string())
+        .bind(i64::from(attempt.attempt_no))
+        .bind(encode_timestamp(attempt.started_at))
+        .execute(&mut *transaction)
+        .await?;
+        let changed = sqlx::query(
+            "UPDATE batch_executions SET state = 'running', started_at = ? \
+             WHERE id = ? AND state = 'scheduled' AND started_at IS NULL",
+        )
+        .bind(encode_timestamp(request.at))
+        .bind(batch.id.to_string())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        batch.state = ExecutionState::Running;
+        batch.started_at = Some(request.at);
+        insert_batch_worker_audit(
+            &mut transaction,
+            &batch,
+            &attempt,
+            request.worker_id,
+            request.correlation_id,
+        )
+        .await?;
+        enqueue_in_transaction(
+            &mut transaction,
+            &EventEnvelope::at(
+                request.correlation_id,
+                DomainEvent::BatchExecutionStateChanged {
+                    batch_execution_id: batch.id,
+                    state: batch.state,
+                },
+                request.at,
+            ),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(attempt)
+    }
+
+    async fn find_active_batch_execution_attempt(
+        &self,
+        batch_execution_id: BatchExecutionId,
+    ) -> Result<Option<BatchExecutionAttempt>, StorageError> {
+        sqlx::query(
+            "SELECT id, batch_execution_id, attempt_no, started_at, finished_at, result, \
+                    error_class, provider_trace_id FROM batch_execution_attempts \
+             WHERE batch_execution_id = ? AND finished_at IS NULL \
+             ORDER BY attempt_no DESC LIMIT 1",
+        )
+        .bind(batch_execution_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?
+        .as_ref()
+        .map(decode_batch_attempt)
+        .transpose()
+    }
 }
 
 const BATCH_EXECUTION_SELECT_BY_ID: &str = "SELECT id, provider_account_id, course_id, requested_capabilities_json, \
@@ -251,6 +398,166 @@ fn decode_batch_execution(row: &sqlx::sqlite::SqliteRow) -> Result<BatchExecutio
     Ok(execution)
 }
 
+fn decode_batch_attempt(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<BatchExecutionAttempt, StorageError> {
+    Ok(BatchExecutionAttempt {
+        id: BatchExecutionAttemptId::from_str(row.try_get("id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        batch_execution_id: BatchExecutionId::from_str(row.try_get("batch_execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        attempt_no: u32::try_from(row.try_get::<i64, _>("attempt_no")?).map_err(|_| {
+            StorageError::InvalidData("batch execution attempt number is invalid".to_owned())
+        })?,
+        started_at: decode_timestamp(row.try_get("started_at")?)?,
+        finished_at: decode_optional_timestamp(row.try_get("finished_at")?)?,
+        result: row
+            .try_get::<Option<&str>, _>("result")?
+            .map(decode_enum::<AttemptResult>)
+            .transpose()?,
+        error_class: row
+            .try_get::<Option<&str>, _>("error_class")?
+            .map(decode_enum::<ProviderErrorClass>)
+            .transpose()?,
+        provider_trace_id: row.try_get("provider_trace_id")?,
+    })
+}
+
+async fn find_active_attempt(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+) -> Result<Option<BatchExecutionAttempt>, StorageError> {
+    sqlx::query(
+        "SELECT id, batch_execution_id, attempt_no, started_at, finished_at, result, \
+                error_class, provider_trace_id FROM batch_execution_attempts \
+         WHERE batch_execution_id = ? AND finished_at IS NULL \
+         ORDER BY attempt_no DESC LIMIT 1",
+    )
+    .bind(batch_execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .as_ref()
+    .map(decode_batch_attempt)
+    .transpose()
+}
+
+async fn assert_batch_scheduler_claim(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+    scheduler_job_id: asterism_domain::ScheduleId,
+    worker_id: &str,
+    at: Timestamp,
+) -> Result<Timestamp, StorageError> {
+    let row = sqlx::query(
+        "SELECT payload_json, lease_expires_at FROM scheduled_jobs \
+         WHERE id = ? AND job_kind = 'batch_execution' AND state = 'claimed' AND worker_id = ?",
+    )
+    .bind(scheduler_job_id.to_string())
+    .bind(worker_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::BatchExecutionClaimLost)?;
+    let lease_expires_at = decode_timestamp(row.try_get("lease_expires_at")?)?;
+    let kind: ScheduledJobKind = serde_json::from_str(row.try_get("payload_json")?)?;
+    if lease_expires_at <= at || kind != (ScheduledJobKind::BatchExecution { batch_execution_id }) {
+        return Err(StorageError::BatchExecutionClaimLost);
+    }
+    Ok(lease_expires_at)
+}
+
+pub(crate) async fn assert_batch_worker_claims(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+    attempt_id: BatchExecutionAttemptId,
+    scheduler_job_id: asterism_domain::ScheduleId,
+    worker_id: &str,
+    at: Timestamp,
+) -> Result<BatchExecutionAttempt, StorageError> {
+    assert_batch_scheduler_claim(
+        transaction,
+        batch_execution_id,
+        scheduler_job_id,
+        worker_id,
+        at,
+    )
+    .await?;
+    assert_batch_lease(transaction, batch_execution_id, worker_id, at).await?;
+    let attempt = find_active_attempt(transaction, batch_execution_id)
+        .await?
+        .ok_or(StorageError::BatchExecutionAttemptNotActive)?;
+    if attempt.id == attempt_id {
+        Ok(attempt)
+    } else {
+        Err(StorageError::BatchExecutionAttemptNotActive)
+    }
+}
+
+pub(crate) async fn assert_batch_lease(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+    worker_id: &str,
+    at: Timestamp,
+) -> Result<(), StorageError> {
+    let owned: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM batch_execution_leases \
+         WHERE batch_execution_id = ? AND worker_id = ? AND expires_at > ?",
+    )
+    .bind(batch_execution_id.to_string())
+    .bind(worker_id)
+    .bind(encode_timestamp(at))
+    .fetch_one(&mut **transaction)
+    .await?;
+    if owned == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::BatchExecutionClaimLost)
+    }
+}
+
+fn validate_worker_context(worker_id: &str, correlation_id: &str) -> Result<(), StorageError> {
+    if valid_token(worker_id, 256) && valid_token(correlation_id, 256) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(
+            "batch execution worker identity is invalid".to_owned(),
+        ))
+    }
+}
+
+async fn insert_batch_worker_audit(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch: &BatchExecution,
+    attempt: &BatchExecutionAttempt,
+    worker_id: &str,
+    correlation_id: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'worker', ?, 'batch_execution_attempt_started', 'batch_execution', \
+                 ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(attempt.started_at))
+    .bind(worker_id)
+    .bind(batch.id.to_string())
+    .bind(correlation_id)
+    .bind(
+        serde_json::json!({
+            "attempt_id": attempt.id,
+            "attempt_no": attempt.attempt_no,
+            "provider_account_id": batch.provider_account_id,
+            "course_id": batch.course_id,
+            "expected_child_count": batch.expected_child_count,
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn insert_batch_execution_audit(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     request: &BatchExecutionScheduleRequest<'_>,
@@ -319,12 +626,27 @@ fn decode_optional_timestamp(value: Option<&str>) -> Result<Option<Timestamp>, S
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
     use super::*;
     use asterism_domain::{
         BatchExecutionId, CourseId, ProviderAccountId, ProviderId, RequestSource, UserId,
     };
+    use asterism_provider_api::ExecutionParentBatchSnapshot;
+    use asterism_secrets::{SecretAccess, SecretActor, SecretKey, SecretStoreError, SecretValue};
+    use chrono::Duration;
+
+    use crate::{
+        BatchExecutionParentSnapshotBindOutcome, BatchExecutionParentSnapshotBindRequest,
+        BatchExecutionParentSnapshotRepository, BatchExecutionParentSnapshotResolveRequest,
+        SchedulerRepository, SecretKeyring, SqliteSchedulerRepository, SqliteSecretStore,
+    };
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test keeps scheduling, claim, lease, attempt and idempotent restart boundaries together"
+    )]
     async fn scheduling_is_course_bound_atomic_and_idempotent_without_touching_tasks() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
@@ -381,7 +703,7 @@ mod tests {
                 .find_idempotent_batch_execution("user:test-owner", "course-batch-1")
                 .await
                 .unwrap(),
-            Some(batch)
+            Some(batch.clone())
         );
         let job: (String, String) = sqlx::query_as(
             "SELECT job_kind, payload_json FROM scheduled_jobs \
@@ -415,6 +737,207 @@ mod tests {
             .unwrap(),
             1
         );
+
+        let scheduler = SqliteSchedulerRepository::new(database.clone());
+        let claimed = scheduler
+            .claim_due_batch_execution_jobs("batch-worker", now, now + Duration::minutes(5), 1)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let start = || BatchExecutionAttemptStartRequest {
+            batch_execution_id: batch.id,
+            scheduler_job_id: claimed[0].id,
+            worker_id: "batch-worker",
+            at: now + Duration::seconds(1),
+            correlation_id: "batch-attempt-start",
+        };
+        let attempt = repository
+            .start_batch_execution_attempt(start())
+            .await
+            .unwrap();
+        assert_eq!(attempt.batch_execution_id, batch.id);
+        assert_eq!(attempt.attempt_no, 1);
+        assert_eq!(
+            repository
+                .start_batch_execution_attempt(start())
+                .await
+                .unwrap(),
+            attempt
+        );
+        assert_eq!(
+            repository
+                .find_active_batch_execution_attempt(batch.id)
+                .await
+                .unwrap(),
+            Some(attempt.clone())
+        );
+        assert_eq!(
+            repository
+                .find_batch_execution(batch.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            ExecutionState::Running
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM batch_execution_leases \
+                 WHERE batch_execution_id = ? AND worker_id = 'batch-worker'",
+            )
+            .bind(batch.id.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            1
+        );
+
+        let keyring = Arc::new(
+            SecretKeyring::new(
+                "batch-parent-key",
+                BTreeMap::from([("batch-parent-key".to_owned(), SecretKey::new([31; 32]))]),
+            )
+            .unwrap(),
+        );
+        let parent_repository = SqliteSecretStore::new(database.clone(), keyring)
+            .batch_execution_parent_snapshots(ProviderId::new("test").unwrap());
+        let bound_at = now + Duration::seconds(2);
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("batch-execution-worker"),
+            correlation_id: "batch-parent-bind".to_owned(),
+            reason: "freeze complete course batch before child creation".to_owned(),
+        };
+        let snapshot = || {
+            ExecutionParentBatchSnapshot::try_new(
+                ProviderId::new("test").unwrap(),
+                "test.batch-parent-authority.v1",
+                SecretValue::new(b"BATCH_PARENT_AUTHORITY".to_vec()),
+                "test.complete-course-batch.v1",
+                SecretValue::new(b"COMPLETE_COURSE_BATCH".to_vec()),
+            )
+            .unwrap()
+        };
+        let bind_request = |snapshot| BatchExecutionParentSnapshotBindRequest {
+            batch_execution_id: batch.id,
+            attempt_id: attempt.id,
+            scheduler_job_id: claimed[0].id,
+            worker_id: "batch-worker",
+            snapshot,
+            correlation_id: "batch-parent-bind",
+            at: bound_at,
+            access: &access,
+        };
+        let first = snapshot();
+        let expected = crate::BatchExecutionParentSnapshotRecord {
+            batch_execution_id: batch.id,
+            attempt_id: attempt.id,
+            provider_id: ProviderId::new("test").unwrap(),
+            authority_type: "test.batch-parent-authority.v1".to_owned(),
+            authority_digest: first.authority_digest(),
+            batch_type: "test.complete-course-batch.v1".to_owned(),
+            batch_digest: first.batch_digest(),
+            bound_at,
+        };
+        assert_eq!(
+            parent_repository
+                .bind_batch_execution_parent_snapshot(bind_request(first))
+                .await
+                .unwrap(),
+            BatchExecutionParentSnapshotBindOutcome::Bound(expected.clone())
+        );
+        let resolved = parent_repository
+            .resolve_batch_execution_parent_snapshot(BatchExecutionParentSnapshotResolveRequest {
+                batch_execution_id: batch.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: claimed[0].id,
+                worker_id: "batch-worker",
+                correlation_id: "batch-parent-bind",
+                at: bound_at,
+                access: &access,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.metadata, expected);
+        assert_eq!(
+            resolved.snapshot.authority().expose_secret(),
+            b"BATCH_PARENT_AUTHORITY"
+        );
+        assert_eq!(
+            resolved.snapshot.batch().expose_secret(),
+            b"COMPLETE_COURSE_BATCH"
+        );
+        assert_eq!(
+            parent_repository
+                .bind_batch_execution_parent_snapshot(bind_request(snapshot()))
+                .await
+                .unwrap(),
+            BatchExecutionParentSnapshotBindOutcome::AlreadyBound(expected.clone())
+        );
+
+        let encrypted: (Vec<u8>, Vec<u8>) = sqlx::query_as(
+            "SELECT authority.encrypted_data, child_batch.encrypted_data \
+             FROM batch_execution_parent_snapshots AS snapshot \
+             INNER JOIN secret_blobs AS authority \
+                ON authority.id = snapshot.authority_secret_blob_id \
+             INNER JOIN secret_blobs AS child_batch \
+                ON child_batch.id = snapshot.batch_secret_blob_id \
+             WHERE snapshot.batch_execution_id = ?",
+        )
+        .bind(batch.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(
+            !encrypted
+                .0
+                .windows(b"BATCH_PARENT_AUTHORITY".len())
+                .any(|window| window == b"BATCH_PARENT_AUTHORITY")
+        );
+        assert!(
+            !encrypted
+                .1
+                .windows(b"COMPLETE_COURSE_BATCH".len())
+                .any(|window| window == b"COMPLETE_COURSE_BATCH")
+        );
+        let audit_metadata: String = sqlx::query_scalar(
+            "SELECT metadata_sanitized_json FROM audit_records \
+             WHERE action = 'batch_execution_parent_snapshot_bound' AND resource_id = ?",
+        )
+        .bind(batch.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(!audit_metadata.contains("BATCH_PARENT_AUTHORITY"));
+        assert!(!audit_metadata.contains("COMPLETE_COURSE_BATCH"));
+        assert!(audit_metadata.contains("[HASHED]"));
+
+        sqlx::query(
+            "UPDATE secret_blobs SET encrypted_data = X'00' WHERE id = ( \
+                SELECT batch_secret_blob_id FROM batch_execution_parent_snapshots \
+                WHERE batch_execution_id = ? \
+             )",
+        )
+        .bind(batch.id.to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            parent_repository
+                .resolve_batch_execution_parent_snapshot(
+                    BatchExecutionParentSnapshotResolveRequest {
+                        batch_execution_id: batch.id,
+                        attempt_id: attempt.id,
+                        scheduler_job_id: claimed[0].id,
+                        worker_id: "batch-worker",
+                        correlation_id: "batch-parent-bind",
+                        at: bound_at,
+                        access: &access,
+                    }
+                )
+                .await,
+            Err(SecretStoreError::AuthenticationFailed)
+        ));
     }
 
     async fn insert_fixture(

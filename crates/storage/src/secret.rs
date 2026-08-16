@@ -197,6 +197,19 @@ impl SqliteSecretStore {
         )
     }
 
+    /// Builds the encrypted parent authority repository for a Course-scoped
+    /// `BatchExecution` Attempt.
+    pub fn batch_execution_parent_snapshots(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteBatchExecutionParentSnapshotRepository {
+        crate::SqliteBatchExecutionParentSnapshotRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
     async fn replace_provider_credentials_internal(
         &self,
         request: CredentialSetCommit<'_>,
