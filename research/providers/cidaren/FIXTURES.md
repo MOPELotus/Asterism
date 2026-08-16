@@ -340,7 +340,8 @@ placeholder identities, result codes, status values and pagination shape.
   response identity must match the fresh learning row as type `1`; treating
   the request selector as the response row type fails `RemoteChanged`.
   The same vector retains the donor's literal `%23000000` option-font value,
-  and the Native HTTP test requires `%2523000000` in the raw encoded URL.
+  freezes the resulting ClassTask request digest, and the Native HTTP test
+  requires `%2523000000` in the raw encoded URL.
 - Mutation serialization consumes and recursively clears its temporary JSON
   tree, including copied answer, topic-code and word-map values, before keeping
   only the zeroizing serialized request body.

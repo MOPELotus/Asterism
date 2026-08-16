@@ -663,6 +663,14 @@ mod tests {
         assert_eq!(query(&request, "release_id"), Some("2002"));
         assert_eq!(query(&request, "opt_font_c"), Some(START_OPTION_FONT_COLOR));
         assert_eq!(query(&request, "version"), Some(START_VERSION));
+        assert_eq!(
+            request.request_digest(),
+            [
+                0x49, 0xa4, 0x60, 0x8c, 0x10, 0x78, 0x1f, 0x5a, 0x9b, 0xa4, 0x62, 0x9f, 0xc2, 0xda,
+                0x37, 0x14, 0x79, 0x14, 0x17, 0xe0, 0xfe, 0x31, 0x98, 0xb1, 0xea, 0x7f, 0x4b, 0xfe,
+                0x97, 0xde, 0x69, 0xfe,
+            ]
+        );
 
         let study = study_binding();
         let request = build_start_answer_request(&study, 1_710_000_000_000);
