@@ -380,11 +380,13 @@ impl ChaoxingSubmissionForm {
     pub(crate) fn bind_chapter_target(
         self,
         knowledge_id: &str,
+        cpi: &str,
         work_id: &str,
         job_id: &str,
     ) -> ProviderResult<Self> {
         for (name, expected) in [
             ("knowledgeid", knowledge_id),
+            ("cpi", cpi),
             ("oldWorkId", work_id),
             ("jobid", job_id),
             ("originJobId", job_id),
@@ -2250,10 +2252,11 @@ mod tests {
             .unwrap()
             .bind_user("9001")
             .unwrap()
-            .bind_chapter_target("4001", "job-work", "job-work")
+            .bind_chapter_target("4001", "300", "job-work", "job-work")
             .unwrap();
         let fields = form.fields().iter().cloned().collect::<BTreeMap<_, _>>();
         assert_eq!(fields.get("knowledgeid").map(String::as_str), Some("4001"));
+        assert_eq!(fields.get("cpi").map(String::as_str), Some("300"));
         assert_eq!(fields.get("userId").map(String::as_str), Some("9001"));
         assert_eq!(
             fields.get("answerwqbid").map(String::as_str),
@@ -2270,12 +2273,16 @@ mod tests {
         assert!(!fields.contains_key("ignoredFutureField"));
         assert!(!format!("{form:?}").contains("SAFE_CHAPTER_EPHEMERAL_TOKEN"));
 
-        let foreign = CHAPTER_EDITOR.replacen("value=\"4001\"", "value=\"4002\"", 1);
-        let foreign = ChaoxingSubmissionForm::parse(&foreign, identity, &plan)
-            .unwrap()
-            .bind_chapter_target("4001", "job-work", "job-work")
-            .unwrap_err();
-        assert_eq!(foreign.kind, ProviderErrorKind::RemoteChanged);
+        for foreign in [
+            CHAPTER_EDITOR.replacen("value=\"4001\"", "value=\"4002\"", 1),
+            CHAPTER_EDITOR.replacen("value=\"300\"", "value=\"301\"", 1),
+        ] {
+            let foreign = ChaoxingSubmissionForm::parse(&foreign, identity, &plan)
+                .unwrap()
+                .bind_chapter_target("4001", "300", "job-work", "job-work")
+                .unwrap_err();
+            assert_eq!(foreign.kind, ProviderErrorKind::RemoteChanged);
+        }
     }
 
     #[tokio::test]

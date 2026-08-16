@@ -1273,7 +1273,12 @@ impl ChaoxingSubmissionTransport for NativeChaoxingInventoryTransport {
         })?;
         let form = ChaoxingSubmissionForm::parse(document.as_str(), identity, plan)?
             .bind_user(user_id)?
-            .bind_chapter_target(request.knowledge_id(), target.work_id(), target.job_id())?;
+            .bind_chapter_target(
+                request.knowledge_id(),
+                route.cpi(),
+                target.work_id(),
+                target.job_id(),
+            )?;
         self.post_work_submission_once(&session, &referer, &form)
             .await
     }

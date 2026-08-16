@@ -117,8 +117,9 @@ validation is still required.
   conflicting fresh-editor `userId`, and fills an omitted field only from that
   same resolved session before the one-shot POST.
   The same donor chain constructs its attempt URL from Chapter `knowledgeid`,
-  target `workId`, and the card's `jobid/originJobId`; the final form is now
-  required to repeat those exact fresh target identities before dispatch.
+  account-scoped `cpi`, target `workId`, and the card's
+  `jobid/originJobId`; the final form is now required to repeat those exact
+  fresh target identities before dispatch.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence
   and explicitly audits empty answer rows, not arbitrary substring-derived
