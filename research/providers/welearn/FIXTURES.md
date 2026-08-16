@@ -402,6 +402,11 @@ only structural field names, response codes and bounded placeholder shapes.
   reject malformed private bytes, target-count/digest/version drift, any
   non-expected child target substitution, target reorder or expected-child
   mismatch before Core child creation.
+- Typed Core-child restore tests recover every Fanyuchang child from the v2
+  parent pair plus `ProviderExecutionChildPlan`, bind position/remote Task/full
+  target/grouped call/artifact/sequence, reject split calls, and prove the
+  native execution and recovery entry points return the same result as existing
+  prepared/raw-durable paths after the same fresh I/O.
 - Prepared parent-call tests return the private snapshot and Core ordered batch
   plan from one function, prove both digest pairs remain equal before and after
   moving the parts out, redact all Course/SCO/target material from Debug, and

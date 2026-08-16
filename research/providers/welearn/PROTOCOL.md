@@ -931,6 +931,15 @@ the legacy authority constructor and full batch validator, then
 conditional sequences without a rescan. Auto retains only its aggregate budget
 and derives targets from the validated batch. Neither value performs Storage I/O
 or grants child/mutation authority.
+`restore_from_execution_parent_batch_snapshot` selects one Core child only after
+that complete dispatch exists. It requires the exact one-based position and
+remote Task, one grouped `DurationReport + ResourceExecution` call, the exact
+artifact for that entry and the artifact-bound conditional sequence. Split
+calls, a child from another parent or any position/artifact/sequence
+substitution fail before fresh I/O. `execute_core_child_plan` then enters the
+ordinary fresh-rebind mutation path, while `verify_core_child_snapshot` enters
+the same snapshot-first read-only recovery verifier; neither path trusts a raw
+child artifact alone.
 `prepare_atomic_child_plan_from_fresh_inventory` accepts that authority
 plus one complete fresh Unit/SCO inventory, rebuilds the selected batch once,
 locates the expected child without widening selection, then materializes and

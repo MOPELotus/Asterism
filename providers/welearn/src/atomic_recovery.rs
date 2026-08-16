@@ -3,9 +3,10 @@ use std::{fmt, sync::Arc};
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
     ExecutionMutationSequencePlan, ExecutionMutationSequenceRecoverySnapshot,
-    ExecutionMutationVerification, ExecutionRecoveryOutcome, ProviderContext, ProviderError,
-    ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata,
-    ProviderResult, TaskDetailCapability,
+    ExecutionMutationVerification, ExecutionParentBatchSnapshot, ExecutionRecoveryOutcome,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionChildPlan,
+    ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderResult,
+    TaskDetailCapability,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -235,6 +236,28 @@ impl WellearnAtomicDurationCompletionRecovery {
             encoded_batch_snapshot,
             snapshot.artifact(),
         )?;
+        self.verify_execution_recovery(context, &prepared, snapshot)
+            .await
+    }
+
+    /// Restores Core's v2 parent pair and exact generic child plan before
+    /// entering the same snapshot-first read-only recovery verifier.
+    ///
+    /// # Errors
+    ///
+    /// Rejects parent/target, child/group/artifact/sequence, recovery snapshot,
+    /// fresh-detail or final-CMI drift.
+    pub async fn verify_core_child_snapshot(
+        &self,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        child: &ProviderExecutionChildPlan,
+        snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        let prepared =
+            WellearnPreparedAtomicChildPlan::restore_from_execution_parent_batch_snapshot(
+                parent, child,
+            )?;
         self.verify_execution_recovery(context, &prepared, snapshot)
             .await
     }

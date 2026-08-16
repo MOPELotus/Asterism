@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::{ProviderId, RemoteState, TaskCapability};
 use asterism_provider_api::{
-    ExecutionParentBatchSnapshot, ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact,
-    ProviderResult, RemoteTask, RemoteTaskDetail,
+    ExecutionParentBatchSnapshot, ProviderError, ProviderErrorKind, ProviderExecutionChildPlan,
+    ProviderExecutionPlanArtifact, ProviderResult, RemoteTask, RemoteTaskDetail,
 };
 use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
@@ -905,6 +905,81 @@ impl WellearnPreparedAtomicChildPlan {
             authority.frozen_fanyuchang_target_seconds,
             child_artifact,
         )
+    }
+
+    /// Restores one exact child from Core's v2 encrypted parent pair and
+    /// immutable generic child projection.
+    ///
+    /// The parent pair first reconstructs the complete target-authorized batch.
+    /// This boundary then binds the child's one-based position, remote Task,
+    /// grouped atomic call, Provider artifact and conditional sequence to the
+    /// corresponding entry. It performs no fresh I/O and grants no mutation
+    /// authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any parent schema/target drift, foreign or non-atomic grouped
+    /// call, position/identity substitution, artifact mismatch or sequence
+    /// mismatch.
+    pub fn restore_from_execution_parent_batch_snapshot(
+        parent: &ExecutionParentBatchSnapshot,
+        child: &ProviderExecutionChildPlan,
+    ) -> ProviderResult<Self> {
+        let (_, batch_plan, frozen_fanyuchang_targets) =
+            decode_execution_parent_batch_snapshot(parent)?;
+        let entry_index = usize::try_from(child.position() - 1)
+            .map_err(|_| invalid_atomic_recovery_artifacts())?;
+        if child.execution_plan().provider_id() != parent.provider_id()
+            || child.execution_plan().calls()
+                != [vec![
+                    TaskCapability::DurationReport,
+                    TaskCapability::ResourceExecution,
+                ]]
+            || batch_plan
+                .entries
+                .get(entry_index)
+                .is_none_or(|entry| entry.remote_task_id != child.remote_task_id())
+        {
+            return Err(invalid_atomic_recovery_artifacts());
+        }
+        let frozen_target = match batch_plan.flow {
+            WellearnBatchFlow::FanyuchangDuration => Some(
+                frozen_fanyuchang_targets
+                    .as_deref()
+                    .and_then(|targets| targets.get(entry_index))
+                    .copied()
+                    .ok_or_else(invalid_atomic_recovery_artifacts)?,
+            ),
+            WellearnBatchFlow::AutoDuration => {
+                if frozen_fanyuchang_targets.is_some() {
+                    return Err(invalid_atomic_recovery_artifacts());
+                }
+                None
+            }
+            WellearnBatchFlow::FanyuchangCompletion
+            | WellearnBatchFlow::YzbrhCompletion
+            | WellearnBatchFlow::YzbrhDuration
+            | WellearnBatchFlow::AutoCompletion
+            | WellearnBatchFlow::AutoLegacyDuration => {
+                return Err(invalid_atomic_recovery_artifacts());
+            }
+        };
+        let artifact = child
+            .execution_plan()
+            .artifact()
+            .ok_or_else(invalid_atomic_recovery_artifacts)?;
+        let prepared = Self::restore_from_provider_execution_plan_artifact(
+            batch_plan,
+            entry_index,
+            frozen_target,
+            artifact,
+        )?;
+        let expected_sequence =
+            crate::build_atomic_mutation_sequence_plan(prepared.child_plan(), artifact)?;
+        if child.mutation_sequence_plan() != &expected_sequence {
+            return Err(invalid_atomic_recovery_artifacts());
+        }
+        Ok(prepared)
     }
 
     /// Revalidates the exact child projection against its rebuilt batch.
@@ -3653,12 +3728,32 @@ mod tests {
             )
             .await
             .unwrap();
+        let core_batch =
+            crate::prepare_atomic_execution_batch_plan(&authority, prepared.batch_plan(), None)
+                .unwrap();
+        let core_child = core_batch
+            .execution_batch_plan()
+            .children()
+            .iter()
+            .find(|child| child.remote_task_id() == prepared.child_plan().remote_task_id())
+            .unwrap();
+        let core_events = AtomicFixtureEvents::default();
+        let core_outcome = executor
+            .execute_core_child_plan(
+                &atomic_context(),
+                core_batch.parent_snapshot(),
+                core_child,
+                &core_events,
+            )
+            .await
+            .unwrap();
 
         assert!(outcome.verified);
         assert_eq!(outcome.remote_state, RemoteState::Completed);
         assert_eq!(durable_outcome.remote_state, outcome.remote_state);
         assert_eq!(durable_outcome.verified, outcome.verified);
         assert_eq!(durable_outcome.result_sanitized, outcome.result_sanitized);
+        assert_eq!(core_outcome.result_sanitized, outcome.result_sanitized);
         assert_eq!(
             outcome.result_sanitized["schema"],
             "welearn.atomic-duration-completion.v1"
@@ -3678,9 +3773,10 @@ mod tests {
         assert_eq!(events.sequence_plans.lock().unwrap().len(), 1);
         assert!(durable_events.verifications.lock().unwrap().is_empty());
         assert_eq!(durable_events.sequence_plans.lock().unwrap().len(), 1);
-        assert_eq!(detail_calls.lock().unwrap().len(), 2);
+        assert_eq!(core_events.sequence_plans.lock().unwrap().len(), 1);
+        assert_eq!(detail_calls.lock().unwrap().len(), 3);
         let calls = transport.calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert!(calls.iter().all(|call| {
             call == &(
                 "1001".to_owned(),
@@ -4005,6 +4101,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(prepared_recovery, durable_recovery);
+        let targets = [1, 2, 3];
+        let core_batch = crate::prepare_atomic_execution_batch_plan(
+            &authority,
+            prepared.batch_plan(),
+            Some(&targets),
+        )
+        .unwrap();
+        let core_child = core_batch
+            .execution_batch_plan()
+            .children()
+            .iter()
+            .find(|child| child.remote_task_id() == prepared.child_plan().remote_task_id())
+            .unwrap();
+        let core_recovery = recovery
+            .verify_core_child_snapshot(
+                &atomic_context(),
+                core_batch.parent_snapshot(),
+                core_child,
+                &snapshot,
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared_recovery, core_recovery);
         let (outcome, pending_verification) = prepared_recovery.into_parts();
         assert!(outcome.verified);
         assert_eq!(outcome.result_sanitized["final_save_ordinal"], 4);
@@ -4026,8 +4145,8 @@ mod tests {
             pending_verification.observation_digest(),
             direct_proof.observation_digest()
         );
-        assert_eq!(detail_calls.lock().unwrap().len(), 2);
-        assert_eq!(transport.calls.lock().unwrap().len(), 2);
+        assert_eq!(detail_calls.lock().unwrap().len(), 3);
+        assert_eq!(transport.calls.lock().unwrap().len(), 3);
 
         let persisted_snapshot = atomic_recovery_snapshot(
             prepared.provider_plan_artifact().unwrap(),
@@ -4088,8 +4207,8 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(detail_calls.lock().unwrap().len(), 4);
-        assert_eq!(transport.calls.lock().unwrap().len(), 4);
+        assert_eq!(detail_calls.lock().unwrap().len(), 5);
+        assert_eq!(transport.calls.lock().unwrap().len(), 5);
     }
 
     #[tokio::test]

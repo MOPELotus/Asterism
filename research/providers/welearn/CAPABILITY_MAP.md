@@ -315,6 +315,12 @@ redundant vector: its existing configured/range/sample/aggregate authority and
 validated batch deterministically rebuild every equal-floor target. Core
 `fe63910` supplies encrypted same-Attempt storage and resolve semantics;
 Provider code still neither writes Storage nor gains scheduling authority.
+`WellearnPreparedAtomicChildPlan::restore_from_execution_parent_batch_snapshot`
+then consumes one exact Core `ProviderExecutionChildPlan` and rebinds its
+one-based position, remote Task, grouped call, artifact and conditional sequence
+to that restored dispatch entry. The native executor and read-only recovery
+coordinator expose corresponding typed Core-child entry points while preserving
+the existing fresh TaskDetail and same-attempt mutation snapshot checks.
 The complete Provider batch also encodes as bounded deny-unknown
 `welearn.batch-plan.v1` bytes and fully revalidates on decode; all seven flows
 and the 8,192-child maximum are covered. This supplies the complete

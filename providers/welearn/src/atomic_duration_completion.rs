@@ -2,9 +2,10 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::{HumanRequiredReason, RemoteState};
 use asterism_provider_api::{
-    ExecutionEventSink, ExecutionMutationVerification, ExecutionOutcome, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderIdentity,
-    ProviderMetadata, ProviderResult, TaskDetailCapability,
+    ExecutionEventSink, ExecutionMutationVerification, ExecutionOutcome,
+    ExecutionParentBatchSnapshot, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderExecutionChildPlan, ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata,
+    ProviderResult, TaskDetailCapability,
 };
 use async_trait::async_trait;
 
@@ -365,6 +366,27 @@ impl WellearnAtomicDurationCompletion {
             encoded_batch_snapshot,
             child_artifact,
         )?;
+        self.execute_prepared(context, &prepared, events).await
+    }
+
+    /// Restores Core's v2 encrypted parent pair and exact generic child plan,
+    /// then enters the ordinary fresh-rebind atomic execution path.
+    ///
+    /// # Errors
+    ///
+    /// Rejects parent/target, child position/identity, grouped call,
+    /// artifact/sequence, fresh-detail, transport or verification drift.
+    pub async fn execute_core_child_plan(
+        &self,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        child: &ProviderExecutionChildPlan,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        let prepared =
+            WellearnPreparedAtomicChildPlan::restore_from_execution_parent_batch_snapshot(
+                parent, child,
+            )?;
         self.execute_prepared(context, &prepared, events).await
     }
 }

@@ -319,8 +319,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        WellearnAtomicMutationKind, WellearnScoLeavesDocument, build_batch_plan,
-        parse_course_inventory, parse_task_inventory,
+        WellearnAtomicMutationKind, WellearnPreparedAtomicChildPlan, WellearnScoLeavesDocument,
+        build_batch_plan, parse_course_inventory, parse_task_inventory,
     };
 
     const COURSES: &str =
@@ -582,6 +582,70 @@ mod tests {
         let (parent, children) = prepared.into_parts();
         assert_eq!(parent.authority_digest(), children.authority_digest());
         assert_eq!(parent.batch_digest(), children.batch_digest());
+    }
+
+    #[test]
+    fn core_child_plan_restores_exact_position_target_group_artifact_and_sequence() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            batch.course_remote_id.clone(),
+            WellearnBatchFlow::FanyuchangDuration,
+            batch.selection.clone(),
+            batch.entries[1].remote_task_id.clone(),
+            Some(37),
+            None,
+        )
+        .unwrap();
+        let targets = [0, 37, 19_800];
+        let prepared_batch =
+            prepare_atomic_execution_batch_plan(&authority, &batch, Some(&targets)).unwrap();
+
+        for child in prepared_batch.execution_batch_plan().children() {
+            let restored =
+                WellearnPreparedAtomicChildPlan::restore_from_execution_parent_batch_snapshot(
+                    prepared_batch.parent_snapshot(),
+                    child,
+                )
+                .unwrap();
+            assert_eq!(
+                restored.entry_index(),
+                usize::try_from(child.position() - 1).unwrap()
+            );
+            assert_eq!(
+                restored.child_plan().remote_task_id(),
+                child.remote_task_id()
+            );
+            assert_eq!(
+                restored.child_plan().target_seconds(),
+                targets[restored.entry_index()]
+            );
+        }
+
+        let exact = &prepared_batch.execution_batch_plan().children()[0];
+        let split_calls = ProviderExecutionPlan::try_new(
+            ProviderId::new(PROVIDER_ID).unwrap(),
+            vec![
+                vec![TaskCapability::DurationReport],
+                vec![TaskCapability::ResourceExecution],
+            ],
+            Some(exact.execution_plan().artifact().unwrap().clone()),
+        )
+        .unwrap();
+        let split_child = ProviderExecutionChildPlan::try_new(
+            exact.position(),
+            exact.remote_task_id(),
+            split_calls,
+            exact.mutation_sequence_plan().clone(),
+        )
+        .unwrap();
+        assert!(
+            WellearnPreparedAtomicChildPlan::restore_from_execution_parent_batch_snapshot(
+                prepared_batch.parent_snapshot(),
+                &split_child,
+            )
+            .is_err()
+        );
     }
 
     #[test]

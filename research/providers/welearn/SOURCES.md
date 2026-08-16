@@ -229,6 +229,9 @@ release/issue counts remain unchanged at `v4.0.0@5d1df60cb007`, `1/1`, `0/9`
 and `0/0`. Splitting arbitrary full targets between a four-KiB digest authority
 and eight-MiB complete snapshot is Asterism recovery hardening over existing
 audited duration semantics, not a donor protocol delta.
+The adjacent typed Core-child execution/recovery adapter reuses that unchanged
+refresh. It only composes the v2 parent pair with Core's existing child plan and
+same-attempt mutation snapshot; no donor request or result behavior changed.
 
 ## Source selection
 
