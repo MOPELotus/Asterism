@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, fmt};
 
 use asterism_domain::{
-    AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, BrowserBridgeExchange,
-    BrowserBridgeExchangeState, BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
+    AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, BatchExecutionAttemptId,
+    BatchExecutionId, BrowserBridgeExchange, BrowserBridgeExchangeState,
+    BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
     BrowserBridgeRuntimeStateMetadata, CourseId, ExecutionId, LogLevel, ProviderAccountId,
     ProviderId, Question, QuestionKind, RemoteState, SecretId, SelectedAnswer, SessionKind,
     SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
@@ -1525,6 +1526,170 @@ pub struct ExecutionPlanningRequest<'a> {
     pub runtime_settings: &'a ResolvedProviderRuntimeSettings,
 }
 
+const MAX_BATCH_EXECUTION_PLANNING_INPUT_BYTES: usize = 1024 * 1024;
+
+/// Bounded Provider-private product authorization and selection input for one
+/// Course-scoped parent planning pass. Core must persist and resolve the bytes
+/// as encrypted state; the digest is safe to bind into immutable scheduling
+/// records but is not mutation authority by itself.
+pub struct ProviderBatchExecutionPlanningInput {
+    provider_id: ProviderId,
+    input_type: String,
+    input_digest: [u8; 32],
+    payload: SecretValue,
+}
+
+impl ProviderBatchExecutionPlanningInput {
+    /// Builds one namespaced, bounded private planning input.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign/unsafe type name and empty or oversized bytes.
+    pub fn try_new(
+        provider_id: ProviderId,
+        input_type: impl Into<String>,
+        payload: SecretValue,
+    ) -> ProviderResult<Self> {
+        let input_type = input_type.into();
+        let bytes = payload.expose_secret();
+        if !valid_provider_execution_artifact_type(&provider_id, &input_type)
+            || bytes.is_empty()
+            || bytes.len() > MAX_BATCH_EXECUTION_PLANNING_INPUT_BYTES
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider batch execution planning input is invalid",
+            ));
+        }
+        Ok(Self {
+            input_digest: digest_parent_batch_bytes(
+                b"asterism.provider-batch-planning-input.v1\0",
+                &input_type,
+                bytes,
+            ),
+            provider_id,
+            input_type,
+            payload,
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn input_type(&self) -> &str {
+        &self.input_type
+    }
+
+    pub const fn input_digest(&self) -> [u8; 32] {
+        self.input_digest
+    }
+
+    pub const fn payload(&self) -> &SecretValue {
+        &self.payload
+    }
+}
+
+impl fmt::Debug for ProviderBatchExecutionPlanningInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderBatchExecutionPlanningInput")
+            .field("provider_id", &self.provider_id)
+            .field("input_type", &self.input_type)
+            .field("input_digest", &"[HASHED]")
+            .field("payload", &self.payload)
+            .finish()
+    }
+}
+
+/// Exact Core-owned parent identity plus the resolved Provider-private input
+/// and account-level runtime settings for one fresh, read-only planning pass.
+pub struct BatchExecutionPlanningRequest<'a> {
+    pub batch_execution_id: BatchExecutionId,
+    pub attempt_id: BatchExecutionAttemptId,
+    pub course_id: CourseId,
+    pub remote_course_id: &'a str,
+    pub requested_capabilities: &'a [TaskCapability],
+    pub expected_child_count: u32,
+    pub runtime_settings: &'a ResolvedProviderRuntimeSettings,
+    pub planning_input: &'a ProviderBatchExecutionPlanningInput,
+}
+
+impl fmt::Debug for BatchExecutionPlanningRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BatchExecutionPlanningRequest")
+            .field("batch_execution_id", &self.batch_execution_id)
+            .field("attempt_id", &self.attempt_id)
+            .field("course_id", &self.course_id)
+            .field("remote_course_id", &"[REDACTED]")
+            .field("requested_capabilities", &self.requested_capabilities)
+            .field("expected_child_count", &self.expected_child_count)
+            .field("runtime_settings", &"[REDACTED]")
+            .field("planning_input", &self.planning_input)
+            .finish()
+    }
+}
+
+/// Provider-complete parent planning result. The ordered child plan must be
+/// constructed against the exact private parent pair and match Core's frozen
+/// expected child count before either value can be persisted or materialized.
+pub struct PreparedProviderBatchExecutionPlan {
+    parent_snapshot: ExecutionParentBatchSnapshot,
+    execution_batch_plan: ProviderExecutionBatchPlan,
+}
+
+impl PreparedProviderBatchExecutionPlan {
+    /// # Errors
+    ///
+    /// Rejects provider/digest detachment or a child count that differs from
+    /// the already scheduled parent authorization.
+    pub fn try_new(
+        parent_snapshot: ExecutionParentBatchSnapshot,
+        execution_batch_plan: ProviderExecutionBatchPlan,
+        expected_child_count: u32,
+    ) -> ProviderResult<Self> {
+        if execution_batch_plan.provider_id() != parent_snapshot.provider_id()
+            || execution_batch_plan.authority_digest() != parent_snapshot.authority_digest()
+            || execution_batch_plan.batch_digest() != parent_snapshot.batch_digest()
+            || usize::try_from(expected_child_count) != Ok(execution_batch_plan.children().len())
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider batch execution planning result is detached from its parent",
+            ));
+        }
+        Ok(Self {
+            parent_snapshot,
+            execution_batch_plan,
+        })
+    }
+
+    pub const fn parent_snapshot(&self) -> &ExecutionParentBatchSnapshot {
+        &self.parent_snapshot
+    }
+
+    pub const fn execution_batch_plan(&self) -> &ProviderExecutionBatchPlan {
+        &self.execution_batch_plan
+    }
+
+    pub fn into_parts(self) -> (ExecutionParentBatchSnapshot, ProviderExecutionBatchPlan) {
+        (self.parent_snapshot, self.execution_batch_plan)
+    }
+}
+
+impl fmt::Debug for PreparedProviderBatchExecutionPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedProviderBatchExecutionPlan")
+            .field("provider_id", self.parent_snapshot.provider_id())
+            .field("authority_digest", &"[HASHED]")
+            .field("batch_digest", &"[HASHED]")
+            .field("child_count", &self.execution_batch_plan.children().len())
+            .finish()
+    }
+}
+
 impl fmt::Debug for ExecutionPlanningRequest<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1636,6 +1801,44 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         request: &ExecutionPlanningRequest<'_>,
     ) -> ProviderResult<ProviderExecutionPlan> {
         self.execution_plan_snapshot(request.requested_capabilities, request.runtime_settings)
+    }
+
+    /// Performs one fresh, read-only Course-scoped parent planning pass and
+    /// returns the encrypted parent material together with the complete ordered
+    /// child projection. Core owns persistence and child creation; this hook
+    /// receives no repository, scheduler, lease or mutation sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed unsupported-task error by default. Implementations must
+    /// reject invalid input, fresh remote drift and incomplete batch evidence.
+    async fn prepare_batch_execution_plan(
+        &self,
+        _context: &ProviderContext,
+        _request: &BatchExecutionPlanningRequest<'_>,
+    ) -> ProviderResult<PreparedProviderBatchExecutionPlan> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement Course-scoped batch execution planning",
+        ))
+    }
+
+    /// Reconstructs the complete ordered child projection using only the exact
+    /// encrypted parent pair resolved by Core. It must not perform I/O, rescan,
+    /// repair order, redistribute targets or issue a remote mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed unsupported-task error by default. Implementations must
+    /// fail closed on private schema, digest, order or child authority drift.
+    fn restore_batch_execution_plan(
+        &self,
+        _parent: &ExecutionParentBatchSnapshot,
+    ) -> ProviderResult<ProviderExecutionBatchPlan> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement Course-scoped batch execution recovery",
+        ))
     }
 
     /// Declares whether this exact selected action set requires the Provider's
@@ -3711,6 +3914,40 @@ mod provider_execution_plan_tests {
     }
 
     #[test]
+    fn batch_planning_input_is_provider_scoped_bounded_and_redacted() {
+        let provider_id = ProviderId::new("welearn").unwrap();
+        let input = ProviderBatchExecutionPlanningInput::try_new(
+            provider_id.clone(),
+            "welearn.atomic-batch-request.v1",
+            SecretValue::new(b"PRIVATE_SELECTION_AND_TARGETS".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(input.provider_id(), &provider_id);
+        assert_eq!(input.input_type(), "welearn.atomic-batch-request.v1");
+        assert_ne!(input.input_digest(), [0; 32]);
+        let debug = format!("{input:?}");
+        assert!(debug.contains("[HASHED]"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("PRIVATE_SELECTION_AND_TARGETS"));
+        assert!(
+            ProviderBatchExecutionPlanningInput::try_new(
+                provider_id.clone(),
+                "uai.atomic-batch-request.v1",
+                SecretValue::new(vec![1]),
+            )
+            .is_err()
+        );
+        assert!(
+            ProviderBatchExecutionPlanningInput::try_new(
+                provider_id,
+                "welearn.atomic-batch-request.v1",
+                SecretValue::new(vec![1; MAX_BATCH_EXECUTION_PLANNING_INPUT_BYTES + 1]),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn artifact_is_provider_bound_hashed_bounded_and_redacted() {
         let provider_id = ProviderId::new("welearn").unwrap();
         let artifact = ProviderExecutionPlanArtifact::try_new(
@@ -3848,6 +4085,26 @@ mod provider_execution_plan_tests {
             ProviderExecutionChildPlan::try_new(1, "sco:course:one", execution_plan, sequence,)
                 .is_err()
         );
+
+        let prepared = PreparedProviderBatchExecutionPlan::try_new(parent, plan, 2).unwrap();
+        assert_eq!(prepared.execution_batch_plan().children().len(), 2);
+        let debug = format!("{prepared:?}");
+        assert!(debug.contains("child_count: 2"));
+        assert!(debug.contains("[HASHED]"));
+        assert!(!debug.contains("complete-batch"));
+
+        let parent = ExecutionParentBatchSnapshot::try_new(
+            ProviderId::new("welearn").unwrap(),
+            "welearn.parent-authority.v1",
+            SecretValue::new(b"another-parent-authority".to_vec()),
+            "welearn.batch-plan.v1",
+            SecretValue::new(b"another-complete-batch".to_vec()),
+        )
+        .unwrap();
+        let plan =
+            ProviderExecutionBatchPlan::try_new(&parent, vec![child(1, "sco:course:only", 60)])
+                .unwrap();
+        assert!(PreparedProviderBatchExecutionPlan::try_new(parent, plan, 2).is_err());
     }
 }
 

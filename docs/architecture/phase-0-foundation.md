@@ -5127,3 +5127,30 @@ map remote identities, create child Tasks/Executions, reserve child credit or
 enqueue child jobs. The next shared transaction must call the Provider parent
 planning hook, verify its digest-bound ordered child plan and atomically create
 or recover every child before any mutation can be issued.
+
+## Two-hundred-and-seventy-seventh Phase 0 slice
+
+Provider API now exposes the Course-scoped parent planning boundary without
+granting Providers access to Core repositories or scheduling. One request
+binds the exact `BatchExecution` and Attempt, local and redacted remote Course,
+canonical child capability set, frozen expected count, resolved account-level
+runtime settings and a bounded Provider-namespaced private planning input. The
+input is zeroizing, digest-bound and Debug-redacted; Core must encrypt it before
+the worker resolves it, and its digest alone grants no planning or mutation
+authority.
+
+The fresh asynchronous hook returns one `PreparedProviderBatchExecutionPlan`
+that keeps the private parent snapshot and complete ordered child projection
+together. Construction independently rechecks Provider identity, both parent
+digests and the already scheduled child count. A second deterministic recovery
+hook accepts only the resolved encrypted parent pair and must reconstruct the
+same child projection without I/O, rescanning, order repair or target
+redistribution. Providers which do not implement this exact Course batch
+contract fail with `UnsupportedTask` by default, preserving existing
+single-Task behavior.
+
+This slice defines and verifies the runtime contract only. The private planning
+input does not yet have a scheduling-time encrypted repository, Engine does not
+invoke the hook, and Storage does not consume the returned children. Those
+pieces must land before WELearn's Provider implementation can be registered and
+before any child Task/Execution or mutation sequence is created.
