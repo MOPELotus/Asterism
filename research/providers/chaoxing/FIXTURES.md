@@ -384,9 +384,12 @@ every fixture before staging it.
   `signDetail` alone is not completion evidence, and an opaque `stuSignajax`
   string is a Receipt at most and never authorizes replay after ambiguity.
   Provider unit regressions additionally derive one ordinary-sign preparation
-  from these fixtures, assert its exact two query field sets and actor-bound
-  digest, redact UID/name, and reject foreign snapshots, non-normal variants
-  and malformed actor inputs without issuing HTTP.
+  from these fixtures, assert the explicitly tagged
+  `YlimPreSignStuSignAjax` family's exact two query field sets and actor-bound
+  digest, including the absence of Samueli/mini-only `tid`/`ut`, redact
+  UID/name, and reject foreign snapshots, non-normal variants and malformed
+  actor inputs without issuing HTTP. No fixture may combine mini's pre-sign
+  shape with Ylim's `stuSignajax` route.
   A synthetic Ylim auxiliary fixture contains exactly one
   `code='+'PRIVATE_ANALYSIS_CODE'` marker. Provider regressions bind the exact
   `analysis?vs=1&DB_STRATEGY=RANDOM&aid=...` request to the same fresh ordinary

@@ -223,12 +223,16 @@ not copy GPL source, advertise sign-in, issue a mutation or call structural
 detail a completion readback.
 
 A follow-up parameter audit compared Samueli's `741d5c1` methods with the two
-new pins. Only the ordinary-sign core is sufficiently consistent for immutable
-preparation: the course/activity-bound `preSign` fields and the identity-bound
-normal `stuSignajax` fields are frozen into separate zeroizing templates and a
-single digest. Gesture has conflicting code-validation prerequisites, location
-has conflicting field sets, photo requires an uploaded `objectId`, and QR
-requires dynamic `enc`; none is prepared. The preparation has no HTTP consumer
+new pins. It found overlapping ordinary fields but no one complete cross-donor
+sequence: Ylim uses its exact `preSign -> stuSignajax` pair, Samueli adds a
+different field set, and `mini-hbut` uses the broader pre-sign shape before a
+different `/pptSign` route. The current preparation therefore explicitly
+selects `YlimPreSignStuSignAjax`, freezes only that family's two zeroizing
+templates and includes the family in its digest; it does not splice
+Samueli/mini-only `tid`/`ut` into Ylim's pre-sign request. Gesture has
+conflicting code-validation prerequisites, location has conflicting field
+sets, photo requires an uploaded `objectId`, and QR requires dynamic `enc`;
+none is prepared by this ordinary family. The preparation has no HTTP consumer
 and does not weaken the durable-authority/readback gate.
 
 The same parameter follow-up extracted only Ylim's exact response vocabulary:

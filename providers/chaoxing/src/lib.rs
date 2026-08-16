@@ -91,7 +91,7 @@ pub use sign_in::{
     ChaoxingSignActivityReadTransport, ChaoxingSignDetail, ChaoxingSignDetailDocument,
     ChaoxingSignDetailRequest, ChaoxingSignVariant, parse_sign_activity_list, parse_sign_detail,
 };
-pub use sign_in_prepare::ChaoxingNormalSignPreparation;
+pub use sign_in_prepare::{ChaoxingNormalSignPreparation, ChaoxingNormalSignProtocolFamily};
 pub use sign_in_receipt::{
     ChaoxingPreSignDocument, ChaoxingPreSignEvidence, ChaoxingPreSignEvidenceKind,
     ChaoxingSignReceipt, ChaoxingSignReceiptDocument, ChaoxingSignReceiptKind,

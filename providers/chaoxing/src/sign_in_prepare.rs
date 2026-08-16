@@ -12,10 +12,20 @@ const PRE_SIGN_BASE: &str = "https://mobilelearn.chaoxing.com/newsign/preSign";
 const SUBMISSION_BASE: &str = "https://mobilelearn.chaoxing.com/pptSign/stuSignajax";
 const MAX_ACTOR_ID_BYTES: usize = 128;
 const MAX_ACTOR_NAME_BYTES: usize = 256;
-const REQUEST_DIGEST_DOMAIN: &[u8] = b"asterism.chaoxing.normal-sign-preparation.v1\0";
+const REQUEST_DIGEST_DOMAIN: &[u8] = b"asterism.chaoxing.normal-sign-preparation.v2\0";
+const YLIM_PROTOCOL_FAMILY: &[u8] = b"ylim-pre-sign-stu-sign-ajax";
 
-/// An immutable, unregistered preparation for the donor-corroborated ordinary
-/// sign-in request shape.
+/// Exact donor request family frozen by the ordinary-sign preparation.
+///
+/// Other audited donors corroborate several fields but use different complete
+/// routes or parameter sets. They must not be spliced into this Ylim sequence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChaoxingNormalSignProtocolFamily {
+    YlimPreSignStuSignAjax,
+}
+
+/// An immutable, unregistered preparation for Ylim's exact ordinary sign-in
+/// request pair.
 ///
 /// This value is not durable mutation authority. It exposes no send method,
 /// performs no HTTP request, assigns no meaning to Provider status codes, and
@@ -81,9 +91,7 @@ impl ChaoxingNormalSignPreparation {
                     ("sys", "1"),
                     ("ls", "1"),
                     ("appType", "15"),
-                    ("tid", ""),
                     ("uid", &uid),
-                    ("ut", "s"),
                     ("isTeacherViewOpen", "0"),
                 ],
             )?;
@@ -127,6 +135,10 @@ impl ChaoxingNormalSignPreparation {
 
     pub const fn variant(&self) -> ChaoxingSignVariant {
         ChaoxingSignVariant::Normal
+    }
+
+    pub const fn protocol_family(&self) -> ChaoxingNormalSignProtocolFamily {
+        ChaoxingNormalSignProtocolFamily::YlimPreSignStuSignAjax
     }
 
     pub const fn pre_sign_route(&self) -> &'static str {
@@ -231,6 +243,7 @@ fn request_digest(
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(REQUEST_DIGEST_DOMAIN);
+    update_digest_field(&mut digest, YLIM_PROTOCOL_FAMILY);
     update_digest_field(&mut digest, activity.remote_id().as_bytes());
     update_digest_field(&mut digest, activity.fingerprint().as_bytes());
     update_digest_field(&mut digest, detail.fingerprint().as_bytes());
@@ -280,6 +293,10 @@ mod tests {
 
         assert_eq!(preparation.remote_id(), activity.remote_id());
         assert_eq!(preparation.variant(), ChaoxingSignVariant::Normal);
+        assert_eq!(
+            preparation.protocol_family(),
+            ChaoxingNormalSignProtocolFamily::YlimPreSignStuSignAjax
+        );
         assert_eq!(preparation.pre_sign_route(), PRE_SIGN_BASE);
         assert_eq!(preparation.submission_route(), SUBMISSION_BASE);
         assert_eq!(preparation.prepared_request_count(), 2);
@@ -295,9 +312,7 @@ mod tests {
                 ("isTeacherViewOpen".to_owned(), "0".to_owned()),
                 ("ls".to_owned(), "1".to_owned()),
                 ("sys".to_owned(), "1".to_owned()),
-                ("tid".to_owned(), String::new()),
                 ("uid".to_owned(), "9001".to_owned()),
-                ("ut".to_owned(), "s".to_owned()),
             ])
         );
         assert_eq!(

@@ -742,27 +742,37 @@ inputs, durable non-idempotent authority, receipt classification, and a fresh
 account-bound readback which proves the exact activity was completed. No
 `preSign` or `stuSignajax` call exists in the current implementation.
 
-The Provider-local ordinary-sign preparation closes only the immutable request
-shape. From one exact list/detail pair and explicit bounded UID/FID/name, it
-freezes two separate zeroizing query templates:
+The Provider-local ordinary-sign preparation closes only one exact donor request
+family. From one exact list/detail pair and explicit bounded UID/FID/name, it
+identifies `YlimPreSignStuSignAjax` and freezes two separate zeroizing query
+templates:
 
 ```text
 newsign/preSign:
   courseId, classId, activePrimaryId, general=1, sys=1, ls=1,
-  appType=15, tid="", uid, ut=s, isTeacherViewOpen=0
+  appType=15, uid, isTeacherViewOpen=0
 
 pptSign/stuSignajax:
   activeId, uid, clientip="", latitude=-1, longitude=-1,
   appType=15, fid, name
 ```
 
-The resulting digest binds actor fields, activity/detail fingerprints and both
-canonical queries. Only static route names, the two-request count and the
-digest leave the object; the zeroizing queries have no public getter and no
-transport implementation consumes them. Status codes do not authorize the
-preparation. Photo upload/object identity, location fields, gesture/code
-prerequisites and QR `enc` differ or require extra dynamic evidence across the
-donors, so every non-normal variant remains unsupported at preparation time.
+This is Ylim's exact ordinary pair, not a donor-field union. Samueli's pre-sign
+shape adds `tid=""` and `ut=s` but omits `isTeacherViewOpen`; its terminal
+`stuSignajax` also carries extra course/class/object/user-agent fields.
+`mini-hbut` uses the broader pre-sign shape and then a different `/pptSign`
+family, with its current common-sign caller passing placeholder pre-sign
+identities. Those sources corroborate overlapping behavior but do not authorize
+splicing their fields or routes into Ylim's pair.
+
+The resulting digest domain is versioned and binds the explicit protocol
+family, actor fields, activity/detail fingerprints and both canonical queries.
+Only the family, static route names, two-request count and digest leave the
+object; the zeroizing queries have no public getter and no transport
+implementation consumes them. Status codes do not authorize the preparation.
+Photo upload/object identity, location fields, gesture/code prerequisites and
+QR `enc` differ or require extra dynamic evidence across the donors, so every
+non-normal variant remains unsupported at preparation time.
 
 Ylim's fixed implementation contains an additional donor-specific auxiliary
 path inside `preSign()` which the earlier ordinary-core audit omitted:
@@ -780,7 +790,7 @@ pptSign/analysis2:
 
 The implementation invokes this pair unconditionally before variant dispatch,
 but its own comment says the pair is required for location sign-in. Asterism
-therefore models it separately from the corroborated ordinary pair: one fresh
+therefore models it separately from the exact Ylim ordinary pair: one fresh
 ordinary preparation binds the first `analysis` query; one bounded, zeroizing
 response parser rejects missing/duplicate/empty/unsafe codes and freezes the
 dynamic `analysis2` query. Only routes/counts and request/response digests are

@@ -93,7 +93,11 @@ validation is still required.
   exact first query and response-bound second query as a separate redacted,
   transport-free continuation. It does not claim ordinary-sign necessity,
   classify the opaque `analysis2` result, or weaken durable issue/readback
-  requirements.
+  requirements. The same exact comparison against Samueli `9699e632` and
+  `mini-hbut` `952640e` corrected the ordinary preparation family: Ylim omits
+  Samueli/mini-only `tid`/`ut`, while mini follows its broader pre-sign request
+  with a different `/pptSign` route. Asterism now explicitly freezes only
+  `YlimPreSignStuSignAjax`; no hybrid donor chain remains.
 - 2026-08-16: refreshed all eight recorded donor default branches. Seven heads
   remain unchanged. `mini-hbut` advanced from `64fb2f06e10c` to
   `952640e2540f`; its three-commit delta changes schedule cleanup, a separate
@@ -145,9 +149,11 @@ validation is still required.
   unknown text fails closed. This adds no send path and deliberately does not
   treat an endpoint response as independent account completion readback.
 - 2026-08-15: compared Samueli `741d5c1884aa84ea50c650897c870229c1de812e`
-  with both newly pinned sign-in sources at the parameter level. The ordinary
-  `preSign`/`stuSignajax` field core is now frozen into an actor- and
-  snapshot-bound, zeroizing Provider-local preparation with no send method.
+  with both newly pinned sign-in sources at the parameter level. The audit
+  established shared field overlap but not a complete shared sequence; the
+  current corrected implementation freezes Ylim's exact actor- and
+  snapshot-bound `preSign -> stuSignajax` family with no send method rather
+  than combining donor-specific fields.
   Gesture/code prerequisites, location field sets, photo upload/object identity
   and QR dynamic `enc` are not consistent or self-contained enough to prepare;
   all remain explicit blockers rather than guessed request shapes.
