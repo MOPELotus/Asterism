@@ -59,19 +59,26 @@ impl ChaoxingQrSignMaterial {
             ));
         }
         let enc = required_material(&fields, "enc")?;
-        let code = fields
-            .get("Code")
-            .map(String::as_str)
-            .map(validate_material)
-            .transpose()?
-            .map(|value| Zeroizing::new(value.to_owned()));
-        if source == ChaoxingQrSignMaterialSource::SignInPayload
-            && fields.get("source").map(String::as_str) != Some("15")
-        {
-            return Err(invalid_response(
-                "Chaoxing SIGNIN QR has an unsupported source",
-            ));
-        }
+        let code = match source {
+            ChaoxingQrSignMaterialSource::HttpsUrl => {
+                if fields.contains_key("Code") || fields.contains_key("source") {
+                    return Err(invalid_response(
+                        "Chaoxing HTTPS QR mixes SIGNIN-only material fields",
+                    ));
+                }
+                None
+            }
+            ChaoxingQrSignMaterialSource::SignInPayload => {
+                if fields.get("source").map(String::as_str) != Some("15") {
+                    return Err(invalid_response(
+                        "Chaoxing SIGNIN QR has an unsupported source",
+                    ));
+                }
+                Some(Zeroizing::new(
+                    required_material(&fields, "Code")?.to_owned(),
+                ))
+            }
+        };
 
         let binding_digest = digest_parts(
             b"asterism.chaoxing.sign-qr-binding.v1",
@@ -398,20 +405,25 @@ fn take_activity_id(
     fields: &BTreeMap<String, String>,
     source: ChaoxingQrSignMaterialSource,
 ) -> ProviderResult<String> {
-    let names = match source {
-        ChaoxingQrSignMaterialSource::HttpsUrl => ["activeId", "id"].as_slice(),
-        ChaoxingQrSignMaterialSource::SignInPayload => ["aid"].as_slice(),
-    };
-    let values = names
+    let aliases = ["activeId", "id", "aid"];
+    let values = aliases
         .iter()
-        .filter_map(|name| fields.get(*name))
+        .filter_map(|name| fields.get(*name).map(|value| (*name, value)))
         .collect::<Vec<_>>();
-    if values.len() != 1 || !valid_activity_id(values[0]) {
+    let allowed_alias = match source {
+        ChaoxingQrSignMaterialSource::HttpsUrl => {
+            matches!(values.first(), Some(&("activeId" | "id", _)))
+        }
+        ChaoxingQrSignMaterialSource::SignInPayload => {
+            matches!(values.first(), Some(&("aid", _)))
+        }
+    };
+    if values.len() != 1 || !allowed_alias || !valid_activity_id(values[0].1) {
         return Err(invalid_response(
             "Chaoxing sign-in QR activity identity is missing or ambiguous",
         ));
     }
-    Ok(values[0].clone())
+    Ok(values[0].1.clone())
 }
 
 fn required_material<'a>(
@@ -514,7 +526,12 @@ mod tests {
         for document in [
             "https://evil.example/path?activeId=7003&enc=PRIVATE_QR_ENC",
             "https://mobilelearn.chaoxing.com/path?activeId=7003&id=7003&enc=PRIVATE_QR_ENC",
+            "https://mobilelearn.chaoxing.com/path?activeId=7003&aid=foreign&enc=PRIVATE_QR_ENC",
             "https://mobilelearn.chaoxing.com/path?activeId=7003&enc=one&enc=two",
+            "https://mobilelearn.chaoxing.com/path?activeId=7003&enc=PRIVATE_QR_ENC&Code=PRIVATE_QR_CODE",
+            "https://mobilelearn.chaoxing.com/path?activeId=7003&enc=PRIVATE_QR_ENC&source=15",
+            "SIGNIN:aid=7003&activeId=foreign&source=15&Code=PRIVATE_QR_CODE&enc=PRIVATE_QR_ENC",
+            "SIGNIN:aid=7003&source=15&enc=PRIVATE_QR_ENC",
             "SIGNIN:aid=7003&source=16&Code=PRIVATE_QR_CODE&enc=PRIVATE_QR_ENC",
         ] {
             assert_eq!(

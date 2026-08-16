@@ -286,4 +286,7 @@ unwired and `mini-hbut` uses a conflicting terminal `preSign` shortcut, so no
 mutation or completion capability is inferred. The exact Ylim `stuSignajax`
 second-step field set is now also frozen into an actor/material-bound redacted
 preparation, but it deliberately has no transport and cannot bypass the
-unresolved durable pre-sign sequence.
+unresolved durable pre-sign sequence. Carrier binding additionally requires one
+global activity alias: HTTPS may use `activeId|id`, while Ylim `SIGNIN:` must use
+`aid` with exact `source=15` and required `Code`; cross-carrier field mixing is
+rejected before any preparation.

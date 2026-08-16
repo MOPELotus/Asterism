@@ -419,8 +419,10 @@ every fixture before staging it.
   allowlisted HTTPS URL with HTML-escaped query separators and one exact
   `SIGNIN:aid=...&source=15&Code=...&enc=...` payload. Tests require the same
   activity ID and source, preserve only zeroizing redacted material plus
-  digests, and reject foreign hosts/activities, duplicate ID aliases, duplicate
-  `enc`, wrong source and non-QR variants. They do not issue `preSign` or
+  digests, and reject foreign hosts/activities, any second ID alias across
+  `activeId|id|aid`, HTTPS carriers containing `Code/source`, `SIGNIN:` without
+  required `Code`, duplicate `enc`, wrong source and non-QR variants. They do
+  not issue `preSign` or
   `stuSignajax` and are not completion evidence. Additional regressions freeze
   Ylim's exact ten QR submit fields from that material and explicit actor
   identity, assert deterministic actor/material binding and redacted Debug, and

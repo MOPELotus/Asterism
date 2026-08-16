@@ -117,7 +117,9 @@ validation is still required.
   freshly-bound zeroizing QR material parsing and an immutable preparation of
   Ylim's exact actor-bound `stuSignajax` second step. The preparation exposes no
   query/send method and does not resolve the conflicting pre-sign chains or
-  absent independent readback.
+  absent independent readback. Carrier parsing now also enforces one identity
+  alias globally and keeps HTTPS `activeId|id` separate from Ylim's required
+  `aid/source=15/Code` family, rejecting cross-carrier material mixtures.
 - 2026-08-15: re-checked Ylim's ordinary `handleSign` chain at the fixed pin.
   Its source explicitly requires issuing `preSign` before a later sign record
   can be created and always calls it before variant dispatch. Asterism

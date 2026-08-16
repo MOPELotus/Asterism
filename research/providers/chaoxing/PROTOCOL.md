@@ -837,11 +837,14 @@ source names the dynamic submit fields and its refresh path constructs a
 parses allowlisted Chaoxing HTTPS QR URLs carrying `activeId|id` plus `enc`.
 Asterism accepts either carrier only after fresh list/detail rebinding proves the
 same exact `QrCode` activity. The parser requires one non-ambiguous activity ID,
-one bounded dynamic `enc`, exact `source=15` for the `SIGNIN:` carrier and an
-optional bounded refresh code. It rejects userinfo, custom ports, foreign hosts,
-duplicate aliases/fields and foreign activities. Raw QR material is zeroized and
-redacted; only source, binding digest, material digest and refresh-code presence
-are public.
+one bounded dynamic `enc` and a carrier-exact field family. Across all recognized
+aliases, exactly one of `activeId|id|aid` may appear. An allowlisted HTTPS URL
+uses only `activeId|id` and must not contain Ylim-only `Code/source`; an exact
+`SIGNIN:` payload uses only `aid` and requires both `source=15` and one bounded
+`Code`. It rejects userinfo, custom ports, foreign hosts, duplicate or
+cross-carrier aliases/fields and foreign activities. Raw QR material is
+zeroized and redacted; only source, binding digest, material digest and
+refresh-code presence are public.
 
 A second Provider-local value freezes only Ylim's exact QR submission step:
 
