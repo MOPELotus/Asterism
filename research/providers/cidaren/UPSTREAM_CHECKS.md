@@ -1044,6 +1044,22 @@ artifact digest. Main still owns encrypted persistence and the shared blocked
 outcome, but no additional Cidaren execution cursor is now missing from that
 future record.
 
+### 2026-08-16 blocked-step atomic handoff follow-up
+
+The recovery artifact and flow state were complete, but a future caller could
+still read the rejection and encoded artifact as separate Provider values and
+accidentally pair them with another diagnosis or ledger tuple.
+`CidarenBlockedStepMaterialization` now consumes the exact encoded artifact and
+definite rejection into one immutable handoff containing
+`RequiredChildrenPending`, `SubmitChoseWord`, request digest, response digest
+and receive time. Its getters and consuming `into_parts` expose the same frozen
+tuple, and Debug keeps only the already-redacted artifact plus typed facts.
+
+The current shared adapter still does not return this handoff. Main owns the
+new shared outcome and persistence, while Cidaren now supplies one atomic value
+rather than requiring Core to reconstruct Provider semantics from parallel
+fields.
+
 ## Check procedure
 
 For the next checkpoint:

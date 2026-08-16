@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use asterism_domain::{TaskId, Timestamp};
+use asterism_domain::{CompletionDiagnosis, TaskId, Timestamp};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use asterism_secrets::SecretValue;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -40,6 +40,100 @@ impl fmt::Debug for EncodedCidarenBlockedStepArtifact {
             .debug_struct("EncodedCidarenBlockedStepArtifact")
             .field("value", &"[REDACTED]")
             .field("digest", &self.digest)
+            .finish()
+    }
+}
+
+/// Atomic Provider handoff for one definite blocked Question step. Callers do
+/// not assemble diagnosis, ledger digests or artifact independently.
+pub struct CidarenBlockedStepMaterialization {
+    artifact: EncodedCidarenBlockedStepArtifact,
+    diagnosis: CompletionDiagnosis,
+    operation: CidarenAttemptOperation,
+    request_digest: [u8; 32],
+    response_digest: [u8; 32],
+    received_at: Timestamp,
+}
+
+impl CidarenBlockedStepMaterialization {
+    pub(crate) fn try_new(
+        artifact: EncodedCidarenBlockedStepArtifact,
+        rejection: CidarenDefiniteRejection,
+    ) -> ProviderResult<Self> {
+        if rejection.operation() != CidarenAttemptOperation::SubmitChoseWord
+            || rejection.kind() != CidarenAssessmentRejectionKind::RequiredChildrenPending
+            || rejection.request_digest() == [0; 32]
+            || rejection.response_digest() == [0; 32]
+        {
+            return Err(protocol_drift(
+                "Cidaren blocked-step materialization is invalid",
+            ));
+        }
+        Ok(Self {
+            artifact,
+            diagnosis: CompletionDiagnosis::RequiredChildrenPending,
+            operation: rejection.operation(),
+            request_digest: rejection.request_digest(),
+            response_digest: rejection.response_digest(),
+            received_at: rejection.received_at(),
+        })
+    }
+
+    pub fn artifact(&self) -> &EncodedCidarenBlockedStepArtifact {
+        &self.artifact
+    }
+
+    pub const fn diagnosis(&self) -> CompletionDiagnosis {
+        self.diagnosis
+    }
+
+    pub const fn operation(&self) -> CidarenAttemptOperation {
+        self.operation
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub const fn response_digest(&self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    pub const fn received_at(&self) -> Timestamp {
+        self.received_at
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        EncodedCidarenBlockedStepArtifact,
+        CompletionDiagnosis,
+        CidarenAttemptOperation,
+        [u8; 32],
+        [u8; 32],
+        Timestamp,
+    ) {
+        (
+            self.artifact,
+            self.diagnosis,
+            self.operation,
+            self.request_digest,
+            self.response_digest,
+            self.received_at,
+        )
+    }
+}
+
+impl fmt::Debug for CidarenBlockedStepMaterialization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenBlockedStepMaterialization")
+            .field("artifact", &self.artifact)
+            .field("diagnosis", &self.diagnosis)
+            .field("operation", &self.operation)
+            .field("request_digest", &self.request_digest)
+            .field("response_digest", &self.response_digest)
+            .field("received_at", &self.received_at)
             .finish()
     }
 }
@@ -436,6 +530,46 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn blocked_step_materialization_keeps_one_atomic_handoff() {
+        let task_id = TaskId::new();
+        let received_at = Utc.with_ymd_and_hms(2026, 8, 16, 4, 5, 6).unwrap();
+        let rejection =
+            CidarenDefiniteRejection::from_recovery(7, Some(92_002), [7; 32], [9; 32], received_at);
+        let artifact = CidarenBlockedStepArtifact::from_definite_rejection(
+            task_id,
+            "class-task:2002",
+            rejection,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        let artifact_digest = artifact.digest();
+        let materialization =
+            CidarenBlockedStepMaterialization::try_new(artifact, rejection).unwrap();
+        assert_eq!(
+            materialization.diagnosis(),
+            CompletionDiagnosis::RequiredChildrenPending
+        );
+        assert_eq!(
+            materialization.operation(),
+            CidarenAttemptOperation::SubmitChoseWord
+        );
+        assert_eq!(materialization.request_digest(), [7; 32]);
+        assert_eq!(materialization.response_digest(), [9; 32]);
+        assert_eq!(materialization.received_at(), received_at);
+        assert_eq!(materialization.artifact().digest(), artifact_digest);
+
+        let (artifact, diagnosis, operation, request, response, observed_at) =
+            materialization.into_parts();
+        assert_eq!(artifact.digest(), artifact_digest);
+        assert_eq!(diagnosis, CompletionDiagnosis::RequiredChildrenPending);
+        assert_eq!(operation, CidarenAttemptOperation::SubmitChoseWord);
+        assert_eq!(request, [7; 32]);
+        assert_eq!(response, [9; 32]);
+        assert_eq!(observed_at, received_at);
     }
 
     #[test]

@@ -113,7 +113,7 @@ pub use authentication::{
 };
 pub use blocked_step_artifact::{
     CIDAREN_BLOCKED_STEP_ARTIFACT_TYPE, CidarenBlockedStepArtifact,
-    EncodedCidarenBlockedStepArtifact,
+    CidarenBlockedStepMaterialization, EncodedCidarenBlockedStepArtifact,
 };
 pub use browser_bridge::{
     CidarenBrowserBridge, CidarenCaptureExchangeCompleted, CidarenCaptureExchangeIssued,

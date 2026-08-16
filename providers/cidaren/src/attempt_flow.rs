@@ -13,7 +13,7 @@ use asterism_provider_api::{
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::blocked_step_artifact::CidarenBlockedStepArtifact;
+use crate::blocked_step_artifact::{CidarenBlockedStepArtifact, CidarenBlockedStepMaterialization};
 use crate::pre_question_artifact::CidarenPreQuestionState;
 use crate::{
     CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_READY_TO_ADVANCE_PHASE, CIDAREN_READY_TO_VERIFY_PHASE,
@@ -701,6 +701,28 @@ impl CidarenAttemptFlow {
         )?
         .encode()
         .map(Some)
+    }
+
+    /// Produces one all-or-nothing Provider bundle for a future shared blocked
+    /// step outcome. Current shared adapters do not consume this handoff.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if the definite rejection or its encoded artifact
+    /// cannot satisfy the exact Provider binding.
+    pub fn blocked_step_materialization(
+        &self,
+    ) -> ProviderResult<Option<CidarenBlockedStepMaterialization>> {
+        let Some(rejection) = self.last_definite_rejection else {
+            return Ok(None);
+        };
+        let artifact = CidarenBlockedStepArtifact::from_definite_rejection(
+            self.task_id,
+            &self.remote_task_id,
+            rejection,
+        )?
+        .encode()?;
+        CidarenBlockedStepMaterialization::try_new(artifact, rejection).map(Some)
     }
 
     /// Encodes the current pre-Question phase for Main's encrypted attempt
@@ -2454,6 +2476,15 @@ mod tests {
         assert_ne!(rejection.request_digest(), [0; 32]);
         assert_ne!(rejection.response_digest(), [0; 32]);
         assert_eq!(rejection.received_at(), request_at());
+        let blocked = flow.blocked_step_materialization().unwrap().unwrap();
+        assert_eq!(
+            blocked.diagnosis(),
+            asterism_domain::CompletionDiagnosis::RequiredChildrenPending
+        );
+        assert_eq!(blocked.operation(), rejection.operation());
+        assert_eq!(blocked.request_digest(), rejection.request_digest());
+        assert_eq!(blocked.response_digest(), rejection.response_digest());
+        assert_eq!(blocked.received_at(), rejection.received_at());
         assert_definite_rejection_recovery(&context, &detail, &flow, rejection);
         assert!(flow.issue_word_selection(request_at()).is_err());
     }
