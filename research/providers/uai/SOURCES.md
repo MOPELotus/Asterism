@@ -524,3 +524,10 @@ the existing audited intent/grant/object lineage and exact multipart digest
 locally, drops the reconstructed request without dispatch and enters only fresh
 final-plan preparation. This adds recovery validation, not a replay authority
 or new donor capability.
+
+The end-to-end final-plan recovery checkpoint later on 2026-08-16 reused the
+same unchanged donor query. No upstream exposed an alternative account-free
+final-submit identity or allowed a self-consistent final plan to detach from its
+object-upload predecessor. UAI now rebinds the decoded private final plan to the
+full predecessor chain and exact current Course/openid request before accepted
+readback; this remains local fail-closed recovery over unchanged donor routes.

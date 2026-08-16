@@ -69,6 +69,13 @@ stored request digest. The body is dropped without dispatch, so a rotated token
 cannot inherit an older object success. Only the validated chain enters fresh
 single or complete-Draft-bound compound final-plan preparation.
 
+Decoded final-plan state is now joined to that predecessor proof as well. UAI
+freshly reproduces the full semantic sequence binding and materializes the
+current Course-instance/openid request only to match its exact stored digest,
+then drops the request without dispatch. The resulting private recovered-final
+owner is the readback entry for accepted result state, preventing a valid plan
+from another object chain or account request from producing verification.
+
 ## Current implementation checkpoint
 
 The current crate advertises Authentication, CourseInventory, TaskInventory,

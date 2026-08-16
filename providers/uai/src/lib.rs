@@ -199,7 +199,7 @@ pub use upload_input_state::{
 pub use upload_object_state::{
     EncodedUaiUploadObjectState, UAI_UPLOAD_OBJECT_STATE_TYPE, UaiUploadObjectState,
 };
-pub use upload_recovery::UaiUploadStageRecovery;
+pub use upload_recovery::{UaiRecoveredUploadFinalPlan, UaiUploadStageRecovery};
 pub use upload_sequence::{
     EncodedUaiUploadFinalResultState, UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS,
     UAI_UPLOAD_FINAL_OPERATION_TYPE, UAI_UPLOAD_FINAL_PLAN_ARTIFACT_TYPE,

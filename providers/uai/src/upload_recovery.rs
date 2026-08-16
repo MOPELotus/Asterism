@@ -2,14 +2,85 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::SubmissionDraft;
 use asterism_provider_api::{
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, TaskDetailCapability,
+    ExecutionMutationVerification, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderResult, TaskDetailCapability,
 };
 
 use crate::{
-    UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiUploadGrantState,
-    UaiUploadInputState, UaiUploadIntent, UaiUploadObjectState, UaiUploadPreparation,
-    UaiUploadSubmission, build_upload_multipart,
+    UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiCompoundUploadVerification,
+    UaiUploadFinalPlanState, UaiUploadFinalResultState, UaiUploadFinalSubmissionKind,
+    UaiUploadGrantState, UaiUploadInputState, UaiUploadIntent, UaiUploadObjectState,
+    UaiUploadPreparation, UaiUploadSubmission, UaiUploadVerification,
+    build_compound_upload_submission_request, build_upload_multipart,
+    build_upload_submission_request,
 };
+
+/// Complete private final-plan owner that can only be created after the exact
+/// input/grant/object chain and materialized final request have been rebound.
+pub struct UaiRecoveredUploadFinalPlan {
+    final_plan: UaiUploadFinalPlanState,
+    object_request_digest: [u8; 32],
+}
+
+impl UaiRecoveredUploadFinalPlan {
+    pub const fn kind(&self) -> UaiUploadFinalSubmissionKind {
+        self.final_plan.kind()
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.final_plan.request_digest()
+    }
+
+    pub const fn object_request_digest(&self) -> [u8; 32] {
+        self.object_request_digest
+    }
+
+    /// Parses an accepted single-upload readback only through the fully
+    /// recovered predecessor and final-request chain.
+    ///
+    /// # Errors
+    ///
+    /// Rejects compound state or a foreign accepted result before producing
+    /// mutation verification.
+    pub fn verify_single_readback(
+        &self,
+        result: &UaiUploadFinalResultState,
+        document: &str,
+    ) -> ProviderResult<(UaiUploadVerification, ExecutionMutationVerification)> {
+        if self.kind() != UaiUploadFinalSubmissionKind::Single {
+            return Err(foreign_recovery_chain());
+        }
+        result.verify_single_plan_state(document, &self.final_plan)
+    }
+
+    /// Parses an accepted compound-upload readback only through the fully
+    /// recovered predecessor, Draft and final-request chain.
+    ///
+    /// # Errors
+    ///
+    /// Rejects single state or a foreign accepted result before producing
+    /// mutation verification.
+    pub fn verify_compound_readback(
+        &self,
+        result: &UaiUploadFinalResultState,
+        document: &str,
+    ) -> ProviderResult<(UaiCompoundUploadVerification, ExecutionMutationVerification)> {
+        if self.kind() != UaiUploadFinalSubmissionKind::Compound {
+            return Err(foreign_recovery_chain());
+        }
+        result.verify_compound_plan_state(document, &self.final_plan)
+    }
+}
+
+impl fmt::Debug for UaiRecoveredUploadFinalPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiRecoveredUploadFinalPlan")
+            .field("final_plan", &"[REDACTED]")
+            .field("object_request_digest", &"[HASHED]")
+            .finish()
+    }
+}
 
 /// Provider-owned read-only adapter that reconnects every recovered upload
 /// stage before fresh final-plan preparation. It never dispatches or returns a
@@ -83,6 +154,87 @@ impl UaiUploadStageRecovery {
         self.compound
             .prepare_submission(context, ordinary_draft, object.uploaded())
             .await
+    }
+
+    /// Rebinds a decoded single final-plan state to the complete predecessor
+    /// chain and the exact current Course/account request material.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign semantic plan, object chain, Course/account request
+    /// or compound state. The request is materialized only for digest checking
+    /// and is never returned or dispatched.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the recovery boundary explicitly receives every independent persisted stage"
+    )]
+    pub async fn bind_single_final_state(
+        &self,
+        context: &ProviderContext,
+        input: &UaiUploadInputState,
+        grant: &UaiUploadGrantState,
+        object: &UaiUploadObjectState,
+        final_plan: UaiUploadFinalPlanState,
+        course_instance_id: &str,
+        account_openid: &str,
+    ) -> ProviderResult<UaiRecoveredUploadFinalPlan> {
+        let fresh = self
+            .prepare_single_final(context, input, grant, object)
+            .await?;
+        let recovered = final_plan.as_single().ok_or_else(foreign_recovery_chain)?;
+        if recovered.final_sequence_binding_digest() != fresh.final_sequence_binding_digest() {
+            return Err(foreign_recovery_chain());
+        }
+        let request = build_upload_submission_request(&fresh, course_instance_id, account_openid)?;
+        if request.request_digest() != final_plan.request_digest() {
+            return Err(foreign_recovery_chain());
+        }
+        Ok(UaiRecoveredUploadFinalPlan {
+            final_plan,
+            object_request_digest: object.uploaded().object_request_digest(),
+        })
+    }
+
+    /// Rebinds a decoded compound final-plan state to the complete predecessor
+    /// chain, immutable ordinary Draft and exact Course/account request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign semantic plan, Draft, object chain, Course/account
+    /// request or single state. The request is never returned or dispatched.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the recovery boundary explicitly receives every independent persisted stage"
+    )]
+    pub async fn bind_compound_final_state(
+        &self,
+        context: &ProviderContext,
+        input: &UaiUploadInputState,
+        ordinary_draft: &SubmissionDraft,
+        grant: &UaiUploadGrantState,
+        object: &UaiUploadObjectState,
+        final_plan: UaiUploadFinalPlanState,
+        course_instance_id: &str,
+        account_openid: &str,
+    ) -> ProviderResult<UaiRecoveredUploadFinalPlan> {
+        let fresh = self
+            .prepare_compound_final(context, input, ordinary_draft, grant, object)
+            .await?;
+        let recovered = final_plan
+            .as_compound()
+            .ok_or_else(foreign_recovery_chain)?;
+        if recovered.final_sequence_binding_digest() != fresh.final_sequence_binding_digest() {
+            return Err(foreign_recovery_chain());
+        }
+        let request =
+            build_compound_upload_submission_request(&fresh, course_instance_id, account_openid)?;
+        if request.request_digest() != final_plan.request_digest() {
+            return Err(foreign_recovery_chain());
+        }
+        Ok(UaiRecoveredUploadFinalPlan {
+            final_plan,
+            object_request_digest: object.uploaded().object_request_digest(),
+        })
     }
 }
 
@@ -158,9 +310,10 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        EncodedUaiUploadGrantState, EncodedUaiUploadInputState, EncodedUaiUploadObjectState,
-        UaiUploadArtifact, UaiUploadedArtifact, build_upload_grant_request,
-        parse_upload_grant_bound, parse_upload_object_result,
+        EncodedUaiUploadFinalPlanState, EncodedUaiUploadGrantState, EncodedUaiUploadInputState,
+        EncodedUaiUploadObjectState, UaiUploadArtifact, UaiUploadFinalSubmissionSequence,
+        UaiUploadedArtifact, build_upload_grant_request, parse_upload_grant_bound,
+        parse_upload_object_result,
     };
 
     use super::*;
@@ -194,6 +347,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the end-to-end fixture keeps every independently persisted upload stage visible"
+    )]
     async fn recovered_single_chain_rebinds_every_stage_without_object_replay() {
         let details: Arc<dyn TaskDetailCapability> = Arc::new(FixtureDetail {
             metadata: crate::development_metadata().unwrap(),
@@ -269,6 +426,57 @@ mod tests {
             .unwrap();
         assert_eq!(final_plan.remote_task_id(), REMOTE_TASK_ID);
         assert_eq!(final_plan.artifact_digest(), artifact_digest);
+
+        let final_request =
+            build_upload_submission_request(&final_plan, "course-instance-1", "openid-1").unwrap();
+        let encoded_final =
+            EncodedUaiUploadFinalPlanState::for_single(&final_plan, &final_request).unwrap();
+        let final_digest = encoded_final.digest();
+        let final_value = encoded_final.into_secret_value();
+        let final_sequence = UaiUploadFinalSubmissionSequence::for_single(&final_plan).unwrap();
+        let decoded_final =
+            UaiUploadFinalPlanState::decode_bound(&final_value, final_digest, &final_sequence)
+                .unwrap();
+        let rebound = recovery
+            .bind_single_final_state(
+                &context,
+                &input,
+                &grant_state,
+                &object_state,
+                decoded_final,
+                "course-instance-1",
+                "openid-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(rebound.kind(), UaiUploadFinalSubmissionKind::Single);
+        assert_eq!(rebound.request_digest(), final_request.request_digest());
+        assert_eq!(
+            rebound.object_request_digest(),
+            object_state.uploaded().object_request_digest()
+        );
+
+        let encoded_foreign =
+            EncodedUaiUploadFinalPlanState::for_single(&final_plan, &final_request).unwrap();
+        let foreign_digest = encoded_foreign.digest();
+        let foreign_value = encoded_foreign.into_secret_value();
+        let foreign_final =
+            UaiUploadFinalPlanState::decode_bound(&foreign_value, foreign_digest, &final_sequence)
+                .unwrap();
+        assert!(
+            recovery
+                .bind_single_final_state(
+                    &context,
+                    &input,
+                    &grant_state,
+                    &object_state,
+                    foreign_final,
+                    "course-instance-1",
+                    "openid-2",
+                )
+                .await
+                .is_err()
+        );
 
         let rotated_document =
             r#"{"code":200,"upToken":"rotated-upload-token","fileKey":"course/42/nothing.mp3"}"#;
@@ -369,6 +577,33 @@ mod tests {
             .unwrap();
         assert_eq!(final_plan.ordinary_draft_id(), draft.id);
         assert_eq!(final_plan.artifact_digest(), artifact_digest);
+
+        let final_request =
+            build_compound_upload_submission_request(&final_plan, "course-instance-1", "openid-1")
+                .unwrap();
+        let encoded_final =
+            EncodedUaiUploadFinalPlanState::for_compound(&final_plan, &final_request).unwrap();
+        let final_digest = encoded_final.digest();
+        let final_value = encoded_final.into_secret_value();
+        let final_sequence = UaiUploadFinalSubmissionSequence::for_compound(&final_plan).unwrap();
+        let decoded_final =
+            UaiUploadFinalPlanState::decode_bound(&final_value, final_digest, &final_sequence)
+                .unwrap();
+        let rebound = recovery
+            .bind_compound_final_state(
+                &context,
+                &input,
+                &draft,
+                &grant_state,
+                &object_state,
+                decoded_final,
+                "course-instance-1",
+                "openid-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(rebound.kind(), UaiUploadFinalSubmissionKind::Compound);
+        assert_eq!(rebound.request_digest(), final_request.request_digest());
     }
 
     fn upload_detail(task_fingerprint: &str, task_types: &[&str]) -> RemoteTaskDetail {

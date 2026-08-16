@@ -1317,6 +1317,18 @@ therefore fails. Only this complete chain may enter the existing fresh
 single/compound final-plan preparation; the adapter performs no Qiniu replay
 and does not promote the object receipt to verification.
 
+The same adapter now consumes the decoded `uai.upload.final-plan-state.v1`
+only after that predecessor chain succeeds. It freshly prepares the semantic
+single/compound plan again, requires its complete sequence binding to equal the
+decoded private plan, then materializes the current Course-instance/openid
+final request only to match the stored final request digest. The request is
+again dropped without dispatch. The resulting
+`UaiRecoveredUploadFinalPlan` owns the private plan and is the safe Provider
+entry to accepted-result readback: it delegates to the existing result-state
+verification only after input, grant, object, Draft, semantic plan and dynamic
+request have all been rebound. A foreign account request or otherwise-valid
+final plan from another object chain cannot reach readback evidence.
+
 Once an exact single or compound final plan already exists, UAI now projects a
 credential-free `uai.upload.final-plan.v1` scheduling artifact whose binding
 digest covers the complete semantic plan without exposing the object key or
