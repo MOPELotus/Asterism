@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_secrets::SecretString;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -9,6 +10,9 @@ use crate::{ChaoxingSignActivity, ChaoxingSignDetail, ChaoxingSignVariant};
 
 const MAX_QR_DOCUMENT_BYTES: usize = 4 * 1_024;
 const MAX_QR_MATERIAL_BYTES: usize = 512;
+const MAX_ACTOR_ID_BYTES: usize = 128;
+const MAX_ACTOR_NAME_BYTES: usize = 256;
+const QR_SUBMISSION_BASE: &str = "https://mobilelearn.chaoxing.com/pptSign/stuSignajax";
 const QR_HOSTS: &[&str] = &[
     "mobilelearn.chaoxing.com",
     "www.chaoxing.com",
@@ -116,8 +120,7 @@ impl ChaoxingQrSignMaterial {
         self.code.is_some()
     }
 
-    #[cfg(test)]
-    fn enc(&self) -> &str {
+    pub(crate) fn enc(&self) -> &str {
         self.enc.as_str()
     }
 }
@@ -141,6 +144,177 @@ impl Drop for ChaoxingQrSignMaterial {
         self.activity_id.zeroize();
         self.enc.zeroize();
     }
+}
+
+/// One immutable preparation for Ylim's exact QR `stuSignajax` step.
+///
+/// This is deliberately not a complete sign-in sequence. It freezes only the
+/// independently evidenced QR submission query and exposes no plaintext query
+/// or send method. The donor-conflicted pre-sign step and fresh completion
+/// readback remain separate blockers.
+pub struct ChaoxingQrSignSubmissionPreparation {
+    remote_id: String,
+    material_digest: [u8; 32],
+    submission_query: SecretString,
+    request_digest: [u8; 32],
+}
+
+impl ChaoxingQrSignSubmissionPreparation {
+    /// Freezes one exact QR submission step from freshly rebound snapshots,
+    /// scanned material and explicit actor identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale material/activity bindings, non-QR variants and malformed
+    /// actor fields. Success still grants no remote mutation authority.
+    pub fn try_prepare(
+        activity: &ChaoxingSignActivity,
+        detail: &ChaoxingSignDetail,
+        material: &ChaoxingQrSignMaterial,
+        uid: impl Into<String>,
+        fid: impl Into<String>,
+        name: impl Into<String>,
+    ) -> ProviderResult<Self> {
+        validate_binding(activity, detail)?;
+        let expected_binding = digest_parts(
+            b"asterism.chaoxing.sign-qr-binding.v1",
+            &[
+                activity.remote_id().as_bytes(),
+                activity.fingerprint().as_bytes(),
+                detail.fingerprint().as_bytes(),
+            ],
+        );
+        if material.activity_id != activity.activity_id()
+            || material.binding_digest != expected_binding
+        {
+            return Err(remote_changed(
+                "Chaoxing sign-in QR material changed before submission preparation",
+            ));
+        }
+
+        let mut uid = uid.into();
+        let mut fid = fid.into();
+        let mut name = name.into();
+        let result = (|| {
+            validate_actor_id(&uid)?;
+            validate_actor_id(&fid)?;
+            validate_actor_name(&name)?;
+            let submission_query = canonical_query(
+                QR_SUBMISSION_BASE,
+                &[
+                    ("enc", material.enc()),
+                    ("name", &name),
+                    ("activeId", activity.activity_id()),
+                    ("uid", &uid),
+                    ("clientip", ""),
+                    ("useragent", ""),
+                    ("latitude", "-1"),
+                    ("longitude", "-1"),
+                    ("fid", &fid),
+                    ("appType", "15"),
+                ],
+            )?;
+            let request_digest = digest_parts(
+                b"asterism.chaoxing.sign-qr-submission-preparation.v1",
+                &[
+                    activity.remote_id().as_bytes(),
+                    activity.fingerprint().as_bytes(),
+                    detail.fingerprint().as_bytes(),
+                    material.material_digest.as_slice(),
+                    submission_query.as_bytes(),
+                ],
+            );
+            Ok(Self {
+                remote_id: activity.remote_id().to_owned(),
+                material_digest: material.material_digest,
+                submission_query: SecretString::new(submission_query),
+                request_digest,
+            })
+        })();
+        uid.zeroize();
+        fid.zeroize();
+        name.zeroize();
+        result
+    }
+
+    pub fn remote_id(&self) -> &str {
+        &self.remote_id
+    }
+
+    pub const fn variant(&self) -> ChaoxingSignVariant {
+        ChaoxingSignVariant::QrCode
+    }
+
+    pub const fn submission_route(&self) -> &'static str {
+        QR_SUBMISSION_BASE
+    }
+
+    pub const fn material_digest(&self) -> [u8; 32] {
+        self.material_digest
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub fn prepared_request_count(&self) -> usize {
+        usize::from(!self.submission_query.expose_secret().is_empty())
+    }
+}
+
+impl fmt::Debug for ChaoxingQrSignSubmissionPreparation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingQrSignSubmissionPreparation")
+            .field("remote_id", &self.remote_id)
+            .field("material_digest", &self.material_digest)
+            .field("submission_query", &"[REDACTED]")
+            .field("request_digest", &self.request_digest)
+            .finish()
+    }
+}
+
+fn validate_actor_id(value: &str) -> ProviderResult<()> {
+    if value.is_empty()
+        || value.len() > MAX_ACTOR_ID_BYTES
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Err(invalid_response(
+            "Chaoxing QR sign-in actor identity is invalid",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_actor_name(value: &str) -> ProviderResult<()> {
+    if value.trim().is_empty()
+        || value.trim() != value
+        || value.len() > MAX_ACTOR_NAME_BYTES
+        || value.chars().any(char::is_control)
+    {
+        Err(invalid_response(
+            "Chaoxing QR sign-in actor name is invalid",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn canonical_query(base: &str, pairs: &[(&str, &str)]) -> ProviderResult<String> {
+    let mut url = Url::parse(base).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing QR sign-in static route is invalid",
+        )
+    })?;
+    url.query_pairs_mut().extend_pairs(pairs.iter().copied());
+    url.query().map(str::to_owned).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing QR sign-in query preparation failed",
+        )
+    })
 }
 
 fn validate_binding(
@@ -301,6 +475,7 @@ mod tests {
         ChaoxingCourseScope, ChaoxingSignActivityListDocument, ChaoxingSignDetailDocument,
         ChaoxingSignDetailRequest, parse_sign_activity_list, parse_sign_detail,
     };
+    use std::collections::BTreeMap;
 
     const ACTIVITIES: &str =
         include_str!("../../../fixtures/providers/chaoxing/sign/activities-mixed.json");
@@ -371,6 +546,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn freezes_exact_qr_submission_step_without_claiming_a_sequence() {
+        let (activity, detail) = qr_binding();
+        let material =
+            ChaoxingQrSignMaterial::try_new(&activity, &detail, SIGNIN_PAYLOAD.trim()).unwrap();
+        let preparation = ChaoxingQrSignSubmissionPreparation::try_prepare(
+            &activity,
+            &detail,
+            &material,
+            "9001",
+            "4001",
+            "Test Student",
+        )
+        .unwrap();
+
+        assert_eq!(preparation.remote_id(), activity.remote_id());
+        assert_eq!(preparation.variant(), ChaoxingSignVariant::QrCode);
+        assert_eq!(preparation.submission_route(), QR_SUBMISSION_BASE);
+        assert_eq!(preparation.prepared_request_count(), 1);
+        assert_eq!(preparation.material_digest(), material.material_digest());
+        assert_ne!(preparation.request_digest(), [0; 32]);
+        assert_eq!(
+            query_map(preparation.submission_query.expose_secret()),
+            BTreeMap::from([
+                ("activeId".to_owned(), "7003".to_owned()),
+                ("appType".to_owned(), "15".to_owned()),
+                ("clientip".to_owned(), String::new()),
+                ("enc".to_owned(), "PRIVATE_QR_ENC".to_owned()),
+                ("fid".to_owned(), "4001".to_owned()),
+                ("latitude".to_owned(), "-1".to_owned()),
+                ("longitude".to_owned(), "-1".to_owned()),
+                ("name".to_owned(), "Test Student".to_owned()),
+                ("uid".to_owned(), "9001".to_owned()),
+                ("useragent".to_owned(), String::new()),
+            ])
+        );
+        let debug = format!("{preparation:?}");
+        assert!(!debug.contains("PRIVATE_QR_ENC"));
+        assert!(!debug.contains("9001"));
+        assert!(!debug.contains("Test Student"));
+    }
+
+    #[test]
+    fn qr_submission_step_is_actor_and_fresh_binding_bound() {
+        let (activity, detail) = qr_binding();
+        let material = ChaoxingQrSignMaterial::try_new(&activity, &detail, QR_URL.trim()).unwrap();
+        let first = ChaoxingQrSignSubmissionPreparation::try_prepare(
+            &activity, &detail, &material, "9001", "4001", "Student",
+        )
+        .unwrap();
+        let same = ChaoxingQrSignSubmissionPreparation::try_prepare(
+            &activity, &detail, &material, "9001", "4001", "Student",
+        )
+        .unwrap();
+        let other = ChaoxingQrSignSubmissionPreparation::try_prepare(
+            &activity, &detail, &material, "9002", "4001", "Student",
+        )
+        .unwrap();
+        assert_eq!(first.request_digest(), same.request_digest());
+        assert_ne!(first.request_digest(), other.request_digest());
+
+        for (uid, fid, name) in [
+            ("", "4001", "Student"),
+            ("not-a-uid", "4001", "Student"),
+            ("9001", "", "Student"),
+            ("9001", "4001", "\n"),
+        ] {
+            assert_eq!(
+                ChaoxingQrSignSubmissionPreparation::try_prepare(
+                    &activity, &detail, &material, uid, fid, name,
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::InvalidResponse
+            );
+        }
+
+        let request = ChaoxingSignDetailRequest::for_test(&activity);
+        let changed = QR_DETAIL.replace("\"status\": 1", "\"status\": 2");
+        let changed = ChaoxingSignDetailDocument::try_new(changed).unwrap();
+        let changed = parse_sign_detail(&changed, &request).unwrap();
+        assert_eq!(
+            ChaoxingQrSignSubmissionPreparation::try_prepare(
+                &activity, &changed, &material, "9001", "4001", "Student",
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
+
     fn qr_binding() -> (ChaoxingSignActivity, ChaoxingSignDetail) {
         let scope = ChaoxingCourseScope::new("course:1001:2001", "1001", "2001").unwrap();
         let document = ChaoxingSignActivityListDocument::try_new(ACTIVITIES).unwrap();
@@ -383,5 +649,13 @@ mod tests {
         let document = ChaoxingSignDetailDocument::try_new(QR_DETAIL).unwrap();
         let detail = parse_sign_detail(&document, &request).unwrap();
         (activity, detail)
+    }
+
+    fn query_map(query: &str) -> BTreeMap<String, String> {
+        Url::parse(&format!("https://example.invalid/?{query}"))
+            .unwrap()
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect()
     }
 }

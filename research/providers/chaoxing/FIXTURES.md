@@ -402,7 +402,12 @@ every fixture before staging it.
   activity ID and source, preserve only zeroizing redacted material plus
   digests, and reject foreign hosts/activities, duplicate ID aliases, duplicate
   `enc`, wrong source and non-QR variants. They do not issue `preSign` or
-  `stuSignajax` and are not completion evidence.
+  `stuSignajax` and are not completion evidence. Additional regressions freeze
+  Ylim's exact ten QR submit fields from that material and explicit actor
+  identity, assert deterministic actor/material binding and redacted Debug, and
+  reject stale detail fingerprints or malformed UID/FID/name. The preparation
+  still contains only one second-step template and never claims the unresolved
+  pre-sign sequence is complete.
   WebIM fixtures separately cover the exact three bootstrap selectors, one
   `atype=2` `att_chat_course` identity and one non-sign activity. Tests bind
   credentials to account/correlation without exposing token/UID/name, retain

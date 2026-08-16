@@ -805,12 +805,27 @@ duplicate aliases/fields and foreign activities. Raw QR material is zeroized and
 redacted; only source, binding digest, material digest and refresh-code presence
 are public.
 
+A second Provider-local value freezes only Ylim's exact QR submission step:
+
+```text
+pptSign/stuSignajax:
+  enc, name, activeId, uid, clientip="", useragent="",
+  latitude=-1, longitude=-1, fid, appType=15
+```
+
+The preparation repeats the fresh activity/detail binding, requires the QR
+material binding digest to match, validates explicit numeric UID/FID plus a
+bounded actor name, and hashes the complete canonical query with the material
+digest. Only the static route, one-request count and digests are visible; the
+zeroizing query has no public getter and no transport consumer.
+
 This parser does not settle the mutation sequence. Ylim defines a two-step
 pre-sign plus `stuSignajax` flow and does not wire QR dispatch from its main
 handler, while `mini-hbut` treats one different `preSign` shape as terminal.
 Neither supplies an independent account-result readback. No QR request is
-therefore exposed until Main provides the durable multi-step authority and a
-fresh verification surface.
+therefore sent until Main provides the durable multi-step authority and a fresh
+verification surface. Freezing the second request does not authorize omitting,
+replaying or guessing the preceding `preSign` step.
 
 Ylim also implements event-driven discovery through a distinct WebIM path:
 

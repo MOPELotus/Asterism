@@ -92,7 +92,9 @@ pub use sign_in_receipt::{
     ChaoxingSignReceipt, ChaoxingSignReceiptDocument, ChaoxingSignReceiptKind,
     parse_pre_sign_evidence, parse_sign_receipt,
 };
-pub use sign_qr::{ChaoxingQrSignMaterial, ChaoxingQrSignMaterialSource};
+pub use sign_qr::{
+    ChaoxingQrSignMaterial, ChaoxingQrSignMaterialSource, ChaoxingQrSignSubmissionPreparation,
+};
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use submission_build::ChaoxingSubmissionBuild;
 pub use submission_execute::{ChaoxingSubmissionExecute, ChaoxingSubmissionTransport};

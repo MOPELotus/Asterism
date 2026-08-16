@@ -268,4 +268,7 @@ The same fixed-source re-read closed only the Provider-local QR Capture-input
 shape: one allowlisted HTTPS QR URL or exact Ylim `SIGNIN:` carrier is now bound
 to a fresh QR activity and retained as zeroizing digests. Ylim leaves QR dispatch
 unwired and `mini-hbut` uses a conflicting terminal `preSign` shortcut, so no
-mutation or completion capability is inferred.
+mutation or completion capability is inferred. The exact Ylim `stuSignajax`
+second-step field set is now also frozen into an actor/material-bound redacted
+preparation, but it deliberately has no transport and cannot bypass the
+unresolved durable pre-sign sequence.
