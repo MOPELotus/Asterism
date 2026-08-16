@@ -120,6 +120,10 @@ validation is still required.
   account-scoped `cpi`, target `workId`, and the card's
   `jobid/originJobId`; the final form is now required to repeat those exact
   fresh target identities before dispatch.
+  Samueli posts the decoded form to the exact same web
+  `/mooc-ans/work/addStudentWorkNew` endpoint. The form parser now requires that
+  explicit relative or absolute same-origin action instead of trusting only a
+  familiar form ID and silently substituting the static endpoint.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence
   and explicitly audits empty answer rows, not arbitrary substring-derived

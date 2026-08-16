@@ -292,6 +292,17 @@ impl ChaoxingSubmissionForm {
                 "Chaoxing Work editor contains multiple submission forms",
             ));
         }
+        if !matches!(
+            form.value().attr("action"),
+            Some(
+                "/mooc-ans/work/addStudentWorkNew"
+                    | "https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew"
+            )
+        ) {
+            return Err(protocol_drift(
+                "Chaoxing Work editor changed its submission endpoint",
+            ));
+        }
         let remote_types = validate_remote_question_partition(form, plan)?;
 
         let mut values = BTreeMap::new();
@@ -2118,6 +2129,21 @@ mod tests {
             .bind_user("OTHER_UID")
             .unwrap_err();
         assert_eq!(foreign.kind, ProviderErrorKind::RemoteChanged);
+
+        for drifted in [
+            EDITOR.replace(
+                "/mooc-ans/work/addStudentWorkNew",
+                "https://foreign.invalid/mooc-ans/work/addStudentWorkNew",
+            ),
+            EDITOR.replace(" action=\"/mooc-ans/work/addStudentWorkNew\"", ""),
+        ] {
+            assert_eq!(
+                ChaoxingSubmissionForm::parse(&drifted, identity, &plan)
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
     }
 
     #[tokio::test]

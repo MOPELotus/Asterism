@@ -320,8 +320,10 @@ value and other shapes fail closed.
 
 `SubmissionExecute` rebuilds from the immutable Draft, rebinds the exact
 Course/Chapter/seven-card target, acquires one fresh editor and forwards only
-audited form fields before one `addStudentWorkNew` POST. Neither attempt GET nor
-POST is replayed after an ambiguous send, and the JSON success flag is only a
+audited form fields before one `addStudentWorkNew` POST. The selected form must
+itself declare exactly the same relative or absolute same-origin web action;
+an ID-only form, missing action or foreign endpoint is protocol drift. Neither
+attempt GET nor POST is replayed after an ambiguous send, and the JSON success flag is only a
 Receipt. This web request family retains the donor-observed editor Referer and
 same-origin `Origin`, sends the UTF-8 form media type and
 `X-Requested-With: XMLHttpRequest`; it does not reuse the separate mobile Exam
