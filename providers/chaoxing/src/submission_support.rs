@@ -396,6 +396,8 @@ impl ChaoxingSubmissionForm {
         job_id: &str,
     ) -> ProviderResult<Self> {
         for (name, expected) in [
+            ("api", "1"),
+            ("mooc2", "1"),
             ("knowledgeid", knowledge_id),
             ("cpi", cpi),
             ("oldWorkId", work_id),
@@ -2300,6 +2302,8 @@ mod tests {
         assert!(!format!("{form:?}").contains("SAFE_CHAPTER_EPHEMERAL_TOKEN"));
 
         for foreign in [
+            CHAPTER_EDITOR.replacen("name=\"api\" value=\"1\"", "name=\"api\" value=\"0\"", 1),
+            CHAPTER_EDITOR.replacen("name=\"mooc2\" value=\"1\"", "name=\"mooc\" value=\"0\"", 1),
             CHAPTER_EDITOR.replacen("value=\"4001\"", "value=\"4002\"", 1),
             CHAPTER_EDITOR.replacen("value=\"300\"", "value=\"301\"", 1),
         ] {

@@ -120,6 +120,9 @@ validation is still required.
   account-scoped `cpi`, target `workId`, and the card's
   `jobid/originJobId`; the final form is now required to repeat those exact
   fresh target identities before dispatch.
+  Its web chain also fixes `api=1, mooc2=1`; Asterism now rejects a missing or
+  changed mode flag rather than splicing CxKitty's separate mobile
+  `api=1, mooc=0` body into this endpoint family.
   Samueli posts the decoded form to the exact same web
   `/mooc-ans/work/addStudentWorkNew` endpoint. The form parser now requires that
   explicit relative or absolute same-origin action instead of trusting only a
