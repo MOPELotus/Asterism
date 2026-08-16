@@ -607,6 +607,66 @@ impl UaiSubmissionPlan {
         })
     }
 
+    pub(crate) fn restore_compound_oral(
+        mut remote_question_id: String,
+        mut task_type: String,
+        mut answer_children: Vec<Vec<String>>,
+        mut judges: Vec<(String, String)>,
+        course_publish_version: u64,
+    ) -> ProviderResult<Self> {
+        if task_type != "basic-scoop-content"
+            || course_publish_version == 0
+            || i64::try_from(course_publish_version).is_err()
+            || !valid_submission_question_identity(&remote_question_id)
+            || answer_children.is_empty()
+            || answer_children.len() > MAX_ANSWER_CHILDREN
+            || answer_children.iter().any(|values| {
+                values.is_empty()
+                    || values.len() > MAX_ANSWER_VALUES_PER_CHILD
+                    || values.iter().any(|value| {
+                        value.trim().is_empty()
+                            || value.len() > MAX_RECOVERED_ANSWER_VALUE_BYTES
+                            || value.chars().any(char::is_control)
+                    })
+            })
+            || judges.len() != answer_children.len()
+            || judges.iter().any(|(question_type, reply_type)| {
+                !valid_judge_type(question_type) || !valid_judge_type(reply_type)
+            })
+        {
+            remote_question_id.zeroize();
+            task_type.zeroize();
+            for child in &mut answer_children {
+                child.zeroize();
+            }
+            answer_children.zeroize();
+            for (question_type, reply_type) in &mut judges {
+                question_type.zeroize();
+                reply_type.zeroize();
+            }
+            judges.zeroize();
+            return Err(remote_changed(
+                "UAI recovered compound oral Question plan is invalid",
+            ));
+        }
+        let protocol_versions = UaiSubmissionProtocolVersions::current(course_publish_version)?;
+        Ok(Self {
+            questions: vec![UaiSubmissionQuestionPlan {
+                remote_question_id,
+                task_type,
+                answer_children,
+                judges: judges
+                    .into_iter()
+                    .map(|(question_type, reply_type)| UaiSubmissionJudgePlan {
+                        question_type,
+                        reply_type,
+                    })
+                    .collect(),
+            }],
+            protocol_versions,
+        })
+    }
+
     #[must_use]
     pub fn questions(&self) -> &[UaiSubmissionQuestionPlan] {
         &self.questions

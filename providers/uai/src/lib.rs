@@ -15,6 +15,8 @@ mod browser_batch;
 mod browser_bridge;
 mod browser_cursor;
 mod compound_oral;
+mod compound_oral_plan_state;
+mod compound_oral_sequence;
 mod compound_upload;
 mod course_inventory;
 mod course_policy;
@@ -100,6 +102,14 @@ pub use compound_oral::{
     UAI_COMPOUND_ORAL_PLAN_ARTIFACT_TYPE, UaiCompoundOralPreparation, UaiCompoundOralSubmission,
     UaiCompoundOralSubmissionRequest, UaiCompoundOralTransport, UaiCompoundOralVerification,
     build_compound_oral_submission_request, parse_compound_oral_verification,
+};
+pub use compound_oral_plan_state::{
+    EncodedUaiCompoundOralPlanState, UAI_COMPOUND_ORAL_PLAN_STATE_TYPE, UaiCompoundOralPlanState,
+};
+pub use compound_oral_sequence::{
+    UAI_COMPOUND_ORAL_MAXIMUM_ATTEMPTS, UAI_COMPOUND_ORAL_OPERATION_TYPE,
+    UAI_COMPOUND_ORAL_SEQUENCE_TYPE, UaiCompoundOralSubmissionOutcome,
+    UaiCompoundOralSubmissionSequence,
 };
 pub use compound_upload::{
     UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest,

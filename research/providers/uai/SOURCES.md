@@ -555,3 +555,12 @@ unchanged donor result. The new credential-free projection carries only stable
 Task/Draft/version/digest identity and omits all executable matching/oral and
 dynamic account material. It adds scheduling representation, not donor
 behavior.
+
+The compound-oral single-occurrence/private-state checkpoint later on
+2026-08-16 queried all four default refs and tag sets again. Apache
+`bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and Rust
+`525c7ecfc2b` remained unchanged, with respectively 0, 4, 14 and 1 tag refs.
+The new `uai.compound-oral.submit.v1` sequence and bounded zeroizing
+`uai.compound-oral.plan-state.v1` codec therefore harden persistence/recovery
+for the already audited atomic mutation; they add no donor route, answer shape,
+retry claim or completion authority.

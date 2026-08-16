@@ -176,6 +176,18 @@ impl UaiCompoundOralSubmission {
         &self.oral_instance_id
     }
 
+    pub(crate) fn task_fingerprint(&self) -> &str {
+        &self.task_fingerprint
+    }
+
+    pub(crate) const fn ordinary_plan(&self) -> &UaiSubmissionPlan {
+        &self.ordinary_plan
+    }
+
+    pub(crate) fn oral_children(&self) -> &[OralChildEvidence] {
+        &self.oral_children
+    }
+
     pub(crate) fn plan_binding_digest(&self) -> ProviderResult<[u8; 32]> {
         let mut digest = Sha256::new();
         let ordinary_draft_id = Zeroizing::new(self.ordinary_draft_id.to_string());
@@ -272,12 +284,108 @@ impl UaiCompoundOralSubmission {
         .map_err(|_| invalid_response("UAI compound oral plan artifact is invalid"))
     }
 
-    fn ordinary_question(&self) -> ProviderResult<&UaiSubmissionQuestionPlan> {
+    pub(crate) fn ordinary_question(&self) -> ProviderResult<&UaiSubmissionQuestionPlan> {
         self.ordinary_plan
             .questions()
             .first()
             .filter(|_| self.ordinary_plan.questions().len() == 1)
             .ok_or_else(|| protocol_drift("UAI compound oral lost its ordinary Question plan"))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the complete private compound plan is rebound field-by-field"
+    )]
+    pub(crate) fn restore_plan_state(
+        ordinary_draft_id: SubmissionDraftId,
+        mut remote_task_id: String,
+        mut course_resource_id: String,
+        mut unit_id: String,
+        mut group_id: String,
+        mut task_fingerprint: String,
+        course_publish_version: u64,
+        ordinary_plan: UaiSubmissionPlan,
+        mut oral_instance_id: String,
+        oral_children: Vec<OralChildEvidence>,
+        mut fingerprint: String,
+    ) -> ProviderResult<Self> {
+        let ordinary = ordinary_plan
+            .questions()
+            .first()
+            .filter(|_| ordinary_plan.questions().len() == 1);
+        let invalid = !is_remote_component(&course_resource_id)
+            || !is_remote_component(&unit_id)
+            || !is_remote_component(&group_id)
+            || remote_task_id != format!("group:{course_resource_id}:{unit_id}:{group_id}")
+            || task_fingerprint.is_empty()
+            || task_fingerprint.len() > 8 * 1_024
+            || course_publish_version == 0
+            || i64::try_from(course_publish_version).is_err()
+            || ordinary_plan.protocol_versions().course() != course_publish_version
+            || ordinary_plan.protocol_versions().answer() != 3
+            || ordinary.is_none_or(|question| question.task_type() != "basic-scoop-content")
+            || !valid_oral_identity(&oral_instance_id)
+            || !(1..=MAX_ORAL_CHILDREN).contains(&oral_children.len())
+            || !fingerprint.starts_with("uai-compound-oral-v1:")
+            || fingerprint.len() > 8 * 1_024;
+        if invalid {
+            remote_task_id.zeroize();
+            course_resource_id.zeroize();
+            unit_id.zeroize();
+            group_id.zeroize();
+            task_fingerprint.zeroize();
+            oral_instance_id.zeroize();
+            fingerprint.zeroize();
+            return Err(remote_changed(
+                "UAI recovered compound oral private plan is invalid",
+            ));
+        }
+        Ok(Self {
+            ordinary_draft_id,
+            remote_task_id,
+            course_resource_id,
+            unit_id,
+            group_id,
+            task_fingerprint,
+            course_publish_version,
+            ordinary_plan,
+            oral_instance_id,
+            oral_children,
+            fingerprint,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        ordinary_draft_id: SubmissionDraftId,
+        ordinary_answer: &str,
+        oral_value: Value,
+        oral_extra: Option<Value>,
+    ) -> Self {
+        let judge_value = oral_judge_value(&oral_value)
+            .expect("synthetic compound-oral value must have a donor judge encoding");
+        Self {
+            ordinary_draft_id,
+            remote_task_id: "group:2001:unit-1:group-oral".to_owned(),
+            course_resource_id: "2001".to_owned(),
+            unit_id: "unit-1".to_owned(),
+            group_id: "group-oral".to_owned(),
+            task_fingerprint: "v1:compound-oral".to_owned(),
+            course_publish_version: 123_290,
+            ordinary_plan: UaiSubmissionPlan::fixture_current(
+                "5001",
+                "basic-scoop-content",
+                vec![vec![ordinary_answer.to_owned()]],
+                123_290,
+            ),
+            oral_instance_id: "6001".to_owned(),
+            oral_children: vec![OralChildEvidence {
+                value: ZeroizingJsonValue::new(oral_value),
+                extra: oral_extra.map(ZeroizingJsonValue::new),
+                judge_value: Zeroizing::new(judge_value),
+            }],
+            fingerprint: "uai-compound-oral-v1:fixture".to_owned(),
+        }
     }
 }
 
@@ -440,10 +548,70 @@ impl Drop for UaiCompoundOralVerification {
     }
 }
 
-struct OralChildEvidence {
+pub(crate) struct OralChildEvidence {
     value: ZeroizingJsonValue,
     extra: Option<ZeroizingJsonValue>,
     judge_value: Zeroizing<String>,
+}
+
+impl OralChildEvidence {
+    pub(crate) fn value(&self) -> &Value {
+        self.value.as_value()
+    }
+
+    pub(crate) fn extra(&self) -> Option<&Value> {
+        self.extra.as_ref().map(ZeroizingJsonValue::as_value)
+    }
+
+    pub(crate) fn judge_value(&self) -> &str {
+        self.judge_value.as_str()
+    }
+
+    pub(crate) fn restore(
+        value_document: &str,
+        extra_document: Option<&str>,
+        judge_value: String,
+    ) -> ProviderResult<Self> {
+        let mut judge_value = Zeroizing::new(judge_value);
+        let value = ZeroizingJsonValue::new(
+            serde_json::from_str(value_document)
+                .map_err(|_| remote_changed("UAI recovered oral value is invalid"))?,
+        );
+        let encoded = Zeroizing::new(
+            serde_json::to_vec(value.as_value())
+                .map_err(|_| remote_changed("UAI recovered oral value is invalid"))?,
+        );
+        let expected_judge = Zeroizing::new(oral_judge_value(value.as_value())?);
+        if encoded.len() > MAX_ORAL_CHILD_VALUE_BYTES
+            || expected_judge.len() > MAX_ORAL_CHILD_VALUE_BYTES
+            || expected_judge.as_str() != judge_value.as_str()
+        {
+            return Err(remote_changed(
+                "UAI recovered oral value no longer matches its judge",
+            ));
+        }
+        let extra = extra_document
+            .map(|document| {
+                let value = ZeroizingJsonValue::new(
+                    serde_json::from_str(document)
+                        .map_err(|_| remote_changed("UAI recovered oral extra is invalid"))?,
+                );
+                let encoded = Zeroizing::new(
+                    serde_json::to_vec(value.as_value())
+                        .map_err(|_| remote_changed("UAI recovered oral extra is invalid"))?,
+                );
+                if encoded.len() > MAX_ORAL_CHILD_EXTRA_BYTES {
+                    return Err(remote_changed("UAI recovered oral extra is oversized"));
+                }
+                Ok(value)
+            })
+            .transpose()?;
+        Ok(Self {
+            value,
+            extra,
+            judge_value: Zeroizing::new(std::mem::take(&mut *judge_value)),
+        })
+    }
 }
 
 struct CompoundOralBinding {

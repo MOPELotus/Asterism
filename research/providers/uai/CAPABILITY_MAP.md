@@ -39,7 +39,19 @@ to the dynamic wire digest. Course/openid substitution changes the wire digest
 without changing semantics; a same-Draft-ID answer substitution changes both.
 A compact `uai.compound-oral.plan.v1` Core artifact exposes only Task, Draft ID,
 Course version and that semantic digest; selected answers, oral evidence and
-dynamic route/account material remain private.
+dynamic route/account material remain private. The artifact now anchors one
+`uai.compound-oral.submit.v1` sequence whose only phase is ordinal-one
+`uai.compound-oral.submit`, minimum/maximum one, accepted-and-maximum advance
+and stop-after-rejection. Issuance is therefore non-replayable even when the
+response is rejected, malformed or transport-ambiguous; only a strictly parsed
+accepted acknowledgement can create its receipt. Complete executable semantics
+live separately in bounded zeroizing `uai.compound-oral.plan-state.v1` bytes.
+Decode requires the exact state digest, compact artifact, sequence-plan digest
+and independently persisted request digest, then reconstructs every ordinary
+answer/judge and oral instance/value/extra/judge. Core still lacks the shared
+compound Draft/Attempt invocation slot and atomic receipt-plus-encrypted-state
+persistence; those remain Main-owned gaps rather than reasons to expose private
+values in the artifact.
 
 The object-upload checkpoint additionally preserves Qiniu's optional bounded
 `hash`/ETag beside the exact donor-required key and hashes the complete accepted

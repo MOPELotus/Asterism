@@ -1500,7 +1500,31 @@ independent credential-free `uai.compound-oral.plan.v1` artifact projects only
 the Provider/Task, immutable Draft ID, Course version and semantic binding
 digest. It contains no matching answer, oral instance/value/extra or dynamic
 Course/account request material; a same-Draft-ID answer substitution still
-changes its artifact digest. An
+changes its artifact digest. That artifact is now the immutable input to one
+`uai.compound-oral.submit.v1` mutation sequence. Its sole
+`uai.compound-oral.submit` phase has minimum one, maximum one,
+`AcceptedMaximumReached` and stop-after-rejection semantics. Core persists the
+exact request digest at ordinal one before dispatch. A strict accepted
+acknowledgement is the only response that can construct a mutation receipt;
+remote rejection, malformed/foreign acknowledgement and transport ambiguity
+write no receipt and authorize no replay.
+
+The complete executable plan is encoded separately as bounded zeroizing
+`uai.compound-oral.plan-state.v1` bytes intended only for the encrypted
+Provider execution-state store. It retains the exact Task hierarchy and
+fingerprint, Draft ID, Course/protocol versions, ordinary Question/type,
+selected children and judges, oral instance and every exact value/extra/judge,
+semantic fingerprint, plan binding and materialized request digest. Decode
+requires an independently persisted state digest, the exact compact artifact
+and sequence-plan digests, and the independently persisted request digest. It
+then reconstructs the plan, recomputes its semantic/artifact/sequence identity
+and rejects any same-ID answer, oral value/extra or Course/account request
+substitution. The compact Core artifact never receives those private values.
+Shared Core still needs the compound Draft/Attempt invocation slot and atomic
+receipt-plus-encrypted-state transaction; until then this is a Provider-local
+recoverable boundary, not a public capability registration.
+
+An
 accepted version is only a receipt. Verification reads exactly that version
 and requires the complete ordered two-module user-module state, exact ordinary
 answer equality, the same oral instance, and every exact scalar-empty,
