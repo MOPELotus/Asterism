@@ -1330,9 +1330,10 @@ request have all been rebound. A foreign account request or otherwise-valid
 final plan from another object chain cannot reach readback evidence.
 The lower-level result-to-plan/readback helpers are crate-private; external
 integration receives only the recovered-final owner, so it cannot skip this
-predecessor validation. Offline accepted-result coverage now drives that owner
-through the exact receipt-versioned single-upload readback and obtains the
-same-ordinal `ExecutionMutationVerification` over the readback digest.
+predecessor validation. Offline accepted-result coverage now drives both
+single and atomic compound owners through their exact receipt-versioned
+readbacks and obtains same-ordinal `ExecutionMutationVerification` over each
+readback digest.
 
 Once an exact single or compound final plan already exists, UAI now projects a
 credential-free `uai.upload.final-plan.v1` scheduling artifact whose binding

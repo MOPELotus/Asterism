@@ -535,5 +535,6 @@ readback; this remains local fail-closed recovery over unchanged donor routes.
 The recovered-readback entry checkpoint later on 2026-08-16 reused the same
 unchanged upstream result. It narrows local API authority only: raw
 result-to-plan readback is no longer externally callable, while the fully
-recovered owner exercises the already audited receipt-versioned verification
-route. No donor behavior or verification claim changed.
+recovered single and compound owners exercise the already audited
+receipt-versioned verification routes. No donor behavior or verification claim
+changed.

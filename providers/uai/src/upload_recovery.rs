@@ -517,6 +517,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the atomic compound fixture keeps both Draft and five persisted upload stages visible"
+    )]
     async fn recovered_compound_chain_rebinds_the_complete_ordinary_draft() {
         let details: Arc<dyn TaskDetailCapability> = Arc::new(FixtureDetail {
             metadata: crate::development_metadata().unwrap(),
@@ -621,6 +625,25 @@ mod tests {
             .unwrap();
         assert_eq!(rebound.kind(), UaiUploadFinalSubmissionKind::Compound);
         assert_eq!(rebound.request_digest(), final_request.request_digest());
+        let accepted_document = r#"{"code":0,"data":{"course_id":"course-instance-1","group_id":"group-upload","version":"compound-v1"}}"#;
+        let accepted_outcome = final_request
+            .classify_final_response(1, accepted_document, "course-instance-1", "group-upload")
+            .unwrap();
+        let accepted_result = final_sequence
+            .accepted_result_state(&accepted_outcome)
+            .unwrap();
+        let readback =
+            compound_upload_verification_document("A", "course/42/nothing.mp3", "compound-v1");
+        let (verification, mutation_verification) = rebound
+            .verify_compound_readback(&accepted_result, &readback)
+            .unwrap();
+        assert_eq!(verification.ordinary_draft_id(), draft.id);
+        assert_eq!(verification.submission_version(), "compound-v1");
+        assert_eq!(mutation_verification.ordinal(), 1);
+        assert_eq!(
+            mutation_verification.observation_digest(),
+            verification.result_digest()
+        );
     }
 
     fn upload_detail(task_fingerprint: &str, task_types: &[&str]) -> RemoteTaskDetail {
@@ -746,6 +769,58 @@ mod tests {
             "answer": answer,
             "context": "{\"state\":\"submitted\"}",
         }])
+        .to_string();
+        json!({
+            "success": true,
+            "code": 0,
+            "data": {
+                "course": "course-instance-1",
+                "module": format!("group-upload-{version}"),
+                "state": {
+                    "version": version,
+                    "quesData": questions,
+                    "__EXTEND_DATA__": {"__SUBMIT_INFO__": {
+                        "course_id": "course-instance-1",
+                        "group_id": "group-upload",
+                        "version": version,
+                    }},
+                },
+            },
+        })
+        .to_string()
+    }
+
+    fn compound_upload_verification_document(
+        selected: &str,
+        file_key: &str,
+        version: &str,
+    ) -> String {
+        let ordinary_answer = json!({
+            "value": [],
+            "children": [{"value": [selected], "isDone": true}],
+            "progress": {},
+            "record": {"url": ""},
+        })
+        .to_string();
+        let upload_answer = json!({
+            "value": [],
+            "children": [{"value": [file_key], "isDone": true}],
+            "progress": {},
+            "record": {"url": ""},
+        })
+        .to_string();
+        let questions = json!([
+            {
+                "instanceId": "1001",
+                "answer": ordinary_answer,
+                "context": "{\"state\":\"submitted\"}",
+            },
+            {
+                "instanceId": "0",
+                "answer": upload_answer,
+                "context": "{\"state\":\"submitted\"}",
+            },
+        ])
         .to_string();
         json!({
             "success": true,
