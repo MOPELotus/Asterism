@@ -981,6 +981,32 @@ value and a subsequent reading-card payload with another allocation leaves
 `SubmitAnswerAndSave` FailedClosed as `RemoteChanged`. This adds no new wire
 claim and preserves the same no-replay boundary already used by real Questions.
 
+### 2026-08-16 definite prerequisite-rejection boundary
+
+The three default refs and recorded latest tags were re-resolved unchanged as
+`ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`, historical
+`main@1409858800f3c4bd27577a08049bf1f8d17a069c`, public/owner `1.5.4` at
+`7e29ee43692f4c0807fae8cf7f74a5a674793097` and historical `v3.73` at
+`152278daf3a5822b11eb2a3064924bf50d3c18b6`. No new donor capability or
+protocol delta entered scope.
+
+Public issues 48/49 were re-read at the response boundary. They repeatedly
+show the same response-only five-field `SubmitChoseWord` envelope: numeric
+zero code, the incomplete-section prerequisite message, null data and string
+`jv=cv=0`. Cidaren now classifies only that exact shape as
+`CidarenAssessmentRejectionKind::RequiredChildrenPending`; any changed message,
+truthy data, version or extra field remains ordinary fail-closed result-shape
+drift. The Native transport can therefore retain the raw response digest and
+actual receive time, and the attempt flow exposes a non-replayable
+`CidarenDefiniteRejection` before returning stable non-retryable provider code
+`cidaren.required-children-pending.v1` through the current public adapter.
+
+This narrows but does not cross the shared gap. `ProviderQuestionReadStepOutcome`
+still cannot persist a blocked diagnosis with that digest/time, so no durable
+`RequiredChildrenPending` step is fabricated. The Provider stays FailedClosed
+and a second `SubmitChoseWord` remains impossible.
+
 ## Check procedure
 
 For the next checkpoint:

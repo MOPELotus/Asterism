@@ -48,8 +48,11 @@ not credentials or executable request material:
   fixture;
 - [issues 48](https://github.com/ularch/Easy_Cidaren/issues/48) and
   [49](https://github.com/ularch/Easy_Cidaren/issues/49) repeatedly record the
-  same definite incomplete-section `SubmitChoseWord` rejection; shared blocked
-  Question-step representation remains a Core Gap;
+  same definite five-field incomplete-section `SubmitChoseWord` rejection. A
+  sanitized response-only fixture now freezes that exact public envelope; the
+  Provider classifies and retains its digest/time without copying any Task,
+  account, word-map or log context. Shared blocked Question-step
+  representation remains a Core Gap;
 - [issue 72](https://github.com/ularch/Easy_Cidaren/issues/72) records the
   exact remote-state response `code=20001`, `msg=需要选词！`, `data=null` from
   `StartAnswer`; release 1.5.2 reported a fix even though the reopened shared

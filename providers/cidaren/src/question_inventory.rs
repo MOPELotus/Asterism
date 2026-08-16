@@ -397,7 +397,7 @@ mod tests {
         CidarenAttemptOperation, CidarenMutationRequest, CidarenStartAnswerRequest,
         CidarenStudyTaskDocument, CidarenSubmissionBuild, CidarenSubmissionExecute,
         CidarenWordEvidence, CidarenWordInventory, CidarenWordLookup, parse_assessment_response,
-        parse_study_task_info_response, runtime_settings,
+        parse_study_task_info_response, parse_word_selection_response, runtime_settings,
     };
 
     const REMOTE_TASK_ID: &str = "class-task:2002";
@@ -672,6 +672,45 @@ mod tests {
             panic!("selection-required receipt must rotate a continuation");
         };
         assert_eq!(continuation.phase(), CIDAREN_READY_TO_SELECT_WORDS_PHASE);
+        assert_eq!(
+            *boundaries.operations.lock().unwrap(),
+            [CidarenAttemptOperation::SubmitChoseWord]
+        );
+    }
+
+    #[tokio::test]
+    async fn required_children_rejection_survives_the_public_adapter_as_non_retryable() {
+        let rejection = parse_word_selection_response(include_bytes!(
+            "../../../fixtures/providers/cidaren/questions/submit-chose-word-required-children.json"
+        ))
+        .unwrap();
+        let boundaries = Arc::new(FixtureBoundaries::new(
+            detail("learning", 92002),
+            vec![rejection],
+        ));
+        let capability = CidarenQuestionInventory::try_new(
+            boundaries.clone(),
+            boundaries.clone(),
+            boundaries.clone(),
+        )
+        .unwrap();
+        let context = context();
+        let task_id = TaskId::new();
+        let settings = settings();
+        let initial = capability
+            .prepare_question_read_attempt(&context, task_id, REMOTE_TASK_ID, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = prepare_operation(&capability, &context, task_id, initial, &settings).await;
+
+        let error = prepared.execute(&context).await.unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        assert_eq!(
+            error.provider_code.as_deref(),
+            Some(crate::CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE)
+        );
+        assert!(!error.is_retryable());
         assert_eq!(
             *boundaries.operations.lock().unwrap(),
             [CidarenAttemptOperation::SubmitChoseWord]

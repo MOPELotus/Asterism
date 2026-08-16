@@ -367,6 +367,14 @@ placeholder identities, result codes, status values and pagination shape.
   no Provider layer performs an automatic assessment retry.
 - `SubmitChoseWord` accepts only its acknowledgement response family; the
   assessment-step parser still rejects missing decoded data.
+- `submit-chose-word-required-children.json` freezes only the public issues
+  48/49 five-field prerequisite envelope. Parser tests classify the exact
+  shape as Provider-private `RequiredChildrenPending`, reject message/data/
+  version/field-count near matches, and keep the localized message out of
+  Debug. Flow tests retain operation, raw response digest and receive time in
+  `CidarenDefiniteRejection`, remain FailedClosed/non-retryable and prohibit a
+  second `SubmitChoseWord`; the public adapter preserves the stable provider
+  code while the shared durable blocked-step outcome remains a Core Gap.
 - Mode 73 parses as FillBlank only when its bounded answer count equals its
   word-length count; no answer wire shape is inferred from the public log.
 - `SearchWord` parsing bounds both JSON and the donor's literal

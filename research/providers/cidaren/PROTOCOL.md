@@ -733,10 +733,16 @@ copying donor UI text.
 Issues 48/49 establish one exact `code=0` prerequisite shape: repeated
 class-learning runs receive null data and a stable incomplete-section message
 after `SubmitChoseWord`. This is a definite rejected mutation and semantically
-`RequiredChildrenPending`, but the shared Question remote-step outcome has no
-blocked variant carrying response digest/time and diagnosis. Until Main adds
-that contract, Cidaren keeps it non-replayable and fail-closed rather than
-relabelling it Completed, HumanRequired or retryable.
+`RequiredChildrenPending`. The word-selection parser now accepts only the exact
+five-field issue envelope as `CidarenAssessmentRejectionKind::RequiredChildrenPending`;
+message/data/version changes or extra fields remain ordinary fail-closed shape
+drift. Native transport therefore hashes and timestamps the definite response
+before parsing, the attempt flow retains a `CidarenDefiniteRejection`, and the
+public adapter returns a non-retryable InvalidResponse with stable provider
+code `cidaren.required-children-pending.v1`. The shared Question remote-step
+outcome still has no blocked variant carrying response digest/time and
+diagnosis. Until Main adds that contract, Cidaren cannot emit a durable blocked
+step, and it never relabels the rejection Completed, HumanRequired or retryable.
 
 Before `StartAnswer`, eligible learning Tasks build the donor's exact flat or
 self-built grouped word map from a fresh Task-bound inventory. After start,

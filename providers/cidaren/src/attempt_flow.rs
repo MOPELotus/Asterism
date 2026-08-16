@@ -16,11 +16,11 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::pre_question_artifact::CidarenPreQuestionState;
 use crate::{
     CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_READY_TO_ADVANCE_PHASE, CIDAREN_READY_TO_VERIFY_PHASE,
-    CidarenAssessmentBinding, CidarenAssessmentReceiptKind, CidarenAssessmentResponse,
-    CidarenAssessmentTransport, CidarenAttemptProgress, CidarenCurrentQuestionState,
-    CidarenMutationRequest, CidarenPreQuestionArtifact, CidarenQuestionArtifact,
-    CidarenRuntimeSettings, CidarenStartAnswerRequest, CidarenWireAnswer, CidarenWordSelectionPlan,
-    EncodedCidarenPreQuestionArtifact, EncodedCidarenQuestionArtifact,
+    CidarenAssessmentBinding, CidarenAssessmentReceiptKind, CidarenAssessmentRejectionKind,
+    CidarenAssessmentResponse, CidarenAssessmentTransport, CidarenAttemptProgress,
+    CidarenCurrentQuestionState, CidarenMutationRequest, CidarenPreQuestionArtifact,
+    CidarenQuestionArtifact, CidarenRuntimeSettings, CidarenStartAnswerRequest, CidarenWireAnswer,
+    CidarenWordSelectionPlan, EncodedCidarenPreQuestionArtifact, EncodedCidarenQuestionArtifact,
     ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep, ParsedCidarenReadingCard,
     build_skip_answer_request, build_start_answer_request, build_submit_answer_and_save_request,
     build_submit_chose_word_request, build_verify_answer_request, parse_attempt_step,
@@ -29,6 +29,9 @@ use crate::{
 const MAX_CORRELATION_ID_BYTES: usize = 512;
 const MAX_TOPIC_CODE_BYTES: usize = 4_096;
 const MAX_VERIFIED_STEPS: u32 = 256;
+
+pub const CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE: &str =
+    "cidaren.required-children-pending.v1";
 
 /// One donor-observed remote mutation in the Cidaren answer lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,12 +92,41 @@ pub struct CidarenAttemptFlow {
     position: u32,
     phase: Option<CidarenAttemptPhase>,
     last_response_binding: Option<CidarenQuestionResponseBinding>,
+    last_definite_rejection: Option<CidarenDefiniteRejection>,
 }
 
 #[derive(Clone, Copy)]
 struct CidarenQuestionResponseBinding {
     response_digest: [u8; 32],
     received_at: Timestamp,
+}
+
+/// Definite, non-replayable Provider rejection retained before the shared
+/// Question-step contract can persist a blocked outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CidarenDefiniteRejection {
+    operation: CidarenAttemptOperation,
+    kind: CidarenAssessmentRejectionKind,
+    response_digest: [u8; 32],
+    received_at: Timestamp,
+}
+
+impl CidarenDefiniteRejection {
+    pub const fn operation(self) -> CidarenAttemptOperation {
+        self.operation
+    }
+
+    pub const fn kind(self) -> CidarenAssessmentRejectionKind {
+        self.kind
+    }
+
+    pub const fn response_digest(self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    pub const fn received_at(self) -> Timestamp {
+        self.received_at
+    }
 }
 
 enum CidarenAttemptPhase {
@@ -365,6 +397,7 @@ impl CidarenAttemptFlow {
             position: 1,
             phase: Some(phase),
             last_response_binding: None,
+            last_definite_rejection: None,
         })
     }
 
@@ -419,6 +452,7 @@ impl CidarenAttemptFlow {
             position,
             phase: Some(phase),
             last_response_binding: None,
+            last_definite_rejection: None,
         })
     }
 
@@ -520,6 +554,7 @@ impl CidarenAttemptFlow {
             position: question.position,
             phase: Some(restored_phase),
             last_response_binding: None,
+            last_definite_rejection: None,
         })
     }
 
@@ -555,6 +590,13 @@ impl CidarenAttemptFlow {
             }
             None => CidarenAttemptFlowStatus::Invalid,
         }
+    }
+
+    /// Returns one exact definite remote rejection after the flow has failed
+    /// closed. It is never retry authority and is cleared on every fresh or
+    /// recovered flow construction.
+    pub const fn definite_rejection(&self) -> Option<CidarenDefiniteRejection> {
+        self.last_definite_rejection
     }
 
     /// Encodes the current pre-Question phase for Main's encrypted attempt
@@ -1157,9 +1199,18 @@ impl CidarenAttemptFlow {
             response_digest: outcome.response_digest,
             received_at: outcome.received_at,
         };
+        let rejection_kind = outcome.response.rejection_kind();
         let applied = self.apply_response(continuation, outcome.response, outcome.received_at);
         if applied.is_err() {
             self.phase = Some(CidarenAttemptPhase::FailedClosed(operation));
+            if let Some(kind) = rejection_kind {
+                self.last_definite_rejection = Some(CidarenDefiniteRejection {
+                    operation,
+                    kind,
+                    response_digest: outcome.response_digest,
+                    received_at: outcome.received_at,
+                });
+            }
         } else {
             self.last_response_binding = Some(response_binding);
         }
@@ -1246,6 +1297,7 @@ impl CidarenAttemptFlow {
                     });
                     Ok(())
                 }
+                CidarenAssessmentResponse::Rejected { kind } => Err(definite_rejection_error(kind)),
                 _ => Err(protocol_drift(
                     "Cidaren SubmitChoseWord returned an unexpected response",
                 )),
@@ -1338,6 +1390,9 @@ impl CidarenAttemptFlow {
                 ..
             } => Err(protocol_drift(
                 "Cidaren assessment step returned only a generic acknowledgement",
+            )),
+            CidarenAssessmentResponse::Rejected { .. } => Err(protocol_drift(
+                "Cidaren assessment step returned a word-selection rejection",
             )),
         }
     }
@@ -1695,6 +1750,17 @@ fn invalid_response(message: impl Into<String>) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidResponse, message)
 }
 
+fn definite_rejection_error(kind: CidarenAssessmentRejectionKind) -> ProviderError {
+    let message = match kind {
+        CidarenAssessmentRejectionKind::RequiredChildrenPending => {
+            "Cidaren word selection is blocked by incomplete required children"
+        }
+    };
+    let mut error = ProviderError::new(ProviderErrorKind::InvalidResponse, message);
+    error.provider_code = Some(CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE.to_owned());
+    error
+}
+
 fn protocol_drift(message: impl Into<String>) -> ProviderError {
     ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
 }
@@ -1720,6 +1786,7 @@ mod tests {
     use crate::{
         CidarenAnswerEvidenceBinding, CidarenStudyTaskDocument, build_word_selection_plan,
         parse_assessment_response, parse_attempt_question, parse_study_task_info_response,
+        parse_word_selection_response,
     };
 
     struct FixtureTransport {
@@ -2224,6 +2291,53 @@ mod tests {
             *transport.operations.lock().unwrap(),
             [CidarenAttemptOperation::SubmitChoseWord]
         );
+    }
+
+    #[tokio::test]
+    async fn required_children_rejection_retains_definite_non_replayable_evidence() {
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([required_children_rejection()])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let (detail, plan) = word_selection_plan();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail,
+            Some(plan),
+        )
+        .unwrap();
+        let outcome = flow
+            .issue_word_selection(request_at())
+            .unwrap()
+            .execute(transport, &context)
+            .await
+            .unwrap();
+        let error = flow.accept(outcome).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        assert_eq!(
+            error.provider_code.as_deref(),
+            Some(CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE)
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(
+            flow.status(),
+            CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::SubmitChoseWord)
+        );
+        let rejection = flow.definite_rejection().unwrap();
+        assert_eq!(
+            rejection.operation(),
+            CidarenAttemptOperation::SubmitChoseWord
+        );
+        assert_eq!(
+            rejection.kind(),
+            CidarenAssessmentRejectionKind::RequiredChildrenPending
+        );
+        assert_ne!(rejection.response_digest(), [0; 32]);
+        assert_eq!(rejection.received_at(), request_at());
+        assert!(flow.issue_word_selection(request_at()).is_err());
     }
 
     #[tokio::test]
@@ -2766,6 +2880,13 @@ mod tests {
             kind,
             message_sanitized: None,
         }
+    }
+
+    fn required_children_rejection() -> CidarenAssessmentResponse {
+        parse_word_selection_response(include_bytes!(
+            "../../../fixtures/providers/cidaren/questions/submit-chose-word-required-children.json"
+        ))
+        .unwrap()
     }
 
     fn start_payload() -> Value {

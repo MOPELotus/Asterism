@@ -11,6 +11,7 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_MESSAGE_BYTES: usize = 2_048;
 const ASSESSMENT_STEP_FAMILY: &str = "assessment_step";
 const WORD_SELECTION_FAMILY: &str = "word_selection";
+const REQUIRED_CHILDREN_PENDING_MESSAGE: &str = "对不起，存在小节任务未完成，请先完成小节任务";
 
 /// Bounded donor acknowledgement classification. A terminal acknowledgement
 /// is only a mutation receipt; it never substitutes for fresh verification.
@@ -21,6 +22,13 @@ pub enum CidarenAssessmentReceiptKind {
     WordSelectionRequired,
 }
 
+/// Exact donor rejection semantics that are definite but cannot yet cross the
+/// shared durable Question-step outcome boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CidarenAssessmentRejectionKind {
+    RequiredChildrenPending,
+}
+
 /// Strict decoded result of one Cidaren assessment protocol call.
 pub enum CidarenAssessmentResponse {
     Payload(CidarenDecodedAssessmentPayload),
@@ -28,6 +36,18 @@ pub enum CidarenAssessmentResponse {
         kind: CidarenAssessmentReceiptKind,
         message_sanitized: Option<String>,
     },
+    Rejected {
+        kind: CidarenAssessmentRejectionKind,
+    },
+}
+
+impl CidarenAssessmentResponse {
+    pub const fn rejection_kind(&self) -> Option<CidarenAssessmentRejectionKind> {
+        match self {
+            Self::Rejected { kind } => Some(*kind),
+            Self::Payload(_) | Self::Receipt { .. } => None,
+        }
+    }
 }
 
 impl fmt::Debug for CidarenAssessmentResponse {
@@ -41,6 +61,10 @@ impl fmt::Debug for CidarenAssessmentResponse {
                 .debug_struct("Receipt")
                 .field("kind", kind)
                 .field("has_message", &message_sanitized.is_some())
+                .finish(),
+            Self::Rejected { kind } => formatter
+                .debug_struct("Rejected")
+                .field("kind", kind)
                 .finish(),
         }
     }
@@ -230,6 +254,11 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
             root,
         )
     })?;
+    if required_children_pending_rejection(object, code, message.as_deref()) {
+        return Ok(CidarenAssessmentResponse::Rejected {
+            kind: CidarenAssessmentRejectionKind::RequiredChildrenPending,
+        });
+    }
     if code == 20_004 {
         return Ok(CidarenAssessmentResponse::Receipt {
             kind: CidarenAssessmentReceiptKind::Completed,
@@ -260,6 +289,19 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
         kind: CidarenAssessmentReceiptKind::Accepted,
         message_sanitized: message,
     })
+}
+
+fn required_children_pending_rejection(
+    object: &serde_json::Map<String, Value>,
+    code: i64,
+    message: Option<&str>,
+) -> bool {
+    code == 0
+        && message == Some(REQUIRED_CHILDREN_PENDING_MESSAGE)
+        && object.len() == 5
+        && matches!(object.get("data"), Some(Value::Null))
+        && object.get("jv").and_then(Value::as_str) == Some("0")
+        && object.get("cv").and_then(Value::as_str) == Some("0")
 }
 
 fn json_truthy(value: &Value) -> bool {
@@ -429,6 +471,41 @@ mod tests {
                     .unwrap(),
                 )
                 .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn required_children_rejection_is_exact_and_word_selection_scoped() {
+        let document = include_bytes!(
+            "../../../fixtures/providers/cidaren/questions/submit-chose-word-required-children.json"
+        );
+        let response = parse_word_selection_response(document).unwrap();
+        assert_eq!(
+            response.rejection_kind(),
+            Some(CidarenAssessmentRejectionKind::RequiredChildrenPending)
+        );
+        let debug = format!("{response:?}");
+        assert!(debug.contains("RequiredChildrenPending"));
+        assert!(!debug.contains(REQUIRED_CHILDREN_PENDING_MESSAGE));
+        assert!(parse_assessment_response(document, None).is_err());
+
+        let exact: Value = serde_json::from_slice(document).unwrap();
+        let mut wrong_message = exact.clone();
+        wrong_message["msg"] = json!("对不起，存在小节任务未完成");
+        let mut truthy_data = exact.clone();
+        truthy_data["data"] = json!({"accepted": false});
+        let mut changed_version = exact.clone();
+        changed_version["jv"] = json!("1");
+        let mut extended = exact;
+        extended["extra"] = json!(true);
+        for near_match in [wrong_message, truthy_data, changed_version, extended] {
+            let error = parse_word_selection_response(&serde_json::to_vec(&near_match).unwrap())
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+            assert_eq!(
+                error.protocol_observation.unwrap().kind,
+                ProtocolObservationKind::UnknownResultShape
             );
         }
     }

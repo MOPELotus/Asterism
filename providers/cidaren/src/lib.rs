@@ -96,14 +96,15 @@ pub use assessment_protocol::{
     build_submit_chose_word_request, build_verify_answer_request,
 };
 pub use assessment_response::{
-    CidarenAssessmentReceiptKind, CidarenAssessmentResponse, CidarenDecodedAssessmentPayload,
-    parse_assessment_response, parse_word_selection_response,
+    CidarenAssessmentReceiptKind, CidarenAssessmentRejectionKind, CidarenAssessmentResponse,
+    CidarenDecodedAssessmentPayload, parse_assessment_response, parse_word_selection_response,
 };
 pub use assessment_transport::{CidarenAssessmentTransport, CidarenAssessmentTransportOutcome};
 pub use attempt_flow::{
-    CidarenAttemptFlow, CidarenAttemptFlowStatus, CidarenAttemptOperation,
-    CidarenDurableStepOutcome, CidarenIssuedCommand, CidarenIssuedOutcome,
-    CidarenPreQuestionContinuation, CidarenQuestionMaterialization,
+    CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE, CidarenAttemptFlow, CidarenAttemptFlowStatus,
+    CidarenAttemptOperation, CidarenDefiniteRejection, CidarenDurableStepOutcome,
+    CidarenIssuedCommand, CidarenIssuedOutcome, CidarenPreQuestionContinuation,
+    CidarenQuestionMaterialization,
 };
 pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
