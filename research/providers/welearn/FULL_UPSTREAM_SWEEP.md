@@ -40,7 +40,7 @@ not executed or reverse engineered.
 | Fresh SCO identity/detail and CMI read | TaskDetail, TaskProgressRead and DurationRead | Implemented with full fresh rediscovery, fingerprint/capability/state rebinding and fail-closed result parsing |
 | Direct completion/progress/score writes | ResourceExecution | Current dual-save, legacy set/save and Auto save-only profiles are separately frozen and independently verified; ambiguous mutation is never replayed |
 | YZBRH preservation duration and Auto single-file duration | DurationReport | Implemented with donor-specific start/keep/finalize/readback evidence and goal-specific Core verification |
-| Current Fanyuchang and modular Auto duration plus completion in one start session | atomic duration-completion child | Provider parent/batch/child artifacts, complete ordered dispatch projection, conditional sequence, issue/receipt/observation transport, native runtime, same-attempt snapshot adapter and immediate/read-only verification are implemented. Foreign generic retry deadlines fail closed. Batch prepare/restore are registered through TaskExecution; the native grouped mutation/recovery coordinator remains outside singleton dispatch until Core creates and routes durable parent/child attempts |
+| Current Fanyuchang and modular Auto duration plus completion in one start session | atomic duration-completion child | Provider parent/batch/child artifacts, complete ordered dispatch projection, conditional sequence, issue/receipt/observation transport, native runtime, same-attempt snapshot adapter and immediate/read-only verification are implemented. Foreign generic retry deadlines fail closed. Core now creates Requested child drafts; WELearn directly restores one from parent+ordinal+ExecutionRequest. The native grouped coordinator remains outside singleton dispatch until Core activates and routes those drafts |
 | Auto aggregate duration budget and equal-floor child allocation | bounded parent batch authority and child targets | Provider modeling is implemented; shared parent runtime scope, entropy, orchestration and API remain missing |
 | Per-account 1-100 worker setting and independent sessions | Provider/account concurrency bound | Implemented; global and cross-account admission remain Core-owned |
 | Account add/remove, nickname/status, CSV/TXT import/export and batch-account queue | shared account/API/UI behavior | Not WELearn wire behavior; plaintext donor password export must not be copied |
@@ -81,21 +81,21 @@ Consequently:
 
 ## Shared gaps reported to Main
 
-1. Durable parent/child batch execution must atomically bind the encoded parent
-   authority and up-to-8-MiB complete batch snapshot to one parent attempt, then
-   create every ordered child Execution with its exact Provider artifact and
-   conditional sequence. Child retries/recovery must not rescan or redistribute
-   membership. Provider v2 now binds every ordered Fanyuchang target through a
-   four-KiB count/digest authority plus the full vector in the complete batch;
-   Auto remains aggregate-derived.
+1. Durable parent/child planning now binds the encoded parent, frozen settings,
+   ordered plans and Requested child Execution drafts. Activation must preserve
+   the same parent Attempt and mapping ordinal, create scheduler-visible work
+   without rebuilding membership, and inject the resolved parent into Provider
+   execution/recovery. Provider v2 binds every ordered Fanyuchang target through
+   a four-KiB count/digest authority plus the full vector; Auto remains
+   aggregate-derived.
 2. Core now owns the conditional ledger, attempt-bound observations,
    same-attempt recovery snapshot loading and recovered final-verification
    persistence. Core `53859f8` plus WELearn now also own the namespaced planning
    input and registered fresh prepare/deterministic restore boundary. Core now
    durably materializes the ordered child-plan records through `7aaadd5`.
-   WELearn binds those future child Executions to the resolved parent pair with
-   its request-level atomic adapter. Main still needs parent settings freeze,
-   transactional child Execution creation and actual grouped dispatch.
+   WELearn binds those child Execution drafts directly to the resolved parent
+   pair and mapping ordinal. Main still needs activation/job creation and actual
+   grouped dispatch.
 3. Capture/BrowserBridge still needs active browser session injection, action
    dispatch, callback handling and bounded recovery for interactive login.
 4. Cross-account bulk import/export and queueing are shared product surfaces and

@@ -361,10 +361,11 @@ at least one minute, then performs equal-floor allocation. Provider-private
 `WellearnAutoDurationBudget` now freezes all four facts: configured base,
 configured range, sampled offset and resulting aggregate. The atomic parent
 authority carries that value rather than accepting an unexplained aggregate.
-The shared runtime settings model still lacks parent-batch scope, immutable
-parent entropy and durable parent/child creation, so these two UI settings must
-not be exposed as ordinary per-Task duration overrides until Main closes that
-Core Gap.
+The shared runtime settings model still lacks a product-facing parent-batch
+scope and immutable sampling boundary for these two Auto UI inputs, so they
+must not be exposed as ordinary per-Task duration overrides until Main closes
+that Core Gap. Core's frozen account settings and child drafts do not invent
+that missing parent-specific authorization or entropy.
 
 ## Historical results, answer evidence and retake audit
 
@@ -545,8 +546,8 @@ Modular Auto uses plain/simple-Referer minimal start and implicit keeps, then
 switches only its completion-bearing score-0 save to the task-specific Referer;
 it never emits the singleton bare save. After the final mutation only, an
 authentication failure may renew once for a fresh read-only verification. The
-transport remains absent from capability registration until Core wires durable
-parent/child creation and recovery dispatch to this already-persistent
+transport remains absent from capability registration until Core wires child
+activation and recovery dispatch to this already-persistent
 per-transition boundary.
 
 Core's later `AcceptedOrMaximumReached` sequence condition does not alter this
@@ -694,7 +695,7 @@ proof. Both return `ExecutionRecoveryOutcome`; accepted proof requires Core's
 complete-sequence final accepted ordinal before either fresh read, and stored
 ordinal drift likewise stops there. Stored digest equality is checked against
 the new fresh proof. These methods are still outside capability registration
-until Core owns WELearn composite parent/child creation and dispatch.
+until Core owns WELearn composite child activation and dispatch.
 
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 The child-artifact-bound conditional sequence freezes the only legal operation
@@ -976,9 +977,9 @@ complete batch, reconstructs every target/artifact/conditional sequence in
 order and returns `ProviderExecutionBatchPlan`. It has no Course or Task
 inventory dependency and therefore cannot rescan, repair order or redistribute
 Auto targets during recovery. Core `fe63910` supplies encrypted same-Attempt
-bind/resolve storage. Engine selection of the WELearn parent composite,
-transactional child creation and actual grouped mutation/recovery dispatch
-remain the shared orchestration gap.
+bind/resolve storage. Core now selects/plans the parent and creates immutable
+child drafts; activation/job ownership and actual grouped mutation/recovery
+dispatch remain the shared orchestration gap.
 
 Core `7aaadd5` now atomically materializes the ordered child-plan records after
 the parent pair exists, including local Task binding plus artifact/sequence
@@ -1003,6 +1004,18 @@ loads Storage, reconstructs a plan from digests, broadens active capabilities
 or treats the frozen runtime settings as mutation authority; the child artifact
 and conditional ledger remain authoritative for the atomic donor profile.
 
+Core `7d7ff81` now creates immutable Requested child Execution drafts from the
+durable child plans. Each ordinal owns an Execution/Task mapping, grouped
+capability steps, frozen parent account settings and the full Provider artifact,
+while remaining deliberately absent from scheduler jobs. WELearn can consume
+that shape without asking Core to reconstruct `ProviderExecutionChildPlan`:
+`try_from_parent_position` calls deterministic parent-only restore, selects the
+exact one-based mapped child, and then applies the request binding above.
+`execute_materialized_core_child` and
+`verify_materialized_core_child_snapshot` expose this direct activation target.
+Position zero/out of range, an artifact or remote Task from another ordinal and
+all prior request drift fail before TaskDetail or transport.
+
 Core `0c0d26b` closes the shared recovery-result portion of that integration:
 Engine validates an optional Provider verification against the same-attempt
 complete sequence and final accepted ordinal, then writes it under the active
@@ -1010,12 +1023,12 @@ recovery claim before finishing. Core `fe63910` separately closes the encrypted
 parent authority plus complete-batch same-Attempt repository primitive, and
 WELearn constructs its exact typed input. Core `217c1f6` defines the generic
 ordered child/batch plan, and Core `53859f8` exposes the fresh prepare and
-deterministic restore hooks now implemented by WELearn. Core `7aaadd5` also
-persists the exact ordered child-plan records. The remaining Core Gap is the
-final orchestration transaction and runtime: freeze parent settings, create the
-actual child Executions from those records, build the request-bound grouped
-call, and resolve/inject the private snapshot into WELearn's new exact atomic
-execution/recovery adapter.
+deterministic restore hooks now implemented by WELearn. Core `34e64db`,
+`7aaadd5` and `7d7ff81` now freeze parent settings, persist ordered child plans
+and create complete Requested child Execution drafts. The remaining Core Gap is
+activation and runtime dispatch: create scheduler-visible work under the parent
+Attempt, reconstruct the ordinary grouped `ExecutionRequest`, resolve the same
+parent snapshot and call WELearn's materialized execution/recovery adapter.
 Giving the Provider direct Storage access would still violate ownership instead
 of closing that gap.
 
@@ -1083,8 +1096,9 @@ The maximum 8,192-child fixture keeps the authority below 4 KiB and the combined
 batch below 8 MiB. Auto omits the redundant vector and remains aggregate-derived.
 Core `fe63910` now provides the encrypted authority/batch half of that boundary;
 the Provider adapter supplies locally bounded zeroizing bytes and stable type
-names after joint semantic validation. Ordered child creation and composite
-dispatch remain Main-owned and are not implied by successful snapshot creation.
+names after joint semantic validation. Core now creates immutable child drafts;
+their activation and composite dispatch remain Main-owned and are not implied
+by successful snapshot creation.
 
 ## Sanitization and routing
 

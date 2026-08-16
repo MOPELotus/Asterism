@@ -3762,10 +3762,10 @@ mod tests {
         let core_events = AtomicFixtureEvents::default();
         let core_request = core_atomic_execution_request(core_child);
         let core_outcome = executor
-            .execute_core_child_request(
+            .execute_materialized_core_child(
                 &atomic_context(),
                 core_batch.parent_snapshot(),
-                core_child,
+                core_child.position(),
                 &core_request,
                 &core_events,
             )
@@ -4140,10 +4140,10 @@ mod tests {
             .unwrap();
         let core_request = core_atomic_execution_request(core_child);
         let core_recovery = recovery
-            .verify_core_child_request_snapshot(
+            .verify_materialized_core_child_snapshot(
                 &atomic_context(),
                 core_batch.parent_snapshot(),
-                core_child,
+                core_child.position(),
                 &core_request,
                 &snapshot,
             )

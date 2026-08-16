@@ -427,6 +427,29 @@ impl WellearnAtomicDurationCompletion {
         self.execute_prepared(context, resolved.prepared(), events)
             .await
     }
+
+    /// Restores the generic child directly from Core's resolved parent pair and
+    /// durable one-based child mapping, then binds and executes its materialized
+    /// Execution request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects parent/position/request drift or any error from the ordinary
+    /// resolved native atomic execution path.
+    pub async fn execute_materialized_core_child(
+        &self,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        position: u32,
+        request: &ExecutionRequest,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        let resolved = WellearnResolvedAtomicChildExecution::try_from_parent_position(
+            parent, position, request,
+        )?;
+        self.execute_resolved_core_child(context, &resolved, events)
+            .await
+    }
 }
 
 async fn persist_atomic_completion_verification(

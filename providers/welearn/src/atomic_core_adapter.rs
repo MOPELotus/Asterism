@@ -31,6 +31,41 @@ pub struct WellearnResolvedAtomicChildExecution {
 }
 
 impl WellearnResolvedAtomicChildExecution {
+    /// Restores the complete ordered child plan from the encrypted parent pair,
+    /// selects the exact durable batch-child position and binds the materialized
+    /// Core Execution request.
+    ///
+    /// This is the direct adapter for Core's child Execution draft: the caller
+    /// supplies the resolved parent snapshot, the persisted one-based mapping
+    /// position and the ordinary request reconstructed from Execution, Task,
+    /// frozen settings, capability steps and Provider artifact rows.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid parent, missing/foreign position or every request
+    /// detachment documented by [`Self::try_new`].
+    pub fn try_from_parent_position(
+        parent: &ExecutionParentBatchSnapshot,
+        position: u32,
+        request: &ExecutionRequest,
+    ) -> ProviderResult<Self> {
+        let plan = crate::restore_batch_execution_plan(parent)
+            .map_err(|_| invalid_resolved_atomic_child())?;
+        let child = plan
+            .children()
+            .get(
+                usize::try_from(
+                    position
+                        .checked_sub(1)
+                        .ok_or_else(invalid_resolved_atomic_child)?,
+                )
+                .map_err(|_| invalid_resolved_atomic_child())?,
+            )
+            .filter(|child| child.position() == position)
+            .ok_or_else(invalid_resolved_atomic_child)?;
+        Self::try_new(parent, child, request)
+    }
+
     /// Jointly restores the Provider parent/child facts and binds them to the
     /// exact Core materialized Execution request.
     ///
@@ -193,6 +228,14 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("sco:1001"));
         assert!(!debug.contains("target_seconds"));
+
+        let direct = WellearnResolvedAtomicChildExecution::try_from_parent_position(
+            prepared.parent_snapshot(),
+            child.position(),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(direct, resolved);
     }
 
     #[test]
@@ -308,5 +351,49 @@ mod tests {
         )
         .unwrap();
         assert!(WellearnResolvedAtomicChildExecution::try_new(&foreign, child, &request).is_err());
+    }
+
+    #[test]
+    fn parent_position_adapter_rejects_missing_or_cross_ordinal_execution_drafts() {
+        let prepared = prepared();
+        let first = &prepared.execution_batch_plan().children()[0];
+        let second = &prepared.execution_batch_plan().children()[1];
+        let first_request = execution_request(first);
+
+        assert!(
+            WellearnResolvedAtomicChildExecution::try_from_parent_position(
+                prepared.parent_snapshot(),
+                0,
+                &first_request,
+            )
+            .is_err()
+        );
+        assert!(
+            WellearnResolvedAtomicChildExecution::try_from_parent_position(
+                prepared.parent_snapshot(),
+                4,
+                &first_request,
+            )
+            .is_err()
+        );
+        assert!(
+            WellearnResolvedAtomicChildExecution::try_from_parent_position(
+                prepared.parent_snapshot(),
+                second.position(),
+                &first_request,
+            )
+            .is_err()
+        );
+
+        let mut mixed_artifact = execution_request(second);
+        mixed_artifact.provider_plan_artifact = first.execution_plan().artifact().cloned();
+        assert!(
+            WellearnResolvedAtomicChildExecution::try_from_parent_position(
+                prepared.parent_snapshot(),
+                second.position(),
+                &mixed_artifact,
+            )
+            .is_err()
+        );
     }
 }

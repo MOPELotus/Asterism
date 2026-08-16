@@ -300,6 +300,29 @@ impl WellearnAtomicDurationCompletionRecovery {
         self.verify_execution_recovery(context, resolved.prepared(), snapshot)
             .await
     }
+
+    /// Restores the generic child directly from Core's resolved parent pair and
+    /// durable one-based mapping, then verifies its materialized Execution from
+    /// the same-attempt mutation snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Rejects parent/position/request/snapshot drift or any error from the
+    /// ordinary resolved read-only recovery path.
+    pub async fn verify_materialized_core_child_snapshot(
+        &self,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        position: u32,
+        request: &ExecutionRequest,
+        snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        let resolved = WellearnResolvedAtomicChildExecution::try_from_parent_position(
+            parent, position, request,
+        )?;
+        self.verify_resolved_core_child_snapshot(context, &resolved, snapshot)
+            .await
+    }
 }
 
 impl fmt::Debug for WellearnAtomicDurationCompletionRecovery {

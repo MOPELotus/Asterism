@@ -249,6 +249,12 @@ at `1/9/0` records (YZBRH includes two pull requests). Binding Core's local
 Execution/Task/Course, grouped request, frozen settings and exact artifact to
 the already-audited parent/child plan adds no donor route, mutation, result or
 retry behavior.
+The adjacent Core `7d7ff81` child-Execution-draft checkpoint reuses that
+immediately preceding unchanged upstream refresh. Restoring a WELearn child
+directly from the encrypted parent pair, durable ordinal and ordinary Core
+`ExecutionRequest` only composes Asterism persistence values already checked
+against audited donor membership/target semantics; it adds no donor endpoint,
+setting, mutation, result or retry claim.
 
 ## Source selection
 

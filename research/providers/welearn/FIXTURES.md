@@ -414,8 +414,15 @@ only structural field names, response codes and bounded placeholder shapes.
   split capability authority, missing Course, missing artifact, invalid settings
   and a foreign parent all fail before fresh I/O; Debug exposes none of the
   remote Task, target, settings or prepared payload.
+- Parent-position draft-consumption fixtures call
+  `try_from_parent_position` with only the resolved encrypted parent, durable
+  one-based mapping position and ordinary materialized `ExecutionRequest`.
+  They prove the result equals the explicit generic-child adapter and reject
+  zero/out-of-range positions, a request from another ordinal and cross-child
+  artifact substitution before fresh I/O.
 - Native execution and snapshot-recovery integration fixtures now enter through
-  `execute_core_child_request` and `verify_core_child_request_snapshot` and
+  `execute_materialized_core_child` and
+  `verify_materialized_core_child_snapshot` and
   still produce the same verified result as prepared/raw-durable paths. This
   proves resolved-parent injection adds Core identity binding without changing
   donor mutation or read-only verification semantics.
