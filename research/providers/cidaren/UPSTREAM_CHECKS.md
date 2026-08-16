@@ -1115,11 +1115,10 @@ issues 48/49 five-field response is classified as
 `RequiredChildrenPending` label), and only an ordinary class-unit plan may
 rotate that response into the durable pre-Question artifact phase
 `cidaren.ready-to-start` with the accepted response digest and receive time.
-Recovery fresh-rebinds the Task and dynamic
-allocation, cannot rebuild or resend the word map, and issues `StartAnswer` as
-the next distinct operation. The same response on a self-built class or direct
-`StudyTask` plan, near-match envelopes and all unrelated failures still fail
-closed.
+Recovery fresh-rebinds the Task and dynamic allocation, cannot rebuild or
+resend the word map, and issues `StartAnswer` as the next distinct operation.
+The same response on a self-built class or direct `StudyTask` plan, near-match
+envelopes and all unrelated failures still fail closed.
 
 Because the exact rejection is now an evidenced pre-Question continuation,
 not a Task completion diagnosis, the provisional
@@ -1149,6 +1148,24 @@ only `%23000000` on the wire and changed the durable request digest.
 and StudyTask. The protocol-vector test checks the value before transport, and
 the Native HTTP boundary checks the double-encoded raw URL. No credential,
 mutation scheduling or response semantics changed.
+
+### 2026-08-16 post-correction stop-rule checkpoint
+
+The final ref check after the grouped selection, existing-selection recovery
+and Start query corrections still resolves public
+`master@bce9559f536ebbdad791f41ed4e111b30accb05d`, owner
+`master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`, historical
+`main@1409858800f3c4bd27577a08049bf1f8d17a069c` and tag
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`. No new branch/tag protocol
+delta appeared.
+
+Every audited donor call site is now implemented or covered by currently
+executable Provider verification. The only remaining gates are the authorized
+authenticated-browser context, real-account/live-mutation validation and new
+mode-73 answer-wire evidence already listed in `CAPABILITY_MAP.md`; each needs
+external state or new evidence rather than another Cidaren-only code change.
+This satisfies the repository Provider stop rule until Main or a future donor
+delta reopens the worker.
 
 ## Check procedure
 
