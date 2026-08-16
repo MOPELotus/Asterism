@@ -407,6 +407,18 @@ only structural field names, response codes and bounded placeholder shapes.
   target/grouped call/artifact/sequence, reject split calls, and prove the
   native execution and recovery entry points return the same result as existing
   prepared/raw-durable paths after the same fresh I/O.
+- Resolved Core-child adapter tests additionally bind the materialized
+  `ExecutionRequest`'s local Execution/Task/Course identities, exact grouped
+  capability plan, position-1 authority, frozen WELearn settings and full child
+  artifact to the v2 parent/child reconstruction. Remote-Task substitution,
+  split capability authority, missing Course, missing artifact, invalid settings
+  and a foreign parent all fail before fresh I/O; Debug exposes none of the
+  remote Task, target, settings or prepared payload.
+- Native execution and snapshot-recovery integration fixtures now enter through
+  `execute_core_child_request` and `verify_core_child_request_snapshot` and
+  still produce the same verified result as prepared/raw-durable paths. This
+  proves resolved-parent injection adds Core identity binding without changing
+  donor mutation or read-only verification semantics.
 - Prepared parent-call tests return the private snapshot and Core ordered batch
   plan from one function, prove both digest pairs remain equal before and after
   moving the parts out, redact all Course/SCO/target material from Debug, and

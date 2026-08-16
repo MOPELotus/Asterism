@@ -6,6 +6,7 @@
 //! explicit daemon opt-in. Its parser/native-boundary coverage makes no claim
 //! of live compatibility.
 
+mod atomic_core_adapter;
 mod atomic_dispatch;
 mod atomic_duration_completion;
 mod atomic_mutation_digest;
@@ -33,6 +34,7 @@ mod stored_session;
 mod task_detail;
 mod task_inventory;
 
+pub use atomic_core_adapter::WellearnResolvedAtomicChildExecution;
 pub use atomic_dispatch::{
     WellearnAtomicBatchDispatchPlan, WellearnAtomicChildDispatchPlan,
     WellearnPreparedAtomicBatchPlan, materialize_atomic_batch_dispatch_plan,

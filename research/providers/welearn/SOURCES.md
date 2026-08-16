@@ -238,6 +238,17 @@ reuses that immediately preceding full 2026-08-16 refresh. The new
 only restore hook are Asterism orchestration boundaries over the already
 audited Course/Unit/SCO membership and target rules; they add no donor route,
 setting, mutation, completion or retry behavior.
+The resolved-child adapter checkpoint after Core `7aaadd5` repeated all three
+default-head/tag queries and Release/issue enumeration on 2026-08-16. Heads
+remain `afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2`,
+`bd160e91d0452b8bf483087fbdd3bdd58d855e13` and
+`85918caaccd93b73b1e41fe537b4e9a11377b759`; Fanyuchang's sole tag/Release is
+still `v4.0.0@5d1df60cb0078f70679be2a22f2afbf1ef4fa88a`, while YZBRH and Auto still
+have no tags or Releases. The GitHub issue endpoint surfaces remain unchanged
+at `1/9/0` records (YZBRH includes two pull requests). Binding Core's local
+Execution/Task/Course, grouped request, frozen settings and exact artifact to
+the already-audited parent/child plan adds no donor route, mutation, result or
+retry behavior.
 
 ## Source selection
 

@@ -980,6 +980,29 @@ bind/resolve storage. Engine selection of the WELearn parent composite,
 transactional child creation and actual grouped mutation/recovery dispatch
 remain the shared orchestration gap.
 
+Core `7aaadd5` now atomically materializes the ordered child-plan records after
+the parent pair exists, including local Task binding plus artifact/sequence
+digests and every conditional phase. That durable record is still not enough
+for Provider execution by itself: WELearn must also see the exact materialized
+`ExecutionRequest` and resolved encrypted parent pair. The pure
+`WellearnResolvedAtomicChildExecution::try_new` adapter therefore restores the
+complete Provider child first, requires the Core request to carry the same
+remote Task and exact child artifact, and accepts only one position-1 grouped
+`DurationReport + ResourceExecution` call with a local Course binding. It
+retains the local Execution/Task/Course identities and frozen resolved settings,
+revalidates both settings and prepared child immediately before use, and keeps
+all remote/target/private values out of Debug.
+
+`execute_core_child_request` injects that resolved value into the existing
+fresh-rebind native atomic coordinator. Its recovery twin,
+`verify_core_child_request_snapshot`, injects the same binding into the
+snapshot-first read-only verifier. Both preserve the older lower-level
+parent+child methods for already prepared internal callers, but the new request
+boundary is the exact target for Core child Execution dispatch. Neither adapter
+loads Storage, reconstructs a plan from digests, broadens active capabilities
+or treats the frozen runtime settings as mutation authority; the child artifact
+and conditional ledger remain authoritative for the atomic donor profile.
+
 Core `0c0d26b` closes the shared recovery-result portion of that integration:
 Engine validates an optional Provider verification against the same-attempt
 complete sequence and final accepted ordinal, then writes it under the active
@@ -987,14 +1010,12 @@ recovery claim before finishing. Core `fe63910` separately closes the encrypted
 parent authority plus complete-batch same-Attempt repository primitive, and
 WELearn constructs its exact typed input. Core `217c1f6` defines the generic
 ordered child/batch plan, and Core `53859f8` exposes the fresh prepare and
-deterministic restore hooks now implemented by WELearn. The remaining Core Gap
-is the orchestration transaction and runtime: persist and schedule Core
-`dc04512`'s Course-scoped `BatchExecution` and Attempt, resolve and pass the
-already persisted Provider planning input, bind the returned snapshot before
-child creation, consume the Provider batch plan once, create each child with
-its exact grouped call/artifact/sequence without rescanning, and resolve/inject
-the private snapshot into the existing atomic execution and recovery
-coordinators.
+deterministic restore hooks now implemented by WELearn. Core `7aaadd5` also
+persists the exact ordered child-plan records. The remaining Core Gap is the
+final orchestration transaction and runtime: freeze parent settings, create the
+actual child Executions from those records, build the request-bound grouped
+call, and resolve/inject the private snapshot into WELearn's new exact atomic
+execution/recovery adapter.
 Giving the Provider direct Storage access would still violate ownership instead
 of closing that gap.
 

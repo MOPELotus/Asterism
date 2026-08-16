@@ -4,9 +4,9 @@ use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
     ExecutionMutationSequencePlan, ExecutionMutationSequenceRecoverySnapshot,
     ExecutionMutationVerification, ExecutionParentBatchSnapshot, ExecutionRecoveryOutcome,
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionChildPlan,
-    ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderResult,
-    TaskDetailCapability,
+    ExecutionRequest, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderExecutionChildPlan, ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata,
+    ProviderResult, TaskDetailCapability,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use crate::{
     WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnAtomicDurationCompletionPlan,
     WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionVerification,
     WellearnAtomicMutationKind, WellearnCmiDocument, WellearnPreparedAtomicChildPlan,
-    WellearnResourceExecutionTransport,
+    WellearnResolvedAtomicChildExecution, WellearnResourceExecutionTransport,
     atomic_duration_completion::{atomic_goal_changed, verify_atomic_final_snapshot},
     build_atomic_mutation_sequence_plan,
     cmi::parse_sco_identity,
@@ -259,6 +259,45 @@ impl WellearnAtomicDurationCompletionRecovery {
                 parent, child,
             )?;
         self.verify_execution_recovery(context, &prepared, snapshot)
+            .await
+    }
+
+    /// Binds Core's materialized Execution request to the resolved parent and
+    /// child before entering snapshot-first read-only recovery.
+    ///
+    /// # Errors
+    ///
+    /// Rejects local Execution/Task/Course, grouped capability, frozen setting,
+    /// artifact, parent/child, recovery snapshot, fresh-detail or final-CMI
+    /// drift.
+    pub async fn verify_core_child_request_snapshot(
+        &self,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        child: &ProviderExecutionChildPlan,
+        request: &ExecutionRequest,
+        snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        let resolved = WellearnResolvedAtomicChildExecution::try_new(parent, child, request)?;
+        self.verify_resolved_core_child_snapshot(context, &resolved, snapshot)
+            .await
+    }
+
+    /// Verifies one already resolved Core atomic child using only the durable
+    /// mutation snapshot and fresh read-only Provider evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the resolved-value, mutation-snapshot, fresh-detail or exact
+    /// final-CMI verification error.
+    pub async fn verify_resolved_core_child_snapshot(
+        &self,
+        context: &ProviderContext,
+        resolved: &WellearnResolvedAtomicChildExecution,
+        snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        resolved.validate()?;
+        self.verify_execution_recovery(context, resolved.prepared(), snapshot)
             .await
     }
 }

@@ -333,6 +333,18 @@ one-based position, remote Task, grouped call, artifact and conditional sequence
 to that restored dispatch entry. The native executor and read-only recovery
 coordinator expose corresponding typed Core-child entry points while preserving
 the existing fresh TaskDetail and same-attempt mutation snapshot checks.
+Core `7aaadd5` now durably materializes those ordered child-plan digests and
+phases after the parent pair is bound. WELearn's
+`WellearnResolvedAtomicChildExecution` supplies the next Provider-owned adapter:
+it jointly restores the v2 parent pair plus exact generic child, then binds the
+materialized Core `ExecutionRequest`'s local Execution, Task, required Course,
+one grouped DurationReport+ResourceExecution call, one-based position, frozen
+resolved settings and exact Provider artifact. The native execution and
+snapshot-first recovery coordinators expose request-bound entry points and
+revalidate the resolved value before fresh I/O. Debug omits the remote Task,
+target, settings and prepared payload. A split capability step, missing Course,
+foreign artifact, invalid settings or parent/child substitution cannot reach
+TaskDetail or transport.
 The complete Provider batch also encodes as bounded deny-unknown
 `welearn.batch-plan.v1` bytes and fully revalidates on decode; all seven flows
 and the 8,192-child maximum are covered. This supplies the complete
@@ -352,9 +364,9 @@ complete-sequence/final-ordinal validation and claim-bound same-Attempt
 verification write. Core `53859f8` and the registered WELearn implementation
 now close the Provider planning-input/fresh-prepare/deterministic-restore
 contract. Core `dc04512` models the independent Course-scoped
-`BatchExecution`/Attempt, but Main must still persist and schedule it, invoke
-the bind before child creation, consume
-the Provider-produced `ProviderExecutionBatchPlan` once to create every ordered
-child with its exact grouped call/artifact/sequence, and route
-execution/recovery with the resolved private snapshot without rescanning.
+`BatchExecution`/Attempt and Core `7aaadd5` materializes the complete ordered
+child plan after parent binding. Main must still freeze parent runtime settings
+with the Attempt, create the actual child Executions transactionally, and route
+each materialized `ExecutionRequest` plus resolved private snapshot into the
+new WELearn request-bound execution/recovery adapter without rescanning.
 Provider code must not synthesize that ownership.

@@ -91,9 +91,11 @@ Consequently:
 2. Core now owns the conditional ledger, attempt-bound observations,
    same-attempt recovery snapshot loading and recovered final-verification
    persistence. Core `53859f8` plus WELearn now also own the namespaced planning
-   input and registered fresh prepare/deterministic restore boundary. Main still
-   needs the orchestration transaction, child creation and resolved
-   private-snapshot injection into grouped execution/recovery dispatch.
+   input and registered fresh prepare/deterministic restore boundary. Core now
+   durably materializes the ordered child-plan records through `7aaadd5`.
+   WELearn binds those future child Executions to the resolved parent pair with
+   its request-level atomic adapter. Main still needs parent settings freeze,
+   transactional child Execution creation and actual grouped dispatch.
 3. Capture/BrowserBridge still needs active browser session injection, action
    dispatch, callback handling and bounded recovery for interactive login.
 4. Cross-account bulk import/export and queueing are shared product surfaces and

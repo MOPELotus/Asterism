@@ -2535,12 +2535,12 @@ fn normalized_completion(task: &RemoteTask) -> Option<RemoteState> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use asterism_domain::ProviderAccountId;
+    use asterism_domain::{CourseId, ExecutionId, ProviderAccountId, TaskId};
     use asterism_provider_api::{
         ExecutionEventSink, ExecutionMutationIssue, ExecutionMutationReceipt,
         ExecutionMutationRecoveryRecord, ExecutionMutationSequenceObservation,
         ExecutionMutationSequencePlan, ExecutionMutationSequenceRecoverySnapshot,
-        ExecutionMutationSink, ExecutionMutationVerification, ProviderContext,
+        ExecutionMutationSink, ExecutionMutationVerification, ExecutionRequest, ProviderContext,
         ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
         TaskDetailCapability,
     };
@@ -2559,7 +2559,7 @@ mod tests {
         WellearnAtomicDurationCompletionTransport, WellearnAtomicMutationKind,
         WellearnAtomicPreFinalObservation, WellearnCmiDocument, WellearnScoLeavesDocument,
         build_atomic_mutation_sequence_plan, development_metadata, parse_course_inventory,
-        parse_task_inventory, parse_unit_inventory,
+        parse_task_inventory, parse_unit_inventory, runtime_settings::runtime_settings_schema,
     };
 
     const COURSES: &str =
@@ -2848,6 +2848,28 @@ mod tests {
             account_id: ProviderAccountId::new(),
             credential_refs: Vec::new(),
             correlation_id: "welearn-atomic-prepared".to_owned(),
+        }
+    }
+
+    fn core_atomic_execution_request(
+        child: &asterism_provider_api::ProviderExecutionChildPlan,
+    ) -> ExecutionRequest {
+        ExecutionRequest {
+            execution_id: ExecutionId::new(),
+            task_id: TaskId::new(),
+            remote_task_id: child.remote_task_id().to_owned(),
+            course_id: Some(CourseId::new()),
+            requested_capabilities: vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ],
+            capability_plan: vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ],
+            capability_step_position: 1,
+            runtime_settings: runtime_settings_schema().resolve(None, None, None).unwrap(),
+            provider_plan_artifact: child.execution_plan().artifact().cloned(),
         }
     }
 
@@ -3738,11 +3760,13 @@ mod tests {
             .find(|child| child.remote_task_id() == prepared.child_plan().remote_task_id())
             .unwrap();
         let core_events = AtomicFixtureEvents::default();
+        let core_request = core_atomic_execution_request(core_child);
         let core_outcome = executor
-            .execute_core_child_plan(
+            .execute_core_child_request(
                 &atomic_context(),
                 core_batch.parent_snapshot(),
                 core_child,
+                &core_request,
                 &core_events,
             )
             .await
@@ -4114,11 +4138,13 @@ mod tests {
             .iter()
             .find(|child| child.remote_task_id() == prepared.child_plan().remote_task_id())
             .unwrap();
+        let core_request = core_atomic_execution_request(core_child);
         let core_recovery = recovery
-            .verify_core_child_snapshot(
+            .verify_core_child_request_snapshot(
                 &atomic_context(),
                 core_batch.parent_snapshot(),
                 core_child,
+                &core_request,
                 &snapshot,
             )
             .await

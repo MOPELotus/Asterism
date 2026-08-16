@@ -3,19 +3,19 @@ use std::{fmt, sync::Arc};
 use asterism_domain::{HumanRequiredReason, RemoteState};
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionMutationVerification, ExecutionOutcome,
-    ExecutionParentBatchSnapshot, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderExecutionChildPlan, ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata,
-    ProviderResult, TaskDetailCapability,
+    ExecutionParentBatchSnapshot, ExecutionRequest, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderExecutionChildPlan, ProviderExecutionPlanArtifact, ProviderIdentity,
+    ProviderMetadata, ProviderResult, TaskDetailCapability,
 };
 use async_trait::async_trait;
 
 use crate::{
     WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnCmiDocument,
     WellearnDurationProtocolMode, WellearnPreparedAtomicChildPlan,
-    WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
-    WellearnResourceCompletionTimeMode, WellearnResourceCompletionWriteMode,
-    WellearnResourceExecutionPlan, WellearnResourceMutationProfile,
-    atomic_mutation_digest::atomic_completion_observation_digest,
+    WellearnResolvedAtomicChildExecution, WellearnResourceCompletionCmiFormat,
+    WellearnResourceCompletionSequence, WellearnResourceCompletionTimeMode,
+    WellearnResourceCompletionWriteMode, WellearnResourceExecutionPlan,
+    WellearnResourceMutationProfile, atomic_mutation_digest::atomic_completion_observation_digest,
     build_atomic_mutation_sequence_plan, cmi::parse_mutation_cmi_baseline,
     metadata::development_metadata, parse_cmi_snapshot,
     runtime_settings::MAX_DURATION_REPORT_SECONDS,
@@ -388,6 +388,44 @@ impl WellearnAtomicDurationCompletion {
                 parent, child,
             )?;
         self.execute_prepared(context, &prepared, events).await
+    }
+
+    /// Binds Core's materialized Execution request to the resolved parent and
+    /// child plan before entering native atomic execution.
+    ///
+    /// # Errors
+    ///
+    /// Rejects local Execution/Task/Course, grouped capability, frozen setting,
+    /// artifact, parent/child, fresh-detail, transport or verification drift.
+    pub async fn execute_core_child_request(
+        &self,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        child: &ProviderExecutionChildPlan,
+        request: &ExecutionRequest,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        let resolved = WellearnResolvedAtomicChildExecution::try_new(parent, child, request)?;
+        self.execute_resolved_core_child(context, &resolved, events)
+            .await
+    }
+
+    /// Executes one already resolved Core atomic child without weakening its
+    /// immutable local or Provider bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns the resolved-value, fresh-detail, transport, mutation-ledger or
+    /// exact final-verification error.
+    pub async fn execute_resolved_core_child(
+        &self,
+        context: &ProviderContext,
+        resolved: &WellearnResolvedAtomicChildExecution,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        resolved.validate()?;
+        self.execute_prepared(context, resolved.prepared(), events)
+            .await
     }
 }
 
