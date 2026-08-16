@@ -878,6 +878,17 @@ Its `validate` method replays every ordinal projection and rejects missing,
 extra, reordered or cross-child substituted values. The projection is neither
 serialized authority nor a scheduler: it does not choose Execution IDs,
 persist attempts, create/recover children or grant mutation permission.
+`to_provider_execution_batch_plan` is the final Provider-to-Core projection.
+It requires the exact `welearn` private type names, decodes both encrypted
+snapshot values, demands that the decoded complete batch equals the dispatch
+batch, reconstructs and digest-compares the parent snapshot, and for current
+Fanyuchang also proves that the authority's expected Task retains its exact
+frozen child target. Each child then becomes a one-based
+`ProviderExecutionChildPlan` carrying the grouped
+`DurationReport + ResourceExecution` call, exact namespaced artifact and its
+artifact-bound conditional sequence. Core's generic constructor rechecks
+contiguous positions, unique remote Tasks/artifacts/sequences and Provider
+namespaces. This still grants no local Task or mutation authority.
 `WellearnPreparedAtomicChildPlan::restore_from_provider_execution_plan_artifact`
 is the lower-level in-memory recovery constructor. It consumes a validated
 complete batch, ordinal, frozen target authority and exact Core artifact,
@@ -936,11 +947,14 @@ Engine validates an optional Provider verification against the same-attempt
 complete sequence and final accepted ordinal, then writes it under the active
 recovery claim before finishing. Core `fe63910` separately closes the encrypted
 parent authority plus complete-batch same-Attempt repository primitive, and
-WELearn now constructs its exact typed input. The remaining Core Gap is the
-orchestration transaction and runtime: select and create the parent composite,
-bind the snapshot before child creation, consume the ordered atomic dispatch
-projection once, create each child with its exact artifact/sequence without
-rescanning, and resolve/inject the private snapshot on execution and recovery.
+WELearn now constructs its exact typed input. Core `217c1f6` defines the generic
+ordered child/batch plan, and WELearn projects its complete atomic dispatch into
+that contract. The remaining Core Gap is the orchestration transaction and
+runtime: persist and schedule Core `dc04512`'s Course-scoped `BatchExecution`
+and Attempt, provide the Provider planning input, bind the snapshot before child
+creation, consume the Provider batch plan once, create each child with its
+exact grouped call/artifact/sequence without rescanning, and resolve/inject the
+private snapshot on execution and recovery.
 Giving the Provider direct Storage access would still violate ownership instead
 of closing that gap.
 

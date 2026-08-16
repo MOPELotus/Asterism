@@ -1,13 +1,17 @@
+use asterism_domain::{ProviderId, TaskCapability};
 use asterism_provider_api::{
-    ExecutionMutationSequencePlan, ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact,
-    ProviderResult,
+    ExecutionMutationSequencePlan, ExecutionParentBatchSnapshot, ProviderError, ProviderErrorKind,
+    ProviderExecutionBatchPlan, ProviderExecutionChildPlan, ProviderExecutionPlan,
+    ProviderExecutionPlanArtifact, ProviderResult,
 };
 
 use crate::batch_plan::{
-    WellearnAtomicChildPlan, WellearnBatchExecutionShape, WellearnBatchFlow, WellearnBatchPlan,
-    materialize_atomic_child_plan_for_validated_batch, validate_batch_plan_integrity,
+    WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE, WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE,
+    WellearnAtomicBatchPlanningAuthority, WellearnAtomicChildPlan, WellearnBatchExecutionShape,
+    WellearnBatchFlow, WellearnBatchPlan, materialize_atomic_child_plan_for_validated_batch,
+    validate_batch_plan_integrity,
 };
-use crate::build_atomic_mutation_sequence_plan;
+use crate::{build_atomic_mutation_sequence_plan, metadata::PROVIDER_ID};
 
 /// One exact child projection kept together with its target authority, Core
 /// artifact and receipt-conditional mutation sequence.
@@ -120,6 +124,88 @@ impl WellearnAtomicBatchDispatchPlan {
             }
         }
         Ok(())
+    }
+
+    /// Converts the complete `WELearn` projection into Core's generic immutable
+    /// parent/child batch plan.
+    ///
+    /// The supplied private parent snapshot is decoded and rebound to this
+    /// exact complete batch before any child is projected. Current Fanyuchang's
+    /// explicitly selected expected child must also retain the parent authority
+    /// target. Core still owns local Task binding and transactional child
+    /// Execution creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for foreign/private-type drift, parent/batch or
+    /// expected-child inconsistency, invalid child positions, artifact/sequence
+    /// detachment, or any generic Core batch-plan contract failure.
+    pub fn to_provider_execution_batch_plan(
+        &self,
+        parent: &ExecutionParentBatchSnapshot,
+    ) -> ProviderResult<ProviderExecutionBatchPlan> {
+        self.validate()?;
+        let provider_id =
+            ProviderId::new(PROVIDER_ID).map_err(|_| invalid_atomic_batch_dispatch_plan())?;
+        if parent.provider_id() != &provider_id
+            || parent.authority_type() != WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE
+            || parent.batch_type() != WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE
+        {
+            return Err(invalid_atomic_batch_dispatch_plan());
+        }
+
+        let authority =
+            WellearnAtomicBatchPlanningAuthority::decode(parent.authority().expose_secret())?;
+        let batch_plan = WellearnBatchPlan::decode_snapshot(parent.batch().expose_secret())?;
+        if batch_plan != self.batch_plan {
+            return Err(invalid_atomic_batch_dispatch_plan());
+        }
+        let reconstructed = authority.to_execution_parent_batch_snapshot(&batch_plan)?;
+        if reconstructed.authority_digest() != parent.authority_digest()
+            || reconstructed.batch_digest() != parent.batch_digest()
+        {
+            return Err(invalid_atomic_batch_dispatch_plan());
+        }
+
+        if authority.flow() == WellearnBatchFlow::FanyuchangDuration {
+            let expected = self
+                .children
+                .iter()
+                .find(|child| {
+                    child.child_plan().remote_task_id() == authority.expected_remote_task_id()
+                })
+                .ok_or_else(invalid_atomic_batch_dispatch_plan)?;
+            if expected.frozen_fanyuchang_target_seconds()
+                != authority.frozen_fanyuchang_target_seconds()
+            {
+                return Err(invalid_atomic_batch_dispatch_plan());
+            }
+        }
+
+        let children = self
+            .children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| {
+                let position =
+                    u32::try_from(index + 1).map_err(|_| invalid_atomic_batch_dispatch_plan())?;
+                let execution_plan = ProviderExecutionPlan::try_new(
+                    provider_id.clone(),
+                    vec![vec![
+                        TaskCapability::DurationReport,
+                        TaskCapability::ResourceExecution,
+                    ]],
+                    Some(child.provider_plan_artifact().clone()),
+                )?;
+                ProviderExecutionChildPlan::try_new(
+                    position,
+                    child.child_plan().remote_task_id(),
+                    execution_plan,
+                    child.mutation_sequence_plan().clone(),
+                )
+            })
+            .collect::<ProviderResult<Vec<_>>>()?;
+        ProviderExecutionBatchPlan::try_new(parent, children)
     }
 }
 
@@ -331,5 +417,82 @@ mod tests {
         let mut target_mixed = plan;
         target_mixed.children[0].frozen_fanyuchang_target_seconds = Some(2);
         assert!(target_mixed.validate().is_err());
+    }
+
+    #[test]
+    fn core_batch_plan_binds_private_parent_and_every_ordered_child() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let targets = vec![0, 37, 19_800];
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            batch.course_remote_id.clone(),
+            WellearnBatchFlow::FanyuchangDuration,
+            batch.selection.clone(),
+            batch.entries[0].remote_task_id.clone(),
+            Some(targets[0]),
+            None,
+        )
+        .unwrap();
+        let parent = authority
+            .to_execution_parent_batch_snapshot(&batch)
+            .unwrap();
+        let dispatch =
+            materialize_atomic_batch_dispatch_plan(batch.clone(), Some(targets)).unwrap();
+
+        let core = dispatch.to_provider_execution_batch_plan(&parent).unwrap();
+        assert_eq!(core.provider_id().as_str(), PROVIDER_ID);
+        assert_eq!(core.authority_digest(), parent.authority_digest());
+        assert_eq!(core.batch_digest(), parent.batch_digest());
+        assert_eq!(core.children().len(), batch.entries.len());
+        for (index, child) in core.children().iter().enumerate() {
+            assert_eq!(child.position(), u32::try_from(index + 1).unwrap());
+            assert_eq!(child.remote_task_id(), batch.entries[index].remote_task_id);
+            assert_eq!(
+                child.execution_plan().calls(),
+                &[vec![
+                    TaskCapability::DurationReport,
+                    TaskCapability::ResourceExecution,
+                ]]
+            );
+            assert_eq!(
+                child.execution_plan().artifact().unwrap().artifact_digest(),
+                child.mutation_sequence_plan().artifact_digest()
+            );
+        }
+    }
+
+    #[test]
+    fn core_batch_plan_rejects_private_snapshot_or_expected_target_substitution() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            batch.course_remote_id.clone(),
+            WellearnBatchFlow::FanyuchangDuration,
+            batch.selection.clone(),
+            batch.entries[0].remote_task_id.clone(),
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let parent = authority
+            .to_execution_parent_batch_snapshot(&batch)
+            .unwrap();
+        let dispatch =
+            materialize_atomic_batch_dispatch_plan(batch, Some(vec![0, 37, 19_800])).unwrap();
+        assert!(dispatch.to_provider_execution_batch_plan(&parent).is_err());
+
+        let malformed = ExecutionParentBatchSnapshot::try_new(
+            ProviderId::new(PROVIDER_ID).unwrap(),
+            WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE,
+            asterism_secrets::SecretValue::new(b"not-json".to_vec()),
+            WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE,
+            asterism_secrets::SecretValue::new(b"not-json".to_vec()),
+        )
+        .unwrap();
+        assert!(
+            dispatch
+                .to_provider_execution_batch_plan(&malformed)
+                .is_err()
+        );
     }
 }

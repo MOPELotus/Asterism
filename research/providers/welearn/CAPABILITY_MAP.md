@@ -291,8 +291,13 @@ The complete atomic batch can now also be projected once into an ordered
 `WellearnAtomicBatchDispatchPlan`. Every child item binds its target authority,
 Provider child plan, exact Core artifact and artifact-bound conditional
 sequence, and whole-plan validation rejects cardinality, ordinal, artifact or
-sequence mixing. This remains pure Provider planning evidence: it does not
-create, persist, restore or authorize any parent/child Execution.
+sequence mixing. Its Core adapter now re-authenticates the encrypted parent
+snapshot, requires its decoded complete batch to equal the dispatch batch,
+rechecks the authority-selected Fanyuchang child target, and constructs Core
+`ProviderExecutionBatchPlan` children with a one-based position, exact remote
+Task, grouped DurationReport+ResourceExecution call, artifact and sequence.
+This remains pure Provider planning evidence: it does not create, persist,
+restore or authorize any parent/child Execution.
 The parent authority itself now has a credential-free, versioned v1 encoding
 bounded to 4 KiB. Restore rejects unknown fields, version drift, malformed or
 duplicate Unit selections, cross-flow target mixtures and an Auto `actual`
@@ -319,8 +324,11 @@ The remaining shared contract is now narrower and concrete. Core `fe63910` can
 encrypt and bind the Provider-constructed parent/batch snapshot to an exact live
 parent Attempt, while Core `0c0d26b` supplies the recovery result,
 complete-sequence/final-ordinal validation and claim-bound same-Attempt
-verification write. Main must still add the parent composite capability and
-planning input, invoke the bind before child creation, consume
-`WellearnAtomicBatchDispatchPlan` once to create every ordered child with its
-exact artifact/sequence, and route execution/recovery with the resolved private
-snapshot without rescanning. Provider code must not synthesize that ownership.
+verification write. Main must still add the Provider parent-planning hook and
+input; Core `dc04512` models the independent Course-scoped
+`BatchExecution`/Attempt but Main must still persist and schedule it, invoke the
+bind before child creation, consume
+the Provider-produced `ProviderExecutionBatchPlan` once to create every ordered
+child with its exact grouped call/artifact/sequence, and route
+execution/recovery with the resolved private snapshot without rescanning.
+Provider code must not synthesize that ownership.

@@ -211,6 +211,10 @@ still older `v4.0.0@5d1df60cb0078f70679be2a22f2afbf1ef4fa88a`, and
 release/issue counts remain `1/1`, `0/9` and `0/0`. No donor delta was available.
 The Provider change only normalizes already-audited parent authority and full
 batch bytes into Core `fe63910`'s encrypted same-Attempt snapshot contract.
+The adjacent ordered-child-plan integration checkpoint reused that immediately
+preceding unchanged upstream refresh after Core `217c1f6`. Projecting the
+already-audited WELearn child artifacts and conditional sequences into Core's
+generic batch plan adds no donor route, setting, completion or retry behavior.
 
 ## Source selection
 

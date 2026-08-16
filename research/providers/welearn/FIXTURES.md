@@ -394,6 +394,11 @@ only structural field names, response codes and bounded placeholder shapes.
   durable recovery, round-trip both private byte values through their local
   schemas, prove deterministic nonzero Core digests and Debug redaction, and
   reject cross-selection or Auto aggregate drift before any Storage boundary.
+- Core ordered-batch projection tests bind the decoded private snapshot back to
+  the exact dispatch batch, preserve one-based child order, remote Task,
+  grouped DurationReport+ResourceExecution call, artifact and sequence, and
+  reject malformed private bytes or a substituted Fanyuchang expected-child
+  target before Core child creation.
 - Durable atomic-child recovery tests decode the parent authority and complete
   batch snapshot together, accept both Fanyuchang and Auto target shapes, and
   reject cross-attempt Course, flow, Unit selection, aggregate, expected-child
