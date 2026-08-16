@@ -110,7 +110,8 @@ validation is still required.
   and `X-Requested-With: XMLHttpRequest`. Asterism had accidentally reused the
   mobile Exam request-family constant for independent and Chapter Work final
   POSTs. Work now has a separate web-AJAX constant and a built-request regression
-  covering both that header and the retained Referer.
+  covering that header, the retained Referer, the same-origin `Origin` and the
+  donor's `application/x-www-form-urlencoded; charset=UTF-8` media type.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence
   and explicitly audits empty answer rows, not arbitrary substring-derived

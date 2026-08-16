@@ -323,6 +323,7 @@ Course/Chapter/seven-card target, acquires one fresh editor and forwards only
 audited form fields before one `addStudentWorkNew` POST. Neither attempt GET nor
 POST is replayed after an ambiguous send, and the JSON success flag is only a
 Receipt. This web request family retains the donor-observed editor Referer and
+same-origin `Origin`, sends the UTF-8 form media type and
 `X-Requested-With: XMLHttpRequest`; it does not reuse the separate mobile Exam
 header. Independent `SubmissionVerify` refetches seven cards and confirms only
 when the exact attachment is Completed. Per-Question facts stay Unverified when

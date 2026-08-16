@@ -12,7 +12,7 @@ use chrono::Utc;
 use rand_core::{OsRng, RngCore};
 use reqwest::{
     Client, Request, Response, StatusCode, Url,
-    header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, REFERER, RETRY_AFTER},
+    header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, ORIGIN, REFERER, RETRY_AFTER},
 };
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -2180,6 +2180,11 @@ fn build_work_submission_request(
         .post(url)
         .header(COOKIE, session.header_value()?)
         .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+        .header(
+            CONTENT_TYPE,
+            "application/x-www-form-urlencoded; charset=UTF-8",
+        )
+        .header(ORIGIN, WORK_LIST_ORIGIN)
         .header(REFERER, referer.as_str())
         .header("x-requested-with", WORK_REQUESTED_WITH)
         .form(body)
@@ -2896,6 +2901,20 @@ mod tests {
             Some(WORK_REQUESTED_WITH)
         );
         assert_eq!(WORK_REQUESTED_WITH, "XMLHttpRequest");
+        assert_eq!(
+            request
+                .headers()
+                .get(ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some(WORK_LIST_ORIGIN)
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/x-www-form-urlencoded; charset=UTF-8")
+        );
         assert_eq!(
             request
                 .headers()
