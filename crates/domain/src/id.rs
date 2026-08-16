@@ -75,6 +75,8 @@ entity_id!(SubmissionDraftId);
 entity_id!(SubmissionResultId);
 entity_id!(ExecutionId);
 entity_id!(ExecutionAttemptId);
+entity_id!(BatchExecutionId);
+entity_id!(BatchExecutionAttemptId);
 entity_id!(ScheduleId);
 entity_id!(AutomationPlanId);
 entity_id!(PriceQuoteId);

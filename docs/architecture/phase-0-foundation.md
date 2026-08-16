@@ -5057,3 +5057,20 @@ remote identity to a local Task, create an Execution, change Task state,
 reserve credit, enqueue scheduler work or expose a mutation sink. Those
 transactional parent/child operations remain the next shared Storage/Engine
 slice.
+
+## Two-hundred-and-seventy-fourth Phase 0 slice
+
+Core Domain now gives a Course-scoped parent batch its own `BatchExecutionId`
+and `BatchExecutionAttemptId` instead of attaching it to a synthetic Task or
+borrowing one selected child as an anchor. The parent binds the exact Provider
+account and Course, one canonical executable capability set, the bounded
+expected child count, requester/source and the ordinary execution lifecycle.
+
+Validation rejects read-only/non-executable capabilities, duplicate or
+non-canonical capability order, zero or more than 8,192 children and lifecycle
+timestamps inconsistent with the parent state. A successful parent requires a
+real started attempt; cancellation or definite failure may terminate before
+remote work starts. Because the parent owns no `TaskId`, it cannot consume a
+child Task lease or force the first child to have different scheduling and
+recovery semantics. Durable tables, scheduler claims, encrypted snapshot
+rebinding and atomic child creation remain the following Storage/Engine work.

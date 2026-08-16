@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ExecutionAttemptId, ExecutionId, PriceQuoteId, SubmissionDraftId, TaskCapability, TaskId,
-    Timestamp, UserId,
+    BatchExecutionAttemptId, BatchExecutionId, CourseId, ExecutionAttemptId, ExecutionId,
+    PriceQuoteId, ProviderAccountId, SubmissionDraftId, TaskCapability, TaskId, Timestamp, UserId,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -66,6 +66,125 @@ pub struct ExecutionAttempt {
     pub result: Option<AttemptResult>,
     pub error_class: Option<ProviderErrorClass>,
     pub provider_trace_id: Option<String>,
+}
+
+/// Course-scoped parent for a Provider-planned ordered child batch. It is not
+/// attached to a synthetic or anchor Task and therefore never owns a child's
+/// Task lease.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BatchExecution {
+    pub id: BatchExecutionId,
+    pub provider_account_id: ProviderAccountId,
+    pub course_id: CourseId,
+    /// Canonical child capability set authorized uniformly across the batch.
+    pub requested_capabilities: Vec<TaskCapability>,
+    pub expected_child_count: u32,
+    pub requested_by: Option<UserId>,
+    pub request_source: RequestSource,
+    pub state: ExecutionState,
+    pub scheduled_at: Option<Timestamp>,
+    pub started_at: Option<Timestamp>,
+    pub finished_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+}
+
+impl BatchExecution {
+    /// Rechecks the parent identity, canonical child authority and lifecycle
+    /// timestamps independently from Provider-private selection bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty/oversized or non-canonical child capability sets, an
+    /// invalid child count, or lifecycle timestamps inconsistent with state.
+    pub fn validate(&self) -> Result<(), BatchExecutionValidationError> {
+        if self.requested_capabilities.is_empty()
+            || self.requested_capabilities.len() > 5
+            || !self
+                .requested_capabilities
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || !self
+                .requested_capabilities
+                .iter()
+                .copied()
+                .all(is_batch_execution_capability)
+            || self.expected_child_count == 0
+            || self.expected_child_count > 8_192
+            || self
+                .scheduled_at
+                .is_some_and(|scheduled_at| scheduled_at < self.created_at)
+            || self
+                .started_at
+                .is_some_and(|started_at| started_at < self.scheduled_at.unwrap_or(self.created_at))
+            || self
+                .finished_at
+                .is_some_and(|finished_at| finished_at < self.started_at.unwrap_or(self.created_at))
+            || !batch_execution_state_timestamps_match(self)
+        {
+            return Err(BatchExecutionValidationError::Invalid);
+        }
+        Ok(())
+    }
+}
+
+const fn batch_execution_state_timestamps_match(execution: &BatchExecution) -> bool {
+    match execution.state {
+        ExecutionState::Requested => {
+            execution.scheduled_at.is_none()
+                && execution.started_at.is_none()
+                && execution.finished_at.is_none()
+        }
+        ExecutionState::Scheduled => {
+            execution.scheduled_at.is_some()
+                && execution.started_at.is_none()
+                && execution.finished_at.is_none()
+        }
+        ExecutionState::Running
+        | ExecutionState::Recovering
+        | ExecutionState::RetryWaiting
+        | ExecutionState::HumanRequired => {
+            execution.scheduled_at.is_some()
+                && execution.started_at.is_some()
+                && execution.finished_at.is_none()
+        }
+        ExecutionState::Succeeded => {
+            execution.scheduled_at.is_some()
+                && execution.started_at.is_some()
+                && execution.finished_at.is_some()
+        }
+        ExecutionState::Failed | ExecutionState::Cancelled => {
+            execution.scheduled_at.is_some() && execution.finished_at.is_some()
+        }
+    }
+}
+
+const fn is_batch_execution_capability(capability: TaskCapability) -> bool {
+    matches!(
+        capability,
+        TaskCapability::ResourceExecution
+            | TaskCapability::SubmissionExecute
+            | TaskCapability::DurationReport
+            | TaskCapability::Discussion
+            | TaskCapability::Practice
+    )
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BatchExecutionAttempt {
+    pub id: BatchExecutionAttemptId,
+    pub batch_execution_id: BatchExecutionId,
+    pub attempt_no: u32,
+    pub started_at: Timestamp,
+    pub finished_at: Option<Timestamp>,
+    pub result: Option<AttemptResult>,
+    pub error_class: Option<ProviderErrorClass>,
+    pub provider_trace_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum BatchExecutionValidationError {
+    #[error("batch execution identity, authority, count or lifecycle is invalid")]
+    Invalid,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -198,6 +317,40 @@ mod tests {
         assert_eq!(
             progress.validate(),
             Err(ExecutionProgressError::PercentOutOfRange)
+        );
+    }
+
+    #[test]
+    fn batch_execution_requires_independent_course_scope_and_canonical_children() {
+        let now = Utc::now();
+        let mut batch = BatchExecution {
+            id: BatchExecutionId::new(),
+            provider_account_id: ProviderAccountId::new(),
+            course_id: CourseId::new(),
+            requested_capabilities: vec![
+                TaskCapability::ResourceExecution,
+                TaskCapability::DurationReport,
+            ],
+            expected_child_count: 2,
+            requested_by: Some(UserId::new()),
+            request_source: RequestSource::WebUi,
+            state: ExecutionState::Scheduled,
+            scheduled_at: Some(now),
+            started_at: None,
+            finished_at: None,
+            created_at: now,
+        };
+        assert_eq!(batch.validate(), Ok(()));
+        batch.requested_capabilities.swap(0, 1);
+        assert_eq!(
+            batch.validate(),
+            Err(BatchExecutionValidationError::Invalid)
+        );
+        batch.requested_capabilities.swap(0, 1);
+        batch.expected_child_count = 8_193;
+        assert_eq!(
+            batch.validate(),
+            Err(BatchExecutionValidationError::Invalid)
         );
     }
 }

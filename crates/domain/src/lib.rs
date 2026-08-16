@@ -75,8 +75,9 @@ pub use credits::{
     CreditTransaction, CreditTransactionType, PriceQuote,
 };
 pub use execution::{
-    AttemptResult, Execution, ExecutionAttempt, ExecutionLease, ExecutionLogEvent,
-    ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, ProviderErrorClass, RequestSource,
+    AttemptResult, BatchExecution, BatchExecutionAttempt, BatchExecutionValidationError, Execution,
+    ExecutionAttempt, ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
+    ExecutionState, LogLevel, ProviderErrorClass, RequestSource,
 };
 pub use external_oauth::{
     ExternalOauthPending, ExternalOauthPendingCreate, ExternalOauthPendingError,
