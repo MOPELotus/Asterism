@@ -793,6 +793,25 @@ classifications are not a send path. `Accepted` is not verified completion,
 and even `AlreadySigned` remains an endpoint/preflight response rather than the
 required independent fresh account-result readback.
 
+QR sign-in has a separately bounded Capture-input checkpoint. Ylim's fixed
+source names the dynamic submit fields and its refresh path constructs a
+`SIGNIN:aid=...&source=15&Code=...&enc=...` payload; `mini-hbut` independently
+parses allowlisted Chaoxing HTTPS QR URLs carrying `activeId|id` plus `enc`.
+Asterism accepts either carrier only after fresh list/detail rebinding proves the
+same exact `QrCode` activity. The parser requires one non-ambiguous activity ID,
+one bounded dynamic `enc`, exact `source=15` for the `SIGNIN:` carrier and an
+optional bounded refresh code. It rejects userinfo, custom ports, foreign hosts,
+duplicate aliases/fields and foreign activities. Raw QR material is zeroized and
+redacted; only source, binding digest, material digest and refresh-code presence
+are public.
+
+This parser does not settle the mutation sequence. Ylim defines a two-step
+pre-sign plus `stuSignajax` flow and does not wire QR dispatch from its main
+handler, while `mini-hbut` treats one different `preSign` shape as terminal.
+Neither supplies an independent account-result readback. No QR request is
+therefore exposed until Main provides the durable multi-step authority and a
+fresh verification surface.
+
 Ylim also implements event-driven discovery through a distinct WebIM path:
 
 ```text

@@ -28,11 +28,14 @@ fixtures/providers/chaoxing/
   sign/
     activities-mixed.json
     detail-normal.json
+    detail-qr.json
     pre-sign-no-completion.html
     pre-sign-completed.html
     receipt-accepted.txt
     receipt-already-signed.txt
     receipt-window-closed.txt
+    qr-url.txt
+    qr-signin.txt
     webim-me.html
     webim-sign-event.json
     webim-non-sign-event.json
@@ -393,6 +396,13 @@ every fixture before staging it.
   that request is required for the later sign record. GET method semantics must
   not bypass issue persistence, and an ambiguous pre-sign outcome must not be
   replayed without a separately evidenced recovery rule.
+  QR material fixtures add one freshly rebound `otherId=2` detail, one
+  allowlisted HTTPS URL with HTML-escaped query separators and one exact
+  `SIGNIN:aid=...&source=15&Code=...&enc=...` payload. Tests require the same
+  activity ID and source, preserve only zeroizing redacted material plus
+  digests, and reject foreign hosts/activities, duplicate ID aliases, duplicate
+  `enc`, wrong source and non-QR variants. They do not issue `preSign` or
+  `stuSignajax` and are not completion evidence.
   WebIM fixtures separately cover the exact three bootstrap selectors, one
   `atype=2` `att_chat_course` identity and one non-sign activity. Tests bind
   credentials to account/correlation without exposing token/UID/name, retain

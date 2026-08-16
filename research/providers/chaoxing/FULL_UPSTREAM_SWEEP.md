@@ -264,3 +264,8 @@ cleanup, a separate OIDC identity platform, root/website documentation and
 website behavior. Recursive Git tree comparison confirms that every
 Chaoxing-check-in source, protocol document and related UI blob is byte-identical,
 so this pin update carries no Chaoxing capability or protocol delta.
+The same fixed-source re-read closed only the Provider-local QR Capture-input
+shape: one allowlisted HTTPS QR URL or exact Ylim `SIGNIN:` carrier is now bound
+to a fresh QR activity and retained as zeroizing digests. Ylim leaves QR dispatch
+unwired and `mini-hbut` uses a conflicting terminal `preSign` shortcut, so no
+mutation or completion capability is inferred.

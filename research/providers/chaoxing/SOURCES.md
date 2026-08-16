@@ -94,7 +94,11 @@ validation is still required.
   fixed Work form confirms type 2 still uses one `answer{qid}` plus
   `answertype{qid}` field. Asterism now fixture-covers only the exact
   page-bound single-blank independent Work subset and keeps multi-blank and
-  short-answer semantics fail-closed.
+  short-answer semantics fail-closed. The same refresh also re-read Ylim's
+  unwired QR submit fields and refresh `SIGNIN:` carrier plus `mini-hbut`'s QR
+  URL parser/terminal-preSign shortcut. Asterism retains only strict,
+  freshly-bound zeroizing QR material parsing; the conflicting mutation chains
+  and absent independent readback remain blocked.
 - 2026-08-15: re-checked Ylim's ordinary `handleSign` chain at the fixed pin.
   Its source explicitly requires issuing `preSign` before a later sign record
   can be created and always calls it before variant dispatch. Asterism

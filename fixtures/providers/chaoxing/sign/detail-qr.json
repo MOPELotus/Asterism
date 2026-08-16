@@ -1,0 +1,13 @@
+{
+  "id": 7003,
+  "courseId": "1001",
+  "clazzId": 2001,
+  "activeType": 2,
+  "type": 2,
+  "otherId": 2,
+  "status": 1,
+  "name": "QR attendance",
+  "ifRefreshEwm": 1,
+  "enc": "PRIVATE_DETAIL_ENC_NOT_RETAINED",
+  "code": "PRIVATE_DETAIL_CODE_NOT_RETAINED"
+}
