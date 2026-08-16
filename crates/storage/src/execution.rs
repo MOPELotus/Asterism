@@ -3102,7 +3102,7 @@ async fn insert_retry_job(
     Ok(())
 }
 
-async fn insert_worker_audit(
+pub(crate) async fn insert_worker_audit(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     execution_id: ExecutionId,
     worker_id: &str,
@@ -4983,7 +4983,10 @@ fn decode_optional_timestamp(value: Option<&str>) -> Result<Option<Timestamp>, S
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
     use asterism_domain::{
         CompletionDiagnosis, CompletionPolicySnapshot, CompletionWorkflowBinding, CreditAmount,
@@ -4992,16 +4995,19 @@ mod tests {
         SubmissionAttemptReceipt, SubmissionDraftId, SubmissionReceipt, TaskId,
     };
     use asterism_provider_api::{
-        ProviderRuntimeSettingsSchema, ProviderSettingDefinition, ProviderSettingKind,
-        ProviderSettingScope,
+        ExecutionParentBatchSnapshot, ProviderRuntimeSettingsSchema, ProviderSettingDefinition,
+        ProviderSettingKind, ProviderSettingScope,
     };
-    use asterism_secrets::{SecretAccess, SecretActor, SecretKey, SecretValue};
+    use asterism_secrets::{SecretAccess, SecretActor, SecretKey, SecretStoreError, SecretValue};
     use sha2::Digest as _;
     use sqlx::Row;
 
     use super::*;
     use crate::{
-        CompletionWorkflowRepository, QuestionSessionArtifactRepository, QuestionSessionRepository,
+        CompletionWorkflowRepository, ExecutionParentBatchSnapshotBindOutcome,
+        ExecutionParentBatchSnapshotBindRequest, ExecutionParentBatchSnapshotRecord,
+        ExecutionParentBatchSnapshotRepository, ExecutionParentBatchSnapshotResolveRequest,
+        QuestionSessionArtifactRepository, QuestionSessionRepository,
         SqliteCompletionWorkflowRepository, SqliteQuestionSessionRepository,
     };
 
@@ -5059,6 +5065,182 @@ mod tests {
                 .get("count");
             assert_eq!(count, 1, "unexpected row count in {table}");
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test covers encrypted binding, replay, conflict, ciphertext and tamper boundaries together"
+    )]
+    async fn parent_batch_snapshot_is_attempt_bound_immutable_and_digest_checked() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let keyring = Arc::new(
+            crate::SecretKeyring::new(
+                "parent-batch-key",
+                BTreeMap::from([("parent-batch-key".to_owned(), SecretKey::new([27; 32]))]),
+            )
+            .unwrap(),
+        );
+        let parent_repository = crate::SqliteSecretStore::new(database.clone(), keyring)
+            .execution_parent_batch_snapshots(ProviderId::new("test").unwrap());
+        let now = Utc::now();
+        let execution = scheduled_execution(owner, task_id, now);
+        repository
+            .schedule_execution(test_request(&execution, owner, "parent-batch-snapshot"))
+            .await
+            .unwrap();
+        let (job_id, attempt) = start_execution(&repository, &database, &execution, now).await;
+        let bound_at = now + chrono::Duration::seconds(2);
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("execution-worker"),
+            correlation_id: "parent-batch-bind".to_owned(),
+            reason: "freeze complete parent batch before child dispatch".to_owned(),
+        };
+        let snapshot = || {
+            ExecutionParentBatchSnapshot::try_new(
+                ProviderId::new("test").unwrap(),
+                "test.parent_authority.v1",
+                SecretValue::new(b"AUTHORITY_SECRET".to_vec()),
+                "test.complete_batch.v1",
+                SecretValue::new(b"FULL_BATCH_BODY".to_vec()),
+            )
+            .unwrap()
+        };
+        let request = |snapshot| ExecutionParentBatchSnapshotBindRequest {
+            execution_id: execution.id,
+            attempt_id: attempt.id,
+            scheduler_job_id: job_id,
+            worker_id: "worker-a",
+            snapshot,
+            correlation_id: "parent-batch-bind",
+            at: bound_at,
+            access: &access,
+        };
+        let first = snapshot();
+        let expected = ExecutionParentBatchSnapshotRecord {
+            execution_id: execution.id,
+            attempt_id: attempt.id,
+            provider_id: ProviderId::new("test").unwrap(),
+            authority_type: "test.parent_authority.v1".to_owned(),
+            authority_digest: first.authority_digest(),
+            batch_type: "test.complete_batch.v1".to_owned(),
+            batch_digest: first.batch_digest(),
+            bound_at,
+        };
+        assert_eq!(
+            parent_repository
+                .bind_execution_parent_batch_snapshot(request(first))
+                .await
+                .unwrap(),
+            ExecutionParentBatchSnapshotBindOutcome::Bound(expected.clone())
+        );
+        let resolved = parent_repository
+            .resolve_execution_parent_batch_snapshot(ExecutionParentBatchSnapshotResolveRequest {
+                execution_id: execution.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: job_id,
+                worker_id: "worker-a",
+                correlation_id: "parent-batch-bind",
+                at: bound_at,
+                access: &access,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.metadata, expected);
+        assert_eq!(
+            resolved.snapshot.authority().expose_secret(),
+            b"AUTHORITY_SECRET"
+        );
+        assert_eq!(
+            resolved.snapshot.batch().expose_secret(),
+            b"FULL_BATCH_BODY"
+        );
+        assert_eq!(
+            parent_repository
+                .bind_execution_parent_batch_snapshot(request(snapshot()))
+                .await
+                .unwrap(),
+            ExecutionParentBatchSnapshotBindOutcome::AlreadyBound(expected.clone())
+        );
+
+        let changed = ExecutionParentBatchSnapshot::try_new(
+            ProviderId::new("test").unwrap(),
+            "test.parent_authority.v1",
+            SecretValue::new(b"DIFFERENT_AUTHORITY".to_vec()),
+            "test.complete_batch.v1",
+            SecretValue::new(b"FULL_BATCH_BODY".to_vec()),
+        )
+        .unwrap();
+        assert!(matches!(
+            parent_repository
+                .bind_execution_parent_batch_snapshot(request(changed))
+                .await,
+            Err(SecretStoreError::VersionConflict)
+        ));
+        let encrypted: (Vec<u8>, Vec<u8>) = sqlx::query_as(
+            "SELECT authority.encrypted_data, batch.encrypted_data \
+             FROM execution_parent_batch_snapshots AS snapshot \
+             INNER JOIN secret_blobs AS authority \
+                ON authority.id = snapshot.authority_secret_blob_id \
+             INNER JOIN secret_blobs AS batch ON batch.id = snapshot.batch_secret_blob_id \
+             WHERE snapshot.execution_id = ?",
+        )
+        .bind(execution.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(
+            !encrypted
+                .0
+                .windows(b"AUTHORITY_SECRET".len())
+                .any(|window| { window == b"AUTHORITY_SECRET" })
+        );
+        assert!(
+            !encrypted
+                .1
+                .windows(b"FULL_BATCH_BODY".len())
+                .any(|window| { window == b"FULL_BATCH_BODY" })
+        );
+        let audit_metadata: String = sqlx::query_scalar(
+            "SELECT metadata_sanitized_json FROM audit_records \
+             WHERE action = 'execution_parent_batch_snapshot_bound' AND resource_id = ?",
+        )
+        .bind(execution.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(!audit_metadata.contains("AUTHORITY_SECRET"));
+        assert!(!audit_metadata.contains("FULL_BATCH_BODY"));
+        assert!(audit_metadata.contains("[HASHED]"));
+
+        sqlx::query(
+            "UPDATE secret_blobs SET encrypted_data = X'00' WHERE id = ( \
+                SELECT batch_secret_blob_id FROM execution_parent_batch_snapshots \
+                WHERE execution_id = ? \
+             )",
+        )
+        .bind(execution.id.to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            parent_repository
+                .resolve_execution_parent_batch_snapshot(
+                    ExecutionParentBatchSnapshotResolveRequest {
+                        execution_id: execution.id,
+                        attempt_id: attempt.id,
+                        scheduler_job_id: job_id,
+                        worker_id: "worker-a",
+                        correlation_id: "parent-batch-bind",
+                        at: bound_at,
+                        access: &access,
+                    }
+                )
+                .await,
+            Err(SecretStoreError::AuthenticationFailed)
+        ));
     }
 
     #[tokio::test]

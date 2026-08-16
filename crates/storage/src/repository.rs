@@ -26,9 +26,9 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
-    ExecutionMutationPlan, ExecutionMutationSequencePlan, ProviderExecutionPlanArtifact,
-    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
-    ProviderSettingScope, ResolvedProviderRuntimeSettings,
+    ExecutionMutationPlan, ExecutionMutationSequencePlan, ExecutionParentBatchSnapshot,
+    ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
+    ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -2580,6 +2580,70 @@ pub trait ExecutionAtomicMutationRepository: Send + Sync {
         &self,
         request: ExecutionAtomicMutationRecoveryVerificationRequest<'_>,
     ) -> Result<ExecutionAtomicMutationVerificationOutcome, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionParentBatchSnapshotRecord {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub provider_id: ProviderId,
+    pub authority_type: String,
+    pub authority_digest: [u8; 32],
+    pub batch_type: String,
+    pub batch_digest: [u8; 32],
+    pub bound_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct ExecutionParentBatchSnapshotBindRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub snapshot: ExecutionParentBatchSnapshot,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionParentBatchSnapshotResolveRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct ResolvedExecutionParentBatchSnapshot {
+    pub metadata: ExecutionParentBatchSnapshotRecord,
+    pub snapshot: ExecutionParentBatchSnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionParentBatchSnapshotBindOutcome {
+    Bound(ExecutionParentBatchSnapshotRecord),
+    AlreadyBound(ExecutionParentBatchSnapshotRecord),
+}
+
+/// Durable encrypted parent authority and complete batch snapshot binding.
+/// The first active attempt to bind the Provider-scoped material wins
+/// permanently for the Execution; later workers may only resolve the exact
+/// immutable record through an authorized, claimed worker context.
+#[async_trait]
+pub trait ExecutionParentBatchSnapshotRepository: Send + Sync {
+    async fn bind_execution_parent_batch_snapshot(
+        &self,
+        request: ExecutionParentBatchSnapshotBindRequest<'_>,
+    ) -> Result<ExecutionParentBatchSnapshotBindOutcome, SecretStoreError>;
+
+    async fn resolve_execution_parent_batch_snapshot(
+        &self,
+        request: ExecutionParentBatchSnapshotResolveRequest<'_>,
+    ) -> Result<Option<ResolvedExecutionParentBatchSnapshot>, SecretStoreError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

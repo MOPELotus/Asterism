@@ -13,6 +13,7 @@ mod course;
 mod credit;
 mod database;
 mod execution;
+mod execution_parent_batch;
 mod external_oauth;
 mod interactive_auth;
 mod lease;
@@ -48,6 +49,7 @@ pub use course::SqliteCourseProgressRepository;
 pub use credit::{CreditGrant, CreditGrantOutcome, CreditGrantResult, SqliteCreditRepository};
 pub use database::{Database, StorageError};
 pub use execution::SqliteExecutionRepository;
+pub use execution_parent_batch::SqliteExecutionParentBatchSnapshotRepository;
 pub use interactive_auth::SqliteInteractiveAuthContinuationRepository;
 pub use lease::{LeaseAcquireOutcome, SqliteExecutionLeaseRepository};
 pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRepository};
@@ -100,10 +102,13 @@ pub use repository::{
     ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
     ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
     ExecutionCapabilityStepState, ExecutionDetail, ExecutionLeaseRepository,
-    ExecutionLogAppendRequest, ExecutionLogPage, ExecutionPage, ExecutionProgressUpdate,
-    ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
-    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionStrictCompletionRetryConfirmation,
+    ExecutionLogAppendRequest, ExecutionLogPage, ExecutionPage,
+    ExecutionParentBatchSnapshotBindOutcome, ExecutionParentBatchSnapshotBindRequest,
+    ExecutionParentBatchSnapshotRecord, ExecutionParentBatchSnapshotRepository,
+    ExecutionParentBatchSnapshotResolveRequest, ExecutionProgressUpdate, ExecutionQueryRepository,
+    ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest, ExecutionRepository,
+    ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
+    ExecutionScheduleRequest, ExecutionStrictCompletionRetryConfirmation,
     ExecutionStrictCompletionRetryRequest, ExecutionSubmissionRepository,
     ExecutionVerificationRecoveryRepository, ExternalOauthClaim, GlobalAnswerCorpusEvidence,
     InteractiveAuthAbortRequest, InteractiveAuthCandidateFailureRequest,
@@ -135,17 +140,18 @@ pub use repository::{
     QuestionSessionTransition, QuestionSnapshot, QuestionSnapshotRepository,
     ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
     ResolvedBrowserBridgeWorkflowContext, ResolvedBrowserBridgeWorkflowPlan,
-    ResolvedInteractiveAuthCandidate, ResolvedQuestionReadContinuation,
-    ResolvedQuestionSessionContinuation, ScanScheduleRepository, SchedulerRepository,
-    ScoreImprovementBeginRequest, ScoreImprovementObserveRequest, ScoreImprovementWorkflowRecord,
-    ServiceTokenPage, ServiceTokenQueryRepository, SessionRepository, StrictCompletionBeginRequest,
-    StrictCompletionExecutionObservationRecord, StrictCompletionExecutionObservationRequest,
-    StrictCompletionObserveRequest, StrictCompletionWorkflowRecord, SubmissionDraftRepository,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
-    TaskLifecycleMutation, TaskLifecycleMutationOutcome, TaskLifecycleReceipt,
-    TaskLifecycleRepository, TaskPage, TaskQueryRepository, TaskRepository, TaskRuntimeRepository,
-    UserAdminCreate, UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate,
-    UserAdminUpdateOutcome, UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
+    ResolvedExecutionParentBatchSnapshot, ResolvedInteractiveAuthCandidate,
+    ResolvedQuestionReadContinuation, ResolvedQuestionSessionContinuation, ScanScheduleRepository,
+    SchedulerRepository, ScoreImprovementBeginRequest, ScoreImprovementObserveRequest,
+    ScoreImprovementWorkflowRecord, ServiceTokenPage, ServiceTokenQueryRepository,
+    SessionRepository, StrictCompletionBeginRequest, StrictCompletionExecutionObservationRecord,
+    StrictCompletionExecutionObservationRequest, StrictCompletionObserveRequest,
+    StrictCompletionWorkflowRecord, SubmissionDraftRepository, SubmissionReceiptPersistRequest,
+    SubmissionResultPersistRequest, SubmissionResultRepository, TaskLifecycleMutation,
+    TaskLifecycleMutationOutcome, TaskLifecycleReceipt, TaskLifecycleRepository, TaskPage,
+    TaskQueryRepository, TaskRepository, TaskRuntimeRepository, UserAdminCreate,
+    UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate, UserAdminUpdateOutcome,
+    UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

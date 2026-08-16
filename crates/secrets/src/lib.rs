@@ -104,6 +104,7 @@ pub enum SecretPurpose {
     ServiceToken,
     IntegrationCredential,
     BrowserJobCredential,
+    ProviderExecutionState,
 }
 
 impl SecretPurpose {

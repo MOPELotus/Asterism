@@ -139,7 +139,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 72);
+        assert_eq!(migration_count, 73);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -255,6 +255,35 @@ mod tests {
             columns
                 .iter()
                 .any(|row| row.get::<String, _>("name") == "retry_not_before")
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_batch_snapshot_migration_is_present_on_a_fresh_database() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let columns = sqlx::query("PRAGMA table_info(execution_parent_batch_snapshots)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        let names = columns
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "execution_id",
+                "execution_attempt_id",
+                "provider_id",
+                "authority_type",
+                "authority_digest",
+                "authority_secret_blob_id",
+                "batch_type",
+                "batch_digest",
+                "batch_secret_blob_id",
+                "bound_at",
+            ]
         );
     }
 

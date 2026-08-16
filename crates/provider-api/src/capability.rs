@@ -315,7 +315,8 @@ const fn capture_purpose_rank(purpose: SecretPurpose) -> u8 {
         SecretPurpose::WebSessionToken
         | SecretPurpose::ServiceToken
         | SecretPurpose::IntegrationCredential
-        | SecretPurpose::BrowserJobCredential => u8::MAX,
+        | SecretPurpose::BrowserJobCredential
+        | SecretPurpose::ProviderExecutionState => u8::MAX,
     }
 }
 
@@ -1774,6 +1775,123 @@ impl fmt::Debug for ProviderExecutionPlanArtifact {
             .field("payload_sanitized", &"[REDACTED]")
             .finish()
     }
+}
+
+const MAX_PARENT_BATCH_AUTHORITY_BYTES: usize = 4 * 1_024;
+const MAX_PARENT_BATCH_SNAPSHOT_BYTES: usize = 8 * 1_024 * 1_024;
+
+pub struct ExecutionParentBatchSnapshot {
+    provider_id: ProviderId,
+    authority_type: String,
+    authority_digest: [u8; 32],
+    authority: SecretValue,
+    batch_type: String,
+    batch_digest: [u8; 32],
+    batch: SecretValue,
+}
+
+impl ExecutionParentBatchSnapshot {
+    /// Creates one provider-scoped private parent authority and its complete
+    /// bounded batch snapshot. Core persists the pair only through an
+    /// encrypted repository bound to one parent Execution Attempt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign types, empty or oversized bytes, and non-digestable
+    /// parent material.
+    pub fn try_new(
+        provider_id: ProviderId,
+        authority_type: impl Into<String>,
+        authority: SecretValue,
+        batch_type: impl Into<String>,
+        batch: SecretValue,
+    ) -> ProviderResult<Self> {
+        let authority_type = authority_type.into();
+        let batch_type = batch_type.into();
+        let authority_bytes = authority.expose_secret();
+        let batch_bytes = batch.expose_secret();
+        if !valid_provider_execution_artifact_type(&provider_id, &authority_type)
+            || !valid_provider_execution_artifact_type(&provider_id, &batch_type)
+            || authority_bytes.is_empty()
+            || authority_bytes.len() > MAX_PARENT_BATCH_AUTHORITY_BYTES
+            || batch_bytes.is_empty()
+            || batch_bytes.len() > MAX_PARENT_BATCH_SNAPSHOT_BYTES
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider parent batch snapshot is invalid",
+            ));
+        }
+        Ok(Self {
+            provider_id,
+            authority_digest: digest_parent_batch_bytes(
+                b"asterism.provider-parent-batch-authority.v1\0",
+                &authority_type,
+                authority_bytes,
+            ),
+            authority_type,
+            authority,
+            batch_digest: digest_parent_batch_bytes(
+                b"asterism.provider-parent-batch-snapshot.v1\0",
+                &batch_type,
+                batch_bytes,
+            ),
+            batch_type,
+            batch,
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn authority_type(&self) -> &str {
+        &self.authority_type
+    }
+
+    pub const fn authority_digest(&self) -> [u8; 32] {
+        self.authority_digest
+    }
+
+    pub const fn authority(&self) -> &SecretValue {
+        &self.authority
+    }
+
+    pub fn batch_type(&self) -> &str {
+        &self.batch_type
+    }
+
+    pub const fn batch_digest(&self) -> [u8; 32] {
+        self.batch_digest
+    }
+
+    pub const fn batch(&self) -> &SecretValue {
+        &self.batch
+    }
+}
+
+impl fmt::Debug for ExecutionParentBatchSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionParentBatchSnapshot")
+            .field("provider_id", &self.provider_id)
+            .field("authority_type", &self.authority_type)
+            .field("authority_digest", &"[HASHED]")
+            .field("authority", &self.authority)
+            .field("batch_type", &self.batch_type)
+            .field("batch_digest", &"[HASHED]")
+            .field("batch", &self.batch)
+            .finish()
+    }
+}
+
+fn digest_parent_batch_bytes(prefix: &[u8], value_type: &str, bytes: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(prefix);
+    digest.update(value_type.as_bytes());
+    digest.update([0]);
+    digest.update(bytes);
+    digest.finalize().into()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3291,6 +3409,62 @@ mod execution_mutation_tests {
         assert!(!debug.contains("9, 9"));
         assert!(ExecutionMutationReceipt::new_retryable_rejection(1, [9; 32], 0).is_err());
         assert!(ExecutionMutationReceipt::new_retryable_rejection(1, [9; 32], 86_401).is_err());
+    }
+}
+
+#[cfg(test)]
+mod execution_parent_batch_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_is_provider_scoped_digest_bound_and_redacted() {
+        let provider = ProviderId::new("welearn").unwrap();
+        let snapshot = ExecutionParentBatchSnapshot::try_new(
+            provider.clone(),
+            "welearn.parent-authority.v1",
+            SecretValue::new(b"PRIVATE_AUTHORITY".to_vec()),
+            "welearn.batch-plan.v1",
+            SecretValue::new(b"PRIVATE_BATCH".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(snapshot.provider_id(), &provider);
+        assert_ne!(snapshot.authority_digest(), [0; 32]);
+        assert_ne!(snapshot.batch_digest(), [0; 32]);
+        let debug = format!("{snapshot:?}");
+        assert!(debug.contains("[HASHED]"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("PRIVATE_AUTHORITY"));
+        assert!(!debug.contains("PRIVATE_BATCH"));
+        assert!(
+            ExecutionParentBatchSnapshot::try_new(
+                provider.clone(),
+                "foreign.parent.v1",
+                SecretValue::new(vec![1]),
+                "welearn.batch-plan.v1",
+                SecretValue::new(vec![2]),
+            )
+            .is_err()
+        );
+        assert!(
+            ExecutionParentBatchSnapshot::try_new(
+                provider.clone(),
+                "welearn.parent-authority.v1",
+                SecretValue::new(vec![1; 4 * 1_024 + 1]),
+                "welearn.batch-plan.v1",
+                SecretValue::new(vec![2]),
+            )
+            .is_err()
+        );
+        assert!(
+            ExecutionParentBatchSnapshot::try_new(
+                provider,
+                "welearn.parent-authority.v1",
+                SecretValue::new(vec![1]),
+                "welearn.batch-plan.v1",
+                SecretValue::new(vec![2; 8 * 1_024 * 1_024 + 1]),
+            )
+            .is_err()
+        );
     }
 }
 

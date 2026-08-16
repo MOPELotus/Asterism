@@ -5015,3 +5015,26 @@ Execution then succeeds. This contract carries no Provider-private stage
 output: UAI upload versions/keys/answers and WELearn parent batch authority must
 still use separately encrypted, atomically bound state rather than a sanitized
 plan artifact or mutation digest.
+
+## Two-hundred-and-seventy-second Phase 0 slice
+
+The shared Core boundary now models a Provider-scoped parent authority together
+with the complete bounded batch snapshot that it authorizes. Both private
+values are held as zeroizing `SecretValue`s, type-names and SHA-256 digests are
+frozen in the immutable Execution record, and the two values are encrypted
+under separate `ProviderExecutionState` secret blobs in the same transaction.
+
+Binding requires the current live worker claim, the exact unfinished Attempt,
+the Running Execution state and the permanently scoped Provider account. A
+second bind is accepted only when the Attempt, Provider, type-names and
+digests are identical; another Attempt or changed material fails closed. A
+resolve path requires the same worker claim and an authorized Core/Provider
+runtime access, re-authenticates both encrypted blobs, rebuilds the typed
+snapshot and verifies both digests before returning private bytes. Recovery may
+resolve the frozen record but cannot create or replace it. Audit metadata
+contains only the binding identity, type-names and hash placeholders, never
+authority or batch bytes.
+
+This is a persistence and dispatch boundary only. It does not create child
+Executions, schedule a batch, or grant a Provider a mutation sink; those remain
+explicit capability and Engine decisions after the parent snapshot is frozen.

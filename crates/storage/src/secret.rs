@@ -184,6 +184,19 @@ impl SqliteSecretStore {
         )
     }
 
+    /// Builds a permanently Provider-scoped encrypted repository for the
+    /// parent authority and complete batch snapshot frozen before child work.
+    pub fn execution_parent_batch_snapshots(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteExecutionParentBatchSnapshotRepository {
+        crate::SqliteExecutionParentBatchSnapshotRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
     async fn replace_provider_credentials_internal(
         &self,
         request: CredentialSetCommit<'_>,
@@ -2341,6 +2354,7 @@ fn encode_purpose(purpose: SecretPurpose) -> &'static str {
         SecretPurpose::ServiceToken => "service_token",
         SecretPurpose::IntegrationCredential => "integration_credential",
         SecretPurpose::BrowserJobCredential => "browser_job_credential",
+        SecretPurpose::ProviderExecutionState => "provider_execution_state",
     }
 }
 
@@ -2356,6 +2370,7 @@ fn decode_purpose(value: &str) -> Result<SecretPurpose, SecretStoreError> {
         "service_token" => Ok(SecretPurpose::ServiceToken),
         "integration_credential" => Ok(SecretPurpose::IntegrationCredential),
         "browser_job_credential" => Ok(SecretPurpose::BrowserJobCredential),
+        "provider_execution_state" => Ok(SecretPurpose::ProviderExecutionState),
         _ => Err(SecretStoreError::Storage),
     }
 }
