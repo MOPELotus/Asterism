@@ -1328,6 +1328,11 @@ entry to accepted-result readback: it delegates to the existing result-state
 verification only after input, grant, object, Draft, semantic plan and dynamic
 request have all been rebound. A foreign account request or otherwise-valid
 final plan from another object chain cannot reach readback evidence.
+The lower-level result-to-plan/readback helpers are crate-private; external
+integration receives only the recovered-final owner, so it cannot skip this
+predecessor validation. Offline accepted-result coverage now drives that owner
+through the exact receipt-versioned single-upload readback and obtains the
+same-ordinal `ExecutionMutationVerification` over the readback digest.
 
 Once an exact single or compound final plan already exists, UAI now projects a
 credential-free `uai.upload.final-plan.v1` scheduling artifact whose binding

@@ -531,3 +531,9 @@ final-submit identity or allowed a self-consistent final plan to detach from its
 object-upload predecessor. UAI now rebinds the decoded private final plan to the
 full predecessor chain and exact current Course/openid request before accepted
 readback; this remains local fail-closed recovery over unchanged donor routes.
+
+The recovered-readback entry checkpoint later on 2026-08-16 reused the same
+unchanged upstream result. It narrows local API authority only: raw
+result-to-plan readback is no longer externally callable, while the fully
+recovered owner exercises the already audited receipt-versioned verification
+route. No donor behavior or verification claim changed.

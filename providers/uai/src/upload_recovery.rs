@@ -455,6 +455,23 @@ mod tests {
             rebound.object_request_digest(),
             object_state.uploaded().object_request_digest()
         );
+        let accepted_document = r#"{"code":0,"data":{"course_id":"course-instance-1","group_id":"group-upload","version":"upload-v1"}}"#;
+        let accepted_outcome = final_request
+            .classify_final_response(1, accepted_document, "course-instance-1", "group-upload")
+            .unwrap();
+        let accepted_result = final_sequence
+            .accepted_result_state(&accepted_outcome)
+            .unwrap();
+        let readback = single_upload_verification_document("course/42/nothing.mp3", "upload-v1");
+        let (verification, mutation_verification) = rebound
+            .verify_single_readback(&accepted_result, &readback)
+            .unwrap();
+        assert_eq!(verification.submission_version(), "upload-v1");
+        assert_eq!(mutation_verification.ordinal(), 1);
+        assert_eq!(
+            mutation_verification.observation_digest(),
+            verification.result_digest()
+        );
 
         let encoded_foreign =
             EncodedUaiUploadFinalPlanState::for_single(&final_plan, &final_request).unwrap();
@@ -714,6 +731,40 @@ mod tests {
         };
         draft.validate().unwrap();
         draft
+    }
+
+    fn single_upload_verification_document(file_key: &str, version: &str) -> String {
+        let answer = json!({
+            "value": [],
+            "children": [{"value": [file_key], "isDone": true}],
+            "progress": {},
+            "record": {"url": ""},
+        })
+        .to_string();
+        let questions = json!([{
+            "instanceId": "0",
+            "answer": answer,
+            "context": "{\"state\":\"submitted\"}",
+        }])
+        .to_string();
+        json!({
+            "success": true,
+            "code": 0,
+            "data": {
+                "course": "course-instance-1",
+                "module": format!("group-upload-{version}"),
+                "state": {
+                    "version": version,
+                    "quesData": questions,
+                    "__EXTEND_DATA__": {"__SUBMIT_INFO__": {
+                        "course_id": "course-instance-1",
+                        "group_id": "group-upload",
+                        "version": version,
+                    }},
+                },
+            },
+        })
+        .to_string()
     }
 
     fn context() -> ProviderContext {

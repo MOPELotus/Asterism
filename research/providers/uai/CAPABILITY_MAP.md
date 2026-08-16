@@ -75,6 +75,10 @@ current Course-instance/openid request only to match its exact stored digest,
 then drops the request without dispatch. The resulting private recovered-final
 owner is the readback entry for accepted result state, preventing a valid plan
 from another object chain or account request from producing verification.
+Lower-level result/plan verification helpers are crate-private, so future Core
+integration cannot bypass the recovered-final owner. The exact single accepted
+path is covered through receipt-versioned readback into ordinal-bound mutation
+verification.
 
 ## Current implementation checkpoint
 

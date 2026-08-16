@@ -437,7 +437,7 @@ impl UaiUploadFinalResultState {
     ///
     /// Rejects a foreign final plan, malformed accepted state or any changed
     /// upload key/readback identity before constructing verification evidence.
-    pub fn verify_single_readback(
+    pub(crate) fn verify_single_readback(
         &self,
         document: &str,
         submission: &UaiUploadSubmission,
@@ -458,7 +458,7 @@ impl UaiUploadFinalResultState {
     ///
     /// Rejects a compound or foreign request state before reading any result
     /// evidence.
-    pub fn verify_single_plan_state(
+    pub(crate) fn verify_single_plan_state(
         &self,
         document: &str,
         final_plan: &UaiUploadFinalPlanState,
@@ -477,7 +477,7 @@ impl UaiUploadFinalResultState {
     ///
     /// Rejects a foreign Draft answer, judge descriptor, object key, sequence
     /// lineage or changed receipt-versioned readback before returning evidence.
-    pub fn verify_compound_readback(
+    pub(crate) fn verify_compound_readback(
         &self,
         document: &str,
         submission: &UaiCompoundUploadSubmission,
@@ -501,7 +501,7 @@ impl UaiUploadFinalResultState {
     ///
     /// Rejects a single, answer-substituted or request-substituted state before
     /// producing mutation verification evidence.
-    pub fn verify_compound_plan_state(
+    pub(crate) fn verify_compound_plan_state(
         &self,
         document: &str,
         final_plan: &UaiUploadFinalPlanState,
