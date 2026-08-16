@@ -33,6 +33,10 @@ Compound-oral verification now retains its exact validated readback digest
 directly in the main Provider owner, not only inside optional policy evidence.
 Complete legacy responses without strategy and score summary therefore still
 preserve exact result identity while exposing neither policy nor score.
+Its request owner separately retains a complete semantic-plan digest covering
+the same-ID Draft answer, ordinary judges and every oral value/extra in addition
+to the dynamic wire digest. Course/openid substitution changes the wire digest
+without changing semantics; a same-Draft-ID answer substitution changes both.
 
 The object-upload checkpoint additionally preserves Qiniu's optional bounded
 `hash`/ETag beside the exact donor-required key and hashes the complete accepted

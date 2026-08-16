@@ -1487,7 +1487,13 @@ available `tab_type=task` leaf, then materializes one zeroizing request owner
 containing the matching answer followed by the frozen oral slot in one
 `submitType=1` POST. Its request digest binds exact POST URL, content type,
 fresh Course instance, account openid and complete body independently from the
-semantic plan fingerprint; Native HTTP sends those same owned bytes. Every
+semantic plan fingerprint; Native HTTP sends those same owned bytes. The
+request owner now also carries an independent semantic binding digest over the
+complete immutable Draft ID, Task hierarchy/fingerprint, Course/protocol
+versions, ordinary Question/selected children/judges, oral instance and every
+oral value/extra/judge. Dynamic Course/openid changes alter only the wire
+request digest, while changing the matching answer under the same Draft ID
+changes both semantic binding and request digest. Every
 judge uses the fresh Course publish version and the oral judge retains exact
 `oral-sentence` labels. An
 accepted version is only a receipt. Verification reads exactly that version

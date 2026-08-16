@@ -175,6 +175,78 @@ impl UaiCompoundOralSubmission {
         &self.oral_instance_id
     }
 
+    pub(crate) fn plan_binding_digest(&self) -> ProviderResult<[u8; 32]> {
+        let mut digest = Sha256::new();
+        let ordinary_draft_id = Zeroizing::new(self.ordinary_draft_id.to_string());
+        for field in [
+            b"asterism:uai:compound-oral-plan-binding:v1".as_slice(),
+            ordinary_draft_id.as_bytes(),
+            self.remote_task_id.as_bytes(),
+            self.course_resource_id.as_bytes(),
+            self.unit_id.as_bytes(),
+            self.group_id.as_bytes(),
+            self.task_fingerprint.as_bytes(),
+            self.oral_instance_id.as_bytes(),
+            self.fingerprint.as_bytes(),
+        ] {
+            digest.update(field);
+            digest.update(b"\0");
+        }
+        digest.update(self.course_publish_version.to_be_bytes());
+        let versions = self.ordinary_plan.protocol_versions();
+        digest.update(versions.course().to_be_bytes());
+        digest.update(versions.answer().to_be_bytes());
+        let ordinary = self.ordinary_question()?;
+        digest.update(ordinary.remote_question_id().as_bytes());
+        digest.update(b"\0");
+        digest.update(ordinary.task_type().as_bytes());
+        digest.update(b"\0");
+        digest.update(
+            u32::try_from(ordinary.answer_children().len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for child in ordinary.answer_children() {
+            digest.update(u32::try_from(child.len()).unwrap_or(u32::MAX).to_be_bytes());
+            for value in child {
+                digest.update(value.as_bytes());
+                digest.update(b"\0");
+            }
+        }
+        for judge in ordinary.judges() {
+            digest.update(judge.question_type().as_bytes());
+            digest.update(b"\0");
+            digest.update(judge.reply_type().as_bytes());
+            digest.update(b"\0");
+        }
+        digest.update(
+            u32::try_from(self.oral_children.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for child in &self.oral_children {
+            let value =
+                Zeroizing::new(serde_json::to_vec(child.value.as_value()).map_err(|_| {
+                    invalid_response("UAI compound oral plan value cannot be fingerprinted")
+                })?);
+            digest.update(value.as_slice());
+            digest.update(b"\0");
+            if let Some(extra) = &child.extra {
+                let extra = Zeroizing::new(serde_json::to_vec(extra.as_value()).map_err(|_| {
+                    invalid_response("UAI compound oral plan extra cannot be fingerprinted")
+                })?);
+                digest.update([1]);
+                digest.update(extra.as_slice());
+            } else {
+                digest.update([0]);
+            }
+            digest.update(b"\0");
+            digest.update(child.judge_value.as_bytes());
+            digest.update(b"\0");
+        }
+        Ok(digest.finalize().into())
+    }
+
     fn ordinary_question(&self) -> ProviderResult<&UaiSubmissionQuestionPlan> {
         self.ordinary_plan
             .questions()
@@ -220,6 +292,7 @@ pub struct UaiCompoundOralSubmissionRequest {
     url: Zeroizing<String>,
     content_type: &'static str,
     body: Zeroizing<String>,
+    plan_binding_digest: [u8; 32],
     request_digest: [u8; 32],
 }
 
@@ -227,6 +300,10 @@ impl UaiCompoundOralSubmissionRequest {
     /// Exact pre-dispatch identity over method, route, content type and body.
     pub const fn request_digest(&self) -> [u8; 32] {
         self.request_digest
+    }
+
+    pub const fn plan_binding_digest(&self) -> [u8; 32] {
+        self.plan_binding_digest
     }
 
     pub(crate) fn expose_url(&self) -> &str {
@@ -249,6 +326,7 @@ impl fmt::Debug for UaiCompoundOralSubmissionRequest {
             .field("url", &"[ROUTE]")
             .field("content_type", &self.content_type)
             .field("body", &"[REDACTED]")
+            .field("plan_binding_digest", &"[HASHED]")
             .field("request_digest", &"[HASHED]")
             .finish()
     }
@@ -256,6 +334,7 @@ impl fmt::Debug for UaiCompoundOralSubmissionRequest {
 
 impl Drop for UaiCompoundOralSubmissionRequest {
     fn drop(&mut self) {
+        self.plan_binding_digest.zeroize();
         self.request_digest.zeroize();
     }
 }
@@ -736,6 +815,7 @@ pub fn build_compound_oral_submission_request(
     course_instance_id: &str,
     open_id: &str,
 ) -> ProviderResult<UaiCompoundOralSubmissionRequest> {
+    let plan_binding_digest = submission.plan_binding_digest()?;
     let body = build_compound_oral_submission_body(submission, course_instance_id, open_id)?;
     let url = Url::parse(UAI_COMPOUND_ORAL_SUBMISSION_ROUTE)
         .map_err(|_| invalid_response("UAI compound oral submission route is invalid"))?;
@@ -751,6 +831,7 @@ pub fn build_compound_oral_submission_request(
         url: Zeroizing::new(url.into()),
         content_type: UAI_COMPOUND_ORAL_CONTENT_TYPE,
         body,
+        plan_binding_digest,
         request_digest: digest.finalize().into(),
     })
 }
@@ -1158,13 +1239,22 @@ mod tests {
             build_compound_oral_submission_request(&submission, "course-instance-1", "openid-1")
                 .unwrap();
         assert_ne!(request.request_digest(), [0; 32]);
+        assert_ne!(request.plan_binding_digest(), [0; 32]);
         assert_eq!(request.request_digest(), duplicate.request_digest());
-        assert_ne!(
-            request.request_digest(),
-            build_compound_oral_submission_request(&submission, "course-instance-2", "openid-1",)
-                .unwrap()
-                .request_digest()
+        assert_eq!(
+            request.plan_binding_digest(),
+            duplicate.plan_binding_digest()
         );
+        assert_ne!(request.request_digest(), {
+            let foreign = build_compound_oral_submission_request(
+                &submission,
+                "course-instance-2",
+                "openid-1",
+            )
+            .unwrap();
+            assert_eq!(request.plan_binding_digest(), foreign.plan_binding_digest());
+            foreign.request_digest()
+        });
         assert_ne!(
             request.request_digest(),
             build_compound_oral_submission_request(&submission, "course-instance-1", "openid-2",)
@@ -1182,14 +1272,15 @@ mod tests {
             {"id": 5001, "answer": ""},
             {"id": 6001, "answer": ""}
         ]));
+        let draft = ordinary_draft();
         let first = build_compound_oral_submission(
             &detail(&["basic-scoop-content", "oral-sentence"]),
             "group:2001:unit-1:group-oral",
-            &ordinary_draft(),
+            &draft,
             &answer,
         )
         .unwrap();
-        let mut changed_draft = ordinary_draft();
+        let mut changed_draft = draft.clone();
         changed_draft.items[0].selected.answer = NormalizedAnswer::Pairs(vec![AnswerPair {
             left: "left".to_owned(),
             right: "changed".to_owned(),
@@ -1208,6 +1299,7 @@ mod tests {
             build_compound_oral_submission_request(&changed, "course-instance-1", "openid-1")
                 .unwrap();
         assert_ne!(first.request_digest(), changed.request_digest());
+        assert_ne!(first.plan_binding_digest(), changed.plan_binding_digest());
     }
 
     #[test]
