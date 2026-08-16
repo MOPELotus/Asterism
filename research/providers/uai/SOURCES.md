@@ -538,3 +538,9 @@ result-to-plan readback is no longer externally callable, while the fully
 recovered single and compound owners exercise the already audited
 receipt-versioned verification routes. No donor behavior or verification claim
 changed.
+
+The compound-oral result-digest checkpoint later on 2026-08-16 reused the same
+unchanged donor result. It corrects local evidence ownership only: the exact
+validated readback digest now survives even when optional strategy and score
+summary fields are absent. No route, answer shape, score rule or completion
+claim changed.

@@ -1493,7 +1493,10 @@ judge uses the fresh Course publish version and the oral judge retains exact
 accepted version is only a receipt. Verification reads exactly that version
 and requires the complete ordered two-module user-module state, exact ordinary
 answer equality, the same oral instance, and every exact scalar-empty,
-empty-array or non-empty child value plus optional extra. Fresh Group progress
+empty-array or non-empty child value plus optional extra. The verification
+owner always retains the exact complete readback digest independently of
+optional policy fields; a complete legacy response without strategy/summary
+still produces that digest but no policy or score. Fresh Group progress
 remains the only completion authority. Shared Core still needs one compound
 Draft/Attempt slot before the Provider-private preparation and transport can be
 exposed as a public capability.

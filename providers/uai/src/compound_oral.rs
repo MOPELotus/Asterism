@@ -267,6 +267,7 @@ pub struct UaiCompoundOralVerification {
     remote_task_id: String,
     oral_instance_id: String,
     submission_version: String,
+    result_digest: [u8; 32],
     score: Option<SubmissionScore>,
     policy: Option<UaiSubmissionPolicyEvidence>,
     verified_at: Timestamp,
@@ -287,6 +288,10 @@ impl UaiCompoundOralVerification {
 
     pub fn submission_version(&self) -> &str {
         &self.submission_version
+    }
+
+    pub const fn result_digest(&self) -> [u8; 32] {
+        self.result_digest
     }
 
     pub const fn score(&self) -> Option<SubmissionScore> {
@@ -314,6 +319,7 @@ impl fmt::Debug for UaiCompoundOralVerification {
             .field("remote_task_id", &self.remote_task_id)
             .field("oral_instance_id", &"[REMOTE]")
             .field("submission_version", &self.submission_version)
+            .field("result_digest", &"[HASHED]")
             .field("score", &self.score)
             .field("policy", &self.policy)
             .field("verified_at", &self.verified_at)
@@ -326,6 +332,7 @@ impl Drop for UaiCompoundOralVerification {
         self.remote_task_id.zeroize();
         self.oral_instance_id.zeroize();
         self.submission_version.zeroize();
+        self.result_digest.zeroize();
     }
 }
 
@@ -941,17 +948,14 @@ pub fn parse_compound_oral_verification(
         &submission.oral_instance_id,
         &submission.oral_children,
     )?;
-    let policy = verified_submission_policy(
-        state,
-        submission.group_id(),
-        version,
-        Sha256::digest(document.as_bytes()).into(),
-    )?;
+    let result_digest = Sha256::digest(document.as_bytes()).into();
+    let policy = verified_submission_policy(state, submission.group_id(), version, result_digest)?;
     Ok(UaiCompoundOralVerification {
         ordinary_draft_id: submission.ordinary_draft_id,
         remote_task_id: submission.remote_task_id.clone(),
         oral_instance_id: submission.oral_instance_id.clone(),
         submission_version: version.to_owned(),
+        result_digest,
         score,
         policy,
         verified_at: Utc::now(),
@@ -1340,6 +1344,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture covers current policy, legacy no-policy and both ordered modules"
+    )]
     fn receipt_readback_must_preserve_both_compound_oral_modules() {
         let draft = ordinary_draft();
         let answer = encrypted_answer(&json!([
@@ -1383,6 +1391,10 @@ mod tests {
         assert_eq!(verified.ordinary_draft_id(), draft.id);
         assert_eq!(verified.oral_instance_id(), "6001");
         assert_eq!(
+            verified.result_digest(),
+            <[u8; 32]>::from(Sha256::digest(document.as_bytes()))
+        );
+        assert_eq!(
             verified.score(),
             Some(SubmissionScore {
                 earned_milli_points: 88_500,
@@ -1398,6 +1410,25 @@ mod tests {
             <[u8; 32]>::from(Sha256::digest(document.as_bytes()))
         );
         assert!(verified.requires_fresh_progress_read());
+
+        let mut legacy: Value = serde_json::from_str(&document).unwrap();
+        legacy["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"] = json!({
+            "course_id": "course-instance-1",
+            "group_id": "group-oral",
+            "version": "compound-oral-v1",
+        });
+        legacy["data"]["state"]["__EXTEND_DATA__"]
+            .as_object_mut()
+            .unwrap()
+            .remove("__SUMMARY__");
+        let legacy_document = serde_json::to_string(&legacy).unwrap();
+        let legacy_verified =
+            parse_compound_oral_verification(&legacy_document, &submission, &receipt).unwrap();
+        assert_eq!(legacy_verified.policy(), None);
+        assert_eq!(
+            legacy_verified.result_digest(),
+            <[u8; 32]>::from(Sha256::digest(legacy_document.as_bytes()))
+        );
 
         let changed_oral = json!({
             "value": [],
