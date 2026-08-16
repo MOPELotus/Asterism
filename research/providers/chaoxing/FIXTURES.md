@@ -140,9 +140,10 @@ JSON acknowledgement that remains only a Receipt, prompt-as-Pending semantics,
 and exact server-visible answer comparison on the result view. Regressions
 accept `A、C` as an explicit separated choice set but reject arbitrary text such
 as `not-B`, duplicate `BB`, multi-valued single-choice `AB`, substring
-true/false `不正确` and mixed `错误但对` as protocol drift. They contain no real
-token, answer, route or account fact and do not prove the endpoint works against
-the current live platform.
+true/false `不正确`, mixed `错误但对`, and a duplicate-label value such as
+`我的答案：B 我的答案：AD` as protocol drift. The duplicate-label rule is also
+covered for Exam results. They contain no real token, answer, route or account
+fact and do not prove the endpoint works against the current live platform.
 
 `submission-editor-fill.html` and `submission-view-fill.html` pin the exact
 single-blank independent Work subset. The complete two-Question editor keeps an

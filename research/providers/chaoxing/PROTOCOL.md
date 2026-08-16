@@ -470,7 +470,9 @@ does not expose the submitted values. Only an allowlisted `/work/view` result
 whose complete unique QID/type set exposes `我的答案` and exactly matches every
 Draft answer becomes Confirmed with remote Completed. Type 2 confirmation
 additionally requires the same one-blank Question binding and one exact bounded
-visible text value; a different value is Rejected and a missing value is
+visible text value; each selected result node must contain exactly one
+`我的答案` label, and a duplicate label is structural drift rather than a safe
+cutoff point. A different value is Rejected and a missing value is
 Inconclusive. Choice evidence may contain only uppercase option IDs and explicit
 whitespace/comma/Chinese-comma/dunhao/semicolon separators. Duplicate IDs,
 multi-valued single-choice text or arbitrary surrounding text are protocol
@@ -480,6 +482,11 @@ substring values such as `不正确` or `错误但对` are drift. A complete val
 mismatch is Rejected; incomplete result facts are Inconclusive. CSS selection
 state, list text, HTTP 200 and the acknowledgement JSON never substitute for
 this readback.
+
+The same unique `我的答案` label rule is applied before mobile Exam visible-value
+parsing. A node such as `我的答案：B 我的答案：AD` cannot confirm the first value or
+fall through as an ordinary mismatch; it is protocol drift because the remote
+answer evidence is structurally ambiguous.
 
 These contracts are covered by explicitly synthetic donor-compatible fixtures
 and capability-level tests, including recovery verification with no Receipt.

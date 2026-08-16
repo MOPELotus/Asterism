@@ -90,8 +90,9 @@ validation is still required.
   values. Asterism tightened independent Work verification accordingly:
   choices now allow only uppercase option IDs plus explicit separators and
   reject duplicates/single-choice multi-values, while true/false accepts only
-  complete controlled tokens. No donor revision changed and no mutation path
-  was added.
+  complete controlled tokens. Work and Exam selected result nodes now also
+  require exactly one `我的答案` label, so a later conflicting value cannot be
+  truncated away. No donor revision changed and no mutation path was added.
 - 2026-08-16: re-checked the two current sign-in donor default branches after
   the QR checkpoint; Ylim remains `7ed64ff547d3` and `mini-hbut` remains
   `952640e2540f`. An exact Ylim `preSign()` re-read recovered an omitted

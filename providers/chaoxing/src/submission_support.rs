@@ -1350,7 +1350,7 @@ fn unique_result_node<'a>(
 }
 
 fn parse_exam_visible_answer(value: &str, type_code: &str) -> ProviderResult<Option<String>> {
-    let Some((_, value)) = value.split_once("我的答案") else {
+    let Some(value) = unique_answer_label_suffix(value, "我的答案")? else {
         return Ok(None);
     };
     let value = value.trim_start_matches([':', '：']).trim();
@@ -1750,12 +1750,10 @@ fn parse_labeled_visible_answer(
     answer_label: &'static str,
     type_code: &str,
 ) -> ProviderResult<String> {
-    let (_, value) = value
-        .split_once(answer_label)
+    let value = unique_answer_label_suffix(value, answer_label)?
         .ok_or_else(|| protocol_drift("Chaoxing Work result visible-answer label is missing"))?;
     let value = value.trim_start_matches([':', '：']).trim();
     let value = [
-        "我的答案",
         "正确答案",
         "答案解析",
         "得分",
@@ -1806,6 +1804,22 @@ fn parse_labeled_visible_answer(
             "Chaoxing Work result answer type is unsupported",
         )),
     }
+}
+
+fn unique_answer_label_suffix<'a>(
+    value: &'a str,
+    answer_label: &str,
+) -> ProviderResult<Option<&'a str>> {
+    let mut labels = value.match_indices(answer_label);
+    let Some((start, _)) = labels.next() else {
+        return Ok(None);
+    };
+    if labels.next().is_some() {
+        return Err(protocol_drift(
+            "Chaoxing result contains duplicate visible-answer labels",
+        ));
+    }
+    Ok(Some(&value[start + answer_label.len()..]))
 }
 
 fn parse_visible_text_answer(value: &str) -> ProviderResult<String> {
@@ -2229,6 +2243,7 @@ mod tests {
             VIEW.replace("我的答案：B", "我的答案：not-B"),
             VIEW.replace("我的答案：B", "我的答案：BB"),
             VIEW.replace("我的答案：B", "我的答案：AB"),
+            VIEW.replace("我的答案：B", "我的答案：B 我的答案：AD"),
         ] {
             let malformed = ChaoxingWorkVerificationDocument::try_new(
                 ChaoxingWorkVerificationRoute::View,
@@ -2258,12 +2273,19 @@ mod tests {
             ("我的答案：AB", "0"),
             ("我的答案：不正确", "3"),
             ("我的答案：错误但对", "3"),
+            ("我的答案：B 我的答案：AD", "0"),
         ] {
             assert_eq!(
                 parse_visible_answer(value, type_code).unwrap_err().kind,
                 ProviderErrorKind::ProtocolDrift
             );
         }
+        assert_eq!(
+            parse_exam_visible_answer("我的答案：B 我的答案：AD", "0")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 
     #[tokio::test]
