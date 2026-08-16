@@ -14,8 +14,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
     UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest, UaiCompoundUploadVerification,
-    UaiUploadSubmission, UaiUploadSubmissionRequest, UaiUploadVerification, metadata::PROVIDER_ID,
-    parse_compound_upload_verification, parse_submission_receipt, parse_upload_verification,
+    UaiUploadFinalPlanState, UaiUploadSubmission, UaiUploadSubmissionRequest,
+    UaiUploadVerification, metadata::PROVIDER_ID, parse_compound_upload_verification,
+    parse_submission_receipt, parse_upload_verification,
 };
 
 pub const UAI_UPLOAD_FINAL_PLAN_ARTIFACT_TYPE: &str = "uai.upload.final-plan.v1";
@@ -450,6 +451,25 @@ impl UaiUploadFinalResultState {
         Ok((verification, mutation_verification))
     }
 
+    /// Verifies one recovered single-upload readback only when the complete
+    /// private final-plan state also binds this accepted request digest.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a compound or foreign request state before reading any result
+    /// evidence.
+    pub fn verify_single_plan_state(
+        &self,
+        document: &str,
+        final_plan: &UaiUploadFinalPlanState,
+    ) -> ProviderResult<(UaiUploadVerification, ExecutionMutationVerification)> {
+        let submission = final_plan.as_single().ok_or_else(foreign_result_state)?;
+        if final_plan.request_digest() != self.request_digest {
+            return Err(foreign_result_state());
+        }
+        self.verify_single_readback(document, submission)
+    }
+
     /// Rebinds an accepted recovered result to the complete compound-upload
     /// final plan and parses the exact ordered answer-plus-object-key readback.
     ///
@@ -472,6 +492,25 @@ impl UaiUploadFinalResultState {
         let mutation_verification =
             ExecutionMutationVerification::new(self.ordinal, verification.result_digest(), true)?;
         Ok((verification, mutation_verification))
+    }
+
+    /// Verifies one recovered compound-upload readback only when the complete
+    /// private plan state binds the same accepted final request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a single, answer-substituted or request-substituted state before
+    /// producing mutation verification evidence.
+    pub fn verify_compound_plan_state(
+        &self,
+        document: &str,
+        final_plan: &UaiUploadFinalPlanState,
+    ) -> ProviderResult<(UaiCompoundUploadVerification, ExecutionMutationVerification)> {
+        let submission = final_plan.as_compound().ok_or_else(foreign_result_state)?;
+        if final_plan.request_digest() != self.request_digest {
+            return Err(foreign_result_state());
+        }
+        self.verify_compound_readback(document, submission)
     }
 
     fn validate_verification_plan(
@@ -1083,8 +1122,15 @@ mod tests {
         assert_eq!(decoded.submission_version(), "upload-v1");
         assert_eq!(decoded.accepted_at(), state.accepted_at());
         let document = single_upload_verification_document("course/42/nothing.mp3", "upload-v1");
+        let encoded_plan =
+            crate::EncodedUaiUploadFinalPlanState::for_single(&submission, &request).unwrap();
+        let plan_digest = encoded_plan.digest();
+        let plan_value = encoded_plan.into_secret_value();
+        let final_plan =
+            crate::UaiUploadFinalPlanState::decode_bound(&plan_value, plan_digest, &sequence)
+                .unwrap();
         let (verified, mutation_verification) = decoded
-            .verify_single_readback(&document, &submission)
+            .verify_single_plan_state(&document, &final_plan)
             .unwrap();
         assert_eq!(verified.submission_version(), "upload-v1");
         assert_eq!(mutation_verification.ordinal(), 1);
@@ -1093,6 +1139,25 @@ mod tests {
             verified.result_digest()
         );
         assert!(mutation_verification.verified());
+        let foreign_request =
+            crate::build_upload_submission_request(&submission, "course-instance-2", "openid-1")
+                .unwrap();
+        let foreign_plan =
+            crate::EncodedUaiUploadFinalPlanState::for_single(&submission, &foreign_request)
+                .unwrap();
+        let foreign_plan_digest = foreign_plan.digest();
+        let foreign_plan_value = foreign_plan.into_secret_value();
+        let foreign_plan = crate::UaiUploadFinalPlanState::decode_bound(
+            &foreign_plan_value,
+            foreign_plan_digest,
+            &sequence,
+        )
+        .unwrap();
+        assert!(
+            decoded
+                .verify_single_plan_state(&document, &foreign_plan)
+                .is_err()
+        );
         let foreign = UaiUploadSubmission::fixture("course/42/other.mp3", "fixture-b");
         assert!(decoded.verify_single_readback(&document, &foreign).is_err());
 

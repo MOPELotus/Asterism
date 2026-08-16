@@ -34,6 +34,7 @@ const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_REMOTE_QUESTION_ID_BYTES: usize = 512;
 const MAX_ANSWER_CHILDREN: usize = 256;
 const MAX_ANSWER_VALUES_PER_CHILD: usize = 256;
+const MAX_RECOVERED_ANSWER_VALUE_BYTES: usize = 32 * 1_024;
 const MAX_QUESTIONS_PER_SUBMISSION: usize = 5_000;
 const MAX_JUDGE_TYPE_BYTES: usize = 128;
 const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
@@ -552,6 +553,58 @@ impl UaiSubmissionPlan {
             &[task_type.to_owned()],
             UaiSubmissionProtocolVersions::current(course_publish_version)?,
         )
+    }
+
+    pub(crate) fn restore_compound_upload(
+        mut remote_question_id: String,
+        mut answer_children: Vec<Vec<String>>,
+        mut judges: Vec<(String, String)>,
+        course_publish_version: u64,
+    ) -> ProviderResult<Self> {
+        if !valid_submission_question_identity(&remote_question_id)
+            || answer_children.len() != 1
+            || answer_children[0].is_empty()
+            || answer_children[0].len() > MAX_ANSWER_VALUES_PER_CHILD
+            || answer_children[0].iter().any(|value| {
+                value.trim().is_empty()
+                    || value.len() > MAX_RECOVERED_ANSWER_VALUE_BYTES
+                    || value.chars().any(char::is_control)
+            })
+            || judges.len() != 1
+            || judges.iter().any(|(question_type, reply_type)| {
+                !valid_judge_type(question_type) || !valid_judge_type(reply_type)
+            })
+        {
+            remote_question_id.zeroize();
+            for child in &mut answer_children {
+                child.zeroize();
+            }
+            answer_children.zeroize();
+            for (question_type, reply_type) in &mut judges {
+                question_type.zeroize();
+                reply_type.zeroize();
+            }
+            judges.zeroize();
+            return Err(remote_changed(
+                "UAI recovered compound upload Question plan is invalid",
+            ));
+        }
+        let protocol_versions = UaiSubmissionProtocolVersions::current(course_publish_version)?;
+        Ok(Self {
+            questions: vec![UaiSubmissionQuestionPlan {
+                remote_question_id,
+                task_type: "multichoice".to_owned(),
+                answer_children,
+                judges: judges
+                    .into_iter()
+                    .map(|(question_type, reply_type)| UaiSubmissionJudgePlan {
+                        question_type,
+                        reply_type,
+                    })
+                    .collect(),
+            }],
+            protocol_versions,
+        })
     }
 
     #[must_use]

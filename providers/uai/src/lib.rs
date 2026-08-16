@@ -41,6 +41,7 @@ mod task_detail;
 mod task_inventory;
 mod task_type;
 mod upload;
+mod upload_final_plan;
 mod upload_sequence;
 mod user_identity;
 
@@ -180,6 +181,9 @@ pub use upload::{
     UaiUploadVerification, UaiUploadedArtifact, build_upload_grant_request, build_upload_multipart,
     build_upload_submission_request, parse_upload_grant, parse_upload_result,
     parse_upload_verification,
+};
+pub use upload_final_plan::{
+    EncodedUaiUploadFinalPlanState, UAI_UPLOAD_FINAL_PLAN_STATE_TYPE, UaiUploadFinalPlanState,
 };
 pub use upload_sequence::{
     EncodedUaiUploadFinalResultState, UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS,

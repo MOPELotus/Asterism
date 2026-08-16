@@ -445,6 +445,62 @@ impl UaiUploadSubmission {
         &self.file_key
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the encrypted final-plan state restores every independent immutable binding"
+    )]
+    pub(crate) fn restore_final_plan(
+        mut remote_task_id: String,
+        mut course_resource_id: String,
+        mut unit_id: String,
+        mut group_id: String,
+        mut file_key: String,
+        mut artifact_digest: String,
+        mut upload_intent_fingerprint: String,
+        course_publish_version: u64,
+        mut fingerprint: String,
+    ) -> ProviderResult<Self> {
+        let expected_remote_task_id = format!("group:{course_resource_id}:{unit_id}:{group_id}");
+        if !is_remote_component(&course_resource_id)
+            || !is_remote_component(&unit_id)
+            || !is_remote_component(&group_id)
+            || remote_task_id != expected_remote_task_id
+            || remote_task_id.len() > 512
+            || file_key.is_empty()
+            || file_key.len() > MAX_UPLOAD_KEY_BYTES
+            || file_key.chars().any(char::is_control)
+            || !valid_private_binding(&artifact_digest, "sha256:", 256)
+            || !valid_private_binding(&upload_intent_fingerprint, "uai-upload-v1:", 256)
+            || !valid_private_binding(&fingerprint, "uai-upload-submit-v1:", 256)
+            || course_publish_version == 0
+            || i64::try_from(course_publish_version).is_err()
+        {
+            remote_task_id.zeroize();
+            course_resource_id.zeroize();
+            unit_id.zeroize();
+            group_id.zeroize();
+            file_key.zeroize();
+            artifact_digest.zeroize();
+            upload_intent_fingerprint.zeroize();
+            fingerprint.zeroize();
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI recovered single-upload final plan is invalid",
+            ));
+        }
+        Ok(Self {
+            remote_task_id,
+            course_resource_id,
+            unit_id,
+            group_id,
+            file_key,
+            artifact_digest,
+            upload_intent_fingerprint,
+            course_publish_version,
+            fingerprint,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture(file_key: &str, fingerprint_suffix: &str) -> Self {
         Self {
@@ -1399,6 +1455,14 @@ fn is_remote_component(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn valid_private_binding(value: &str, prefix: &str, maximum: usize) -> bool {
+    value.starts_with(prefix)
+        && value.len() > prefix.len()
+        && value.len() <= maximum
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 fn is_account_identity(value: &str) -> bool {

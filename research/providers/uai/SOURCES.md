@@ -482,3 +482,12 @@ shape or supplied a generic parent-batch upload recovery protocol. UAI now
 preserves the accepted timestamp and converts only an exact final-plan-bound,
 receipt-versioned readback into mutation verification; this is stricter local
 recovery binding over the existing donor protocol, not a new wire capability.
+
+The complete-final-plan state checkpoint later on 2026-08-16 repeated all four
+default-ref and complete-tag queries with the same unchanged revisions. No
+donor added recoverable platform storage for the private object key or compound
+selected answer. Asterism's new bounded `uai.upload.final-plan-state.v1` codec
+therefore freezes existing donor-required mutation input and the already
+materialized exact request digest, then requires it to reproduce the
+independently stored compact artifact and sequence digests. It adds no upload
+route, retry rule or verification shortcut.

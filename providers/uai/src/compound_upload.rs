@@ -173,6 +173,18 @@ impl UaiCompoundUploadSubmission {
         &self.fingerprint
     }
 
+    pub(crate) fn task_fingerprint(&self) -> &str {
+        &self.task_fingerprint
+    }
+
+    pub(crate) fn upload_intent_fingerprint(&self) -> &str {
+        &self.upload_intent_fingerprint
+    }
+
+    pub(crate) const fn ordinary_plan(&self) -> &UaiSubmissionPlan {
+        &self.ordinary_plan
+    }
+
     pub(crate) fn final_sequence_binding_digest(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         let ordinary_draft_id = self.ordinary_draft_id.to_string();
@@ -230,6 +242,75 @@ impl UaiCompoundUploadSubmission {
 
     pub(crate) fn expose_file_key(&self) -> &str {
         &self.file_key
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the encrypted compound final-plan state restores every independent immutable binding"
+    )]
+    pub(crate) fn restore_final_plan(
+        ordinary_draft_id: SubmissionDraftId,
+        mut remote_task_id: String,
+        mut course_resource_id: String,
+        mut unit_id: String,
+        mut group_id: String,
+        mut task_fingerprint: String,
+        mut file_key: String,
+        mut artifact_digest: String,
+        mut upload_intent_fingerprint: String,
+        course_publish_version: u64,
+        ordinary_plan: UaiSubmissionPlan,
+        mut fingerprint: String,
+    ) -> ProviderResult<Self> {
+        let expected_remote_task_id = format!("group:{course_resource_id}:{unit_id}:{group_id}");
+        let ordinary = ordinary_plan.questions();
+        let versions = ordinary_plan.protocol_versions();
+        if !is_remote_component(&course_resource_id)
+            || !is_remote_component(&unit_id)
+            || !is_remote_component(&group_id)
+            || remote_task_id != expected_remote_task_id
+            || remote_task_id.len() > 512
+            || !valid_private_binding(&task_fingerprint, "v1:", 512)
+            || file_key.is_empty()
+            || file_key.len() > 1_024
+            || file_key.chars().any(char::is_control)
+            || !valid_private_binding(&artifact_digest, "sha256:", 256)
+            || !valid_private_binding(&upload_intent_fingerprint, "uai-upload-v1:", 256)
+            || !valid_private_binding(&fingerprint, "uai-compound-upload-v1:", 256)
+            || course_publish_version == 0
+            || i64::try_from(course_publish_version).is_err()
+            || ordinary.len() != 1
+            || ordinary[0].task_type() != "multichoice"
+            || versions.course() != course_publish_version
+            || versions.answer() != 3
+        {
+            remote_task_id.zeroize();
+            course_resource_id.zeroize();
+            unit_id.zeroize();
+            group_id.zeroize();
+            task_fingerprint.zeroize();
+            file_key.zeroize();
+            artifact_digest.zeroize();
+            upload_intent_fingerprint.zeroize();
+            fingerprint.zeroize();
+            return Err(remote_changed(
+                "UAI recovered compound-upload final plan is invalid",
+            ));
+        }
+        Ok(Self {
+            ordinary_draft_id,
+            remote_task_id,
+            course_resource_id,
+            unit_id,
+            group_id,
+            task_fingerprint,
+            file_key,
+            artifact_digest,
+            upload_intent_fingerprint,
+            course_publish_version,
+            ordinary_plan,
+            fingerprint,
+        })
     }
 
     fn ordinary_question(&self) -> ProviderResult<&UaiSubmissionQuestionPlan> {
@@ -810,6 +891,14 @@ fn is_remote_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+fn valid_private_binding(value: &str, prefix: &str, maximum: usize) -> bool {
+    value.starts_with(prefix)
+        && value.len() > prefix.len()
+        && value.len() <= maximum
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
 fn invalid_input(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidResponse, message)
 }
@@ -1104,6 +1193,24 @@ mod tests {
         let request =
             build_compound_upload_submission_request(submission, "course-instance-1", "openid-1")
                 .unwrap();
+        let encoded =
+            crate::EncodedUaiUploadFinalPlanState::for_compound(submission, &request).unwrap();
+        assert!(!format!("{encoded:?}").contains(uploaded.file_key()));
+        let final_plan_digest = encoded.digest();
+        let final_plan_value = encoded.into_secret_value();
+        let restored_state = crate::UaiUploadFinalPlanState::decode_bound(
+            &final_plan_value,
+            final_plan_digest,
+            &sequence,
+        )
+        .unwrap();
+        let restored = restored_state.as_compound().unwrap();
+        assert_eq!(
+            request.request_digest(),
+            build_compound_upload_submission_request(restored, "course-instance-1", "openid-1")
+                .unwrap()
+                .request_digest()
+        );
         let outcome = request
             .classify_final_response(
                 1,
@@ -1114,7 +1221,7 @@ mod tests {
             .unwrap();
         let result_state = sequence.accepted_result_state(&outcome).unwrap();
         let (recovered, mutation_verification) = result_state
-            .verify_compound_readback(document, submission)
+            .verify_compound_plan_state(document, &restored_state)
             .unwrap();
         assert_eq!(recovered.ordinary_draft_id(), draft.id);
         assert_eq!(recovered.submission_version(), "compound-v1");
@@ -1134,6 +1241,22 @@ mod tests {
             uploaded,
         )
         .unwrap();
+        let changed_request =
+            build_compound_upload_submission_request(&changed, "course-instance-1", "openid-1")
+                .unwrap();
+        let changed_encoded =
+            crate::EncodedUaiUploadFinalPlanState::for_compound(&changed, &changed_request)
+                .unwrap();
+        let changed_digest = changed_encoded.digest();
+        let changed_value = changed_encoded.into_secret_value();
+        assert!(
+            crate::UaiUploadFinalPlanState::decode_bound(
+                &changed_value,
+                changed_digest,
+                &sequence,
+            )
+            .is_err()
+        );
         assert!(
             result_state
                 .verify_compound_readback(document, &changed)

@@ -1277,7 +1277,16 @@ ordinary protocol versions, ordered Question identity/type, every ordered
 answer child/value and every judge question/reply type in addition to the
 immutable Draft ID and upload lineage. A same-ID selected-answer substitution
 therefore changes the scheduling artifact and sequence-plan digests before any
-issue. Its one-phase `uai.upload.final-submit.v1` sequence
+issue. Separately, the bounded zeroizing
+`uai.upload.final-plan-state.v1` codec retains the complete private plan. The
+single form owns the exact object key, Task hierarchy, artifact/intent lineage,
+Course version, semantic fingerprint and fully materialized final request
+digest. The compound form additionally owns
+the ordinary Draft ID, Task fingerprint, selected child values, judge labels
+and current protocol versions. Decode recomputes the compact artifact and
+sequence plan and requires both independent digests to match; changing the key,
+answer, judge, hierarchy or otherwise-valid sequence fails before the plan is
+exposed. Its one-phase `uai.upload.final-submit.v1` sequence
 permits at most two `uai.upload.final-submit` ordinals and uses Core's
 `AcceptedOrMaximumReached` condition. Every concrete single/compound request
 also carries the same semantic binding digest before its exact issue-time wire
@@ -1306,8 +1315,9 @@ ordinal and request/response lineage; rejected results, unknown fields, digest
 substitution or a foreign otherwise-valid sequence fail closed. This owner is
 only the Provider input for the future atomic receipt-plus-encrypted-state
 transaction. It now also preserves the exact accepted-receipt timestamp. Once
-decoded against the accepted Core record, UAI must additionally rebuild the
-complete single or compound final plan. Only an exact plan may reconstruct the
+decoded against the accepted Core record, UAI must additionally decode the
+complete single or compound final-plan state against the independently stored
+compact sequence. Only that exact plan may reconstruct the
 bounded accepted receipt, parse the receipt-versioned user-module, and produce
 an `ExecutionMutationVerification` whose observation digest is the exact
 readback digest. For compound upload this rebind includes the ordinary selected
@@ -1321,7 +1331,7 @@ Core's encrypted parent-authority/complete-batch snapshot is not a substitute
 for this stage state. Final upload is one receipt-conditional mutation stage,
 not a parent/child batch, and the parent snapshot contract does not atomically
 commit an accepted mutation receipt with `uai.upload.final-result.v1` or retain
-the exact single/compound final plan. UAI therefore keeps the new read-only
+and type-bind `uai.upload.final-plan-state.v1`. UAI therefore keeps the new read-only
 verification adapter Provider-private until the dedicated stage-output
 transaction exists.
 
@@ -1346,7 +1356,7 @@ stage from hashes alone.
 | `uai.upload.input.v1` | Before sequence preparation | bounded filename, `audio/mpeg` and exact bytes, plus the immutable single-upload or compound-Draft binding | UAI reconstructs `UaiUploadArtifact`, recomputes its digest and freshly prepares the upload intent |
 | `uai.upload.grant.v1` | After an exact code-200 CMS document parses, before any Qiniu issue | zeroizing token and exact file key plus the complete `UaiUploadGrant` Task/artifact/intent binding and grant request/response digests | Only the exact input artifact may materialize the Qiniu request; a persisted grant is reused, never silently replaced |
 | `uai.upload.object.v1` | In the same transaction as the accepted Qiniu mutation receipt | exact returned key, optional bounded returned `hash`/Qiniu ETag, response digest and the complete `UaiUploadedArtifact` binding; the token is no longer copied forward | Only this accepted state, not the receipt hash alone, may prepare single or compound final submission |
-| `uai.upload.final-plan.v1` | After fresh Task/progress/account rebinding and before final-submit issue, atomically with that issue or already durable | exact single/compound semantic plan, Course publish version, uploaded key/artifact lineage, immutable Draft reference for compound form and exact final request digest | Recovery can verify the issued request identity but can never replay an issued request without a receipt |
+| `uai.upload.final-plan-state.v1` | After fresh Task/progress/account rebinding and final request materialization, before final-submit issue, atomically with that issue or already durable | exact single/compound semantic plan, Course publish version, uploaded key/artifact lineage, exact final request digest, immutable Draft reference and complete selected child/judge material for compound form; it must reproduce compact `uai.upload.final-plan.v1` and the sequence digest | Recovery can verify the issued request identity but can never replay an issued request without a receipt |
 | `uai.upload.final-result.v1` | In the same transaction as a definite accepted final-submit receipt | accepted submission version, final request/response digests and final-plan digest | Receipt-versioned user-module readback may retry read-only; fresh TaskProgressRead remains a separate completion authority |
 
 The Qiniu primary documentation describes a normal 200 response containing
