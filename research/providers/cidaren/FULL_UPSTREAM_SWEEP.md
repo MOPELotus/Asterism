@@ -137,9 +137,15 @@ source caller and is absent from the packaged executable.
 Every executable donor platform call and semantic runtime setting is either
 implemented, intentionally represented by shared product scheduling/UI,
 classified as non-platform behavior, or tied to an evidence-backed blocker.
-No migration omission was found, so this checkpoint adds no speculative
-Provider code or fixture. Existing synthetic fixtures remain the minimal
-sanitized corpus; full Provider tests and strict Clippy verify the mapping.
+The original sweep did not identify a migration omission. A later
+2026-08-16 call-site re-read found and corrected three pre-existing exactness
+gaps: eligible word selection must use grouped maps, the public donor's exact
+ordinary-class existing-selection rejection continues to `StartAnswer`, and
+the Start font-color query literal is double-encoded on the wire. Those
+corrections are now reflected in the tables above and in
+`UPSTREAM_CHECKS.md`; no speculative capability was added. Existing synthetic
+fixtures remain the minimal sanitized corpus, and full Provider tests plus
+strict Clippy verify the corrected mapping.
 
 The new shared Answer Evidence Corpus and Score Improvement state machines do
 have an exact Main-owned integration boundary: Cidaren can report no

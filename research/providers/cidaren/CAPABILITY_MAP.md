@@ -395,12 +395,17 @@ Provider therefore grants no implicit retry/retake authority. Its donor
 evidenced Formal assessment classification, and this does not weaken the
 separate explicit authorization required for mutations.
 
-The one-time full upstream sweep found no migration omission: the historical
-batch/class-vs-study flags compose already complete TaskInventory and durable
-per-Task execution; all donor timing semantics are present in runtime schema
-revision 2; compression, updater, logs, music and first-run state are transport
-or UI concerns; and the old `get_all_task` symbol is an uncalled no-request
-stub. Future checkpoints return to normal revision/delta review.
+The one-time full upstream sweep completed the required whole-surface
+classification. A later 2026-08-16 call-site re-read corrected grouped
+word-selection maps, the exact ordinary-class existing-selection continuation
+and Start query percent encoding; these were pre-existing exactness omissions,
+not new capabilities. The historical batch/class-vs-study flags otherwise
+compose already complete TaskInventory and durable per-Task execution; all
+donor timing semantics are present in runtime schema revision 2; compression,
+updater, logs, music and first-run state are transport or UI concerns; and the
+old `get_all_task` symbol is an uncalled no-request stub. Future checkpoints
+continue normal revision/delta review while still reopening any older call-site
+fact that proves the mapping incomplete.
 
 ## Frozen donor executable-surface parity
 
