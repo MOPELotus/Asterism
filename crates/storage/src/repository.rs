@@ -7,7 +7,7 @@ use asterism_auth::TokenDigest;
 use asterism_domain::{
     AccountHealth, AnswerBootstrapHarvest, AnswerCandidate, AnswerCandidateId, AttemptResult,
     AuditActor, AuditRecord, AuthBootstrapClientEvent, AuthBootstrapSession,
-    AuthBootstrapSessionId, AuthSession, AuthSessionId, BrowserBridgeExchange,
+    AuthBootstrapSessionId, AuthSession, AuthSessionId, BatchExecution, BrowserBridgeExchange,
     BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
     BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession, BrowserBridgeSessionId,
     CompletionPolicySnapshot, Course, CourseAggregateProgress, CourseId, CreditAccount,
@@ -2205,6 +2205,45 @@ pub trait ExecutionLeaseRepository: Send + Sync {
 }
 
 #[derive(Clone, Debug)]
+pub struct BatchExecutionScheduleRequest<'a> {
+    pub batch_execution: &'a BatchExecution,
+    pub idempotency_scope: &'a str,
+    pub idempotency_key: &'a str,
+    pub actor: AuditActor,
+    pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchExecutionScheduleOutcome {
+    Created(BatchExecution),
+    Existing(BatchExecution),
+    IdempotencyConflict,
+    BindingConflict,
+}
+
+/// Course-scoped parent scheduling boundary. The parent and its dedicated
+/// scheduler job are created atomically without mutating or leasing a child
+/// Task. Child creation remains a later transaction after Provider planning.
+#[async_trait]
+pub trait BatchExecutionRepository: Send + Sync {
+    async fn find_idempotent_batch_execution(
+        &self,
+        idempotency_scope: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<BatchExecution>, StorageError>;
+
+    async fn schedule_batch_execution(
+        &self,
+        request: BatchExecutionScheduleRequest<'_>,
+    ) -> Result<BatchExecutionScheduleOutcome, StorageError>;
+
+    async fn find_batch_execution(
+        &self,
+        batch_execution_id: asterism_domain::BatchExecutionId,
+    ) -> Result<Option<BatchExecution>, StorageError>;
+}
+
+#[derive(Clone, Debug)]
 pub struct ExecutionBillingReservation<'a> {
     pub quote: &'a PriceQuote,
     pub reservation: &'a CreditReservation,
@@ -2978,6 +3017,14 @@ pub trait SchedulerRepository: Send + Sync {
     ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
 
     async fn claim_due_execution_jobs(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
+
+    async fn claim_due_batch_execution_jobs(
         &self,
         worker_id: &str,
         now: Timestamp,

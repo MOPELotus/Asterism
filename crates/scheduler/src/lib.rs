@@ -4,7 +4,8 @@
 use std::time::Duration;
 
 use asterism_domain::{
-    AnswerBootstrapHarvestId, ExecutionId, NotificationId, ProviderAccountId, ScheduleId, Timestamp,
+    AnswerBootstrapHarvestId, BatchExecutionId, ExecutionId, NotificationId, ProviderAccountId,
+    ScheduleId, Timestamp,
 };
 use chrono::Duration as ChronoDuration;
 use serde::{Deserialize, Serialize};
@@ -138,6 +139,9 @@ pub enum ScheduledJobKind {
     },
     Execution {
         execution_id: ExecutionId,
+    },
+    BatchExecution {
+        batch_execution_id: BatchExecutionId,
     },
     Retry {
         execution_id: ExecutionId,

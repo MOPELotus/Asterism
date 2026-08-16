@@ -6,6 +6,7 @@ mod answer_harvest;
 mod answer_history_ingest;
 mod auth_bootstrap;
 mod auth_session;
+mod batch_execution;
 mod browser_bridge;
 mod browser_bridge_command;
 mod completion_workflow;
@@ -42,6 +43,7 @@ pub use answer_harvest::SqliteAnswerBootstrapHarvestRepository;
 pub use answer_history_ingest::SqliteAnswerHistoryIngestionRepository;
 pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
+pub use batch_execution::SqliteBatchExecutionRepository;
 pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
 pub use browser_bridge_command::SqliteBrowserBridgeCommandArtifactRepository;
 pub use completion_workflow::SqliteCompletionWorkflowRepository;
@@ -73,7 +75,8 @@ pub use repository::{
     AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
-    AuthenticatedCredentialRepository, BrowserBridgeCommandArtifactRepository,
+    AuthenticatedCredentialRepository, BatchExecutionRepository, BatchExecutionScheduleOutcome,
+    BatchExecutionScheduleRequest, BrowserBridgeCommandArtifactRepository,
     BrowserBridgeCommandDispatchRecord, BrowserBridgeCommandDispatchRequest,
     BrowserBridgeCommandIssueRequest, BrowserBridgeCommandResolveRequest,
     BrowserBridgeCredentialCommit, BrowserBridgeCredentialCommitOutcome,

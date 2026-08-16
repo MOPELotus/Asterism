@@ -5074,3 +5074,26 @@ remote work starts. Because the parent owns no `TaskId`, it cannot consume a
 child Task lease or force the first child to have different scheduling and
 recovery semantics. Durable tables, scheduler claims, encrypted snapshot
 rebinding and atomic child creation remain the following Storage/Engine work.
+
+## Two-hundred-and-seventy-fifth Phase 0 slice
+
+SQLite now persists the independent Course-scoped parent in dedicated
+`batch_executions`, `batch_execution_attempts` and `batch_execution_leases`
+tables. The Course/account pair is protected by a composite foreign key, while
+the parent retains its canonical child capability set, bounded expected count,
+requester/source, lifecycle and scoped idempotency identity. No Task row or
+ordinary `execution_leases` entry is created or changed by this transaction.
+
+Scheduling validates the Domain object, exact account/Course owner binding and
+request actor, then atomically writes the parent, a dedicated
+`batch_execution` scheduler job, sanitized audit and transactional outbox
+event. Exact replay returns the existing parent; changed content under the same
+idempotency key or a foreign Course/account binding fails closed. The scheduler
+has a separate batch claim filter, so the existing Task execution worker cannot
+accidentally consume a parent job before the parent worker exists.
+
+This slice deliberately stops before starting a parent Attempt or persisting
+private planning material. The next transaction must claim the dedicated job
+and lease, create the exact Attempt, invoke Provider parent planning, encrypt
+and bind its authority/snapshot, then map and create every ordered child from
+the digest-bound dispatch plan.

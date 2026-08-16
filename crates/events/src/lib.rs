@@ -2,9 +2,9 @@
 //! integrations.
 
 use asterism_domain::{
-    AuthSessionId, AuthState, CreditAmount, EventId, ExecutionId, ExecutionLogEvent,
-    ExecutionProgress, HumanRequiredReason, OrchestrationState, TaskDiffKind, TaskId,
-    TaskLifecycleAction, Timestamp, UserId, UserStatus,
+    AuthSessionId, AuthState, BatchExecutionId, CreditAmount, EventId, ExecutionId,
+    ExecutionLogEvent, ExecutionProgress, HumanRequiredReason, OrchestrationState, TaskDiffKind,
+    TaskId, TaskLifecycleAction, Timestamp, UserId, UserStatus,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,10 @@ pub enum DomainEvent {
     },
     ExecutionStateChanged {
         execution_id: ExecutionId,
+        state: asterism_domain::ExecutionState,
+    },
+    BatchExecutionStateChanged {
+        batch_execution_id: BatchExecutionId,
         state: asterism_domain::ExecutionState,
     },
     ExecutionProgressed(ExecutionProgress),

@@ -17,6 +17,7 @@ enum ClaimFilter {
     Any,
     Scan,
     Execution,
+    BatchExecution,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +66,16 @@ impl SqliteSchedulerRepository {
              WHERE id IN ( \
                  SELECT id FROM scheduled_jobs \
                  WHERE state = 'pending' AND job_kind IN ('execution', 'retry', 'recovery') AND run_at <= ? \
+                 ORDER BY run_at, id LIMIT ? \
+             ) \
+             RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"
+            }
+            ClaimFilter::BatchExecution => {
+                "UPDATE scheduled_jobs \
+             SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
+             WHERE id IN ( \
+                 SELECT id FROM scheduled_jobs \
+                 WHERE state = 'pending' AND job_kind = 'batch_execution' AND run_at <= ? \
                  ORDER BY run_at, id LIMIT ? \
              ) \
              RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"
@@ -150,6 +161,23 @@ impl SchedulerRepository for SqliteSchedulerRepository {
             lease_expires_at,
             limit,
             ClaimFilter::Execution,
+        )
+        .await
+    }
+
+    async fn claim_due_batch_execution_jobs(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<ScheduledJob>, StorageError> {
+        self.claim_due_internal(
+            worker_id,
+            now,
+            lease_expires_at,
+            limit,
+            ClaimFilter::BatchExecution,
         )
         .await
     }
@@ -560,6 +588,7 @@ fn job_kind_name(kind: &ScheduledJobKind) -> &'static str {
         ScheduledJobKind::AnswerBootstrapHarvest { .. } => "answer_bootstrap_harvest",
         ScheduledJobKind::Scan { .. } => "scan",
         ScheduledJobKind::Execution { .. } => "execution",
+        ScheduledJobKind::BatchExecution { .. } => "batch_execution",
         ScheduledJobKind::Retry { .. } => "retry",
         ScheduledJobKind::Recovery { .. } => "recovery",
         ScheduledJobKind::Notification { .. } => "notification",
@@ -578,7 +607,9 @@ fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::{AuthState, ExecutionId, ProviderAccountId, Role, ScheduleId, UserId};
+    use asterism_domain::{
+        AuthState, BatchExecutionId, ExecutionId, ProviderAccountId, Role, ScheduleId, UserId,
+    };
     use chrono::{Duration, Utc};
 
     use super::*;
@@ -832,10 +863,19 @@ mod tests {
             idempotency_key: "execution:claim-filter:recovery".to_owned(),
             ..base.clone()
         };
+        let batch = ScheduledJob {
+            id: ScheduleId::new(),
+            kind: ScheduledJobKind::BatchExecution {
+                batch_execution_id: BatchExecutionId::new(),
+            },
+            idempotency_key: "batch-execution:claim-filter".to_owned(),
+            ..base.clone()
+        };
         repository.enqueue(&base).await.unwrap();
         repository.enqueue(&execution).await.unwrap();
         repository.enqueue(&retry).await.unwrap();
         repository.enqueue(&recovery).await.unwrap();
+        repository.enqueue(&batch).await.unwrap();
 
         let claimed = repository
             .claim_due_execution_jobs("execution-worker", now, now + Duration::minutes(1), 10)
@@ -845,6 +885,13 @@ mod tests {
         assert!(claimed.iter().any(|job| job.id == execution.id));
         assert!(claimed.iter().any(|job| job.id == retry.id));
         assert!(claimed.iter().any(|job| job.id == recovery.id));
+
+        let batch_claimed = repository
+            .claim_due_batch_execution_jobs("batch-worker", now, now + Duration::minutes(1), 10)
+            .await
+            .unwrap();
+        assert_eq!(batch_claimed.len(), 1);
+        assert_eq!(batch_claimed[0].id, batch.id);
 
         let scan = repository
             .claim_due_scan_jobs("scan-worker", now, now + Duration::minutes(1), 10)
