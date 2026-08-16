@@ -578,7 +578,10 @@ each selected Draft Question to its original QID/position/content fingerprint,
 and freezes the strictly increasing selected positions. Each
 `chaoxing.exam-answer-save.v1` operation freezes the exact CxKitty-compatible
 `pos`, `rd`, `value`, `_edt`, query and form body once. Core persists the
-complete request digest before Native HTTP sends the POST. A successful save
+complete request digest before Native HTTP sends the POST. The same digest and
+transport both bind CxKitty's session-wide
+`X-Requested-With: com.chaoxing.mobile`; the web-AJAX `XMLHttpRequest` value is
+not interchangeable for this mobile request family. A successful save
 must return exactly `lastUpdate|encRemain|enc`; the timestamps may not regress,
 remaining time may not increase, and the selected cursor advances by exactly
 one before the encrypted continuation rotates. A save's `start` is the selected

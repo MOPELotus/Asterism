@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rand_core::{OsRng, RngCore};
 use reqwest::{
-    Client, Response, StatusCode, Url,
+    Client, Request, Response, StatusCode, Url,
     header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, REFERER, RETRY_AFTER},
 };
 use scraper::{Html, Selector};
@@ -1306,14 +1306,10 @@ impl ChaoxingSubmissionTransport for NativeChaoxingInventoryTransport {
                 query.append_pair(name, value);
             }
         }
+        let request = build_exam_submission_request(&self.client, &session, url, command.body())?;
         let response = self
             .client
-            .post(url)
-            .header(COOKIE, session.header_value()?)
-            .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
-            .header("x-requested-with", "XMLHttpRequest")
-            .form(command.body())
-            .send()
+            .execute(request)
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
         validate_response_status(&response)?;
@@ -2155,6 +2151,22 @@ fn unique_query<'a>(url: &'a Url, key: &str) -> Option<Cow<'a, str>> {
     values.next().is_none().then_some(value)
 }
 
+fn build_exam_submission_request(
+    client: &Client,
+    session: &ChaoxingCookieSession,
+    url: Url,
+    body: &[(String, String)],
+) -> ProviderResult<Request> {
+    client
+        .post(url)
+        .header(COOKIE, session.header_value()?)
+        .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+        .header("x-requested-with", EXAM_REQUESTED_WITH)
+        .form(body)
+        .build()
+        .map_err(|error| classify_reqwest_error(&error))
+}
+
 async fn classify_response(response: Response) -> ProviderResult<SensitiveHtml> {
     validate_response_head(&response)?;
     read_response_body(response).await
@@ -2815,6 +2827,28 @@ mod tests {
         assert!(session.header_value().unwrap().is_sensitive());
         assert!(ChaoxingCookieSession::try_new("uf=missing-identity").is_err());
         assert!(ChaoxingCookieSession::try_new("_uid=bad\nvalue").is_err());
+    }
+
+    #[test]
+    fn exam_submission_request_uses_the_donor_mobile_header() {
+        let client = Client::new();
+        let session = ChaoxingCookieSession::try_new("_uid=9001; uf=SAFE_UF").unwrap();
+        let request = build_exam_submission_request(
+            &client,
+            &session,
+            Url::parse(EXAM_SUBMISSION_BASE).unwrap(),
+            &[("tempSave".to_owned(), "true".to_owned())],
+        )
+        .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("x-requested-with")
+                .and_then(|value| value.to_str().ok()),
+            Some(EXAM_REQUESTED_WITH)
+        );
+        assert_eq!(EXAM_REQUESTED_WITH, "com.chaoxing.mobile");
     }
 
     #[test]
