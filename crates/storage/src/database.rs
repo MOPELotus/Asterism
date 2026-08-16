@@ -148,7 +148,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 79);
+        assert_eq!(migration_count, 80);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -406,6 +406,20 @@ mod tests {
         let tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema \
              WHERE type = 'table' AND name = 'batch_execution_child_executions'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(tables, 1);
+    }
+
+    #[tokio::test]
+    async fn batch_child_activation_migration_is_present_on_a_fresh_database() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'batch_execution_child_activations'",
         )
         .fetch_one(database.pool())
         .await

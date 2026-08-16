@@ -3964,7 +3964,7 @@ async fn insert_request_audit(
     Ok(())
 }
 
-async fn insert_quote_and_reserve_balance(
+pub(crate) async fn insert_quote_and_reserve_balance(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     billing: &ExecutionBillingReservation<'_>,
 ) -> Result<(), StorageError> {
@@ -4010,7 +4010,7 @@ async fn insert_quote_and_reserve_balance(
     Ok(())
 }
 
-async fn insert_credit_reservation(
+pub(crate) async fn insert_credit_reservation(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     billing: &ExecutionBillingReservation<'_>,
     correlation_id: &str,

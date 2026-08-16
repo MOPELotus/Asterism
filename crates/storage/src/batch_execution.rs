@@ -2,8 +2,9 @@ use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, BatchExecution, BatchExecutionAttempt,
-    BatchExecutionAttemptId, BatchExecutionId, ExecutionId, ExecutionState, ProviderAccountId,
-    ProviderErrorClass, ProviderId, SecretId, TaskCapability, TaskId, Timestamp, UserId,
+    BatchExecutionAttemptId, BatchExecutionId, CreditReservationState, ExecutionId, ExecutionState,
+    ProviderAccountId, ProviderErrorClass, ProviderId, ScheduleId, SecretId, TaskCapability,
+    TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
@@ -21,17 +22,21 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use crate::{
-    BatchExecutionAttemptStartRequest, BatchExecutionChildExecutionCreateOutcome,
-    BatchExecutionChildExecutionCreateRequest, BatchExecutionChildExecutionRecord,
-    BatchExecutionChildExecutionRepository, BatchExecutionChildPlanMaterializeOutcome,
-    BatchExecutionChildPlanMaterializeRequest, BatchExecutionChildPlanRecord,
-    BatchExecutionChildPlanRepository, BatchExecutionPlanningInputRecord,
-    BatchExecutionPlanningInputRepository, BatchExecutionPlanningInputResolveRequest,
-    BatchExecutionRepository, BatchExecutionRuntimeSettingsBindOutcome,
-    BatchExecutionRuntimeSettingsBindRequest, BatchExecutionRuntimeSettingsRepository,
-    BatchExecutionRuntimeSettingsResolveRequest, BatchExecutionScheduleOutcome,
-    BatchExecutionScheduleRequest, Database, ExecutionRuntimeSettingsSnapshot,
-    ResolvedBatchExecutionPlanningInput, SecretKeyring, StorageError,
+    BatchExecutionAttemptStartRequest, BatchExecutionChildActivationBilling,
+    BatchExecutionChildActivationOutcome, BatchExecutionChildActivationRecord,
+    BatchExecutionChildActivationRepository, BatchExecutionChildActivationRequest,
+    BatchExecutionChildExecutionCreateOutcome, BatchExecutionChildExecutionCreateRequest,
+    BatchExecutionChildExecutionRecord, BatchExecutionChildExecutionRepository,
+    BatchExecutionChildPlanMaterializeOutcome, BatchExecutionChildPlanMaterializeRequest,
+    BatchExecutionChildPlanRecord, BatchExecutionChildPlanRepository,
+    BatchExecutionPlanningInputRecord, BatchExecutionPlanningInputRepository,
+    BatchExecutionPlanningInputResolveRequest, BatchExecutionRepository,
+    BatchExecutionRuntimeSettingsBindOutcome, BatchExecutionRuntimeSettingsBindRequest,
+    BatchExecutionRuntimeSettingsRepository, BatchExecutionRuntimeSettingsResolveRequest,
+    BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest, Database,
+    ExecutionRuntimeSettingsSnapshot, ResolvedBatchExecutionPlanningInput, SecretKeyring,
+    StorageError,
+    execution::{insert_credit_reservation, insert_quote_and_reserve_balance},
     outbox::enqueue_in_transaction,
     secret::{decrypt, encrypt, fetch_secret, insert_secret_audit, insert_secret_blob},
 };
@@ -954,6 +959,510 @@ impl BatchExecutionChildExecutionRepository for SqliteBatchExecutionRepository {
     }
 }
 
+#[derive(Debug)]
+struct PreparedBatchChildActivation {
+    position: u32,
+    task_id: TaskId,
+    execution_id: ExecutionId,
+    prior_task_state: String,
+    billing_index: Option<usize>,
+}
+
+#[async_trait]
+#[allow(
+    clippy::too_many_lines,
+    reason = "complete child preflight, optional batch billing, Task/Execution transitions, jobs, mappings, audit and outbox writes stay atomic"
+)]
+impl BatchExecutionChildActivationRepository for SqliteBatchExecutionRepository {
+    async fn activate_batch_execution_children(
+        &self,
+        request: BatchExecutionChildActivationRequest<'_>,
+    ) -> Result<BatchExecutionChildActivationOutcome, StorageError> {
+        validate_worker_context(request.worker_id, request.correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_batch_worker_claims(
+            &mut transaction,
+            request.batch_execution_id,
+            request.attempt_id,
+            request.parent_scheduler_job_id,
+            request.worker_id,
+            request.at,
+        )
+        .await?;
+        let row = sqlx::query(BATCH_EXECUTION_SELECT_BY_ID)
+            .bind(request.batch_execution_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let batch = decode_batch_execution(&row)?;
+        if batch.state != ExecutionState::Running {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        let child_executions = load_child_execution_records(&mut transaction, batch.id).await?;
+        let expected_count = usize::try_from(batch.expected_child_count).unwrap_or(usize::MAX);
+        if child_executions.len() != expected_count
+            || !valid_activation_billing_positions(request.billings, expected_count)
+        {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        let existing = load_child_activation_records(&mut transaction, batch.id).await?;
+        if !existing.is_empty() {
+            if existing.len() != expected_count
+                || !stored_child_activations_match(
+                    &mut transaction,
+                    &batch,
+                    &existing,
+                    request.billings,
+                )
+                .await?
+            {
+                return Err(StorageError::BatchExecutionStateConflict);
+            }
+            transaction.commit().await?;
+            return Ok(BatchExecutionChildActivationOutcome::Existing(existing));
+        }
+
+        let mut prepared = Vec::with_capacity(child_executions.len());
+        for child in &child_executions {
+            let row = sqlx::query(
+                "SELECT execution.state, execution.scheduled_at, execution.started_at, \
+                        execution.finished_at, execution.quote_id, execution.requested_by, \
+                        execution.created_at, task.orchestration_state, task.remote_state \
+                 FROM executions AS execution \
+                 INNER JOIN tasks AS task ON task.id = execution.task_id \
+                 WHERE execution.id = ? AND execution.task_id = ?",
+            )
+            .bind(child.execution_id.to_string())
+            .bind(child.task_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::BatchExecutionStateConflict)?;
+            let other_active_executions: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM executions WHERE task_id = ? AND id != ? \
+                 AND state IN ('requested', 'scheduled', 'running', 'recovering', \
+                               'retry_waiting', 'human_required')",
+            )
+            .bind(child.task_id.to_string())
+            .bind(child.execution_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            let existing_job: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_jobs WHERE idempotency_key = ?")
+                    .bind(format!("execution:{}", child.execution_id))
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            let prior_task_state = row.try_get::<String, _>("orchestration_state")?;
+            if row.try_get::<String, _>("state")? != "requested"
+                || row.try_get::<Option<String>, _>("scheduled_at")?.is_some()
+                || row.try_get::<Option<String>, _>("started_at")?.is_some()
+                || row.try_get::<Option<String>, _>("finished_at")?.is_some()
+                || row.try_get::<Option<String>, _>("quote_id")?.is_some()
+                || row.try_get::<Option<String>, _>("requested_by")?
+                    != batch.requested_by.map(|id| id.to_string())
+                || decode_timestamp(row.try_get("created_at")?)? != child.created_at
+                || request.at < child.created_at
+                || !matches!(prior_task_state.as_str(), "ready" | "failed")
+                || matches!(
+                    row.try_get::<String, _>("remote_state")?.as_str(),
+                    "expired" | "removed"
+                )
+                || other_active_executions != 0
+                || existing_job != 0
+            {
+                return Err(StorageError::BatchExecutionStateConflict);
+            }
+            let billing_index = if request.billings.is_empty() {
+                None
+            } else {
+                let index = usize::try_from(child.position.saturating_sub(1))
+                    .map_err(|_| StorageError::BatchExecutionStateConflict)?;
+                let billing = request
+                    .billings
+                    .get(index)
+                    .ok_or(StorageError::BatchExecutionStateConflict)?;
+                validate_child_activation_billing(&batch, child, billing)?;
+                Some(index)
+            };
+            prepared.push(PreparedBatchChildActivation {
+                position: child.position,
+                task_id: child.task_id,
+                execution_id: child.execution_id,
+                prior_task_state,
+                billing_index,
+            });
+        }
+
+        let mut activations = Vec::with_capacity(prepared.len());
+        for child in prepared {
+            let billing = child
+                .billing_index
+                .and_then(|index| request.billings.get(index));
+            if let Some(billing) = billing {
+                insert_quote_and_reserve_balance(&mut transaction, &billing.billing).await?;
+            }
+            let task_update = sqlx::query(
+                "UPDATE tasks SET orchestration_state = 'scheduled', updated_at = ? \
+                 WHERE id = ? AND orchestration_state = ?",
+            )
+            .bind(encode_timestamp(request.at))
+            .bind(child.task_id.to_string())
+            .bind(&child.prior_task_state)
+            .execute(&mut *transaction)
+            .await?;
+            let execution_update = sqlx::query(
+                "UPDATE executions SET state = 'scheduled', scheduled_at = ?, quote_id = ? \
+                 WHERE id = ? AND state = 'requested' AND scheduled_at IS NULL \
+                   AND quote_id IS NULL",
+            )
+            .bind(encode_timestamp(request.at))
+            .bind(billing.map(|value| value.billing.quote.id.to_string()))
+            .bind(child.execution_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            if task_update.rows_affected() != 1 || execution_update.rows_affected() != 1 {
+                return Err(StorageError::BatchExecutionStateConflict);
+            }
+            if let Some(billing) = billing {
+                insert_credit_reservation(
+                    &mut transaction,
+                    &billing.billing,
+                    request.correlation_id,
+                )
+                .await?;
+            }
+            let scheduler_job_id = ScheduleId::new();
+            let job_kind = ScheduledJobKind::Execution {
+                execution_id: child.execution_id,
+            };
+            sqlx::query(
+                "INSERT INTO scheduled_jobs \
+                 (id, job_kind, payload_json, run_at, state, attempts, idempotency_key, \
+                  created_at, updated_at) \
+                 VALUES (?, 'execution', ?, ?, 'pending', 0, ?, ?, ?)",
+            )
+            .bind(scheduler_job_id.to_string())
+            .bind(serde_json::to_string(&job_kind)?)
+            .bind(encode_timestamp(request.at))
+            .bind(format!("execution:{}", child.execution_id))
+            .bind(encode_timestamp(request.at))
+            .bind(encode_timestamp(request.at))
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO batch_execution_child_activations \
+                 (batch_execution_id, child_position, execution_id, scheduler_job_id, activated_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(batch.id.to_string())
+            .bind(i64::from(child.position))
+            .bind(child.execution_id.to_string())
+            .bind(scheduler_job_id.to_string())
+            .bind(encode_timestamp(request.at))
+            .execute(&mut *transaction)
+            .await?;
+            enqueue_in_transaction(
+                &mut transaction,
+                &EventEnvelope::at(
+                    request.correlation_id,
+                    DomainEvent::ExecutionStateChanged {
+                        execution_id: child.execution_id,
+                        state: ExecutionState::Scheduled,
+                    },
+                    request.at,
+                ),
+            )
+            .await?;
+            activations.push(BatchExecutionChildActivationRecord {
+                batch_execution_id: batch.id,
+                position: child.position,
+                task_id: child.task_id,
+                execution_id: child.execution_id,
+                scheduler_job_id,
+                activated_at: request.at,
+            });
+        }
+        insert_batch_child_activation_audit(
+            &mut transaction,
+            &batch,
+            request.attempt_id,
+            activations.len(),
+            !request.billings.is_empty(),
+            request.worker_id,
+            request.correlation_id,
+            request.at,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(BatchExecutionChildActivationOutcome::Activated(activations))
+    }
+
+    async fn find_batch_execution_child_activations(
+        &self,
+        batch_execution_id: BatchExecutionId,
+    ) -> Result<Vec<BatchExecutionChildActivationRecord>, StorageError> {
+        let mut transaction = self.database.pool().begin().await?;
+        let records = load_child_activation_records(&mut transaction, batch_execution_id).await?;
+        transaction.commit().await?;
+        Ok(records)
+    }
+}
+
+fn valid_activation_billing_positions(
+    billings: &[BatchExecutionChildActivationBilling<'_>],
+    expected_count: usize,
+) -> bool {
+    billings.is_empty()
+        || (billings.len() == expected_count
+            && billings
+                .iter()
+                .enumerate()
+                .all(|(index, billing)| u32::try_from(index + 1).ok() == Some(billing.position)))
+}
+
+fn validate_child_activation_billing(
+    batch: &BatchExecution,
+    child: &BatchExecutionChildExecutionRecord,
+    activation: &BatchExecutionChildActivationBilling<'_>,
+) -> Result<(), StorageError> {
+    let billing = &activation.billing;
+    let quote = billing.quote;
+    let reservation = billing.reservation;
+    let valid = activation.position == child.position
+        && quote.task_id == child.task_id
+        && quote.created_at <= child.created_at
+        && valid_token(&quote.pricing_revision, 128)
+        && valid_token(&quote.reason, 2_048)
+        && i64::try_from(quote.amount.value()).is_ok()
+        && batch.requested_by == Some(reservation.user_id)
+        && reservation.quote_id == quote.id
+        && reservation.execution_id == child.execution_id
+        && reservation.amount == quote.amount
+        && reservation.state == CreditReservationState::Reserved
+        && reservation.created_at == child.created_at
+        && reservation.updated_at == reservation.created_at;
+    if valid {
+        Ok(())
+    } else {
+        Err(StorageError::BatchExecutionStateConflict)
+    }
+}
+
+async fn load_child_activation_records(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+) -> Result<Vec<BatchExecutionChildActivationRecord>, StorageError> {
+    sqlx::query(
+        "SELECT activation.batch_execution_id, activation.child_position, plan.task_id, \
+                activation.execution_id, activation.scheduler_job_id, activation.activated_at \
+         FROM batch_execution_child_activations AS activation \
+         INNER JOIN batch_execution_child_plans AS plan \
+                 ON plan.batch_execution_id = activation.batch_execution_id \
+                AND plan.position = activation.child_position \
+         WHERE activation.batch_execution_id = ? ORDER BY activation.child_position",
+    )
+    .bind(batch_execution_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?
+    .iter()
+    .map(decode_child_activation_record)
+    .collect()
+}
+
+fn decode_child_activation_record(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<BatchExecutionChildActivationRecord, StorageError> {
+    Ok(BatchExecutionChildActivationRecord {
+        batch_execution_id: BatchExecutionId::from_str(row.try_get("batch_execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        position: u32::try_from(row.try_get::<i64, _>("child_position")?).map_err(|_| {
+            StorageError::InvalidData("batch child activation position is invalid".to_owned())
+        })?,
+        task_id: TaskId::from_str(row.try_get("task_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        execution_id: ExecutionId::from_str(row.try_get("execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        scheduler_job_id: ScheduleId::from_str(row.try_get("scheduler_job_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        activated_at: decode_timestamp(row.try_get("activated_at")?)?,
+    })
+}
+
+async fn stored_child_activations_match(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch: &BatchExecution,
+    records: &[BatchExecutionChildActivationRecord],
+    billings: &[BatchExecutionChildActivationBilling<'_>],
+) -> Result<bool, StorageError> {
+    for record in records {
+        let row = sqlx::query(
+            "SELECT execution.task_id, execution.state, execution.quote_id, \
+                    execution.scheduled_at, activation.execution_id AS activation_execution_id, \
+                    activation.scheduler_job_id, activation.activated_at, \
+                    job.job_kind, job.payload_json, job.idempotency_key, job.created_at AS job_created_at, \
+                    quote.id AS persisted_quote_id, quote.task_id AS quote_task_id, \
+                    quote.amount AS quote_amount, quote.pricing_revision, quote.reason, \
+                    quote.created_at AS quote_created_at, \
+                    reservation.id AS reservation_id, reservation.user_id AS reservation_user_id, \
+                    reservation.quote_id AS reservation_quote_id, \
+                    reservation.execution_id AS reservation_execution_id, \
+                    reservation.amount AS reservation_amount, reservation.state AS reservation_state, \
+                    reservation.created_at AS reservation_created_at \
+             FROM batch_execution_child_activations AS activation \
+             INNER JOIN executions AS execution ON execution.id = activation.execution_id \
+             INNER JOIN scheduled_jobs AS job ON job.id = activation.scheduler_job_id \
+             LEFT JOIN price_quotes AS quote ON quote.id = execution.quote_id \
+             LEFT JOIN credit_reservations AS reservation \
+                    ON reservation.execution_id = execution.id \
+             WHERE activation.batch_execution_id = ? AND activation.child_position = ?",
+        )
+        .bind(batch.id.to_string())
+        .bind(i64::from(record.position))
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let state: ExecutionState = decode_enum(row.try_get("state")?)?;
+        let job_kind: ScheduledJobKind = serde_json::from_str(row.try_get("payload_json")?)?;
+        let immutable_match = row.try_get::<String, _>("task_id")? == record.task_id.to_string()
+            && row.try_get::<String, _>("activation_execution_id")?
+                == record.execution_id.to_string()
+            && row.try_get::<String, _>("scheduler_job_id")? == record.scheduler_job_id.to_string()
+            && decode_timestamp(row.try_get("activated_at")?)? == record.activated_at
+            && state != ExecutionState::Requested
+            && decode_optional_timestamp(row.try_get("scheduled_at")?)?
+                == Some(record.activated_at)
+            && row.try_get::<String, _>("job_kind")? == "execution"
+            && job_kind
+                == (ScheduledJobKind::Execution {
+                    execution_id: record.execution_id,
+                })
+            && row.try_get::<String, _>("idempotency_key")?
+                == format!("execution:{}", record.execution_id)
+            && decode_timestamp(row.try_get("job_created_at")?)? == record.activated_at;
+        if !immutable_match {
+            return Ok(false);
+        }
+        if billings.is_empty() {
+            if row.try_get::<Option<String>, _>("quote_id")?.is_some()
+                || row
+                    .try_get::<Option<String>, _>("persisted_quote_id")?
+                    .is_some()
+                || row
+                    .try_get::<Option<String>, _>("reservation_id")?
+                    .is_some()
+            {
+                return Ok(false);
+            }
+            continue;
+        }
+        let index = usize::try_from(record.position.saturating_sub(1))
+            .map_err(|_| StorageError::BatchExecutionStateConflict)?;
+        let Some(activation) = billings.get(index) else {
+            return Ok(false);
+        };
+        if !persisted_activation_billing_matches(&row, record, activation)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn persisted_activation_billing_matches(
+    row: &sqlx::sqlite::SqliteRow,
+    record: &BatchExecutionChildActivationRecord,
+    activation: &BatchExecutionChildActivationBilling<'_>,
+) -> Result<bool, StorageError> {
+    let quote = activation.billing.quote;
+    let reservation = activation.billing.reservation;
+    let state = row
+        .try_get::<Option<&str>, _>("reservation_state")?
+        .map(decode_enum::<CreditReservationState>)
+        .transpose()?;
+    Ok(activation.position == record.position
+        && row.try_get::<Option<String>, _>("quote_id")? == Some(quote.id.to_string())
+        && row.try_get::<Option<String>, _>("persisted_quote_id")? == Some(quote.id.to_string())
+        && row.try_get::<Option<String>, _>("quote_task_id")? == Some(quote.task_id.to_string())
+        && row.try_get::<Option<i64>, _>("quote_amount")?
+            == Some(
+                i64::try_from(quote.amount.value())
+                    .map_err(|_| StorageError::CreditAmountOutOfRange)?,
+            )
+        && row.try_get::<Option<String>, _>("pricing_revision")?
+            == Some(quote.pricing_revision.clone())
+        && row.try_get::<Option<String>, _>("reason")? == Some(quote.reason.clone())
+        && row
+            .try_get::<Option<&str>, _>("quote_created_at")?
+            .map(decode_timestamp)
+            .transpose()?
+            == Some(quote.created_at)
+        && row.try_get::<Option<String>, _>("reservation_id")? == Some(reservation.id.to_string())
+        && row.try_get::<Option<String>, _>("reservation_user_id")?
+            == Some(reservation.user_id.to_string())
+        && row.try_get::<Option<String>, _>("reservation_quote_id")?
+            == Some(reservation.quote_id.to_string())
+        && row.try_get::<Option<String>, _>("reservation_execution_id")?
+            == Some(record.execution_id.to_string())
+        && row.try_get::<Option<i64>, _>("reservation_amount")?
+            == Some(
+                i64::try_from(reservation.amount.value())
+                    .map_err(|_| StorageError::CreditAmountOutOfRange)?,
+            )
+        && state.is_some_and(|state| {
+            matches!(
+                state,
+                CreditReservationState::Reserved
+                    | CreditReservationState::Committed
+                    | CreditReservationState::Released
+            )
+        })
+        && row
+            .try_get::<Option<&str>, _>("reservation_created_at")?
+            .map(decode_timestamp)
+            .transpose()?
+            == Some(reservation.created_at))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the audit binds the parent Attempt, child count, billing mode and live worker context"
+)]
+async fn insert_batch_child_activation_audit(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch: &BatchExecution,
+    attempt_id: BatchExecutionAttemptId,
+    child_count: usize,
+    billed: bool,
+    worker_id: &str,
+    correlation_id: &str,
+    at: Timestamp,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'worker', ?, 'batch_execution_children_activated', \
+                 'batch_execution', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(at))
+    .bind(worker_id)
+    .bind(batch.id.to_string())
+    .bind(correlation_id)
+    .bind(
+        serde_json::json!({
+            "attempt_id": attempt_id,
+            "child_count": child_count,
+            "billed": billed,
+            "execution_ids": "[REDACTED]",
+            "scheduler_job_ids": "[REDACTED]",
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn insert_child_capability_steps(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     execution_id: ExecutionId,
@@ -1067,6 +1576,10 @@ fn decode_child_execution_record(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "restart verifies every immutable child request, plan artifact, activation-aware quote binding, call and frozen setting in one fail-closed boundary"
+)]
 async fn stored_child_executions_match(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     batch: &BatchExecution,
@@ -1088,6 +1601,8 @@ async fn stored_child_executions_match(
                     artifact.artifact_digest AS artifact_digest, \
                     artifact.payload_json AS artifact_payload_json, \
                     artifact.captured_at AS artifact_captured_at, \
+                    activation.execution_id AS activation_execution_id, \
+                    reservation.quote_id AS reservation_quote_id, \
                     settings.provider_id AS settings_provider_id, \
                     settings.schema_version, settings.resolved_settings_json, settings.sources_json, \
                     settings.provider_revision, settings.provider_account_revision, \
@@ -1099,6 +1614,12 @@ async fn stored_child_executions_match(
                      ON settings.execution_id = execution.id \
              INNER JOIN execution_provider_plan_artifacts AS artifact \
                      ON artifact.execution_id = execution.id \
+             LEFT JOIN batch_execution_child_activations AS activation \
+                    ON activation.batch_execution_id = plan.batch_execution_id \
+                   AND activation.child_position = plan.position \
+                   AND activation.execution_id = execution.id \
+             LEFT JOIN credit_reservations AS reservation \
+                    ON reservation.execution_id = execution.id \
              WHERE execution.id = ?",
         )
         .bind(batch.id.to_string())
@@ -1127,6 +1648,22 @@ async fn stored_child_executions_match(
         )
         .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let steps = load_execution_calls(transaction, record.execution_id).await?;
+        let quote_id = row.try_get::<Option<String>, _>("quote_id")?;
+        let activation_execution_id =
+            row.try_get::<Option<String>, _>("activation_execution_id")?;
+        let reservation_quote_id = row.try_get::<Option<String>, _>("reservation_quote_id")?;
+        let quote_binding_valid = match (
+            quote_id.as_deref(),
+            activation_execution_id.as_deref(),
+            reservation_quote_id.as_deref(),
+        ) {
+            (None, None, None) => true,
+            (None, Some(execution_id), None) => execution_id == record.execution_id.to_string(),
+            (Some(quote_id), Some(execution_id), Some(reservation_quote_id)) => {
+                execution_id == record.execution_id.to_string() && quote_id == reservation_quote_id
+            }
+            _ => false,
+        };
         if row.try_get::<String, _>("task_id")? != record.task_id.to_string()
             || serde_json::from_str::<Vec<TaskCapability>>(
                 row.try_get("requested_capabilities_json")?,
@@ -1137,7 +1674,7 @@ async fn stored_child_executions_match(
             || row.try_get::<Option<String>, _>("requested_by")?
                 != batch.requested_by.map(|id| id.to_string())
             || row.try_get::<String, _>("request_source")? != enum_name(batch.request_source)?
-            || row.try_get::<Option<String>, _>("quote_id")?.is_some()
+            || !quote_binding_valid
             || decode_timestamp(row.try_get("created_at")?)? != record.created_at
             || row.try_get::<Option<String>, _>("idempotency_scope")?
                 != Some(format!("batch-execution:{}", batch.id))

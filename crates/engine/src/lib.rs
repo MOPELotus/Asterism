@@ -64,8 +64,8 @@ pub use auth_session::{
     ExternalOauthCallbackRequest, InteractiveAuthPollRequest, InteractiveAuthPollResult,
 };
 pub use batch_execution_job::{
-    BatchExecutionPlanningError, BatchExecutionPlanningResult, BatchExecutionPlanningService,
-    PlanBatchExecutionCommand,
+    BatchExecutionActivationResult, BatchExecutionPlanningError, BatchExecutionPlanningResult,
+    BatchExecutionPlanningService, PlanBatchExecutionCommand,
 };
 pub use browser_bridge_credential::{
     BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorConfig,

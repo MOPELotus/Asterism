@@ -3188,7 +3188,7 @@ attempt contract instead of hiding `phone/start` inside a read call. The
 Provider first performs Course/Exam/cover reads and encodes an encrypted,
 Task-bound command. Immediately before execution it repeats those read-only
 lookups and requires the full continuation digest to remain identical. Core
-persists the exact `chaoxing.exam-start.v1` request digest before the Native
+persists the exact `chaoxing.exam-start.v2` request digest before the Native
 transport sends the one-shot request, so a network ambiguity cannot trigger an
 automatic replay.
 
@@ -5292,3 +5292,35 @@ execution jobs, survive restart without another Provider scan and reject a
 tampered persisted Provider artifact. The next slice can atomically activate
 these drafts by reserving credit, moving Tasks to scheduled and publishing the
 ordered child jobs while preserving the parent sequence boundary.
+
+## Two-hundred-and-eighty-third Phase 0 slice
+
+Migration 080 adds one durable activation row per parent child position,
+binding the immutable child Execution to its exact scheduler job and activation
+time. Storage activates only a complete materialized batch under the same live
+parent claim, lease and Attempt. Before writing, it requires every child to
+remain Requested, unscheduled and unbilled; every Task to remain locally ready
+or failed and remotely executable; no competing active Execution; and no
+pre-existing execution job.
+
+Activation accepts either no billing for the whole batch or one exact quote and
+reservation for every ordered child. Partial billing is rejected. A billed
+activation validates owner, Task, Execution, amount, quote and timestamp
+bindings, then reserves every balance together. In the same transaction it
+moves all Tasks and Executions to Scheduled, attaches immutable quote IDs,
+creates one execution job per frozen position, records the activation mapping,
+emits credit and state outbox events and writes one sanitized parent audit.
+Insufficient credit for any later child rolls back earlier reservations, state
+changes, jobs and activation rows.
+
+Idempotent recovery verifies the exact activation mapping, scheduled timestamp,
+job payload and idempotency key plus every immutable quote/reservation field;
+later job, Execution and reservation lifecycle states may advance without
+invalidating the original activation. The parent planner likewise accepts its
+child drafts after this authorized quote/state transition while continuing to
+verify calls, Provider artifact and frozen settings. Engine exposes activation
+as a separate second phase because child Execution IDs must exist before a
+caller can construct exact credit reservations. Integration coverage proves
+atomic rollback on insufficient aggregate balance, successful two-child
+reservation and scheduling, replay without double debit, and parent-only
+recovery without another fresh Provider scan.

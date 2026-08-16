@@ -2437,6 +2437,57 @@ pub trait BatchExecutionChildExecutionRepository: Send + Sync {
 }
 
 #[derive(Clone, Debug)]
+pub struct BatchExecutionChildActivationBilling<'a> {
+    pub position: u32,
+    pub billing: ExecutionBillingReservation<'a>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchExecutionChildActivationRecord {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub position: u32,
+    pub task_id: TaskId,
+    pub execution_id: ExecutionId,
+    pub scheduler_job_id: ScheduleId,
+    pub activated_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchExecutionChildActivationRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub parent_scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    /// Either empty for an unbilled batch or one exact reservation per child
+    /// position. Partial billing is never accepted.
+    pub billings: &'a [BatchExecutionChildActivationBilling<'a>],
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchExecutionChildActivationOutcome {
+    Activated(Vec<BatchExecutionChildActivationRecord>),
+    Existing(Vec<BatchExecutionChildActivationRecord>),
+}
+
+/// Atomically moves every immutable batch child from Requested to Scheduled,
+/// optionally reserves the complete batch billing set, transitions Tasks and
+/// publishes one execution job per frozen parent position.
+#[async_trait]
+pub trait BatchExecutionChildActivationRepository: Send + Sync {
+    async fn activate_batch_execution_children(
+        &self,
+        request: BatchExecutionChildActivationRequest<'_>,
+    ) -> Result<BatchExecutionChildActivationOutcome, StorageError>;
+
+    async fn find_batch_execution_child_activations(
+        &self,
+        batch_execution_id: asterism_domain::BatchExecutionId,
+    ) -> Result<Vec<BatchExecutionChildActivationRecord>, StorageError>;
+}
+
+#[derive(Clone, Debug)]
 pub struct ExecutionBillingReservation<'a> {
     pub quote: &'a PriceQuote,
     pub reservation: &'a CreditReservation,

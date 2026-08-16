@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use asterism_domain::{
-    BatchExecution, BatchExecutionAttempt, BatchExecutionId, ExecutionState, ProviderAccountId,
-    ProviderId, ScheduleId, Timestamp,
+    BatchExecution, BatchExecutionAttempt, BatchExecutionAttemptId, BatchExecutionId,
+    ExecutionState, ProviderAccountId, ProviderId, ScheduleId, Timestamp,
 };
 use asterism_provider_api::{
     BatchExecutionPlanningRequest, PreparedProviderBatchExecutionPlan, ProviderContext,
@@ -10,17 +10,20 @@ use asterism_provider_api::{
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
-    BatchExecutionAttemptStartRequest, BatchExecutionChildExecutionCreateOutcome,
-    BatchExecutionChildExecutionCreateRequest, BatchExecutionChildExecutionRecord,
-    BatchExecutionChildExecutionRepository, BatchExecutionChildPlanMaterializeOutcome,
-    BatchExecutionChildPlanMaterializeRequest, BatchExecutionChildPlanRecord,
-    BatchExecutionChildPlanRepository, BatchExecutionParentSnapshotBindOutcome,
-    BatchExecutionParentSnapshotBindRequest, BatchExecutionParentSnapshotRepositoryFactory,
-    BatchExecutionParentSnapshotResolveRequest, BatchExecutionPlanningInputRepository,
-    BatchExecutionPlanningInputResolveRequest, BatchExecutionRepository,
-    BatchExecutionRuntimeSettingsBindOutcome, BatchExecutionRuntimeSettingsBindRequest,
-    BatchExecutionRuntimeSettingsRepository, BatchExecutionRuntimeSettingsResolveRequest,
-    CourseRuntimeRepository, ExecutionRuntimeSettingsSnapshot, ProviderAccountRuntimeRepository,
+    BatchExecutionAttemptStartRequest, BatchExecutionChildActivationBilling,
+    BatchExecutionChildActivationOutcome, BatchExecutionChildActivationRecord,
+    BatchExecutionChildActivationRepository, BatchExecutionChildActivationRequest,
+    BatchExecutionChildExecutionCreateOutcome, BatchExecutionChildExecutionCreateRequest,
+    BatchExecutionChildExecutionRecord, BatchExecutionChildExecutionRepository,
+    BatchExecutionChildPlanMaterializeOutcome, BatchExecutionChildPlanMaterializeRequest,
+    BatchExecutionChildPlanRecord, BatchExecutionChildPlanRepository,
+    BatchExecutionParentSnapshotBindOutcome, BatchExecutionParentSnapshotBindRequest,
+    BatchExecutionParentSnapshotRepositoryFactory, BatchExecutionParentSnapshotResolveRequest,
+    BatchExecutionPlanningInputRepository, BatchExecutionPlanningInputResolveRequest,
+    BatchExecutionRepository, BatchExecutionRuntimeSettingsBindOutcome,
+    BatchExecutionRuntimeSettingsBindRequest, BatchExecutionRuntimeSettingsRepository,
+    BatchExecutionRuntimeSettingsResolveRequest, CourseRuntimeRepository,
+    ExecutionRuntimeSettingsSnapshot, ProviderAccountRuntimeRepository,
     ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, StorageError,
 };
 
@@ -44,6 +47,12 @@ pub struct BatchExecutionPlanningResult {
     pub planned_fresh: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchExecutionActivationResult {
+    pub child_activations: Vec<BatchExecutionChildActivationRecord>,
+    pub activated_fresh: bool,
+}
+
 /// Claim-bound Course parent planner. It may call a Provider exactly once to
 /// obtain fresh read-only batch evidence, but Core alone resolves encrypted
 /// input, binds the private parent pair and later materializes children.
@@ -52,6 +61,7 @@ pub struct BatchExecutionPlanningService {
     planning_inputs: Arc<dyn BatchExecutionPlanningInputRepository>,
     child_plans: Arc<dyn BatchExecutionChildPlanRepository>,
     child_executions: Arc<dyn BatchExecutionChildExecutionRepository>,
+    child_activations: Arc<dyn BatchExecutionChildActivationRepository>,
     batch_settings: Arc<dyn BatchExecutionRuntimeSettingsRepository>,
     accounts: Arc<dyn ProviderAccountRuntimeRepository>,
     courses: Arc<dyn CourseRuntimeRepository>,
@@ -79,6 +89,7 @@ impl BatchExecutionPlanningService {
         planning_inputs: Arc<dyn BatchExecutionPlanningInputRepository>,
         child_plans: Arc<dyn BatchExecutionChildPlanRepository>,
         child_executions: Arc<dyn BatchExecutionChildExecutionRepository>,
+        child_activations: Arc<dyn BatchExecutionChildActivationRepository>,
         batch_settings: Arc<dyn BatchExecutionRuntimeSettingsRepository>,
         accounts: Arc<dyn ProviderAccountRuntimeRepository>,
         courses: Arc<dyn CourseRuntimeRepository>,
@@ -91,6 +102,7 @@ impl BatchExecutionPlanningService {
             planning_inputs,
             child_plans,
             child_executions,
+            child_activations,
             batch_settings,
             accounts,
             courses,
@@ -292,6 +304,50 @@ impl BatchExecutionPlanningService {
         })
     }
 
+    /// Activates the already materialized child Execution drafts under the
+    /// same live parent claim. Billing is either absent for the whole batch or
+    /// supplied for every frozen child position.
+    ///
+    /// # Errors
+    ///
+    /// Fails for invalid worker context, lost parent claims, partial or changed
+    /// billing, insufficient credit, Task/Execution drift or persistence
+    /// failures. The repository leaves no partial Task, credit or job writes.
+    pub async fn activate_children(
+        &self,
+        command: &PlanBatchExecutionCommand,
+        attempt_id: BatchExecutionAttemptId,
+        billings: &[BatchExecutionChildActivationBilling<'_>],
+    ) -> Result<BatchExecutionActivationResult, BatchExecutionPlanningError> {
+        validate_command(command)?;
+        let outcome = self
+            .child_activations
+            .activate_batch_execution_children(BatchExecutionChildActivationRequest {
+                batch_execution_id: command.batch_execution_id,
+                attempt_id,
+                parent_scheduler_job_id: command.scheduler_job_id,
+                worker_id: &command.worker_id,
+                billings,
+                correlation_id: &command.correlation_id,
+                at: command.at,
+            })
+            .await?;
+        Ok(match outcome {
+            BatchExecutionChildActivationOutcome::Activated(child_activations) => {
+                BatchExecutionActivationResult {
+                    child_activations,
+                    activated_fresh: true,
+                }
+            }
+            BatchExecutionChildActivationOutcome::Existing(child_activations) => {
+                BatchExecutionActivationResult {
+                    child_activations,
+                    activated_fresh: false,
+                }
+            }
+        })
+    }
+
     async fn materialize_child_plans(
         &self,
         command: &PlanBatchExecutionCommand,
@@ -475,8 +531,9 @@ mod tests {
     use super::*;
 
     use asterism_domain::{
-        AuthMethod, AuthState, CourseId, ProviderAccountId, ProviderId, RequestSource, SessionKind,
-        TaskCapability, UserId,
+        AuthMethod, AuthState, CourseId, CreditAmount, CreditReservation, CreditReservationId,
+        CreditReservationState, PriceQuote, PriceQuoteId, ProviderAccountId, ProviderId,
+        RequestSource, SessionKind, TaskCapability, UserId,
     };
     use asterism_provider_api::{
         ExecutionEventSink, ExecutionMutationSequenceAdvanceCondition,
@@ -488,10 +545,12 @@ mod tests {
     };
     use asterism_secrets::{SecretKey, SecretValue};
     use asterism_storage::{
-        BatchExecutionRepository, BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest,
-        Database, SchedulerRepository, SecretKeyring, SqliteBatchExecutionRepository,
-        SqliteCourseProgressRepository, SqliteProviderAccountRepository,
-        SqliteProviderRuntimeSettingsRepository, SqliteSchedulerRepository, SqliteSecretStore,
+        BatchExecutionChildActivationBilling, BatchExecutionRepository,
+        BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest, Database,
+        ExecutionBillingReservation, SchedulerRepository, SecretKeyring,
+        SqliteBatchExecutionRepository, SqliteCourseProgressRepository,
+        SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
+        SqliteSchedulerRepository, SqliteSecretStore,
     };
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
@@ -731,7 +790,8 @@ mod tests {
             batch_repository.clone(),
             batch_repository.clone(),
             batch_repository.clone(),
-            batch_repository,
+            batch_repository.clone(),
+            batch_repository.clone(),
             Arc::new(SqliteProviderAccountRepository::new(database.clone())),
             Arc::new(SqliteCourseProgressRepository::new(database.clone())),
             Arc::new(SqliteProviderRuntimeSettingsRepository::new(
@@ -843,6 +903,199 @@ mod tests {
             .unwrap(),
             1
         );
+        sqlx::query(
+            "INSERT INTO credit_accounts (user_id, available, reserved, updated_at) \
+             VALUES (?, 100, 0, ?)",
+        )
+        .bind(owner.to_string())
+        .bind(now.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let quotes = first
+            .child_executions
+            .iter()
+            .enumerate()
+            .map(|(index, child)| PriceQuote {
+                id: PriceQuoteId::new(),
+                task_id: child.task_id,
+                amount: CreditAmount::new(u64::try_from((index + 1) * 10).unwrap()),
+                pricing_revision: "batch-test-2026-08".to_owned(),
+                reason: format!("batch child {}", child.position),
+                created_at: child.created_at,
+            })
+            .collect::<Vec<_>>();
+        let reservations = first
+            .child_executions
+            .iter()
+            .zip(&quotes)
+            .map(|(child, quote)| CreditReservation {
+                id: CreditReservationId::new(),
+                user_id: owner,
+                quote_id: quote.id,
+                execution_id: child.execution_id,
+                amount: quote.amount,
+                state: CreditReservationState::Reserved,
+                created_at: child.created_at,
+                updated_at: child.created_at,
+            })
+            .collect::<Vec<_>>();
+        let billings = quotes
+            .iter()
+            .zip(&reservations)
+            .enumerate()
+            .map(
+                |(index, (quote, reservation))| BatchExecutionChildActivationBilling {
+                    position: u32::try_from(index + 1).unwrap(),
+                    billing: ExecutionBillingReservation { quote, reservation },
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut expensive_quotes = quotes.clone();
+        for quote in &mut expensive_quotes {
+            quote.amount = CreditAmount::new(60);
+        }
+        let mut expensive_reservations = reservations.clone();
+        for reservation in &mut expensive_reservations {
+            reservation.amount = CreditAmount::new(60);
+        }
+        let expensive_billings = expensive_quotes
+            .iter()
+            .zip(&expensive_reservations)
+            .enumerate()
+            .map(
+                |(index, (quote, reservation))| BatchExecutionChildActivationBilling {
+                    position: u32::try_from(index + 1).unwrap(),
+                    billing: ExecutionBillingReservation { quote, reservation },
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut activation_command = command.clone();
+        activation_command.at += Duration::seconds(1);
+        assert!(matches!(
+            service
+                .activate_children(&activation_command, first.attempt.id, &expensive_billings)
+                .await,
+            Err(BatchExecutionPlanningError::Storage(
+                StorageError::InsufficientCredits
+            ))
+        ));
+        assert_eq!(
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT available, reserved FROM credit_accounts WHERE user_id = ?",
+            )
+            .bind(owner.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            (100, 0)
+        );
+        for table in [
+            "price_quotes",
+            "credit_reservations",
+            "batch_execution_child_activations",
+        ] {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
+                    .fetch_one(database.pool())
+                    .await
+                    .unwrap(),
+                0,
+                "failed activation leaked rows in {table}",
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM executions WHERE state = 'requested'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM tasks WHERE orchestration_state = 'ready'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        let activated = service
+            .activate_children(&activation_command, first.attempt.id, &billings)
+            .await
+            .unwrap();
+        assert!(activated.activated_fresh);
+        assert_eq!(activated.child_activations.len(), 2);
+        let restored_activation = service
+            .activate_children(&activation_command, first.attempt.id, &billings)
+            .await
+            .unwrap();
+        assert!(!restored_activation.activated_fresh);
+        assert_eq!(
+            restored_activation.child_activations,
+            activated.child_activations
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM executions WHERE state = 'scheduled'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM tasks WHERE orchestration_state = 'scheduled'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM scheduled_jobs WHERE job_kind = 'execution'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM batch_execution_child_activations \
+                 WHERE batch_execution_id = ?",
+            )
+            .bind(batch.id.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT available, reserved FROM credit_accounts WHERE user_id = ?",
+            )
+            .bind(owner.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            (70, 30)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM credit_reservations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            2
+        );
+        let post_activation = service.plan(command.clone()).await.unwrap();
+        assert!(!post_activation.planned_fresh);
+        assert_eq!(post_activation.child_executions, first.child_executions);
+        assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
         sqlx::query(
             "UPDATE execution_provider_plan_artifacts SET artifact_digest = zeroblob(32) \
              WHERE execution_id = ( \
