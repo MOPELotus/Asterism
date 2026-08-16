@@ -84,6 +84,12 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-16: re-checked CxKitty's fixed Exam cover parser at `1589eac9c07c`.
+  Its `var *needcode *= *(\d+);` extraction converts any nonzero decimal to
+  true. Asterism replaced the prior digit-`1` substring heuristic with one exact
+  required declaration: 0 is false, bounded nonzero is true, and
+  missing/duplicate/quoted/fractional/lookalike declarations are ProtocolDrift.
+  The donor revision is unchanged and no challenge-solving path was added.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence
   and explicitly audits empty answer rows, not arbitrary substring-derived

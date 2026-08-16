@@ -254,6 +254,13 @@ changing answer status. Unknown compatible JSON extensions are ignored, but
 malformed state, rejection, identity drift and timing regression fail closed.
 All IDs, signatures and crypto-looking values are synthetic placeholders.
 
+Cover regressions pin CxKitty's exact decimal `needcode` declaration grammar.
+`0` is false and `1`, `2` or `10` are true; compact `varneedcode=10;` remains
+valid because the donor regex permits zero spaces. A lookalike
+`needcodeBackup`, `let` declaration, quoted/fractional value, missing declaration
+or duplicate declaration fails as ProtocolDrift rather than silently disabling
+the Exam-code gate.
+
 `detail-result-partial.html` retains four complete result identities while only
 the second original Question is selected. It proves that v3 continuation
 binding sends one save with `start=1`, reaches final submission after one

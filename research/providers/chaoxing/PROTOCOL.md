@@ -523,6 +523,18 @@ states, and encodes an owner/account/Task-bound `chaoxing.exam-pre-question.v1`
 continuation. Before execution it repeats Course/Exam/cover discovery and
 requires the exact encrypted continuation digest to match.
 
+The cover's Exam-code flag follows the pinned CxKitty parser grammar exactly:
+
+```text
+var *needcode *= *(\d+);
+```
+
+Exactly one bounded decimal declaration is required. `0` means no code gate and
+every nonzero integer means the gate is present. Missing, duplicate, quoted,
+fractional or lookalike declarations are ProtocolDrift. In particular, the
+Provider does not search the statement for digit `1` and does not default an
+omitted declaration to false.
+
 Core persists `chaoxing.exam-start.v1` and the canonical request digest before
 the Provider performs one `phone/start`. The Native transport accepts only the
 bound redirect and returned `examAnswerId`, then reads the complete

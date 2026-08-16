@@ -1012,7 +1012,7 @@ pub(crate) fn parse_exam_cover(html: &str) -> ProviderResult<ChaoxingExamCover> 
         .map(|value| normalize_text(&value))
         .filter(|value| !value.is_empty() && value.len() <= MAX_TITLE_BYTES)
         .ok_or_else(|| protocol_drift("Chaoxing Exam cover has no bounded title"))?;
-    let need_code = script_flag(&document, "needcode");
+    let need_code = script_numeric_flag(&document, "needcode")?;
     let need_face = input_value(&document, "#faceRecognitionCompare").is_some_and(|v| v != "0");
     let need_captcha = input_value(&document, "#captchaCheck").is_some_and(|v| v != "0");
     let captcha_id = input_value(&document, "#captchaCaptchaId").filter(|v| !v.is_empty());
@@ -1150,18 +1150,65 @@ fn first_text(document: &Html, selector_text: &str) -> Option<String> {
         .map(|node| node.text().collect::<Vec<_>>().join(" "))
 }
 
-fn script_flag(document: &Html, name: &str) -> bool {
-    document
+fn script_numeric_flag(document: &Html, name: &str) -> ProviderResult<bool> {
+    let mut values = Vec::new();
+    for script in document
         .select(&Selector::parse("script").expect("static script selector"))
         .flat_map(|node| node.text())
-        .any(|script| {
-            let needle = format!("var {name}");
-            script.contains(&needle)
-                && script
-                    .split_once(&needle)
-                    .and_then(|(_, tail)| tail.split_once(';'))
-                    .is_some_and(|(value, _)| value.contains('1'))
-        })
+    {
+        let mut offset = 0_usize;
+        while let Some(relative_start) = script[offset..].find("var") {
+            let start = offset + relative_start;
+            let tail = &script[start + "var".len()..];
+            let tail = tail.trim_start_matches(' ');
+            let Some(after_name) = tail.strip_prefix(name) else {
+                offset = start + "var".len();
+                continue;
+            };
+            if after_name
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+            {
+                offset = start + "var".len();
+                continue;
+            }
+            let after_name = after_name.trim_start_matches(' ');
+            let Some(value) = after_name.strip_prefix('=') else {
+                return Err(protocol_drift(
+                    "Chaoxing Exam cover has a malformed script flag declaration",
+                ));
+            };
+            let value = value.trim_start_matches(' ');
+            let end = value
+                .bytes()
+                .position(|byte| !byte.is_ascii_digit())
+                .unwrap_or(value.len());
+            let digits = &value[..end];
+            if digits.is_empty() || !value[end..].starts_with(';') {
+                return Err(protocol_drift(
+                    "Chaoxing Exam cover has a malformed script flag value",
+                ));
+            }
+            values.push(
+                digits
+                    .parse::<u64>()
+                    .map_err(|_| protocol_drift("Chaoxing Exam cover script flag is unbounded"))?,
+            );
+            offset = start + "var".len();
+        }
+    }
+    let Some(value) = values.first().copied() else {
+        return Err(protocol_drift(
+            "Chaoxing Exam cover omitted a required script flag",
+        ));
+    };
+    if values.len() != 1 {
+        return Err(protocol_drift(
+            "Chaoxing Exam cover duplicated a script flag",
+        ));
+    }
+    Ok(value != 0)
 }
 
 fn normalize_text(value: &str) -> String {
@@ -1236,6 +1283,33 @@ mod tests {
         assert_eq!(attempt.exam_answer_id.as_str(), "answer-1");
         assert_eq!(attempt.enc_remain_time, 3600);
         assert_eq!(attempt.remain_time, 3600);
+    }
+
+    #[test]
+    fn cover_requires_one_exact_numeric_exam_code_flag() {
+        for (declaration, expected) in [
+            ("var needcode = 0;", false),
+            ("var needcode = 1;", true),
+            ("var needcode=2;", true),
+            ("varneedcode=10;", true),
+        ] {
+            let cover = COVER.replace("var needcode = 1;", declaration);
+            assert_eq!(parse_exam_cover(&cover).unwrap().need_code, expected);
+        }
+
+        for declaration in [
+            "var needcodeBackup = 1;",
+            "let needcode = 1;",
+            "var needcode = '1';",
+            "var needcode = 1.0;",
+            "var needcode = 1; var needcode = 0;",
+        ] {
+            let cover = COVER.replace("var needcode = 1;", declaration);
+            assert_eq!(
+                parse_exam_cover(&cover).unwrap_err().kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
     }
 
     #[test]
