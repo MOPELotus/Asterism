@@ -974,6 +974,13 @@ class-learning Start request sends `2` while only response type `1` satisfies
 the fresh row identity. Dynamic allocation, stable release identity and
 non-replay semantics are unchanged.
 
+The same identity audit also closed the remaining direct recovery-test gap for
+mode-0 reading cards. A synthetic Start payload now binds one positive dynamic
+allocation into `cidaren.pre-question-attempt.v2`; recovery asserts that exact
+value and a subsequent reading-card payload with another allocation leaves
+`SubmitAnswerAndSave` FailedClosed as `RemoteChanged`. This adds no new wire
+claim and preserves the same no-replay boundary already used by real Questions.
+
 ## Check procedure
 
 For the next checkpoint:

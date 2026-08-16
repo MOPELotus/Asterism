@@ -2340,6 +2340,7 @@ mod tests {
         let artifact =
             CidarenPreQuestionArtifact::decode_bound(&value, digest, task_id, "class-task:2002")
                 .unwrap();
+        assert_eq!(artifact.remote_attempt_task_id(), Some(92_002));
         flow = CidarenAttemptFlow::restore_pre_question(
             &recovered_context,
             task_id,
@@ -2378,6 +2379,64 @@ mod tests {
                 CidarenAttemptOperation::SubmitAnswerAndSave,
                 CidarenAttemptOperation::SkipAnswer,
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_reading_card_rejects_a_changed_dynamic_task_allocation() {
+        let mut changed = reading_card_payload();
+        changed["task_id"] = json!(92_003);
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(&reading_card_payload()),
+                response(&changed),
+            ])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let task_id = TaskId::new();
+        let mut flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail(), None)
+                .unwrap();
+        let outcome = flow
+            .issue_start(request_at())
+            .unwrap()
+            .execute(transport.clone(), &context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+
+        let continuation = flow.pre_question_continuation().unwrap().unwrap();
+        let digest = continuation.artifact().digest();
+        let (encoded, _, _, _) = continuation.into_parts();
+        let value = encoded.into_secret_value();
+        let artifact =
+            CidarenPreQuestionArtifact::decode_bound(&value, digest, task_id, "class-task:2002")
+                .unwrap();
+        let recovered = recovered_context(&context);
+        let mut flow = CidarenAttemptFlow::restore_pre_question(
+            &recovered,
+            task_id,
+            "class-task:2002",
+            &detail(),
+            artifact,
+            None,
+        )
+        .unwrap();
+
+        let outcome = flow
+            .issue_advance(&settings(), request_at())
+            .unwrap()
+            .execute(transport, &recovered)
+            .await
+            .unwrap();
+        assert_eq!(
+            flow.accept(outcome).unwrap_err().kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            flow.status(),
+            CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::SubmitAnswerAndSave)
         );
     }
 
@@ -2736,6 +2795,8 @@ mod tests {
 
     fn reading_card_payload() -> Value {
         json!({
+            "task_id": 92_002,
+            "task_type": 2,
             "topic_code": "reading-topic",
             "topic_mode": 0,
             "topic_done_num": 0,

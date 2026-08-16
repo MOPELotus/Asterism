@@ -97,7 +97,10 @@ establishes multi-step allocation stability; issue 77 has one Start, 21 Next
 operations, 22 distinct topic tokens and one response Task ID/type. Synthetic
 tests persist only a placeholder positive `remote_attempt_task_id` in encrypted
 pre-Question and real-Question v2 state, accept older v2 state without it, and
-reject non-positive or switched allocations. No real ID/token is retained.
+reject non-positive or switched allocations. The reading-card recovery vector
+now asserts that the pre-Question artifact retains the placeholder allocation
+and that a later reading-card response switching it fails the issued advance
+as `RemoteChanged` without replay. No real ID/token is retained.
 
 The BrowserBridge fixtures are synthetic result transport documents generated
 from the Provider typed boundary; tests pair each one with a constructor-built
