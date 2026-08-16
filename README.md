@@ -1,6 +1,10 @@
 # Asterism
 
 [![CI](https://github.com/MOPELotus/Asterism/actions/workflows/ci.yml/badge.svg)](https://github.com/MOPELotus/Asterism/actions/workflows/ci.yml)
+[![Rust 1.97+](https://img.shields.io/badge/Rust-1.97%2B-000000?logo=rust)](https://www.rust-lang.org/)
+[![Status: Pre-release](https://img.shields.io/badge/status-pre--release-orange)](#发布路线)
+[![Last commit](https://img.shields.io/github/last-commit/MOPELotus/Asterism)](https://github.com/MOPELotus/Asterism/commits/master/)
+[![GitHub stars](https://img.shields.io/github/stars/MOPELotus/Asterism?style=flat)](https://github.com/MOPELotus/Asterism/stargazers)
 
 **Unified learning task orchestration across multiple platforms, powered by Rust.**
 
@@ -20,16 +24,15 @@ Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。�
 - 通过 Capture / BrowserBridge 辅助需要浏览器登录态或交互的流程；
 - 从 Rust OpenAPI 源生成 TypeScript Client，供 WebUI 和外部集成复用。
 
-## 当前 Provider
+## Provider 路线
 
-| Provider | 当前覆盖 | 状态 |
+| 批次 | Provider | 状态 |
 |---|---|---|
-| Chaoxing | 登录、课程/章节/资源/作业/考试发现，部分资源与提交链路 | Development |
-| WELearn | Password/OIDC/Cookie、Course/Unit/SCO、CMI 进度/时长及执行规划 | Development |
-| UAI | Password/JWT/Capture、层级任务、进度/时长、题目与多类执行边界 | Development |
-| Cidaren | Token/Composite 登录、课程任务、加密题目与答题状态机 | Development |
+| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中 |
+| 第二批 | `zhihuishu`、`zjy`、`icve` | 计划中 |
+| 后续批次 | `fif`、`itest`、`utalk` 及其他已分配 Provider ID 的平台 | 未来 |
 
-这些 Provider 仅在本地验证时显式启用。代码和离线测试覆盖不等于真实账号验证，也不等于平台协议长期稳定。
+第一批 Provider 仅在本地验证时显式启用。代码和离线测试不等于真实账号验证，也不代表平台协议长期稳定。
 
 ## 发布路线
 
@@ -40,7 +43,7 @@ Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。�
 3. 完整 CI、迁移、前端构建和发布产物检查通过；
 4. Development Provider、未授权 mutation 和已知限制得到明确标注。
 
-第二批及后续 Provider 暂列 **Further Future**，不阻塞首次 pre-release。首次 pre-release 只提供明确声明的预发布兼容范围，最终稳定 API / OpenAPI 基线将在后续单独冻结。
+第二批 Provider 当前为计划中，不阻塞首次 pre-release；后续 Provider 批次与稳定 API / OpenAPI 兼容基线属于未来工作。首次 pre-release 只提供明确声明的预发布兼容范围。
 
 ## 架构概览
 
@@ -140,6 +143,10 @@ npm run build
 
 WebUI 使用从 Asterism OpenAPI 自动生成的 TypeScript Client。修改 API 后应重新生成并执行类型检查。
 
+## QQ 机器人交互
+
+QQ 机器人交互部分基于 [MOPELotus/Miao-Yunzai](https://github.com/MOPELotus/Miao-Yunzai) 进行适配。Asterism-Plugin/Yunzai 作为公共交付面的薄适配层，通过 Asterism HTTP API 调用 Core，不在机器人插件中重复实现 Provider 业务逻辑。
+
 ## SecretStore 与开发 Provider
 
 普通 TOML 配置不得保存密码、Cookie、Token 或密钥。SecretStore keyring 只从环境变量读取：
@@ -232,3 +239,15 @@ docs(readme): clarify local setup
 ## 许可证与第三方来源
 
 仓库当前未包含统一的开源许可证文件，因此默认版权规则适用。Provider 可能参考不同许可证或无明确许可证的上游协议证据；贡献者不得直接复制第三方代码，并应在提交中说明必要的来源与许可证影响。
+
+## 鸣谢
+
+感谢以下项目提供的思路及技术支持：
+
+- Chaoxing 相关：[Samueli924/chaoxing](https://github.com/Samueli924/chaoxing)、[surinrasu/CxKitty](https://github.com/surinrasu/CxKitty)、[Ylim314/chaoxing-sign](https://github.com/Ylim314/chaoxing-sign)、[superdaobo/mini-hbut](https://github.com/superdaobo/mini-hbut)、[LangHY/chaoxing-exam](https://github.com/LangHY/chaoxing-exam)、[CodFrm/cxmooc-tools](https://github.com/CodFrm/cxmooc-tools)、[ocsjs/ocsjs](https://github.com/ocsjs/ocsjs)、[iwillwill-ALLWILL/chaoxing-agent-skill](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill)
+- WELearn 相关：[Fanyuchang2026/welearn-helper](https://github.com/Fanyuchang2026/welearn-helper)、[YZBRH/Welearn_helper](https://github.com/YZBRH/Welearn_helper)、[1q2w-c/Auto_WeLearn](https://github.com/1q2w-c/Auto_WeLearn)
+- UAI 相关：[create-try-now/AutoFinish_UxiaoyuanAI](https://github.com/create-try-now/AutoFinish_UxiaoyuanAI)、[Duster-Cule/UnipusHelperPro](https://github.com/Duster-Cule/UnipusHelperPro)、[uxudjs/UnipusAIAutoPlayer](https://github.com/uxudjs/UnipusAIAutoPlayer)、[Zzj-klwgxdz/UnipusAI](https://github.com/Zzj-klwgxdz/UnipusAI)
+- Cidaren 相关：[MOPELotus/Easy_Cidaren](https://github.com/MOPELotus/Easy_Cidaren)、[ularch/Easy_Cidaren](https://github.com/ularch/Easy_Cidaren)、[github123666/cidaren](https://github.com/github123666/cidaren)
+- QQ 机器人交互适配：[MOPELotus/Miao-Yunzai](https://github.com/MOPELotus/Miao-Yunzai)
+
+Asterism 对相关协议与行为采用独立实现。以上鸣谢不代表代码复制、官方隶属、背书或持续兼容承诺；各项目版权与许可证归其原作者及贡献者所有。
