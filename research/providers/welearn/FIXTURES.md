@@ -414,6 +414,17 @@ only structural field names, response codes and bounded placeholder shapes.
   A maximum-size regression carries all 8,192 ordered Fanyuchang children
   through that same preparation, reaches Core position 8,192 and retains the
   digest-only authority below 4 KiB plus complete private batch below 8 MiB.
+- Shared batch-planning contract fixtures encode the deny-unknown namespaced
+  `welearn.atomic-batch-request.v1` input, exercise both a complete
+  Fanyuchang target vector and Auto's sampled aggregate budget, and call the
+  registered `TaskExecutionCapability` fresh hook. They prove exactly one
+  Course-list read plus one complete Unit/SCO scan, preserve all three ordered
+  fixture children, and enforce Core's frozen expected child count.
+- Deterministic batch-restore fixtures call the registered restore hook after
+  fresh preparation and obtain the identical `ProviderExecutionBatchPlan`
+  without increasing either inventory call counter. Foreign namespaced input,
+  unsupported singleton flows, empty Fanyuchang target authority and child
+  cardinality drift all fail closed.
 - Durable atomic-child recovery tests decode the parent authority and complete
   batch snapshot together, accept both Fanyuchang and Auto target shapes, and
   reject cross-attempt Course, flow, Unit selection, aggregate, expected-child

@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use zeroize::Zeroize;
 
 use crate::{
-    WellearnScoLeavesDocument, metadata::development_metadata, parse_course_inventory,
-    parse_task_inventory,
+    WellearnScoLeavesDocument, WellearnUnitObservation, metadata::development_metadata,
+    parse_course_inventory, parse_task_inventory, parse_unit_inventory,
 };
 
 const MAX_INVENTORY_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -152,6 +152,24 @@ impl WellearnTaskInventory {
             metadata: development_metadata()?,
             transport,
         })
+    }
+
+    /// Reads one complete Course-scoped inventory and preserves both Unit
+    /// selection facts and normalized SCO tasks from that same response set.
+    ///
+    /// This Provider-private boundary exists for batch planning because an
+    /// explicitly selected empty Unit must not disappear merely because the
+    /// shared Task inventory contains no child row for it.
+    pub(crate) async fn list_tasks_and_units(
+        &self,
+        context: &ProviderContext,
+        course: &RemoteCourse,
+    ) -> ProviderResult<(Vec<RemoteTask>, Vec<WellearnUnitObservation>)> {
+        validate_context(context, &self.metadata)?;
+        let documents = self.transport.fetch_tasks(context, course).await?;
+        let units = parse_unit_inventory(documents.units.as_str())?;
+        let tasks = parse_task_inventory(course, documents.units.as_str(), &documents.leaves)?;
+        Ok((tasks, units))
     }
 }
 

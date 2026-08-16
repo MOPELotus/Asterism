@@ -947,34 +947,54 @@ rebinds its Core artifact. It is a pure Provider boundary and performs no I/O
 or scheduling. A missing/unselected child is RemoteChanged; singleton or
 incomplete authority never falls back to inferred all-Unit selection.
 
-The shared single-Task `prepare_execution_plan` hook cannot safely call this
-boundary yet. Its request has one Task identity, optional local Course ID,
+The shared single-Task `prepare_execution_plan` hook still cannot safely call
+this boundary. Its request has one Task identity, optional local Course ID,
 capabilities and per-Task settings, but no donor flow, ordered Unit selection,
 parent remote Course authority, sibling membership/ordinal, Auto aggregate or
-concrete Fanyuchang target. The safe order is parent selection authority first,
-one fresh complete Course scan second, one Provider batch build third, then an
-atomic Core transaction that persists the parent plan and creates every child
-with its exact artifact. Independently invoking the hook after each child Task
-already exists could rescan different membership and redistribute Auto targets.
-The Provider adapter now supplies Core's exact typed private snapshot, while
-Core `fe63910` supplies encrypted same-Attempt bind/resolve storage. Neither
-side yet selects the WELearn parent composite capability, invokes that bind from
-Engine planning, creates children or grants mutation authority; those remain
-the shared orchestration gap.
+complete Fanyuchang target vector. Core `53859f8` adds the separate
+Course-scoped batch contract instead. WELearn encodes those missing facts as
+deny-unknown `welearn.atomic-batch-request.v1` bytes inside
+`ProviderBatchExecutionPlanningInput`; the schema is provider-namespaced,
+versioned, locally capped at 1 MiB and re-enters the strict atomic authority,
+Unit-selection, target and Auto-budget constructors on decode.
+
+The registered `WellearnTaskExecution::prepare_batch_execution_plan` delegates
+to `WellearnBatchExecutionPlanner`. It first validates Provider identity, the
+exact two-capability atomic set and resolved runtime settings. It then lists
+Courses once, requires exactly one current remote Course identity, and performs
+one all-or-nothing Unit/SCO inventory request. That internal inventory adapter
+parses both Units and Tasks from the same response set so explicitly selected
+empty Units are not lost at the shared Task projection. The planner rebuilds
+the selected batch once, binds the expected child and its target, prepares the
+v2 encrypted parent pair plus generic ordered children, and finally lets
+`PreparedProviderBatchExecutionPlan` enforce Core's frozen expected child
+count. No remote mutation, Storage access or child scheduling occurs.
+
+`restore_batch_execution_plan` is the deterministic counterpart. It receives
+only `ExecutionParentBatchSnapshot`, decodes and validates the v2 authority and
+complete batch, reconstructs every target/artifact/conditional sequence in
+order and returns `ProviderExecutionBatchPlan`. It has no Course or Task
+inventory dependency and therefore cannot rescan, repair order or redistribute
+Auto targets during recovery. Core `fe63910` supplies encrypted same-Attempt
+bind/resolve storage. Engine selection of the WELearn parent composite,
+transactional child creation and actual grouped mutation/recovery dispatch
+remain the shared orchestration gap.
 
 Core `0c0d26b` closes the shared recovery-result portion of that integration:
 Engine validates an optional Provider verification against the same-attempt
 complete sequence and final accepted ordinal, then writes it under the active
 recovery claim before finishing. Core `fe63910` separately closes the encrypted
 parent authority plus complete-batch same-Attempt repository primitive, and
-WELearn now constructs its exact typed input. Core `217c1f6` defines the generic
-ordered child/batch plan, and WELearn projects its complete atomic dispatch into
-that contract. The remaining Core Gap is the orchestration transaction and
-runtime: persist and schedule Core `dc04512`'s Course-scoped `BatchExecution`
-and Attempt, provide the Provider planning input, bind the snapshot before child
-creation, consume the Provider batch plan once, create each child with its
-exact grouped call/artifact/sequence without rescanning, and resolve/inject the
-private snapshot on execution and recovery.
+WELearn constructs its exact typed input. Core `217c1f6` defines the generic
+ordered child/batch plan, and Core `53859f8` exposes the fresh prepare and
+deterministic restore hooks now implemented by WELearn. The remaining Core Gap
+is the orchestration transaction and runtime: persist and schedule Core
+`dc04512`'s Course-scoped `BatchExecution` and Attempt, resolve and pass the
+already persisted Provider planning input, bind the returned snapshot before
+child creation, consume the Provider batch plan once, create each child with
+its exact grouped call/artifact/sequence without rescanning, and resolve/inject
+the private snapshot into the existing atomic execution and recovery
+coordinators.
 Giving the Provider direct Storage access would still violate ownership instead
 of closing that gap.
 

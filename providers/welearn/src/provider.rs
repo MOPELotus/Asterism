@@ -6,12 +6,12 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionRecovery,
-    WellearnAuthentication, WellearnAuthenticationTransport, WellearnCmiTransport,
-    WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnDurationRead,
-    WellearnDurationReport, WellearnDurationReportTransport, WellearnResourceExecution,
-    WellearnResourceExecutionTransport, WellearnSessionResolver, WellearnTaskDetail,
-    WellearnTaskExecution, WellearnTaskInventory, WellearnTaskInventoryTransport,
-    WellearnTaskProgress, metadata::development_metadata,
+    WellearnAuthentication, WellearnAuthenticationTransport, WellearnBatchExecutionPlanner,
+    WellearnCmiTransport, WellearnCourseInventory, WellearnCourseInventoryTransport,
+    WellearnDurationRead, WellearnDurationReport, WellearnDurationReportTransport,
+    WellearnResourceExecution, WellearnResourceExecutionTransport, WellearnSessionResolver,
+    WellearnTaskDetail, WellearnTaskExecution, WellearnTaskInventory,
+    WellearnTaskInventoryTransport, WellearnTaskProgress, metadata::development_metadata,
     native_authentication::NativeWellearnAuthenticationTransport,
     native_http::NativeWellearnInventoryTransport, runtime_settings::runtime_settings_schema,
     stored_session::StoredWellearnSessionResolver,
@@ -80,9 +80,14 @@ pub fn build_development_provider(
         task_detail.clone(),
         duration_transport,
     )?);
-    let task_execution = Arc::new(WellearnTaskExecution::try_new(
+    let batch_planner = Arc::new(WellearnBatchExecutionPlanner::try_new(
+        course_inventory.clone(),
+        task_inventory.clone(),
+    )?);
+    let task_execution = Arc::new(WellearnTaskExecution::try_new_with_batch_planner(
         resource_execution,
         duration_report,
+        batch_planner,
     )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,

@@ -12,6 +12,7 @@ mod atomic_mutation_digest;
 mod atomic_recovery;
 mod atomic_sequence;
 mod authentication;
+mod batch_execution;
 mod batch_plan;
 mod cmi;
 mod course_context;
@@ -58,6 +59,10 @@ pub use authentication::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCookieSession,
     WellearnLoginRedirect, WellearnPasswordCipher, WellearnSessionResolver,
     classify_password_login_response, encode_password_at,
+};
+pub use batch_execution::{
+    WELLEARN_BATCH_EXECUTION_PLANNING_INPUT_TYPE, WellearnBatchExecutionPlanner,
+    WellearnBatchExecutionPlanningInput, restore_batch_execution_plan,
 };
 pub use batch_plan::{
     WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE, WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE,

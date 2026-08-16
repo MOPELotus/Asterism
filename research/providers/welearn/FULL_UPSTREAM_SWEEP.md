@@ -36,11 +36,11 @@ not executed or reverse engineered.
 | Donor behavior | Current Asterism mapping | Classification |
 |---|---|---|
 | Password/OIDC, raw Cookie input, captcha/SMS and external-provider browser choices | Authentication, stored-session renewal and versioned Capture recipes | Native Password/ImportedCookie and bounded assisted/external-browser Cookie paths are implemented offline; interactive callback and live validation remain shared gates |
-| Course -> Unit -> SCO discovery, ordered Unit selection and all-task selection | CourseInventory, TaskInventory and Provider-private batch plan | Native inventory and immutable selection/membership plans are implemented; durable parent/child scheduling remains a Core gap |
+| Course -> Unit -> SCO discovery, ordered Unit selection and all-task selection | CourseInventory, TaskInventory and Provider-private batch plan | Native inventory, immutable selection/membership plans, namespaced batch planning input and registered fresh/restore hooks are implemented; durable parent/child scheduling remains a Core gap |
 | Fresh SCO identity/detail and CMI read | TaskDetail, TaskProgressRead and DurationRead | Implemented with full fresh rediscovery, fingerprint/capability/state rebinding and fail-closed result parsing |
 | Direct completion/progress/score writes | ResourceExecution | Current dual-save, legacy set/save and Auto save-only profiles are separately frozen and independently verified; ambiguous mutation is never replayed |
 | YZBRH preservation duration and Auto single-file duration | DurationReport | Implemented with donor-specific start/keep/finalize/readback evidence and goal-specific Core verification |
-| Current Fanyuchang and modular Auto duration plus completion in one start session | atomic duration-completion child | Provider parent/batch/child artifacts, complete ordered dispatch projection, conditional sequence, issue/receipt/observation transport, native runtime, same-attempt snapshot adapter and immediate/read-only verification are implemented. Foreign generic retry deadlines fail closed. The runtime remains deliberately unregistered until Core creates and dispatches durable parent/child attempts and persists recovery proof |
+| Current Fanyuchang and modular Auto duration plus completion in one start session | atomic duration-completion child | Provider parent/batch/child artifacts, complete ordered dispatch projection, conditional sequence, issue/receipt/observation transport, native runtime, same-attempt snapshot adapter and immediate/read-only verification are implemented. Foreign generic retry deadlines fail closed. Batch prepare/restore are registered through TaskExecution; the native grouped mutation/recovery coordinator remains outside singleton dispatch until Core creates and routes durable parent/child attempts |
 | Auto aggregate duration budget and equal-floor child allocation | bounded parent batch authority and child targets | Provider modeling is implemented; shared parent runtime scope, entropy, orchestration and API remain missing |
 | Per-account 1-100 worker setting and independent sessions | Provider/account concurrency bound | Implemented; global and cross-account admission remain Core-owned |
 | Account add/remove, nickname/status, CSV/TXT import/export and batch-account queue | shared account/API/UI behavior | Not WELearn wire behavior; plaintext donor password export must not be copied |
@@ -90,9 +90,10 @@ Consequently:
    Auto remains aggregate-derived.
 2. Core now owns the conditional ledger, attempt-bound observations,
    same-attempt recovery snapshot loading and recovered final-verification
-   persistence. It still needs WELearn composite registration/dispatch, parent
-   planning input, transactional child creation and resolved private-snapshot
-   injection into execution/recovery.
+   persistence. Core `53859f8` plus WELearn now also own the namespaced planning
+   input and registered fresh prepare/deterministic restore boundary. Main still
+   needs the orchestration transaction, child creation and resolved
+   private-snapshot injection into grouped execution/recovery dispatch.
 3. Capture/BrowserBridge still needs active browser session injection, action
    dispatch, callback handling and bounded recovery for interactive login.
 4. Cross-account bulk import/export and queueing are shared product surfaces and

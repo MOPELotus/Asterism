@@ -2,12 +2,16 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{
-    ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
-    ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult, TaskExecutionCapability,
+    BatchExecutionPlanningRequest, ExecutionEventSink, ExecutionOutcome,
+    ExecutionParentBatchSnapshot, ExecutionRequest, PreparedProviderBatchExecutionPlan,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionBatchPlan,
+    ProviderIdentity, ProviderMetadata, ProviderResult, TaskExecutionCapability,
 };
 use async_trait::async_trait;
 
-use crate::metadata::development_metadata;
+use crate::{
+    WellearnBatchExecutionPlanner, metadata::development_metadata, restore_batch_execution_plan,
+};
 
 /// Dispatches `WELearn`'s independent `ResourceExecution` and `DurationReport`
 /// capabilities through the single shared `TaskExecution` registry slot. Core
@@ -17,6 +21,7 @@ pub struct WellearnTaskExecution {
     metadata: ProviderMetadata,
     resource: Arc<dyn TaskExecutionCapability>,
     duration: Arc<dyn TaskExecutionCapability>,
+    batch_planner: Option<Arc<WellearnBatchExecutionPlanner>>,
 }
 
 impl WellearnTaskExecution {
@@ -30,6 +35,28 @@ impl WellearnTaskExecution {
         resource: Arc<dyn TaskExecutionCapability>,
         duration: Arc<dyn TaskExecutionCapability>,
     ) -> ProviderResult<Self> {
+        Self::try_new_inner(resource, duration, None)
+    }
+
+    /// Builds the registered dispatcher with fresh Course batch planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when any implementation belongs to a
+    /// different Provider contract.
+    pub fn try_new_with_batch_planner(
+        resource: Arc<dyn TaskExecutionCapability>,
+        duration: Arc<dyn TaskExecutionCapability>,
+        batch_planner: Arc<WellearnBatchExecutionPlanner>,
+    ) -> ProviderResult<Self> {
+        Self::try_new_inner(resource, duration, Some(batch_planner))
+    }
+
+    fn try_new_inner(
+        resource: Arc<dyn TaskExecutionCapability>,
+        duration: Arc<dyn TaskExecutionCapability>,
+        batch_planner: Option<Arc<WellearnBatchExecutionPlanner>>,
+    ) -> ProviderResult<Self> {
         let metadata = development_metadata()?;
         if resource.metadata() != &metadata || duration.metadata() != &metadata {
             return Err(ProviderError::new(
@@ -41,6 +68,7 @@ impl WellearnTaskExecution {
             metadata,
             resource,
             duration,
+            batch_planner,
         })
     }
 }
@@ -52,6 +80,10 @@ impl fmt::Debug for WellearnTaskExecution {
             .field("metadata", &self.metadata)
             .field("resource", &"configured")
             .field("duration", &"configured")
+            .field(
+                "batch_planner",
+                &self.batch_planner.as_ref().map(|_| "configured"),
+            )
             .finish()
     }
 }
@@ -64,6 +96,27 @@ impl ProviderIdentity for WellearnTaskExecution {
 
 #[async_trait]
 impl TaskExecutionCapability for WellearnTaskExecution {
+    async fn prepare_batch_execution_plan(
+        &self,
+        context: &ProviderContext,
+        request: &BatchExecutionPlanningRequest<'_>,
+    ) -> ProviderResult<PreparedProviderBatchExecutionPlan> {
+        let planner = self.batch_planner.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "WELearn batch execution planner is not configured",
+            )
+        })?;
+        planner.prepare(context, request).await
+    }
+
+    fn restore_batch_execution_plan(
+        &self,
+        parent: &ExecutionParentBatchSnapshot,
+    ) -> ProviderResult<ProviderExecutionBatchPlan> {
+        restore_batch_execution_plan(parent)
+    }
+
     fn allows_execution_from_remote_state(
         &self,
         requested_capabilities: &[TaskCapability],

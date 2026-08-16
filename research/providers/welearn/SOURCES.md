@@ -232,6 +232,12 @@ audited duration semantics, not a donor protocol delta.
 The adjacent typed Core-child execution/recovery adapter reuses that unchanged
 refresh. It only composes the v2 parent pair with Core's existing child plan and
 same-attempt mutation snapshot; no donor request or result behavior changed.
+The Core batch-planning-contract checkpoint after shared commit `53859f8`
+reuses that immediately preceding full 2026-08-16 refresh. The new
+`welearn.atomic-batch-request.v1` input, one-scan fresh planner and parent-pair
+only restore hook are Asterism orchestration boundaries over the already
+audited Course/Unit/SCO membership and target rules; they add no donor route,
+setting, mutation, completion or retry behavior.
 
 ## Source selection
 
@@ -268,8 +274,10 @@ task Referer for exercise completion. The current route appends `?uid=...` to
 explicit profiles rather than one merged superset request. Current
 Fanyuchang duration and modular Auto duration each reuse one start through the
 final completion mutation; Provider batch plans mark that atomic execution
-shape, and Core now persists the exact receipt-conditional child sequence.
-Shared parent/child creation, recovery dispatch and capability registration
+shape, and Core now persists the exact receipt-conditional child sequence. The
+registered WELearn batch hooks can freshly prepare the complete parent/child
+projection and deterministically restore it from the encrypted pair. Shared
+parent/child transaction ownership plus grouped execution/recovery dispatch
 remain required before claiming the combined flow is production-reachable. They
 also detect authentication challenges but contain no reliable automated solver
 or task BrowserBridge implementation to port. Asterism provides immutable
