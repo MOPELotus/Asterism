@@ -152,6 +152,8 @@ The current checkpoint (not a completion boundary):
     change because it remains audit metadata rather than execution identity.
 33. registers a public `QuestionInventoryCapability` pre-Question adapter. It
     resolves word-selection evidence only from fresh Task-bound inventory,
+    emits the donor's grouped `{course_id:list_id: [words...]}` map for both
+    ordinary and self-built learning Tasks,
     decodes and rebinds every encrypted phase, freezes exactly one command,
     and maps the accepted raw response to `Continue`, real-Question
     `Materialize`, or typed `Completed`. A repeated word-selection requirement

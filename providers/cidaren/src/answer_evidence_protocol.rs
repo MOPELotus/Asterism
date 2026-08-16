@@ -613,8 +613,9 @@ impl CidarenWordInventory {
 }
 
 /// Reproduces the donor's small-task selection rule and exact word-map shape.
-/// Standard units submit a flat word array. Self-built learning tasks submit
-/// `{course_id:list_id: [words...]}` groups.
+/// Every eligible `StudyTask/Info` inventory is submitted as one or more
+/// `{course_id:list_id: [words...]}` groups. Ordinary units have one group;
+/// self-built learning tasks may span several groups.
 ///
 /// # Errors
 ///
@@ -635,34 +636,17 @@ pub fn build_word_selection_plan(
         return Ok(None);
     }
     let word_count = inventory.words.len();
-    let self_built = matches!(
-        binding.route(),
-        CidarenWordInventoryRoute::StudyTaskInfo {
-            release_id: Some(_),
-            ..
-        }
-    );
-    let word_map = if self_built {
-        let mut groups = Map::new();
-        for entry in &inventory.words {
-            let key = format!("{}:{}", inventory.course_id, entry.list_id);
-            let values = groups
-                .entry(key)
-                .or_insert_with(|| Value::Array(Vec::new()))
-                .as_array_mut()
-                .ok_or_else(|| protocol_drift("Cidaren word-selection group changed shape"))?;
-            values.push(Value::String(entry.word.clone()));
-        }
-        Value::Object(groups)
-    } else {
-        Value::Array(
-            inventory
-                .words
-                .iter()
-                .map(|entry| Value::String(entry.word.clone()))
-                .collect(),
-        )
-    };
+    let mut groups = Map::new();
+    for entry in &inventory.words {
+        let key = format!("{}:{}", inventory.course_id, entry.list_id);
+        let values = groups
+            .entry(key)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| protocol_drift("Cidaren word-selection group changed shape"))?;
+        values.push(Value::String(entry.word.clone()));
+    }
+    let word_map = Value::Object(groups);
     Ok(Some(CidarenWordSelectionPlan {
         remote_task_id: binding.remote_task_id.clone(),
         word_map,
@@ -1572,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    fn word_selection_plan_preserves_flat_and_self_built_shapes() {
+    fn word_selection_plan_preserves_grouped_unit_and_self_built_shapes() {
         let units = study_document();
         let learning = detail("class-task:2002", "learning", 92002, "Synthetic List 02");
         let binding =
@@ -1583,7 +1567,10 @@ mod tests {
         let plan = build_word_selection_plan(&binding, &inventory)
             .unwrap()
             .unwrap();
-        assert_eq!(plan.word_map(), &json!(["alpha", "beta"]));
+        assert_eq!(
+            plan.word_map(),
+            &json!({"course-a:course-a_02": ["alpha", "beta"]})
+        );
         assert!(!format!("{plan:?}").contains("alpha"));
 
         let learning = detail("class-task:2002", "learning", 92002, "Self Built Learning");

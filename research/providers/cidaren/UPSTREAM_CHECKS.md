@@ -1075,6 +1075,25 @@ receive-time drift use the same fail-closed boundary. This is Provider-owned
 binding work only; Main still owns encrypted persistence and the shared blocked
 Question-step outcome.
 
+### 2026-08-16 grouped word-selection wire follow-up
+
+The incremental checkpoint again resolved `ularch/HEAD` and `master` to
+`bce9559f536ebbdad791f41ed4e111b30accb05d`, `MOPELotus/HEAD` and `master` to
+`a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`, and the public latest tag/release
+to `1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`. No branch, tag or release
+delta was present. The public issue ordering also remained headed by issues
+112/113; neither adds a learning-platform route or response shape.
+
+Re-reading both pinned `select_all_word` call families exposed a pre-existing
+migration omission: ordinary units explicitly wrap their fresh words as
+`{course_id:list_id: [words...]}`, while the self-built path first groups the
+fresh inventory by the same key and then passes that object. No eligible donor
+call site supplies a bare word array. `build_word_selection_plan` now always
+emits the grouped map, preserving one group for an ordinary unit and multiple
+groups when a self-built inventory spans units. The signed mutation builder
+remains unchanged and continues bounding, compact-encoding and zeroizing that
+exact map.
+
 ## Check procedure
 
 For the next checkpoint:

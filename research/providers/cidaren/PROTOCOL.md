@@ -763,8 +763,10 @@ has no blocked variant carrying this artifact and diagnosis. Until Main adds
 that contract, Cidaren cannot emit a durable blocked step, and it never
 relabels the rejection Completed, HumanRequired or retryable.
 
-Before `StartAnswer`, eligible learning Tasks build the donor's exact flat or
-self-built grouped word map from a fresh Task-bound inventory. After start,
+Before `StartAnswer`, eligible learning Tasks build the donor's exact grouped
+word map from a fresh Task-bound `StudyTask/Info` inventory. An ordinary unit
+uses one `{course_id:list_id: [words...]}` entry; a self-built task may contain
+several entries. No audited eligible call site submits a bare word array. After start,
 the Provider-private state machine emits only one remote operation at a time:
 
 ```text

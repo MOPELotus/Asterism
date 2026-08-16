@@ -332,6 +332,9 @@ placeholder identities, result codes, status values and pagination shape.
   Reading-card identity JSON and hash material are cleared immediately.
 - Request-vector tests freeze `StartAnswer`, `VerifyAnswer`,
   `SubmitAnswerAndSave`, `SkipAnswer` and `SubmitChoseWord` field/sign order.
+  Word-selection-plan tests freeze the donor's grouped
+  `{course_id:list_id: [words...]}` map for both ordinary and self-built
+  learning Tasks; a bare array is not produced by an eligible plan.
   A dedicated class-learning vector freezes the donor's asymmetric type
   semantics: Start sends the class request selector `2`, while the decoded
   response identity must match the fresh learning row as type `1`; treating
