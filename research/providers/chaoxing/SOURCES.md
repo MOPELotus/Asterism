@@ -89,6 +89,9 @@ validation is still required.
   true. Asterism replaced the prior digit-`1` substring heuristic with one exact
   required declaration: 0 is false, bounded nonzero is true, and
   missing/duplicate/quoted/fractional/lookalike declarations are ProtocolDrift.
+  The same cover re-read confirms required `faceRecognitionCompare` and
+  `captchaCheck` inputs. Asterism now requires one raw `0|1` value for each;
+  missing, duplicate, padded or unknown values are drift rather than false.
   The donor revision is unchanged and no challenge-solving path was added.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence

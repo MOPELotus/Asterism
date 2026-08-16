@@ -535,6 +535,13 @@ fractional or lookalike declarations are ProtocolDrift. In particular, the
 Provider does not search the statement for digit `1` and does not default an
 omitted declaration to false.
 
+The cover's `faceRecognitionCompare` and `captchaCheck` hidden inputs are also
+required structural gate facts. Each selector must match exactly one element,
+and its raw `value` must be exactly `0` or `1`; no whitespace normalization is
+performed. Missing, duplicate, padded or unknown values are ProtocolDrift. A
+true code, face or captcha gate stops the Native start path as
+`HumanRequired(BrowserRequired)`; this parser does not solve the challenge.
+
 Core persists `chaoxing.exam-start.v1` and the canonical request digest before
 the Provider performs one `phone/start`. The Native transport accepts only the
 bound redirect and returned `examAnswerId`, then reads the complete

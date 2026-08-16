@@ -261,6 +261,11 @@ valid because the donor regex permits zero spaces. A lookalike
 or duplicate declaration fails as ProtocolDrift rather than silently disabling
 the Exam-code gate.
 
+The same cover fixture pins `faceRecognitionCompare` and `captchaCheck` as
+required unique binary inputs. Exact `0` is false and `1` is true. Removing a
+field, duplicating it, padding its value or replacing it with `2` must fail as
+ProtocolDrift instead of defaulting the corresponding browser gate to false.
+
 `detail-result-partial.html` retains four complete result identities while only
 the second original Question is selected. It proves that v3 continuation
 binding sends one save with `start=1`, reaches final submission after one

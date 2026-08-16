@@ -1013,8 +1013,9 @@ pub(crate) fn parse_exam_cover(html: &str) -> ProviderResult<ChaoxingExamCover> 
         .filter(|value| !value.is_empty() && value.len() <= MAX_TITLE_BYTES)
         .ok_or_else(|| protocol_drift("Chaoxing Exam cover has no bounded title"))?;
     let need_code = script_numeric_flag(&document, "needcode")?;
-    let need_face = input_value(&document, "#faceRecognitionCompare").is_some_and(|v| v != "0");
-    let need_captcha = input_value(&document, "#captchaCheck").is_some_and(|v| v != "0");
+    let need_face =
+        required_binary_input_flag(&document, "#faceRecognitionCompare", "face-recognition")?;
+    let need_captcha = required_binary_input_flag(&document, "#captchaCheck", "captcha")?;
     let captcha_id = input_value(&document, "#captchaCaptchaId").filter(|v| !v.is_empty());
     Ok(ChaoxingExamCover {
         title,
@@ -1140,6 +1141,36 @@ fn bounded_u64_input(document: &Html, selector_text: &str) -> ProviderResult<u64
         .ok_or_else(|| protocol_drift("Chaoxing Exam attempt omitted a timing field"))?
         .parse::<u64>()
         .map_err(|_| protocol_drift("Chaoxing Exam attempt has an invalid timing field"))
+}
+
+fn required_binary_input_flag(
+    document: &Html,
+    selector_text: &str,
+    field: &'static str,
+) -> ProviderResult<bool> {
+    let selector = Selector::parse(selector_text).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Exam binary-flag selector is invalid",
+        )
+    })?;
+    let mut nodes = document.select(&selector);
+    let node = nodes
+        .next()
+        .ok_or_else(|| protocol_drift("Chaoxing Exam cover omitted a binary gate flag"))?;
+    if nodes.next().is_some() {
+        return Err(protocol_drift(
+            "Chaoxing Exam cover duplicated a binary gate flag",
+        ));
+    }
+    match node.value().attr("value") {
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            format!("Chaoxing Exam cover {field} flag is not binary"),
+        )),
+    }
 }
 
 fn first_text(document: &Html, selector_text: &str) -> Option<String> {
@@ -1275,6 +1306,8 @@ mod tests {
         let cover = parse_exam_cover(COVER).unwrap();
         assert_eq!(cover.exam_answer_id.as_str(), "answer-1");
         assert!(cover.need_code);
+        assert!(!cover.need_face);
+        assert!(!cover.need_captcha);
         let url = Url::parse(
             "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew?courseId=100&classId=200&tId=exam-1&id=answer-1&enc=SAFE_ATTEMPT_ENC",
         )
@@ -1309,6 +1342,38 @@ mod tests {
                 parse_exam_cover(&cover).unwrap_err().kind,
                 ProviderErrorKind::ProtocolDrift
             );
+        }
+    }
+
+    #[test]
+    fn cover_requires_unique_exact_binary_browser_gate_flags() {
+        for (id, field) in [
+            ("faceRecognitionCompare", "need_face"),
+            ("captchaCheck", "need_captcha"),
+        ] {
+            let enabled = COVER.replace(
+                &format!(r#"id="{id}" value="0""#),
+                &format!(r#"id="{id}" value="1""#),
+            );
+            let enabled = parse_exam_cover(&enabled).unwrap();
+            assert!(match field {
+                "need_face" => enabled.need_face,
+                "need_captcha" => enabled.need_captcha,
+                _ => unreachable!(),
+            });
+
+            for replacement in [
+                String::new(),
+                format!(r#"<input id="{id}" value="0"><input id="{id}" value="1">"#),
+                format!(r#"<input id="{id}" value="2">"#),
+                format!(r#"<input id="{id}" value=" 0">"#),
+            ] {
+                let cover = COVER.replace(&format!(r#"<input id="{id}" value="0">"#), &replacement);
+                assert_eq!(
+                    parse_exam_cover(&cover).unwrap_err().kind,
+                    ProviderErrorKind::ProtocolDrift
+                );
+            }
         }
     }
 
