@@ -50,6 +50,7 @@ mod assessment_response;
 mod assessment_transport;
 mod attempt_flow;
 mod authentication;
+mod blocked_step_artifact;
 mod browser_bridge;
 mod browser_protocol;
 mod capture_recipe;
@@ -109,6 +110,10 @@ pub use attempt_flow::{
 pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
     CidarenTokenSession, classify_token_validation_response,
+};
+pub use blocked_step_artifact::{
+    CIDAREN_BLOCKED_STEP_ARTIFACT_TYPE, CidarenBlockedStepArtifact,
+    EncodedCidarenBlockedStepArtifact,
 };
 pub use browser_bridge::{
     CidarenBrowserBridge, CidarenCaptureExchangeCompleted, CidarenCaptureExchangeIssued,

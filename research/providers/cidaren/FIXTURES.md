@@ -375,6 +375,12 @@ placeholder identities, result codes, status values and pagination shape.
   `CidarenDefiniteRejection`, remain FailedClosed/non-retryable and prohibit a
   second `SubmitChoseWord`; the public adapter preserves the stable provider
   code while the shared durable blocked-step outcome remains a Core Gap.
+- Blocked-step artifact tests freeze `cidaren.question-blocked-step.v1` and
+  require exact local/remote Task, `SubmitChoseWord`, rejection kind,
+  request/response digests and nanosecond UTC receive time. The zeroizing
+  encoded value has a stable digest; decode rejects digest, Task, request,
+  operation, reason, unknown-field, zero-digest and non-canonical-time drift.
+  Debug never exposes the stable remote Task identity.
 - Mode 73 parses as FillBlank only when its bounded answer count equals its
   word-length count; no answer wire shape is inferred from the public log.
 - `SearchWord` parsing bounds both JSON and the donor's literal

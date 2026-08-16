@@ -739,10 +739,16 @@ message/data/version changes or extra fields remain ordinary fail-closed shape
 drift. Native transport therefore hashes and timestamps the definite response
 before parsing, the attempt flow retains a `CidarenDefiniteRejection`, and the
 public adapter returns a non-retryable InvalidResponse with stable provider
-code `cidaren.required-children-pending.v1`. The shared Question remote-step
-outcome still has no blocked variant carrying response digest/time and
-diagnosis. Until Main adds that contract, Cidaren cannot emit a durable blocked
-step, and it never relabels the rejection Completed, HumanRequired or retryable.
+code `cidaren.required-children-pending.v1`. The flow can also encode
+`cidaren.question-blocked-step.v1`: a bounded, zeroizing artifact that binds
+local Task ID, stable remote Task ID, exact `SubmitChoseWord` operation,
+request digest, response digest, rejection kind and canonical receive time.
+Decode requires the encrypted artifact digest plus the durable Task/request
+binding and rejects unknown fields, another operation/reason, zero or changed
+digests and non-canonical time. The shared Question remote-step outcome still
+has no blocked variant carrying this artifact and diagnosis. Until Main adds
+that contract, Cidaren cannot emit a durable blocked step, and it never
+relabels the rejection Completed, HumanRequired or retryable.
 
 Before `StartAnswer`, eligible learning Tasks build the donor's exact flat or
 self-built grouped word map from a fresh Task-bound inventory. After start,

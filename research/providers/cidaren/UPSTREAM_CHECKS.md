@@ -1007,6 +1007,24 @@ still cannot persist a blocked diagnosis with that digest/time, so no durable
 `RequiredChildrenPending` step is fabricated. The Provider stays FailedClosed
 and a second `SubmitChoseWord` remains impossible.
 
+### 2026-08-16 blocked-step recovery artifact follow-up
+
+No donor ref, tag or response evidence changed after the definite-rejection
+unit. Cidaren now carries the exact frozen request digest into
+`CidarenIssuedOutcome` and `CidarenDefiniteRejection`, then may encode the
+rejection as `cidaren.question-blocked-step.v1`. The bounded zeroizing artifact
+binds local Task ID, stable remote Task ID, exact SubmitChoseWord operation,
+RequiredChildrenPending kind, request digest, response digest and canonical
+nanosecond UTC receive time. Recovery requires the artifact digest plus exact
+Task and request binding; foreign Task, operation/reason drift, unknown fields,
+zero/changed digests or non-canonical time fail closed.
+
+The current public Question adapter intentionally still returns the stable
+non-retryable provider error and does not persist the artifact. Main owns the
+future durable blocked-step record, encryption/storage and Engine transition;
+this Provider unit supplies the complete no-guess recovery payload without
+claiming that shared authority.
+
 ## Check procedure
 
 For the next checkpoint:

@@ -13,6 +13,7 @@ use asterism_provider_api::{
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::blocked_step_artifact::CidarenBlockedStepArtifact;
 use crate::pre_question_artifact::CidarenPreQuestionState;
 use crate::{
     CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_READY_TO_ADVANCE_PHASE, CIDAREN_READY_TO_VERIFY_PHASE,
@@ -107,6 +108,7 @@ struct CidarenQuestionResponseBinding {
 pub struct CidarenDefiniteRejection {
     operation: CidarenAttemptOperation,
     kind: CidarenAssessmentRejectionKind,
+    request_digest: [u8; 32],
     response_digest: [u8; 32],
     received_at: Timestamp,
 }
@@ -122,6 +124,10 @@ impl CidarenDefiniteRejection {
 
     pub const fn response_digest(self) -> [u8; 32] {
         self.response_digest
+    }
+
+    pub const fn request_digest(self) -> [u8; 32] {
+        self.request_digest
     }
 
     pub const fn received_at(self) -> Timestamp {
@@ -210,6 +216,7 @@ impl CidarenIssuedAction {
 pub struct CidarenIssuedOutcome {
     flow_binding: [u8; 32],
     operation: CidarenAttemptOperation,
+    request_digest: [u8; 32],
     response: CidarenAssessmentResponse,
     response_digest: [u8; 32],
     received_at: asterism_domain::Timestamp,
@@ -597,6 +604,28 @@ impl CidarenAttemptFlow {
     /// recovered flow construction.
     pub const fn definite_rejection(&self) -> Option<CidarenDefiniteRejection> {
         self.last_definite_rejection
+    }
+
+    /// Encodes the exact rejected step for a future encrypted durable blocked
+    /// outcome. Current shared adapters do not persist or return this artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if the retained rejection cannot be rebound to
+    /// this flow's Task identity or encoded within the Provider bound.
+    pub fn definite_rejection_artifact(
+        &self,
+    ) -> ProviderResult<Option<crate::EncodedCidarenBlockedStepArtifact>> {
+        let Some(rejection) = self.last_definite_rejection else {
+            return Ok(None);
+        };
+        CidarenBlockedStepArtifact::from_definite_rejection(
+            self.task_id,
+            &self.remote_task_id,
+            rejection,
+        )?
+        .encode()
+        .map(Some)
     }
 
     /// Encodes the current pre-Question phase for Main's encrypted attempt
@@ -1207,6 +1236,7 @@ impl CidarenAttemptFlow {
                 self.last_definite_rejection = Some(CidarenDefiniteRejection {
                     operation,
                     kind,
+                    request_digest: outcome.request_digest,
                     response_digest: outcome.response_digest,
                     received_at: outcome.received_at,
                 });
@@ -1486,6 +1516,7 @@ impl CidarenIssuedCommand {
                 "Cidaren issued command received another account context",
             ));
         }
+        let request_digest = self.request_digest();
         let transport_outcome = match &self.action {
             CidarenIssuedAction::SubmitChoseWord(request) => {
                 transport.submit_chose_word(context, request).await
@@ -1507,6 +1538,7 @@ impl CidarenIssuedCommand {
         Ok(CidarenIssuedOutcome {
             flow_binding: self.flow_binding,
             operation: self.operation,
+            request_digest,
             response,
             response_digest,
             received_at,
@@ -1533,6 +1565,7 @@ impl fmt::Debug for CidarenIssuedOutcome {
         formatter
             .debug_struct("CidarenIssuedOutcome")
             .field("operation", &self.operation)
+            .field("request_digest", &self.request_digest)
             .field("response", &self.response)
             .field("response_digest", &self.response_digest)
             .finish_non_exhaustive()
@@ -1540,6 +1573,11 @@ impl fmt::Debug for CidarenIssuedOutcome {
 }
 
 impl CidarenIssuedOutcome {
+    /// Digest of the exact credential-free request frozen before transport.
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
     /// Digest of the exact raw response bytes accepted by the strict parser.
     pub const fn response_digest(&self) -> [u8; 32] {
         self.response_digest
@@ -2242,6 +2280,7 @@ mod tests {
         let outcome = CidarenIssuedOutcome {
             flow_binding: flow.flow_binding,
             operation: command.operation(),
+            request_digest: command.request_digest(),
             response: receipt(CidarenAssessmentReceiptKind::Completed),
             response_digest: [9; 32],
             received_at,
@@ -2335,8 +2374,22 @@ mod tests {
             rejection.kind(),
             CidarenAssessmentRejectionKind::RequiredChildrenPending
         );
+        assert_ne!(rejection.request_digest(), [0; 32]);
         assert_ne!(rejection.response_digest(), [0; 32]);
         assert_eq!(rejection.received_at(), request_at());
+        let encoded = flow.definite_rejection_artifact().unwrap().unwrap();
+        let digest = encoded.digest();
+        let value = encoded.into_secret_value();
+        let decoded = crate::CidarenBlockedStepArtifact::decode_bound(
+            &value,
+            digest,
+            flow.task_id,
+            "class-task:2002",
+            rejection.request_digest(),
+        )
+        .unwrap();
+        assert_eq!(decoded.response_digest(), rejection.response_digest());
+        assert_eq!(decoded.received_at(), rejection.received_at());
         assert!(flow.issue_word_selection(request_at()).is_err());
     }
 
