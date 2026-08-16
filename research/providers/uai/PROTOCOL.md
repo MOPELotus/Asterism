@@ -1265,7 +1265,20 @@ evidence.
 Core's receipt-conditional atomic sequence now covers the bounded stage-advance
 rules for staged upload. Each mutating phase can advance only from its definite
 parsed receipt, while its exact request digest is persisted at issue time. The
-production CMS parser additionally binds a code-200 grant to the exact
+pre-sequence artifact now has a bounded zeroizing binary
+`uai.upload.input.v1` codec. It stores the exact filename, `audio/mpeg` media
+type and bytes without JSON/base64 expansion, plus an exact remote Group Task
+binding. The compound form additionally retains the immutable ordinary Draft
+ID and a domain-separated digest of the complete validated Draft, including
+its selected answer; changing only the answer under the same Draft ID fails
+recovery. Decode requires independent state, remote Task and recomputed
+artifact digests, and the compound form also requires the complete expected
+Draft. Only the recovered artifact bytes may enter fresh upload-intent
+preparation. The state itself carries no account, execution or Attempt
+authority, so it remains Provider payload for Core's outer relational and
+encrypted persistence boundary rather than a standalone mutation capability.
+
+The production CMS parser additionally binds a code-200 grant to the exact
 already-materialized account/Course request and complete response digest. The
 bounded zeroizing `uai.upload.grant.v1` codec retains the exact token, object
 key, intent/artifact lineage and Task/Course/Unit/Group/module binding, and
@@ -1284,7 +1297,7 @@ Provider output from encrypted `uai.upload.object.v1`, but Core still has no
 atomic receipt-plus-state repository: its ordinary receipt retains only a
 response digest and acceptance bit, while final UAI submission requires the
 exact object key produced by the grant and confirmed by Qiniu. Core's sanitized
-scheduling artifact also cannot own or recover the bounded audio bytes, and an
+scheduling artifact also cannot own the new encrypted input bytes, and an
 artifact digest alone is not a recoverable owner/account/Task-bound handle. The
 upload sequence must therefore remain Provider-private until the shared
 Artifact/Draft and encrypted stage-output capability atomically binds those

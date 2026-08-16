@@ -508,3 +508,11 @@ independent grant verification or cross-request grant-recovery protocol. The
 new bounded `uai.upload.grant.v1` codec therefore preserves the already audited
 token/key prerequisite together with exact request/response and Task/artifact
 lineage; it adds no donor wire behavior or Task mutation evidence.
+
+The input-state checkpoint later on 2026-08-16 reused the same immediately
+preceding unchanged four-donor head/tag query. No donor introduced a separate
+artifact persistence service or weakened the atomic mixed choice/upload
+requirement. Asterism's compact binary `uai.upload.input.v1` therefore preserves
+the already bounded MP3 bytes plus exact single-Task or immutable compound-Draft
+binding without changing the donor upload protocol. It is local recovery state,
+not evidence that Core has persisted or authorized an Attempt.

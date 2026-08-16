@@ -25,7 +25,7 @@ const MAX_UPLOAD_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_UPLOAD_TOKEN_BYTES: usize = 8 * 1_024;
 const MAX_UPLOAD_KEY_BYTES: usize = 1_024;
 const MAX_UPLOAD_HASH_BYTES: usize = 1_024;
-const MAX_UPLOAD_ARTIFACT_BYTES: usize = 64 * 1_024 * 1_024;
+pub(crate) const MAX_UPLOAD_ARTIFACT_BYTES: usize = 64 * 1_024 * 1_024;
 const MAX_UPLOAD_SUBMISSION_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_UPLOAD_VERIFICATION_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_UPLOAD_NESTED_ANSWER_BYTES: usize = 1_024 * 1_024;
@@ -922,7 +922,21 @@ impl UaiUploadArtifact {
     ///
     /// Rejects empty/oversized bytes and unsafe file metadata.
     pub fn try_new(filename: &str, media_type: &str, bytes: Vec<u8>) -> ProviderResult<Self> {
+        Self::try_new_zeroizing(
+            filename.to_owned(),
+            media_type.to_owned(),
+            Zeroizing::new(bytes),
+        )
+    }
+
+    pub(crate) fn try_new_zeroizing(
+        mut filename: String,
+        mut media_type: String,
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> ProviderResult<Self> {
         if bytes.is_empty() || bytes.len() > MAX_UPLOAD_ARTIFACT_BYTES {
+            filename.zeroize();
+            media_type.zeroize();
             return Err(invalid_input(
                 "UAI upload artifact has an invalid bounded size",
             ));
@@ -933,17 +947,21 @@ impl UaiUploadArtifact {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
+            filename.zeroize();
+            media_type.zeroize();
             return Err(invalid_input("UAI upload artifact filename is invalid"));
         }
         if media_type != "audio/mpeg" {
+            filename.zeroize();
+            media_type.zeroize();
             return Err(invalid_input(
                 "UAI audited upload artifact must use audio/mpeg",
             ));
         }
         Ok(Self {
-            filename: filename.to_owned(),
-            media_type: media_type.to_owned(),
-            bytes: Zeroizing::new(bytes),
+            filename,
+            media_type,
+            bytes,
         })
     }
 

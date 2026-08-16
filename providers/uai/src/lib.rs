@@ -43,6 +43,7 @@ mod task_type;
 mod upload;
 mod upload_final_plan;
 mod upload_grant_state;
+mod upload_input_state;
 mod upload_object_state;
 mod upload_sequence;
 mod user_identity;
@@ -190,6 +191,9 @@ pub use upload_final_plan::{
 };
 pub use upload_grant_state::{
     EncodedUaiUploadGrantState, UAI_UPLOAD_GRANT_STATE_TYPE, UaiUploadGrantState,
+};
+pub use upload_input_state::{
+    EncodedUaiUploadInputState, UAI_UPLOAD_INPUT_STATE_TYPE, UaiUploadInputState,
 };
 pub use upload_object_state::{
     EncodedUaiUploadObjectState, UAI_UPLOAD_OBJECT_STATE_TYPE, UaiUploadObjectState,

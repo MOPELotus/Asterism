@@ -50,6 +50,16 @@ artifact and remains prerequisite credential state rather than mutation or
 verification evidence. Core still must persist this encrypted state under the
 owner/account/Task/Attempt chain before the Qiniu issue.
 
+The initial artifact now also has bounded Provider recovery. Compact binary
+`uai.upload.input.v1` stores exact filename, `audio/mpeg` bytes and remote Group
+Task binding without JSON/base64 expansion. Its compound form additionally
+binds the immutable ordinary Draft ID and a domain-separated digest of the
+complete validated Draft, so a same-ID selected-answer substitution fails.
+Decode requires independent state, Task and artifact digests plus the complete
+expected compound Draft before any fresh intent preparation. Provider codecs
+therefore cover every planned upload state, while Core's encrypted relational
+repository, atomic transitions and invocation remain the executable gap.
+
 ## Current implementation checkpoint
 
 The current crate advertises Authentication, CourseInventory, TaskInventory,
