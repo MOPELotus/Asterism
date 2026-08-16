@@ -1,6 +1,6 @@
 # WELearn upstream sources
 
-Audit date: 2026-08-15
+Audit date: 2026-08-16
 
 The mandatory next-checkpoint full sweep was completed on 2026-08-14. It
 re-read every tracked README, configuration/dependency file, text source,
@@ -202,6 +202,15 @@ queries and the Fanyuchang tag. Heads remain
 `5d1df60cb0078f70679be2a22f2afbf1ef4fa88a`. Mapping the existing fresh proof
 into Core's recovery result adds no donor route, setting, retry or mutation
 behavior, so no upstream delta is available to port at this checkpoint.
+The 2026-08-16 Core parent/batch-snapshot adapter checkpoint again queried all
+three default heads and tags, GitHub Releases and public issues. Heads remain
+`afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2`,
+`bd160e91d0452b8bf483087fbdd3bdd58d855e13` and
+`85918caaccd93b73b1e41fe537b4e9a11377b759`; Fanyuchang's sole tag/Release is
+still older `v4.0.0@5d1df60cb0078f70679be2a22f2afbf1ef4fa88a`, and
+release/issue counts remain `1/1`, `0/9` and `0/0`. No donor delta was available.
+The Provider change only normalizes already-audited parent authority and full
+batch bytes into Core `fe63910`'s encrypted same-Attempt snapshot contract.
 
 ## Source selection
 

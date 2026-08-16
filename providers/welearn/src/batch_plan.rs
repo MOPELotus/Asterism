@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::{ProviderId, RemoteState, TaskCapability};
 use asterism_provider_api::{
-    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderResult, RemoteTask,
-    RemoteTaskDetail,
+    ExecutionParentBatchSnapshot, ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact,
+    ProviderResult, RemoteTask, RemoteTaskDetail,
 };
+use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -17,6 +18,10 @@ pub const WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE: &str = "welearn.atomic-child
 
 /// Namespaced Provider-private type for one complete frozen batch snapshot.
 pub const WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE: &str = "welearn.batch-plan.v1";
+
+/// Namespaced Provider-private type for one frozen atomic parent authority.
+pub const WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE: &str =
+    "welearn.atomic-batch-planning-authority.v1";
 
 /// Audited donor batch flow. This is a pure membership/target boundary; it
 /// does not create or schedule Core executions.
@@ -649,6 +654,33 @@ impl WellearnAtomicBatchPlanningAuthority {
             .map(|budget| u64::from(budget.actual_minutes()))
     }
 
+    /// Converts this authority and its complete validated batch into Core's
+    /// encrypted parent-attempt snapshot value.
+    ///
+    /// The conversion repeats the same Course, flow, Unit selection, expected
+    /// child and aggregate binding used by durable recovery. The returned
+    /// value contains private zeroizing bytes and grants no child scheduling or
+    /// mutation authority by itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the parent and batch are inconsistent, either
+    /// local encoding exceeds its stricter bound, or Core rejects the Provider
+    /// namespace/type/bounded-secret contract.
+    pub fn to_execution_parent_batch_snapshot(
+        &self,
+        batch_plan: &WellearnBatchPlan,
+    ) -> ProviderResult<ExecutionParentBatchSnapshot> {
+        validate_atomic_parent_batch_binding(self, batch_plan)?;
+        ExecutionParentBatchSnapshot::try_new(
+            welearn_provider_id()?,
+            WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE,
+            SecretValue::new(self.encode()?),
+            WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE,
+            SecretValue::new(batch_plan.encode_snapshot()?),
+        )
+    }
+
     /// Encodes this credential-free parent authority using the bounded v1
     /// `WELearn` schema.
     ///
@@ -805,26 +837,7 @@ impl WellearnPreparedAtomicChildPlan {
     ) -> ProviderResult<Self> {
         let authority = WellearnAtomicBatchPlanningAuthority::decode(encoded_parent_authority)?;
         let batch_plan = WellearnBatchPlan::decode_snapshot(encoded_batch_snapshot)?;
-        let aggregate_duration_seconds = authority
-            .frozen_auto_duration_minutes()
-            .map(|minutes| {
-                minutes
-                    .checked_mul(60)
-                    .ok_or_else(invalid_atomic_recovery_artifacts)
-            })
-            .transpose()?;
-        if batch_plan.course_remote_id != authority.course_remote_id
-            || batch_plan.flow != authority.flow
-            || batch_plan.selection != authority.selection
-            || batch_plan.aggregate_duration_seconds != aggregate_duration_seconds
-        {
-            return Err(invalid_atomic_recovery_artifacts());
-        }
-        let expected_entry_index = batch_plan
-            .entries
-            .iter()
-            .position(|entry| entry.remote_task_id == authority.expected_remote_task_id)
-            .ok_or_else(invalid_atomic_recovery_artifacts)?;
+        let expected_entry_index = validate_atomic_parent_batch_binding(&authority, &batch_plan)?;
         Self::restore_from_provider_execution_plan_artifact(
             batch_plan,
             expected_entry_index,
@@ -870,6 +883,34 @@ impl WellearnPreparedAtomicChildPlan {
         self.validate()?;
         self.child_plan.to_provider_execution_plan_artifact()
     }
+}
+
+fn validate_atomic_parent_batch_binding(
+    authority: &WellearnAtomicBatchPlanningAuthority,
+    batch_plan: &WellearnBatchPlan,
+) -> ProviderResult<usize> {
+    authority.validate()?;
+    validate_batch_plan_integrity(batch_plan)?;
+    let aggregate_duration_seconds = authority
+        .frozen_auto_duration_minutes()
+        .map(|minutes| {
+            minutes
+                .checked_mul(60)
+                .ok_or_else(invalid_atomic_recovery_artifacts)
+        })
+        .transpose()?;
+    if batch_plan.course_remote_id != authority.course_remote_id
+        || batch_plan.flow != authority.flow
+        || batch_plan.selection != authority.selection
+        || batch_plan.aggregate_duration_seconds != aggregate_duration_seconds
+    {
+        return Err(invalid_atomic_recovery_artifacts());
+    }
+    batch_plan
+        .entries
+        .iter()
+        .position(|entry| entry.remote_task_id == authority.expected_remote_task_id)
+        .ok_or_else(invalid_atomic_recovery_artifacts)
 }
 
 /// Versioned Provider-private payload for one exact atomic batch child.
@@ -3103,6 +3144,89 @@ mod tests {
         assert_eq!(
             WellearnAtomicBatchPlanningAuthority::decode(&encoded).unwrap(),
             auto
+        );
+    }
+
+    #[test]
+    fn atomic_parent_and_complete_batch_convert_to_core_encrypted_snapshot() {
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            "sco:1001:301",
+            Some(37),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&tasks(), &units(), &authority).unwrap();
+
+        let snapshot = authority
+            .to_execution_parent_batch_snapshot(prepared.batch_plan())
+            .unwrap();
+        assert_eq!(snapshot.provider_id().as_str(), PROVIDER_ID);
+        assert_eq!(
+            snapshot.authority_type(),
+            WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE
+        );
+        assert_eq!(snapshot.batch_type(), WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE);
+        assert_eq!(
+            WellearnAtomicBatchPlanningAuthority::decode(snapshot.authority().expose_secret())
+                .unwrap(),
+            authority
+        );
+        assert_eq!(
+            WellearnBatchPlan::decode_snapshot(snapshot.batch().expose_secret()).unwrap(),
+            prepared.batch_plan().clone()
+        );
+        assert_ne!(snapshot.authority_digest(), [0; 32]);
+        assert_ne!(snapshot.batch_digest(), [0; 32]);
+
+        let replay = authority
+            .to_execution_parent_batch_snapshot(prepared.batch_plan())
+            .unwrap();
+        assert_eq!(snapshot.authority_digest(), replay.authority_digest());
+        assert_eq!(snapshot.batch_digest(), replay.batch_digest());
+
+        let debug = format!("{snapshot:?}");
+        assert!(!debug.contains("course:1001"));
+        assert!(!debug.contains("sco:1001:301"));
+        assert!(!debug.contains("37"));
+    }
+
+    #[test]
+    fn core_parent_batch_snapshot_rejects_cross_selection_and_aggregate_drift() {
+        let fanyuchang = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            "sco:1001:301",
+            Some(37),
+            None,
+        )
+        .unwrap();
+        let all_units =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        assert!(
+            fanyuchang
+                .to_execution_parent_batch_snapshot(&all_units)
+                .is_err()
+        );
+
+        let auto = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:302",
+            None,
+            Some(auto_budget(2)),
+        )
+        .unwrap();
+        let wrong_aggregate =
+            build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
+        assert!(
+            auto.to_execution_parent_batch_snapshot(&wrong_aggregate)
+                .is_err()
         );
     }
 

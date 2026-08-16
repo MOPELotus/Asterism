@@ -901,6 +901,14 @@ credential-free v1 JSON encoding bounded to 4 KiB. Decode uses private wire
 types, denies unknown fields, checks the version and derived Auto aggregate,
 then re-enters the ordinary strict constructor so serialized Unit/flow/target
 facts cannot bypass semantic validation.
+Its `to_execution_parent_batch_snapshot` adapter first applies the same joint
+parent/batch validator used by durable recovery, including Course, flow, exact
+Unit selection, Auto aggregate and expected-child membership. Only then does it
+encode `welearn.atomic-batch-planning-authority.v1` plus
+`welearn.batch-plan.v1` into Core's zeroizing `ExecutionParentBatchSnapshot`.
+This makes persistence-time and recovery-time consistency one rule instead of
+two parallel checks. The value itself performs no Storage write and grants no
+child or mutation authority.
 `prepare_atomic_child_plan_from_fresh_inventory` accepts that authority
 plus one complete fresh Unit/SCO inventory, rebuilds the selected batch once,
 locates the expected child without widening selection, then materializes and
@@ -917,21 +925,24 @@ one fresh complete Course scan second, one Provider batch build third, then an
 atomic Core transaction that persists the parent plan and creates every child
 with its exact artifact. Independently invoking the hook after each child Task
 already exists could rescan different membership and redistribute Auto targets.
-The new Provider encoding supplies the opaque persistence payload for the first
-step, but does not select a parent Execution ID, write Storage, create children
-or grant mutation authority; those bindings remain the same shared Core Gap.
+The Provider adapter now supplies Core's exact typed private snapshot, while
+Core `fe63910` supplies encrypted same-Attempt bind/resolve storage. Neither
+side yet selects the WELearn parent composite capability, invokes that bind from
+Engine planning, creates children or grants mutation authority; those remain
+the shared orchestration gap.
 
 Core `0c0d26b` closes the shared recovery-result portion of that integration:
 Engine validates an optional Provider verification against the same-attempt
 complete sequence and final accepted ordinal, then writes it under the active
-recovery claim before finishing. The remaining Core Gap is the parent
-transaction: it must
-store the encoded authority plus the independently bounded complete batch
-snapshot, consume the ordered atomic dispatch projection once, and create each
-child with its exact artifact/sequence without rescanning. On recovery, Core
-must reload those parent values and its same-attempt sequence snapshot. Giving
-the Provider direct Storage access would still violate ownership instead of
-closing that parent/child gap.
+recovery claim before finishing. Core `fe63910` separately closes the encrypted
+parent authority plus complete-batch same-Attempt repository primitive, and
+WELearn now constructs its exact typed input. The remaining Core Gap is the
+orchestration transaction and runtime: select and create the parent composite,
+bind the snapshot before child creation, consume the ordered atomic dispatch
+projection once, create each child with its exact artifact/sequence without
+rescanning, and resolve/inject the private snapshot on execution and recovery.
+Giving the Provider direct Storage access would still violate ownership instead
+of closing that gap.
 
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per
@@ -989,6 +1000,10 @@ artifact ceiling. This snapshot does not replace parent selection/entropy
 authority or per-child artifacts: Core must persist all three atomically so an
 Auto aggregate cannot masquerade as its configured base/range/sample and a
 Fanyuchang child cannot lose its independently frozen target.
+Core `fe63910` now provides the encrypted authority/batch half of that boundary;
+the Provider adapter supplies locally bounded zeroizing bytes and stable type
+names after joint semantic validation. Ordered child creation and composite
+dispatch remain Main-owned and are not implied by successful snapshot creation.
 
 ## Sanitization and routing
 

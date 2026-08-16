@@ -297,9 +297,12 @@ The parent authority itself now has a credential-free, versioned v1 encoding
 bounded to 4 KiB. Restore rejects unknown fields, version drift, malformed or
 duplicate Unit selections, cross-flow target mixtures and an Auto `actual`
 minute value that does not equal its frozen configured/range/offset derivation.
-This closes the Provider-owned persistence representation only; Core still has
-to choose where the opaque parent authority lives and atomically bind it to the
-parent attempt and all child artifacts.
+`to_execution_parent_batch_snapshot` now reuses the same joint Course, flow,
+selection, expected-child and aggregate validation before constructing Core's
+`ExecutionParentBatchSnapshot` with exact Provider-private type names and
+zeroizing authority/batch bytes. Core `fe63910` supplies encrypted same-Attempt
+storage and resolve semantics for that value; Provider code still neither
+writes Storage nor gains scheduling authority.
 The complete Provider batch also encodes as bounded deny-unknown
 `welearn.batch-plan.v1` bytes and fully revalidates on decode; all seven flows
 and the 8,192-child maximum are covered. This supplies the complete
@@ -312,12 +315,12 @@ remaining plan work is the parent/child Execution and composite dispatch layer,
 not another fixed capability-step approximation of the existing conditional
 sequence.
 
-The remaining shared contract is now concrete. One Core transaction
-must bind the encoded parent authority and bounded complete batch snapshot to a
-parent attempt, then create every ordered child Execution from
-`WellearnAtomicBatchDispatchPlan` with its exact artifact and sequence; recovery
-must reload those parent values rather than rescan. Core `0c0d26b` now supplies
-the recovery result, complete-sequence/final-ordinal validation and claim-bound
-same-Attempt verification write before finish; WELearn supplies the exact
-three-state adapter above. Provider code must not write Storage or synthesize
-the still-missing parent/child ownership.
+The remaining shared contract is now narrower and concrete. Core `fe63910` can
+encrypt and bind the Provider-constructed parent/batch snapshot to an exact live
+parent Attempt, while Core `0c0d26b` supplies the recovery result,
+complete-sequence/final-ordinal validation and claim-bound same-Attempt
+verification write. Main must still add the parent composite capability and
+planning input, invoke the bind before child creation, consume
+`WellearnAtomicBatchDispatchPlan` once to create every ordered child with its
+exact artifact/sequence, and route execution/recovery with the resolved private
+snapshot without rescanning. Provider code must not synthesize that ownership.
