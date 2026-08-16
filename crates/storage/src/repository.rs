@@ -27,8 +27,9 @@ use asterism_domain::{
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
     ExecutionMutationPlan, ExecutionMutationSequencePlan, ExecutionParentBatchSnapshot,
-    ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
-    ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
+    ProviderBatchExecutionPlanningInput, ProviderExecutionPlanArtifact,
+    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
+    ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -2207,6 +2208,7 @@ pub trait ExecutionLeaseRepository: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct BatchExecutionScheduleRequest<'a> {
     pub batch_execution: &'a BatchExecution,
+    pub planning_input: &'a ProviderBatchExecutionPlanningInput,
     pub idempotency_scope: &'a str,
     pub idempotency_key: &'a str,
     pub actor: AuditActor,
@@ -2260,6 +2262,43 @@ pub trait BatchExecutionRepository: Send + Sync {
         &self,
         batch_execution_id: asterism_domain::BatchExecutionId,
     ) -> Result<Option<BatchExecutionAttempt>, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchExecutionPlanningInputRecord {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub provider_id: ProviderId,
+    pub input_type: String,
+    pub input_digest: [u8; 32],
+    pub bound_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchExecutionPlanningInputResolveRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct ResolvedBatchExecutionPlanningInput {
+    pub metadata: BatchExecutionPlanningInputRecord,
+    pub input: ProviderBatchExecutionPlanningInput,
+}
+
+/// Resolves the encrypted product authorization and selection bytes only for
+/// the exact active Course-batch worker. Scheduling owns the one immutable
+/// bind; Providers receive no write or repository capability.
+#[async_trait]
+pub trait BatchExecutionPlanningInputRepository: Send + Sync {
+    async fn resolve_batch_execution_planning_input(
+        &self,
+        request: BatchExecutionPlanningInputResolveRequest<'_>,
+    ) -> Result<ResolvedBatchExecutionPlanningInput, SecretStoreError>;
 }
 
 #[derive(Clone, Debug)]

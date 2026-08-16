@@ -1,29 +1,38 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, BatchExecution, BatchExecutionAttempt,
     BatchExecutionAttemptId, BatchExecutionId, ExecutionState, ProviderAccountId,
-    ProviderErrorClass, TaskCapability, Timestamp, UserId,
+    ProviderErrorClass, ProviderId, SecretId, TaskCapability, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
+use asterism_provider_api::ProviderBatchExecutionPlanningInput;
 use asterism_scheduler::ScheduledJobKind;
+use asterism_secrets::{
+    SecretAccess, SecretActor, SecretPurpose, SecretRef, SecretStoreError, SecretValue,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::Row;
 
 use crate::{
-    BatchExecutionAttemptStartRequest, BatchExecutionRepository, BatchExecutionScheduleOutcome,
-    BatchExecutionScheduleRequest, Database, StorageError, outbox::enqueue_in_transaction,
+    BatchExecutionAttemptStartRequest, BatchExecutionPlanningInputRecord,
+    BatchExecutionPlanningInputRepository, BatchExecutionPlanningInputResolveRequest,
+    BatchExecutionRepository, BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest,
+    Database, ResolvedBatchExecutionPlanningInput, SecretKeyring, StorageError,
+    outbox::enqueue_in_transaction,
+    secret::{decrypt, encrypt, fetch_secret, insert_secret_audit, insert_secret_blob},
 };
 
 #[derive(Clone, Debug)]
 pub struct SqliteBatchExecutionRepository {
     database: Database,
+    keyring: Arc<SecretKeyring>,
 }
 
 impl SqliteBatchExecutionRepository {
-    pub const fn new(database: Database) -> Self {
-        Self { database }
+    pub const fn new(database: Database, keyring: Arc<SecretKeyring>) -> Self {
+        Self { database, keyring }
     }
 }
 
@@ -62,8 +71,14 @@ impl BatchExecutionRepository for SqliteBatchExecutionRepository {
             .await?
         {
             let existing = decode_batch_execution(&row)?;
+            let input_matches = stored_planning_input_matches(
+                &mut transaction,
+                existing.id,
+                request.planning_input,
+            )
+            .await?;
             transaction.commit().await?;
-            return if existing == *request.batch_execution {
+            return if existing == *request.batch_execution && input_matches {
                 Ok(BatchExecutionScheduleOutcome::Existing(existing))
             } else {
                 Ok(BatchExecutionScheduleOutcome::IdempotencyConflict)
@@ -71,7 +86,8 @@ impl BatchExecutionRepository for SqliteBatchExecutionRepository {
         }
 
         let binding = sqlx::query(
-            "SELECT account.owner_user_id, account.id AS provider_account_id, \
+            "SELECT account.owner_user_id, account.provider_id, \
+                    account.id AS provider_account_id, \
                     course.id AS course_id \
              FROM provider_accounts AS account \
              INNER JOIN courses AS course ON course.provider_account_id = account.id \
@@ -87,6 +103,8 @@ impl BatchExecutionRepository for SqliteBatchExecutionRepository {
         };
         let owner_id = UserId::from_str(binding.try_get("owner_user_id")?)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let provider_id = ProviderId::new(binding.try_get::<String, _>("provider_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let actor_matches = match request.actor {
             AuditActor::User(actor) => {
                 actor == owner_id && request.batch_execution.requested_by == Some(actor)
@@ -96,7 +114,7 @@ impl BatchExecutionRepository for SqliteBatchExecutionRepository {
                 .requested_by
                 .is_none_or(|requester| requester == owner_id),
         };
-        if !actor_matches {
+        if !actor_matches || request.planning_input.provider_id() != &provider_id {
             transaction.rollback().await?;
             return Ok(BatchExecutionScheduleOutcome::BindingConflict);
         }
@@ -125,6 +143,7 @@ impl BatchExecutionRepository for SqliteBatchExecutionRepository {
         .bind(encode_timestamp(batch.created_at))
         .execute(&mut *transaction)
         .await?;
+        insert_batch_planning_input(&mut transaction, &self.keyring, owner_id, &request).await?;
         let job_kind = ScheduledJobKind::BatchExecution {
             batch_execution_id: batch.id,
         };
@@ -319,6 +338,295 @@ impl BatchExecutionRepository for SqliteBatchExecutionRepository {
         .map(decode_batch_attempt)
         .transpose()
     }
+}
+
+#[async_trait]
+impl BatchExecutionPlanningInputRepository for SqliteBatchExecutionRepository {
+    async fn resolve_batch_execution_planning_input(
+        &self,
+        request: BatchExecutionPlanningInputResolveRequest<'_>,
+    ) -> Result<ResolvedBatchExecutionPlanningInput, SecretStoreError> {
+        validate_planning_input_access_context(&request)?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(planning_input_storage_error)?;
+        assert_batch_worker_claims(
+            &mut transaction,
+            request.batch_execution_id,
+            request.attempt_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+        )
+        .await
+        .map_err(|_| SecretStoreError::VersionConflict)?;
+        let stored = fetch_stored_planning_input(&mut transaction, request.batch_execution_id)
+            .await?
+            .ok_or(SecretStoreError::NotFound)?;
+        authorize_planning_input_access(
+            stored.owner_user_id,
+            &stored.actual_provider_id,
+            request.access,
+        )?;
+        if stored.state != "running"
+            || stored.metadata.provider_id != stored.actual_provider_id
+            || stored.metadata.bound_at > request.at
+        {
+            return Err(SecretStoreError::VersionConflict);
+        }
+        let secret = fetch_secret(&mut transaction, stored.secret_id).await?;
+        if secret.owner_user_id != stored.owner_user_id
+            || secret.purpose != SecretPurpose::ProviderExecutionState
+            || secret.version != 1
+            || secret.created_at != stored.metadata.bound_at
+            || secret.updated_at != stored.metadata.bound_at
+        {
+            return Err(SecretStoreError::VersionConflict);
+        }
+        let secret_ref = SecretRef {
+            id: stored.secret_id,
+            owner_user_id: secret.owner_user_id,
+            purpose: secret.purpose,
+            version: secret.version,
+            key_id: secret.key_id.clone(),
+            created_at: secret.created_at,
+            updated_at: secret.updated_at,
+        };
+        let plaintext = decrypt(
+            self.keyring.get(&secret.key_id)?,
+            &secret_ref,
+            &secret.nonce,
+            &secret.encrypted_data,
+        )?;
+        let input = ProviderBatchExecutionPlanningInput::try_new(
+            stored.metadata.provider_id.clone(),
+            stored.metadata.input_type.clone(),
+            SecretValue::new(plaintext),
+        )
+        .map_err(|_| SecretStoreError::AuthenticationFailed)?;
+        if input.input_digest() != stored.metadata.input_digest {
+            return Err(SecretStoreError::AuthenticationFailed);
+        }
+        insert_secret_audit(
+            &mut transaction,
+            request.access,
+            "batch_execution_planning_input_accessed",
+            &secret_ref,
+        )
+        .await
+        .map_err(planning_input_storage_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(planning_input_storage_error)?;
+        Ok(ResolvedBatchExecutionPlanningInput {
+            metadata: stored.metadata,
+            input,
+        })
+    }
+}
+
+async fn insert_batch_planning_input(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    keyring: &SecretKeyring,
+    owner_user_id: UserId,
+    request: &BatchExecutionScheduleRequest<'_>,
+) -> Result<(), StorageError> {
+    let batch = request.batch_execution;
+    let (key_id, key) = keyring.active();
+    let secret = SecretRef {
+        id: SecretId::new(),
+        owner_user_id,
+        purpose: SecretPurpose::ProviderExecutionState,
+        version: 1,
+        key_id: key_id.to_owned(),
+        created_at: batch.created_at,
+        updated_at: batch.created_at,
+    };
+    let (nonce, encrypted) = encrypt(
+        key,
+        &secret,
+        request.planning_input.payload().expose_secret(),
+    )?;
+    insert_secret_blob(transaction, &secret, &nonce, &encrypted).await?;
+    sqlx::query(
+        "INSERT INTO batch_execution_planning_inputs \
+         (batch_execution_id, provider_id, input_type, input_digest, secret_blob_id, bound_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(batch.id.to_string())
+    .bind(request.planning_input.provider_id().as_str())
+    .bind(request.planning_input.input_type())
+    .bind(request.planning_input.input_digest().to_vec())
+    .bind(secret.id.to_string())
+    .bind(encode_timestamp(batch.created_at))
+    .execute(&mut **transaction)
+    .await?;
+    insert_secret_audit(
+        transaction,
+        &planning_input_access(request),
+        "batch_execution_planning_input_stored",
+        &secret,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn stored_planning_input_matches(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+    input: &ProviderBatchExecutionPlanningInput,
+) -> Result<bool, StorageError> {
+    let row = sqlx::query(
+        "SELECT provider_id, input_type, input_digest \
+         FROM batch_execution_planning_inputs WHERE batch_execution_id = ?",
+    )
+    .bind(batch_execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    Ok(
+        row.try_get::<String, _>("provider_id")? == input.provider_id().as_str()
+            && row.try_get::<String, _>("input_type")? == input.input_type()
+            && decode_storage_digest(row.try_get("input_digest")?)? == input.input_digest(),
+    )
+}
+
+fn planning_input_access(request: &BatchExecutionScheduleRequest<'_>) -> SecretAccess {
+    SecretAccess {
+        actor: match request.actor {
+            AuditActor::User(id) => SecretActor::User(id),
+            AuditActor::ServiceToken(id) => SecretActor::ServiceToken(id),
+        },
+        correlation_id: request.correlation_id.to_owned(),
+        reason: "freeze batch execution product authorization before scheduling".to_owned(),
+    }
+}
+
+struct StoredPlanningInput {
+    metadata: BatchExecutionPlanningInputRecord,
+    secret_id: SecretId,
+    owner_user_id: UserId,
+    actual_provider_id: ProviderId,
+    state: String,
+}
+
+async fn fetch_stored_planning_input(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+) -> Result<Option<StoredPlanningInput>, SecretStoreError> {
+    let row = sqlx::query(
+        "SELECT input.batch_execution_id, input.provider_id AS input_provider_id, \
+                input.input_type, input.input_digest, input.secret_blob_id, input.bound_at, \
+                account.owner_user_id, account.provider_id AS actual_provider_id, batch.state \
+         FROM batch_execution_planning_inputs AS input \
+         INNER JOIN batch_executions AS batch ON batch.id = input.batch_execution_id \
+         INNER JOIN provider_accounts AS account ON account.id = batch.provider_account_id \
+         WHERE input.batch_execution_id = ?",
+    )
+    .bind(batch_execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(planning_input_storage_error)?;
+    row.as_ref().map(decode_stored_planning_input).transpose()
+}
+
+fn decode_stored_planning_input(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<StoredPlanningInput, SecretStoreError> {
+    let provider_id = ProviderId::new(
+        row.try_get::<String, _>("input_provider_id")
+            .map_err(planning_input_storage_error)?,
+    )
+    .map_err(|_| SecretStoreError::Storage)?;
+    let actual_provider_id = ProviderId::new(
+        row.try_get::<String, _>("actual_provider_id")
+            .map_err(planning_input_storage_error)?,
+    )
+    .map_err(|_| SecretStoreError::Storage)?;
+    Ok(StoredPlanningInput {
+        metadata: BatchExecutionPlanningInputRecord {
+            batch_execution_id: BatchExecutionId::from_str(
+                row.try_get("batch_execution_id")
+                    .map_err(planning_input_storage_error)?,
+            )
+            .map_err(|_| SecretStoreError::Storage)?,
+            provider_id,
+            input_type: row
+                .try_get("input_type")
+                .map_err(planning_input_storage_error)?,
+            input_digest: decode_secret_digest(
+                row.try_get("input_digest")
+                    .map_err(planning_input_storage_error)?,
+            )?,
+            bound_at: decode_timestamp(
+                row.try_get("bound_at")
+                    .map_err(planning_input_storage_error)?,
+            )
+            .map_err(|_| SecretStoreError::Storage)?,
+        },
+        secret_id: SecretId::from_str(
+            row.try_get("secret_blob_id")
+                .map_err(planning_input_storage_error)?,
+        )
+        .map_err(|_| SecretStoreError::Storage)?,
+        owner_user_id: UserId::from_str(
+            row.try_get("owner_user_id")
+                .map_err(planning_input_storage_error)?,
+        )
+        .map_err(|_| SecretStoreError::Storage)?,
+        actual_provider_id,
+        state: row.try_get("state").map_err(planning_input_storage_error)?,
+    })
+}
+
+fn validate_planning_input_access_context(
+    request: &BatchExecutionPlanningInputResolveRequest<'_>,
+) -> Result<(), SecretStoreError> {
+    if valid_token(request.worker_id, 256)
+        && valid_token(request.correlation_id, 256)
+        && request.access.correlation_id == request.correlation_id
+    {
+        Ok(())
+    } else {
+        Err(SecretStoreError::InvalidValue)
+    }
+}
+
+fn authorize_planning_input_access(
+    owner_user_id: UserId,
+    provider_id: &ProviderId,
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
+    if !access.authorizes(owner_user_id) {
+        return Err(SecretStoreError::Unauthorized);
+    }
+    match &access.actor {
+        SecretActor::CoreService(_) => Ok(()),
+        SecretActor::ProviderRuntime(actual) if actual == provider_id.as_str() => Ok(()),
+        SecretActor::User(_) | SecretActor::ServiceToken(_) | SecretActor::ProviderRuntime(_) => {
+            Err(SecretStoreError::Unauthorized)
+        }
+    }
+}
+
+fn decode_secret_digest(bytes: Vec<u8>) -> Result<[u8; 32], SecretStoreError> {
+    bytes.try_into().map_err(|_| SecretStoreError::Storage)
+}
+
+fn decode_storage_digest(bytes: Vec<u8>) -> Result<[u8; 32], StorageError> {
+    bytes
+        .try_into()
+        .map_err(|_| StorageError::InvalidData("batch planning input digest is invalid".to_owned()))
+}
+
+fn planning_input_storage_error(_error: sqlx::Error) -> SecretStoreError {
+    SecretStoreError::Storage
 }
 
 const BATCH_EXECUTION_SELECT_BY_ID: &str = "SELECT id, provider_account_id, course_id, requested_capabilities_json, \
@@ -632,7 +940,9 @@ mod tests {
     use asterism_domain::{
         BatchExecutionId, CourseId, ProviderAccountId, ProviderId, RequestSource, UserId,
     };
-    use asterism_provider_api::ExecutionParentBatchSnapshot;
+    use asterism_provider_api::{
+        ExecutionParentBatchSnapshot, ProviderBatchExecutionPlanningInput,
+    };
     use asterism_secrets::{SecretAccess, SecretActor, SecretKey, SecretStoreError, SecretValue};
     use chrono::Duration;
 
@@ -655,7 +965,20 @@ mod tests {
         let account_id = ProviderAccountId::new();
         let course_id = CourseId::new();
         insert_fixture(&database, owner, account_id, course_id, now).await;
-        let repository = SqliteBatchExecutionRepository::new(database.clone());
+        let keyring = Arc::new(
+            SecretKeyring::new(
+                "batch-parent-key",
+                BTreeMap::from([("batch-parent-key".to_owned(), SecretKey::new([31; 32]))]),
+            )
+            .unwrap(),
+        );
+        let repository = SqliteBatchExecutionRepository::new(database.clone(), keyring.clone());
+        let planning_input = ProviderBatchExecutionPlanningInput::try_new(
+            ProviderId::new("test").unwrap(),
+            "test.course-batch-request.v1",
+            SecretValue::new(b"PRIVATE_BATCH_SELECTION".to_vec()),
+        )
+        .unwrap();
         let batch = BatchExecution {
             id: BatchExecutionId::new(),
             provider_account_id: account_id,
@@ -675,6 +998,7 @@ mod tests {
         };
         let request = || BatchExecutionScheduleRequest {
             batch_execution: &batch,
+            planning_input: &planning_input,
             idempotency_scope: "user:test-owner",
             idempotency_key: "course-batch-1",
             actor: AuditActor::User(owner),
@@ -693,6 +1017,18 @@ mod tests {
                 .await
                 .unwrap(),
             BatchExecutionScheduleOutcome::Existing(batch.clone())
+        );
+        let changed_planning_input = ProviderBatchExecutionPlanningInput::try_new(
+            ProviderId::new("test").unwrap(),
+            "test.course-batch-request.v1",
+            SecretValue::new(b"CHANGED_PRIVATE_BATCH_SELECTION".to_vec()),
+        )
+        .unwrap();
+        let mut conflict = request();
+        conflict.planning_input = &changed_planning_input;
+        assert_eq!(
+            repository.schedule_batch_execution(conflict).await.unwrap(),
+            BatchExecutionScheduleOutcome::IdempotencyConflict
         );
         assert_eq!(
             repository.find_batch_execution(batch.id).await.unwrap(),
@@ -727,6 +1063,21 @@ mod tests {
             .await
             .unwrap(),
             1
+        );
+        let planning_ciphertext: Vec<u8> = sqlx::query_scalar(
+            "SELECT secret.encrypted_data \
+             FROM batch_execution_planning_inputs AS input \
+             INNER JOIN secret_blobs AS secret ON secret.id = input.secret_blob_id \
+             WHERE input.batch_execution_id = ?",
+        )
+        .bind(batch.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(
+            !planning_ciphertext
+                .windows(b"PRIVATE_BATCH_SELECTION".len())
+                .any(|window| window == b"PRIVATE_BATCH_SELECTION")
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -791,14 +1142,56 @@ mod tests {
             .unwrap(),
             1
         );
-
-        let keyring = Arc::new(
-            SecretKeyring::new(
-                "batch-parent-key",
-                BTreeMap::from([("batch-parent-key".to_owned(), SecretKey::new([31; 32]))]),
-            )
-            .unwrap(),
+        let planning_access = SecretAccess {
+            actor: SecretActor::CoreService("batch-execution-worker"),
+            correlation_id: "batch-planning-resolve".to_owned(),
+            reason: "resolve frozen product authorization for parent planning".to_owned(),
+        };
+        let resolved_input = repository
+            .resolve_batch_execution_planning_input(BatchExecutionPlanningInputResolveRequest {
+                batch_execution_id: batch.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: claimed[0].id,
+                worker_id: "batch-worker",
+                correlation_id: "batch-planning-resolve",
+                at: now + Duration::seconds(2),
+                access: &planning_access,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved_input.metadata.input_digest,
+            planning_input.input_digest()
         );
+        assert_eq!(
+            resolved_input.input.payload().expose_secret(),
+            b"PRIVATE_BATCH_SELECTION"
+        );
+        sqlx::query(
+            "UPDATE secret_blobs SET encrypted_data = X'00' WHERE id = ( \
+                SELECT secret_blob_id FROM batch_execution_planning_inputs \
+                WHERE batch_execution_id = ? \
+             )",
+        )
+        .bind(batch.id.to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            repository
+                .resolve_batch_execution_planning_input(BatchExecutionPlanningInputResolveRequest {
+                    batch_execution_id: batch.id,
+                    attempt_id: attempt.id,
+                    scheduler_job_id: claimed[0].id,
+                    worker_id: "batch-worker",
+                    correlation_id: "batch-planning-resolve",
+                    at: now + Duration::seconds(2),
+                    access: &planning_access,
+                })
+                .await,
+            Err(SecretStoreError::AuthenticationFailed)
+        ));
+
         let parent_repository = SqliteSecretStore::new(database.clone(), keyring)
             .batch_execution_parent_snapshots(ProviderId::new("test").unwrap());
         let bound_at = now + Duration::seconds(2);

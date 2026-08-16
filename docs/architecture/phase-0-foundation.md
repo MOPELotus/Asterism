@@ -5154,3 +5154,29 @@ input does not yet have a scheduling-time encrypted repository, Engine does not
 invoke the hook, and Storage does not consume the returned children. Those
 pieces must land before WELearn's Provider implementation can be registered and
 before any child Task/Execution or mutation sequence is created.
+
+## Two-hundred-and-seventy-eighth Phase 0 slice
+
+Batch scheduling now requires the Provider-namespaced private planning input
+and freezes it in the same SQLite transaction as the parent, scheduler job,
+audit and outbox event. Migration 076 stores only its type, domain-separated
+digest, encrypted `ProviderExecutionState` blob reference and bind time. The
+account's actual Provider must match the input namespace, and idempotent replay
+requires the same parent plus the same input type and digest; changed private
+selection under an existing request key is an explicit conflict.
+
+The batch repository now owns the encryption keyring because no scheduled
+parent may exist without its corresponding private product authorization. The
+worker resolve path requires the exact live batch scheduler claim, lease and
+active Attempt, Running parent state, account owner and an authorized Core or
+matching Provider runtime actor. It authenticates the secret blob, rebuilds the
+bounded typed input and rechecks its digest before returning bytes; secret
+audits carry only purpose/key metadata and the access reason. Tests prove the
+plaintext is absent from persisted ciphertext, changed idempotent input is
+rejected and ciphertext tampering fails authentication.
+
+This closes scheduling-time input durability but does not invoke the Provider
+hook or persist its public ordered child projection. Engine still has to
+resolve the input and account settings, perform the one fresh parent planning
+call, bind the returned private parent pair, then atomically materialize every
+child or recover the exact already-created set.

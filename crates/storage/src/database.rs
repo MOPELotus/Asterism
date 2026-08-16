@@ -1,5 +1,6 @@
 use std::{str::FromStr, time::Duration};
 
+use asterism_secrets::SecretStoreError;
 use sqlx::{
     Row, SqlitePool,
     migrate::MigrateError,
@@ -89,6 +90,8 @@ pub enum StorageError {
     Migration(#[from] MigrateError),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("secret storage error: {0}")]
+    Secret(#[from] SecretStoreError),
     #[error("persisted data is invalid: {0}")]
     InvalidData(String),
     #[error("execution lease is no longer owned by this worker")]
@@ -145,7 +148,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 75);
+        assert_eq!(migration_count, 76);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -340,6 +343,31 @@ mod tests {
                 "batch_type",
                 "batch_digest",
                 "batch_secret_blob_id",
+                "bound_at",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_planning_input_migration_is_present_on_a_fresh_database() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let columns = sqlx::query("PRAGMA table_info(batch_execution_planning_inputs)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        let names = columns
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "batch_execution_id",
+                "provider_id",
+                "input_type",
+                "input_digest",
+                "secret_blob_id",
                 "bound_at",
             ]
         );
