@@ -141,6 +141,18 @@ impl ChaoxingNormalSignPreparation {
         &self.request_digest
     }
 
+    pub(crate) fn binding_matches(
+        &self,
+        activity: &ChaoxingSignActivity,
+        detail: &ChaoxingSignDetail,
+    ) -> bool {
+        self.remote_id == activity.remote_id()
+            && self.remote_id == detail.remote_id()
+            && self.discovery_fingerprint == activity.fingerprint()
+            && self.discovery_fingerprint == detail.discovery_fingerprint()
+            && self.detail_fingerprint == detail.fingerprint()
+    }
+
     /// Returns the number of frozen request templates. A valid ordinary sign
     /// preparation always contains separate pre-sign and submission templates.
     pub fn prepared_request_count(&self) -> usize {

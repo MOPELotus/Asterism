@@ -11,7 +11,7 @@ source modules even when their assessments share field names or HTML shapes.
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
 | ResourceExecution | `Samueli924/chaoxing` | OCS, CxKitty | Reference | Document/Read native calls, structurally distinguished signed interval-based Video/Audio progress and Live `liveinfo` -> durable `saveTimePc` heartbeats -> fresh ProgressRead verification are offline-covered; every Live heartbeat is issue/receipt ledgered and ambiguous outcomes are never replayed |
-| Sign-in activity read / preparation / receipt | `Ylim314/chaoxing-sign` | `mini-hbut`, Samueli | PortSource / Reference | Unregistered Provider-local Native GET boundary for exact course-bound `activelist` and activity-bound `signDetail`; bounded/zeroizing documents, numeric-or-string identities, nested/direct time shapes, duplicate rejection and fresh identity/type/variant/time rebinding are offline-covered. A separate immutable ordinary-sign preparation freezes the corroborated `preSign` plus `stuSignajax` query shapes and actor-bound digest without exposing a send method. Bound pure parsers classify only an empty/exact-completed `#statuscontent` and exact `success`/already-signed/expired response strings as preflight evidence or Receipts. The donor states that issuing `preSign` is required for the later sign record, so its GET shape is a mutation-sequence step rather than an independently safe read. Conflicting donor meanings for `status=1` and `otherId=5` remain raw/ambiguous; no read, preparation or Receipt proves independent account completion |
+| Sign-in activity read / preparation / receipt | `Ylim314/chaoxing-sign` | `mini-hbut`, Samueli | PortSource / Reference | Unregistered Provider-local Native GET boundary for exact course-bound `activelist` and activity-bound `signDetail`; bounded/zeroizing documents, numeric-or-string identities, nested/direct time shapes, duplicate rejection and fresh identity/type/variant/time rebinding are offline-covered. A separate immutable ordinary-sign preparation freezes the corroborated `preSign` plus `stuSignajax` query shapes and actor-bound digest without exposing a send method. A donor-specific auxiliary boundary separately freezes Ylim's exact `analysis` request, extracts one bounded dynamic code from its bound response and freezes `analysis2`; it does not claim that the donor's location-labeled auxiliary pair is universally required for ordinary sign-in. Bound pure parsers classify only an empty/exact-completed `#statuscontent` and exact `success`/already-signed/expired response strings as preflight evidence or Receipts. The donor states that issuing `preSign` is required for the later sign record, so its GET shape is a mutation-sequence step rather than an independently safe read. Conflicting donor meanings for `status=1` and `otherId=5` remain raw/ambiguous; no read, preparation or Receipt proves independent account completion |
 | Sign-in QR material / submit-step preparation | `Ylim314/chaoxing-sign` | `mini-hbut` QR scanner | Reference | Provider-local, unregistered parser accepts only an exact freshly rebound QR activity plus an allowlisted HTTPS QR URL or `SIGNIN:` payload. It requires one matching activity ID, one bounded `enc`, exact `source=15` for `SIGNIN:` and an optional refresh code, then retains only redacted zeroizing material plus binding/material digests. A second immutable value freezes Ylim's exact QR `stuSignajax` field set against that material and explicit actor identity, exposes only the static route/count/digests and has no plaintext query or send method. Duplicate aliases, foreign hosts/activities, stale material and non-QR variants fail closed. The donor-conflicted `preSign` step, durable sequence authority, Receipt and independent completion readback remain absent |
 | Sign-in event discovery | `Ylim314/chaoxing-sign` WebIM monitor | Easemob SDK behavior in the same pin | PortSource | Unregistered Native GET reads only `im.chaoxing.com/webim/me`; exact `#myToken/#myTuid/#myName` are account/correlation-bound, zeroized and exposed only by digests/completeness. A separate bounded parser accepts delivered `ext.attachment.att_chat_course` only when `atype=2`, retaining course/class/activity identity for later `signDetail` rebinding. No WebSocket, subscription, acknowledgement, reconnect or mutation is implemented |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
@@ -103,6 +103,17 @@ policy and remains independently guarded.
   plaintext query getter. Photo, location, gesture, QR and conflicted/unknown
   variants fail before preparation because their upload/input/prerequisite
   semantics are not consistently evidenced.
+- A separate Ylim-specific auxiliary preparation records the exact unconditional
+  implementation path inside its `preSign()` method without merging that path
+  into the corroborated ordinary core. It freezes `pptSign/analysis` with
+  `vs=1`, `DB_STRATEGY=RANDOM` and the rebound activity ID; a bounded response
+  parser accepts exactly one non-empty `code='+'...'` marker and freezes
+  `pptSign/analysis2` with that secret code. The code/query remain redacted and
+  zeroizing, every step has a digest, no send method exists, and the opaque
+  `analysis2` result has no invented success meaning. Because the donor comment
+  labels the pair location-required even though the implementation calls it for
+  every variant, this boundary records behavior but does not claim ordinary-sign
+  protocol necessity.
 - A separate QR-material boundary now accepts one scanned allowlisted HTTPS URL
   or exact `SIGNIN:` payload only after the same activity/detail rebinding proves
   `QrCode`. It freezes one matching activity ID, bounded dynamic `enc`, exact
@@ -122,8 +133,10 @@ policy and remains independently guarded.
   HTTP GET. The pinned PortSource says the request must be issued before a sign
   record can be created, and always calls it inside `handleSign`. It therefore
   needs the same durable multi-step mutation authority, issue persistence and
-  ambiguous-outcome recovery boundary as the following `stuSignajax`; the
-  existing pure parser does not grant that authority.
+  ambiguous-outcome recovery boundary as any following donor-observed auxiliary
+  request and `stuSignajax`; the existing preparations and pure parsers do not
+  grant that authority or decide whether Ylim's location-labeled analysis pair
+  is required by the server for an ordinary sign.
 - WebIM bootstrap discovery is independently read-only and unregistered. IM
   credentials are bound to Provider account/correlation and have no public
   plaintext accessor; a delivered sign event retains only rebindable

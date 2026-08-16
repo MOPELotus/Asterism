@@ -244,6 +244,17 @@ read-only authorization boundary. Asterism keeps it transport-free until the
 whole pre-sign/submission sequence has durable issue authority, ambiguous-step
 recovery and an independent Chaoxing account-result readback.
 
+A 2026-08-16 exact function re-read corrected one omitted Provider-owned
+boundary without changing either sign-in donor pin. Ylim's `preSign()` also
+issues `pptSign/analysis?vs=1&DB_STRATEGY=RANDOM&aid=...`, extracts one dynamic
+`code='+'...'` marker, then issues
+`pptSign/analysis2?DB_STRATEGY=RANDOM&code=...`. The implementation calls the
+pair for every variant, while its comment says the calls are location-sign
+prerequisites. Asterism now freezes that first request and dynamic handoff in a
+separate normal-preparation-bound, redacted value. It adds no transport or
+opaque-result meaning and deliberately does not convert the unconditional donor
+implementation into a universal ordinary-sign server requirement.
+
 The post-checkpoint delta audit also recovered Ylim's WebIM monitor. It obtains
 three secret fields from `im.chaoxing.com/webim/me`, opens the pinned Easemob
 application and treats `ext.attachment.att_chat_course.atype=2` as a sign-event

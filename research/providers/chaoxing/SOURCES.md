@@ -84,6 +84,16 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-16: re-checked the two current sign-in donor default branches after
+  the QR checkpoint; Ylim remains `7ed64ff547d3` and `mini-hbut` remains
+  `952640e2540f`. An exact Ylim `preSign()` re-read recovered an omitted
+  auxiliary path: the implementation issues `analysis`, extracts one dynamic
+  `code='+'...'` value, then issues `analysis2` before variant dispatch, while
+  its own comment labels the pair location-required. Asterism now freezes the
+  exact first query and response-bound second query as a separate redacted,
+  transport-free continuation. It does not claim ordinary-sign necessity,
+  classify the opaque `analysis2` result, or weaken durable issue/readback
+  requirements.
 - 2026-08-16: refreshed all eight recorded donor default branches. Seven heads
   remain unchanged. `mini-hbut` advanced from `64fb2f06e10c` to
   `952640e2540f`; its three-commit delta changes schedule cleanup, a separate

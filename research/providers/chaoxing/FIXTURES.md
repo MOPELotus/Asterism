@@ -378,14 +378,24 @@ every fixture before staging it.
   identities, direct/nested times, photo refinement, the non-conflicting
   normal/QR/gesture/location mappings, explicit `otherId=5` ambiguity, raw
   status retention, duplicate rejection and course/detail drift. Remaining
-  fixtures must include `preSign`, required object/location inputs, opaque
-  mutation responses and a genuinely independent account sign-result readback.
+  live fixtures must include exact issued-step observations, required
+  object/location inputs, opaque mutation responses and a genuinely independent
+  account sign-result readback.
   `signDetail` alone is not completion evidence, and an opaque `stuSignajax`
   string is a Receipt at most and never authorizes replay after ambiguity.
   Provider unit regressions additionally derive one ordinary-sign preparation
   from these fixtures, assert its exact two query field sets and actor-bound
   digest, redact UID/name, and reject foreign snapshots, non-normal variants
   and malformed actor inputs without issuing HTTP.
+  A synthetic Ylim auxiliary fixture contains exactly one
+  `code='+'PRIVATE_ANALYSIS_CODE'` marker. Provider regressions bind the exact
+  `analysis?vs=1&DB_STRATEGY=RANDOM&aid=...` request to the same fresh ordinary
+  preparation, extract the bounded code into zeroizing state and freeze only
+  `analysis2?DB_STRATEGY=RANDOM&code=...`. Missing, duplicate, empty,
+  unterminated, control-bearing and oversized values fail closed; Debug never
+  exposes the code. The fixture does not classify the opaque `analysis2`
+  response and does not prove the donor-commented location prerequisite is a
+  universal ordinary-sign server requirement.
   Separate bounded documents bind both pre-sign pages and all three exact
   donor-observed response strings to that preparation digest. Regressions reject
   missing/duplicate/unknown `#statuscontent`, unknown opaque mutation text and
@@ -393,9 +403,11 @@ every fixture before staging it.
   independent completion verification as three distinct concepts.
   A future transport fixture must additionally ledger `preSign` as the first
   issued operation in the sign mutation sequence, because the PortSource says
-  that request is required for the later sign record. GET method semantics must
-  not bypass issue persistence, and an ambiguous pre-sign outcome must not be
-  replayed without a separately evidenced recovery rule.
+  that request is required for the later sign record. Each donor-specific
+  `analysis`/dynamic-`analysis2` request actually selected by a future sequence
+  must receive its own issue/response binding before any later step. GET method
+  semantics must not bypass issue persistence, and an ambiguous outcome must
+  not be replayed without a separately evidenced recovery rule.
   QR material fixtures add one freshly rebound `otherId=2` detail, one
   allowlisted HTTPS URL with HTML-escaped query separators and one exact
   `SIGNIN:aid=...&source=15&Code=...&enc=...` payload. Tests require the same

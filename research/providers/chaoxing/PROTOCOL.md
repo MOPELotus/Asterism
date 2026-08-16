@@ -764,15 +764,41 @@ preparation. Photo upload/object identity, location fields, gesture/code
 prerequisites and QR `enc` differ or require extra dynamic evidence across the
 donors, so every non-normal variant remains unsupported at preparation time.
 
+Ylim's fixed implementation contains an additional donor-specific auxiliary
+path inside `preSign()` which the earlier ordinary-core audit omitted:
+
+```text
+pptSign/analysis:
+  vs=1, DB_STRATEGY=RANDOM, aid={activityId}
+
+bounded raw response:
+  exactly one code='+'{dynamicCode}' marker
+
+pptSign/analysis2:
+  DB_STRATEGY=RANDOM, code={dynamicCode}
+```
+
+The implementation invokes this pair unconditionally before variant dispatch,
+but its own comment says the pair is required for location sign-in. Asterism
+therefore models it separately from the corroborated ordinary pair: one fresh
+ordinary preparation binds the first `analysis` query; one bounded, zeroizing
+response parser rejects missing/duplicate/empty/unsafe codes and freezes the
+dynamic `analysis2` query. Only routes/counts and request/response digests are
+public. No request is sent, the opaque `analysis2` response has no parser, and
+the unconditional donor implementation is not promoted into a claim that the
+server universally requires these calls for ordinary sign-in.
+
 The pinned Ylim source states that the `preSign` request must be sent before a
 later sign record can be created, and its `handleSign` path always issues that
 request before dispatching a variant. `preSign` is therefore not classified as
 read-only merely because the remote method is GET. It is the first protocol
 step of the non-idempotent sign sequence. Any future transport must persist its
 issue before I/O, bind it to the exact fresh activity/detail/actor snapshot,
-separate its observation from the later `stuSignajax` Receipt, and never replay
-an ambiguous issued step unless independent donor evidence establishes a safe
-recovery rule.
+separate its observation from any selected `analysis`/dynamic-`analysis2` step
+and the later `stuSignajax` Receipt, and never replay an ambiguous issued step
+unless independent donor evidence establishes a safe recovery rule. The current
+auxiliary preparation records the exact donor path but does not decide whether
+that path belongs in an ordinary-sign transport sequence.
 
 Bounded pure parsers cover the donor-observed responses without adding a
 transport. The pre-sign HTML must contain exactly one structural
@@ -819,13 +845,14 @@ bounded actor name, and hashes the complete canonical query with the material
 digest. Only the static route, one-request count and digests are visible; the
 zeroizing query has no public getter and no transport consumer.
 
-This parser does not settle the mutation sequence. Ylim defines a two-step
-pre-sign plus `stuSignajax` flow and does not wire QR dispatch from its main
-handler, while `mini-hbut` treats one different `preSign` shape as terminal.
-Neither supplies an independent account-result readback. No QR request is
-therefore sent until Main provides the durable multi-step authority and a fresh
-verification surface. Freezing the second request does not authorize omitting,
-replaying or guessing the preceding `preSign` step.
+This parser does not settle the mutation sequence. Ylim requires `preSign`, its
+current `preSign()` implementation additionally issues the donor-specific
+`analysis`/dynamic-`analysis2` pair, and it does not wire QR dispatch from its
+main handler; `mini-hbut` instead treats one different `preSign` shape as
+terminal. Neither supplies an independent account-result readback. No QR
+request is therefore sent until Main provides the durable multi-step authority
+and a fresh verification surface. Freezing the submit request does not
+authorize omitting, replaying or guessing any preceding step.
 
 Ylim also implements event-driven discovery through a distinct WebIM path:
 
