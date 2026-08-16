@@ -742,10 +742,15 @@ public adapter returns a non-retryable InvalidResponse with stable provider
 code `cidaren.required-children-pending.v1`. The flow can also encode
 `cidaren.question-blocked-step.v1`: a bounded, zeroizing artifact that binds
 local Task ID, stable remote Task ID, exact `SubmitChoseWord` operation,
-request digest, response digest, rejection kind and canonical receive time.
+current position, optional positive dynamic allocation, request digest,
+response digest, rejection kind and canonical receive time.
 Decode requires the encrypted artifact digest plus the durable Task/request
 binding and rejects unknown fields, another operation/reason, zero or changed
-digests and non-canonical time. The shared Question remote-step outcome still
+digests, invalid position/allocation and non-canonical time. After fresh
+context/Task rebinding, `CidarenAttemptFlow::restore_definite_rejection`
+requires the allocation to remain identical and reconstructs only the exact
+FailedClosed `SubmitChoseWord` state; it cannot issue another mutation. The
+shared Question remote-step outcome still
 has no blocked variant carrying this artifact and diagnosis. Until Main adds
 that contract, Cidaren cannot emit a durable blocked step, and it never
 relabels the rejection Completed, HumanRequired or retryable.

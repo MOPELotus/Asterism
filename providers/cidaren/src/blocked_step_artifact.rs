@@ -15,6 +15,7 @@ pub const CIDAREN_BLOCKED_STEP_ARTIFACT_TYPE: &str = "cidaren.question-blocked-s
 const REQUIRED_CHILDREN_PENDING_KIND: &str = "required_children_pending";
 const MAX_ARTIFACT_BYTES: usize = 8 * 1_024;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 768;
+const MAX_POSITION: u32 = 100_000;
 
 /// Encoded Provider-private blocked-step evidence intended for Core's future
 /// encrypted durable outcome boundary.
@@ -48,6 +49,8 @@ impl fmt::Debug for EncodedCidarenBlockedStepArtifact {
 pub struct CidarenBlockedStepArtifact {
     task_id: TaskId,
     remote_task_id: Zeroizing<String>,
+    position: u32,
+    remote_attempt_task_id: Option<i64>,
     request_digest: [u8; 32],
     response_digest: [u8; 32],
     received_at: Timestamp,
@@ -64,6 +67,8 @@ impl CidarenBlockedStepArtifact {
             remote_task_id,
             rejection.operation(),
             rejection.kind(),
+            rejection.position(),
+            rejection.remote_attempt_task_id(),
             rejection.request_digest(),
             rejection.response_digest(),
             rejection.received_at(),
@@ -76,6 +81,8 @@ impl CidarenBlockedStepArtifact {
         remote_task_id: &str,
         operation: CidarenAttemptOperation,
         kind: CidarenAssessmentRejectionKind,
+        position: u32,
+        remote_attempt_task_id: Option<i64>,
         request_digest: [u8; 32],
         response_digest: [u8; 32],
         received_at: Timestamp,
@@ -83,6 +90,9 @@ impl CidarenBlockedStepArtifact {
         if !valid_remote_task_id(remote_task_id)
             || operation != CidarenAttemptOperation::SubmitChoseWord
             || kind != CidarenAssessmentRejectionKind::RequiredChildrenPending
+            || position == 0
+            || position > MAX_POSITION
+            || remote_attempt_task_id.is_some_and(|task_id| task_id <= 0)
             || request_digest == [0; 32]
             || response_digest == [0; 32]
         {
@@ -93,6 +103,8 @@ impl CidarenBlockedStepArtifact {
         Ok(Self {
             task_id,
             remote_task_id: Zeroizing::new(remote_task_id.to_owned()),
+            position,
+            remote_attempt_task_id,
             request_digest,
             response_digest,
             received_at,
@@ -114,6 +126,8 @@ impl CidarenBlockedStepArtifact {
                 remote_task_id: &self.remote_task_id,
                 operation_type: CidarenAttemptOperation::SubmitChoseWord.operation_type(),
                 rejection_kind: REQUIRED_CHILDREN_PENDING_KIND,
+                position: self.position,
+                remote_attempt_task_id: self.remote_attempt_task_id,
                 request_digest: self.request_digest,
                 response_digest: self.response_digest,
                 received_at: &received_at,
@@ -167,6 +181,11 @@ impl CidarenBlockedStepArtifact {
             || wire.remote_task_id != expected_remote_task_id
             || wire.operation_type != CidarenAttemptOperation::SubmitChoseWord.operation_type()
             || wire.rejection_kind != REQUIRED_CHILDREN_PENDING_KIND
+            || wire.position == 0
+            || wire.position > MAX_POSITION
+            || wire
+                .remote_attempt_task_id
+                .is_some_and(|task_id| task_id <= 0)
             || wire.request_digest == [0; 32]
             || wire.request_digest != expected_request_digest
             || wire.response_digest == [0; 32]
@@ -179,6 +198,8 @@ impl CidarenBlockedStepArtifact {
         Ok(Self {
             task_id: wire.task_id,
             remote_task_id: Zeroizing::new(std::mem::take(&mut wire.remote_task_id)),
+            position: wire.position,
+            remote_attempt_task_id: wire.remote_attempt_task_id,
             request_digest: wire.request_digest,
             response_digest: wire.response_digest,
             received_at,
@@ -197,6 +218,14 @@ impl CidarenBlockedStepArtifact {
         CidarenAttemptOperation::SubmitChoseWord
     }
 
+    pub const fn position(&self) -> u32 {
+        self.position
+    }
+
+    pub const fn remote_attempt_task_id(&self) -> Option<i64> {
+        self.remote_attempt_task_id
+    }
+
     pub const fn rejection_kind(&self) -> CidarenAssessmentRejectionKind {
         CidarenAssessmentRejectionKind::RequiredChildrenPending
     }
@@ -212,6 +241,16 @@ impl CidarenBlockedStepArtifact {
     pub const fn received_at(&self) -> Timestamp {
         self.received_at
     }
+
+    pub(crate) const fn definite_rejection(&self) -> CidarenDefiniteRejection {
+        CidarenDefiniteRejection::from_recovery(
+            self.position,
+            self.remote_attempt_task_id,
+            self.request_digest,
+            self.response_digest,
+            self.received_at,
+        )
+    }
 }
 
 impl fmt::Debug for CidarenBlockedStepArtifact {
@@ -221,6 +260,11 @@ impl fmt::Debug for CidarenBlockedStepArtifact {
             .field("binding", &"configured")
             .field("operation", &self.operation())
             .field("rejection_kind", &self.rejection_kind())
+            .field("position", &self.position)
+            .field(
+                "has_remote_attempt_task_id",
+                &self.remote_attempt_task_id.is_some(),
+            )
             .field("request_digest", &self.request_digest)
             .field("response_digest", &self.response_digest)
             .field("received_at", &self.received_at)
@@ -235,6 +279,8 @@ struct ArtifactWireRef<'a> {
     remote_task_id: &'a str,
     operation_type: &'static str,
     rejection_kind: &'static str,
+    position: u32,
+    remote_attempt_task_id: Option<i64>,
     request_digest: [u8; 32],
     response_digest: [u8; 32],
     received_at: &'a str,
@@ -249,6 +295,8 @@ struct ArtifactWire {
     remote_task_id: String,
     operation_type: String,
     rejection_kind: String,
+    position: u32,
+    remote_attempt_task_id: Option<i64>,
     request_digest: [u8; 32],
     response_digest: [u8; 32],
     received_at: String,
@@ -310,6 +358,8 @@ mod tests {
             "class-task:2002",
             CidarenAttemptOperation::SubmitChoseWord,
             CidarenAssessmentRejectionKind::RequiredChildrenPending,
+            7,
+            Some(92_002),
             request_digest,
             response_digest,
             received_at,
@@ -340,6 +390,8 @@ mod tests {
             decoded.rejection_kind(),
             CidarenAssessmentRejectionKind::RequiredChildrenPending
         );
+        assert_eq!(decoded.position(), 7);
+        assert_eq!(decoded.remote_attempt_task_id(), Some(92_002));
         assert_eq!(decoded.request_digest(), request_digest);
         assert_eq!(decoded.response_digest(), response_digest);
         assert_eq!(decoded.received_at(), received_at);
@@ -397,6 +449,8 @@ mod tests {
                 "remote_task_id": "class-task:2002",
                 "operation_type": "cidaren.start-answer.v1",
                 "rejection_kind": REQUIRED_CHILDREN_PENDING_KIND,
+                "position": 7,
+                "remote_attempt_task_id": 92002,
                 "request_digest": vec![7_u8; 32],
                 "response_digest": vec![9_u8; 32],
                 "received_at": received_at,
@@ -407,6 +461,8 @@ mod tests {
                 "remote_task_id": "class-task:2002",
                 "operation_type": "cidaren.submit-chose-word.v1",
                 "rejection_kind": "future_reason",
+                "position": 7,
+                "remote_attempt_task_id": 92002,
                 "request_digest": vec![7_u8; 32],
                 "response_digest": vec![9_u8; 32],
                 "received_at": received_at,
@@ -417,6 +473,8 @@ mod tests {
                 "remote_task_id": "class-task:2002",
                 "operation_type": "cidaren.submit-chose-word.v1",
                 "rejection_kind": REQUIRED_CHILDREN_PENDING_KIND,
+                "position": 0,
+                "remote_attempt_task_id": 92002,
                 "request_digest": vec![0_u8; 32],
                 "response_digest": vec![9_u8; 32],
                 "received_at": received_at,
@@ -427,6 +485,8 @@ mod tests {
                 "remote_task_id": "class-task:2002",
                 "operation_type": "cidaren.submit-chose-word.v1",
                 "rejection_kind": REQUIRED_CHILDREN_PENDING_KIND,
+                "position": 7,
+                "remote_attempt_task_id": -1,
                 "request_digest": vec![7_u8; 32],
                 "response_digest": vec![9_u8; 32],
                 "received_at": "2026-08-16T01:02:03Z",

@@ -1025,6 +1025,25 @@ future durable blocked-step record, encryption/storage and Engine transition;
 this Provider unit supplies the complete no-guess recovery payload without
 claiming that shared authority.
 
+### 2026-08-16 blocked-step flow recovery follow-up
+
+The first artifact unit retained the immutable request/response evidence but
+did not yet distinguish an initial selection block from a later mid-attempt
+selection block, or bind the positive dynamic Task allocation already carried
+by the attempt. `CidarenDefiniteRejection` and
+`cidaren.question-blocked-step.v1` now also retain the bounded current position
+and optional positive `remote_attempt_task_id`.
+
+After the caller decrypts and digest-validates the artifact,
+`CidarenAttemptFlow::restore_definite_rejection` repeats fresh context and
+stable Task rebinding, requires the dynamic allocation to remain exact and
+restores only `FailedClosed(SubmitChoseWord)` with the same definite evidence.
+It cannot recreate a word map, Ready state or mutation command. A changed fresh
+Task ID fails `RemoteChanged`; successful recovery re-encodes the identical
+artifact digest. Main still owns encrypted persistence and the shared blocked
+outcome, but no additional Cidaren execution cursor is now missing from that
+future record.
+
 ## Check procedure
 
 For the next checkpoint:

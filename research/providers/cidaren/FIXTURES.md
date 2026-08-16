@@ -377,10 +377,13 @@ placeholder identities, result codes, status values and pagination shape.
   code while the shared durable blocked-step outcome remains a Core Gap.
 - Blocked-step artifact tests freeze `cidaren.question-blocked-step.v1` and
   require exact local/remote Task, `SubmitChoseWord`, rejection kind,
+  bounded current position, optional positive dynamic allocation,
   request/response digests and nanosecond UTC receive time. The zeroizing
   encoded value has a stable digest; decode rejects digest, Task, request,
-  operation, reason, unknown-field, zero-digest and non-canonical-time drift.
-  Debug never exposes the stable remote Task identity.
+  operation, reason, position, allocation, unknown-field, zero-digest and
+  non-canonical-time drift. Fresh flow recovery accepts the original allocation,
+  rejects a changed fresh Task ID and re-encodes the same artifact digest while
+  remaining FailedClosed. Debug never exposes the stable remote Task identity.
 - Mode 73 parses as FillBlank only when its bounded answer count equals its
   word-length count; no answer wire shape is inferred from the public log.
 - `SearchWord` parsing bounds both JSON and the donor's literal
