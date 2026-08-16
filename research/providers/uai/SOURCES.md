@@ -1,6 +1,7 @@
 # UAI research sources
 
-Audit dates: 2026-08-09, 2026-08-11, 2026-08-13, 2026-08-14 and 2026-08-15. Recorded revisions are
+Audit dates: 2026-08-09, 2026-08-11, 2026-08-13, 2026-08-14, 2026-08-15 and
+2026-08-16. Recorded revisions are
 reproducible implementation snapshots; each checkpoint also refreshes default
 branches, tags/releases and relevant protocol commits for incremental audit.
 
@@ -471,3 +472,13 @@ answer and upload key in one body, Asterism now hashes the complete ordinary
 child/judge semantics directly into the sequence binding instead of relying on
 the Draft identifier alone. This strengthens local recovery identity without
 adding or changing donor wire behavior.
+
+The accepted-result verification-adapter checkpoint on 2026-08-16 queried all
+four default refs and complete tag refs again. Apache remained
+`bef0d29155ce`, MIT remained `590b4a58fe17`, AutoPlayer remained
+`cc6bdc86a13e` and Rust remained `525c7ecfc2b`; their tag sets were unchanged.
+No donor added a version-free readback, changed the atomic compound answer/key
+shape or supplied a generic parent-batch upload recovery protocol. UAI now
+preserves the accepted timestamp and converts only an exact final-plan-bound,
+receipt-versioned readback into mutation verification; this is stricter local
+recovery binding over the existing donor protocol, not a new wire capability.

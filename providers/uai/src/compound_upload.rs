@@ -1069,6 +1069,8 @@ mod tests {
         );
         assert!(verified.requires_fresh_progress_read());
 
+        assert_recovered_compound_verification(&document, &submission, &draft, &uploaded);
+
         assert!(
             parse_compound_upload_verification(
                 &document.replace("course/42/nothing.mp3", "other/key.mp3"),
@@ -1089,6 +1091,53 @@ mod tests {
                 &receipt,
             )
             .is_err()
+        );
+    }
+
+    fn assert_recovered_compound_verification(
+        document: &str,
+        submission: &UaiCompoundUploadSubmission,
+        draft: &SubmissionDraft,
+        uploaded: &UaiUploadedArtifact,
+    ) {
+        let sequence = crate::UaiUploadFinalSubmissionSequence::for_compound(submission).unwrap();
+        let request =
+            build_compound_upload_submission_request(submission, "course-instance-1", "openid-1")
+                .unwrap();
+        let outcome = request
+            .classify_final_response(
+                1,
+                r#"{"code":0,"data":{"course_id":"course-instance-1","group_id":"group-upload","version":"compound-v1"}}"#,
+                "course-instance-1",
+                "group-upload",
+            )
+            .unwrap();
+        let result_state = sequence.accepted_result_state(&outcome).unwrap();
+        let (recovered, mutation_verification) = result_state
+            .verify_compound_readback(document, submission)
+            .unwrap();
+        assert_eq!(recovered.ordinary_draft_id(), draft.id);
+        assert_eq!(recovered.submission_version(), "compound-v1");
+        assert_eq!(mutation_verification.ordinal(), 1);
+        assert_eq!(
+            mutation_verification.observation_digest(),
+            recovered.result_digest()
+        );
+        assert!(mutation_verification.verified());
+
+        let mut changed_draft = draft.clone();
+        changed_draft.items[0].selected.answer = NormalizedAnswer::Selections(vec!["B".to_owned()]);
+        changed_draft.validate().unwrap();
+        let changed = build_compound_upload_submission(
+            &detail(&["multichoice", "multiFileUpload"]),
+            &changed_draft,
+            uploaded,
+        )
+        .unwrap();
+        assert!(
+            result_state
+                .verify_compound_readback(document, &changed)
+                .is_err()
         );
     }
 

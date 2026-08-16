@@ -1,6 +1,6 @@
 # UAI protocol notes
 
-Audit dates: 2026-08-13 and incremental 2026-08-15. These are static donor observations and synthetic
+Audit dates: 2026-08-13 and incremental 2026-08-15/2026-08-16. These are static donor observations and synthetic
 parser coverage, not live compatibility claims. The recorded donor default
 branches, tags and releases were refreshed on this date; unchanged revisions
 remain reproducible audit snapshots rather than permanent update ceilings.
@@ -1305,9 +1305,25 @@ requires an accepted `uai.upload.final-submit` recovery record with the same
 ordinal and request/response lineage; rejected results, unknown fields, digest
 substitution or a foreign otherwise-valid sequence fail closed. This owner is
 only the Provider input for the future atomic receipt-plus-encrypted-state
-transaction. It is not stored by the current sequence sink, contains no object
-key or compound selected answer and therefore cannot independently authorize
-readback, replay or final mutation verification.
+transaction. It now also preserves the exact accepted-receipt timestamp. Once
+decoded against the accepted Core record, UAI must additionally rebuild the
+complete single or compound final plan. Only an exact plan may reconstruct the
+bounded accepted receipt, parse the receipt-versioned user-module, and produce
+an `ExecutionMutationVerification` whose observation digest is the exact
+readback digest. For compound upload this rebind includes the ordinary selected
+children and judge descriptors as well as the object key, so a same-Draft-ID
+answer substitution cannot inherit an accepted result. The state is not stored
+by the current sequence sink, contains no object key or compound selected
+answer and therefore cannot independently authorize readback, replay or final
+mutation verification.
+
+Core's encrypted parent-authority/complete-batch snapshot is not a substitute
+for this stage state. Final upload is one receipt-conditional mutation stage,
+not a parent/child batch, and the parent snapshot contract does not atomically
+commit an accepted mutation receipt with `uai.upload.final-result.v1` or retain
+the exact single/compound final plan. UAI therefore keeps the new read-only
+verification adapter Provider-private until the dedicated stage-output
+transaction exists.
 
 ### Minimal durable upload stage state
 

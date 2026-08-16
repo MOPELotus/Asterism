@@ -1,11 +1,11 @@
 use std::fmt;
 
-use asterism_domain::{ProviderId, SubmissionReceipt};
+use asterism_domain::{ProviderId, SubmissionReceipt, Timestamp};
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
     ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
-    ExecutionMutationSequencePlan, ExecutionMutationSink, ProviderError, ProviderErrorKind,
-    ProviderExecutionPlanArtifact, ProviderResult,
+    ExecutionMutationSequencePlan, ExecutionMutationSink, ExecutionMutationVerification,
+    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderResult,
 };
 use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
@@ -13,8 +13,9 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
-    UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest, UaiUploadSubmission,
-    UaiUploadSubmissionRequest, metadata::PROVIDER_ID, parse_submission_receipt,
+    UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest, UaiCompoundUploadVerification,
+    UaiUploadSubmission, UaiUploadSubmissionRequest, UaiUploadVerification, metadata::PROVIDER_ID,
+    parse_compound_upload_verification, parse_submission_receipt, parse_upload_verification,
 };
 
 pub const UAI_UPLOAD_FINAL_PLAN_ARTIFACT_TYPE: &str = "uai.upload.final-plan.v1";
@@ -202,6 +203,7 @@ impl UaiUploadFinalSubmissionSequence {
             sequence_binding_digest: *sequence_binding_digest,
             request_digest: *request_digest,
             response_digest: *response_digest,
+            accepted_at: receipt.received_at,
             submission_version: Zeroizing::new(submission_version.to_owned()),
         })
     }
@@ -386,6 +388,7 @@ pub struct UaiUploadFinalResultState {
     sequence_binding_digest: [u8; 32],
     request_digest: [u8; 32],
     response_digest: [u8; 32],
+    accepted_at: Timestamp,
     submission_version: Zeroizing<String>,
 }
 
@@ -414,8 +417,91 @@ impl UaiUploadFinalResultState {
         self.response_digest
     }
 
+    pub const fn accepted_at(&self) -> Timestamp {
+        self.accepted_at
+    }
+
     pub fn submission_version(&self) -> &str {
         &self.submission_version
+    }
+
+    /// Rebinds an accepted recovered result to the complete single-upload
+    /// final plan and parses its exact receipt-versioned readback.
+    ///
+    /// The returned mutation verification is safe to persist only for the
+    /// same Core ordinal whose accepted result state was decoded. Fresh Group
+    /// progress remains the separate completion authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign final plan, malformed accepted state or any changed
+    /// upload key/readback identity before constructing verification evidence.
+    pub fn verify_single_readback(
+        &self,
+        document: &str,
+        submission: &UaiUploadSubmission,
+    ) -> ProviderResult<(UaiUploadVerification, ExecutionMutationVerification)> {
+        let sequence = UaiUploadFinalSubmissionSequence::for_single(submission)?;
+        self.validate_verification_plan(&sequence, submission.final_sequence_binding_digest())?;
+        let verification =
+            parse_upload_verification(document, submission, &self.verification_receipt()?)?;
+        let mutation_verification =
+            ExecutionMutationVerification::new(self.ordinal, verification.result_digest(), true)?;
+        Ok((verification, mutation_verification))
+    }
+
+    /// Rebinds an accepted recovered result to the complete compound-upload
+    /// final plan and parses the exact ordered answer-plus-object-key readback.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign Draft answer, judge descriptor, object key, sequence
+    /// lineage or changed receipt-versioned readback before returning evidence.
+    pub fn verify_compound_readback(
+        &self,
+        document: &str,
+        submission: &UaiCompoundUploadSubmission,
+    ) -> ProviderResult<(UaiCompoundUploadVerification, ExecutionMutationVerification)> {
+        let sequence = UaiUploadFinalSubmissionSequence::for_compound(submission)?;
+        self.validate_verification_plan(&sequence, submission.final_sequence_binding_digest())?;
+        let verification = parse_compound_upload_verification(
+            document,
+            submission,
+            &self.verification_receipt()?,
+        )?;
+        let mutation_verification =
+            ExecutionMutationVerification::new(self.ordinal, verification.result_digest(), true)?;
+        Ok((verification, mutation_verification))
+    }
+
+    fn validate_verification_plan(
+        &self,
+        sequence: &UaiUploadFinalSubmissionSequence,
+        sequence_binding_digest: [u8; 32],
+    ) -> ProviderResult<()> {
+        if self.kind != sequence.kind
+            || self.sequence_binding_digest != sequence_binding_digest
+            || self.sequence_binding_digest != sequence.sequence_binding_digest
+            || self.plan_digest != sequence.plan.plan_digest()
+            || self.artifact_digest != sequence.artifact.artifact_digest()
+        {
+            Err(foreign_result_state())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verification_receipt(&self) -> ProviderResult<SubmissionReceipt> {
+        let receipt = SubmissionReceipt {
+            remote_status: "accepted".to_owned(),
+            message_sanitized: Some(
+                "UAI accepted the submission for later verification".to_owned(),
+            ),
+            provider_trace_id: Some(self.submission_version.to_string()),
+            received_at: self.accepted_at,
+        };
+        receipt.validate().map_err(|_| foreign_result_state())?;
+        Ok(receipt)
     }
 
     /// Encodes the accepted result into deterministic bounded secret bytes.
@@ -435,6 +521,8 @@ impl UaiUploadFinalResultState {
                 sequence_binding_digest: self.sequence_binding_digest,
                 request_digest: self.request_digest,
                 response_digest: self.response_digest,
+                accepted_at_unix_seconds: self.accepted_at.timestamp(),
+                accepted_at_subsec_nanos: self.accepted_at.timestamp_subsec_nanos(),
                 submission_version: &self.submission_version,
             })
             .map_err(|_| invalid_result_state())?,
@@ -475,6 +563,11 @@ impl UaiUploadFinalResultState {
             _ => return Err(foreign_result_state()),
         };
         let receipt = record.receipt().filter(|receipt| receipt.accepted());
+        let Some(accepted_at) =
+            Timestamp::from_timestamp(wire.accepted_at_unix_seconds, wire.accepted_at_subsec_nanos)
+        else {
+            return Err(foreign_result_state());
+        };
         if wire.schema != UAI_UPLOAD_FINAL_RESULT_STATE_TYPE
             || wire.ordinal != record.issue().ordinal()
             || record.issue().operation_type() != UAI_UPLOAD_FINAL_OPERATION_TYPE
@@ -505,6 +598,7 @@ impl UaiUploadFinalResultState {
             sequence_binding_digest: wire.sequence_binding_digest,
             request_digest: wire.request_digest,
             response_digest: wire.response_digest,
+            accepted_at,
             submission_version: Zeroizing::new(wire.submission_version.clone()),
         })
     }
@@ -521,6 +615,7 @@ impl fmt::Debug for UaiUploadFinalResultState {
             .field("sequence_binding_digest", &"[HASHED]")
             .field("request_digest", &"[HASHED]")
             .field("response_digest", &"[HASHED]")
+            .field("accepted_at", &self.accepted_at)
             .field("submission_version", &"[REDACTED]")
             .finish()
     }
@@ -809,6 +904,8 @@ struct UploadFinalResultStateWireRef<'a> {
     sequence_binding_digest: [u8; 32],
     request_digest: [u8; 32],
     response_digest: [u8; 32],
+    accepted_at_unix_seconds: i64,
+    accepted_at_subsec_nanos: u32,
     submission_version: &'a str,
 }
 
@@ -823,6 +920,8 @@ struct UploadFinalResultStateWire {
     sequence_binding_digest: [u8; 32],
     request_digest: [u8; 32],
     response_digest: [u8; 32],
+    accepted_at_unix_seconds: i64,
+    accepted_at_subsec_nanos: u32,
     submission_version: String,
 }
 
@@ -961,6 +1060,7 @@ mod tests {
         assert_eq!(state.request_digest(), request.request_digest());
         assert_eq!(state.response_digest(), outcome.response_digest());
         assert_eq!(state.submission_version(), "upload-v1");
+        assert_eq!(state.accepted_at(), outcome.receipt().unwrap().received_at);
         assert!(!format!("{state:?}").contains("upload-v1"));
 
         let encoded = state.encode().unwrap();
@@ -981,6 +1081,20 @@ mod tests {
         let decoded =
             UaiUploadFinalResultState::decode_bound(&value, digest, &sequence, &record).unwrap();
         assert_eq!(decoded.submission_version(), "upload-v1");
+        assert_eq!(decoded.accepted_at(), state.accepted_at());
+        let document = single_upload_verification_document("course/42/nothing.mp3", "upload-v1");
+        let (verified, mutation_verification) = decoded
+            .verify_single_readback(&document, &submission)
+            .unwrap();
+        assert_eq!(verified.submission_version(), "upload-v1");
+        assert_eq!(mutation_verification.ordinal(), 1);
+        assert_eq!(
+            mutation_verification.observation_digest(),
+            verified.result_digest()
+        );
+        assert!(mutation_verification.verified());
+        let foreign = UaiUploadSubmission::fixture("course/42/other.mp3", "fixture-b");
+        assert!(decoded.verify_single_readback(&document, &foreign).is_err());
 
         assert!(
             UaiUploadFinalResultState::decode_bound(&value, [7; 32], &sequence, &record).is_err()
@@ -1018,6 +1132,40 @@ mod tests {
             )
             .unwrap();
         assert!(sequence.accepted_result_state(&rejected).is_err());
+    }
+
+    fn single_upload_verification_document(file_key: &str, version: &str) -> String {
+        let answer = serde_json::json!({
+            "value": [],
+            "children": [{"value": [file_key], "isDone": true}],
+            "progress": {},
+            "record": {"url": ""},
+        })
+        .to_string();
+        let questions = serde_json::json!([{
+            "instanceId": "0",
+            "answer": answer,
+            "context": "{\"state\":\"submitted\"}",
+        }])
+        .to_string();
+        serde_json::json!({
+            "success": true,
+            "code": 0,
+            "data": {
+                "course": "course-instance-1",
+                "module": format!("group-upload-{version}"),
+                "state": {
+                    "version": version,
+                    "quesData": questions,
+                    "__EXTEND_DATA__": {"__SUBMIT_INFO__": {
+                        "course_id": "course-instance-1",
+                        "group_id": "group-upload",
+                        "version": version,
+                    }},
+                },
+            },
+        })
+        .to_string()
     }
 
     #[tokio::test]
