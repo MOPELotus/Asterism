@@ -1128,6 +1128,13 @@ Question-read continuation already carries the required durable state and
 operation-ledger response binding; no shared Core/Storage/Engine change is
 needed for this donor behavior.
 
+Post-implementation refs remained `ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and historical
+`github123666/main@1409858800f3c4bd27577a08049bf1f8d17a069c`; tag `1.5.4`
+still targets `7e29ee43692f4c0807fae8cf7f74a5a674793097`. The scoped Provider
+suite retained 190 unit tests plus two doctests, and all-target/all-feature
+Clippy remained warning-free.
+
 ## Check procedure
 
 For the next checkpoint:
