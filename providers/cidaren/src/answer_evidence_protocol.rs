@@ -497,6 +497,7 @@ pub struct CidarenWordSelectionPlan {
     remote_task_id: String,
     word_map: Value,
     word_count: usize,
+    can_continue_after_existing_selection_rejection: bool,
 }
 
 impl CidarenWordSelectionPlan {
@@ -508,6 +509,10 @@ impl CidarenWordSelectionPlan {
     pub(crate) fn is_bound_to(&self, remote_task_id: &str) -> bool {
         self.remote_task_id == remote_task_id
     }
+
+    pub(crate) const fn can_continue_after_existing_selection_rejection(&self) -> bool {
+        self.can_continue_after_existing_selection_rejection
+    }
 }
 
 impl fmt::Debug for CidarenWordSelectionPlan {
@@ -516,6 +521,10 @@ impl fmt::Debug for CidarenWordSelectionPlan {
             .debug_struct("CidarenWordSelectionPlan")
             .field("task_binding", &"configured")
             .field("word_count", &self.word_count)
+            .field(
+                "can_continue_after_existing_selection_rejection",
+                &self.can_continue_after_existing_selection_rejection,
+            )
             .field("word_map", &"[REDACTED]")
             .finish_non_exhaustive()
     }
@@ -636,6 +645,13 @@ pub fn build_word_selection_plan(
         return Ok(None);
     }
     let word_count = inventory.words.len();
+    let can_continue_after_existing_selection_rejection = matches!(
+        binding.route(),
+        CidarenWordInventoryRoute::StudyTaskInfo {
+            release_id: None,
+            ..
+        }
+    );
     let mut groups = Map::new();
     for entry in &inventory.words {
         let key = format!("{}:{}", inventory.course_id, entry.list_id);
@@ -651,6 +667,7 @@ pub fn build_word_selection_plan(
         remote_task_id: binding.remote_task_id.clone(),
         word_map,
         word_count,
+        can_continue_after_existing_selection_rejection,
     }))
 }
 
@@ -1571,6 +1588,7 @@ mod tests {
             plan.word_map(),
             &json!({"course-a:course-a_02": ["alpha", "beta"]})
         );
+        assert!(plan.can_continue_after_existing_selection_rejection());
         assert!(!format!("{plan:?}").contains("alpha"));
 
         let learning = detail("class-task:2002", "learning", 92002, "Self Built Learning");
@@ -1586,6 +1604,7 @@ mod tests {
             plan.word_map(),
             &json!({"course-a:course-a_02": ["alpha", "beta"]})
         );
+        assert!(!plan.can_continue_after_existing_selection_rejection());
 
         let test = detail("class-task:2002", "test", -1, "Synthetic List 02");
         let binding =

@@ -732,45 +732,34 @@ copying donor UI text.
 
 Issues 48/49 establish one exact `code=0` prerequisite shape: repeated
 class-learning runs receive null data and a stable incomplete-section message
-after `SubmitChoseWord`. This is a definite rejected mutation and semantically
-`RequiredChildrenPending`. The word-selection parser now accepts only the exact
-five-field issue envelope as `CidarenAssessmentRejectionKind::RequiredChildrenPending`;
+after `SubmitChoseWord`. Issue 49's maintainer explanation says the learning
+Task already had word selection, while the reopened ordinary-learning source
+catches that selection failure as "task already started" and immediately
+continues to `StartAnswer`. The clean-room flow does not copy the donor's broad
+exception handler: the word-selection parser accepts only the exact five-field
+envelope as `CidarenAssessmentRejectionKind::RequiredChildrenPending`;
 message/data/version changes or extra fields remain ordinary fail-closed shape
-drift. Native transport therefore hashes and timestamps the definite response
-before parsing, the attempt flow retains a `CidarenDefiniteRejection`, and the
-public adapter returns a non-retryable InvalidResponse with stable provider
-code `cidaren.required-children-pending.v1`. The flow can also encode
-`cidaren.question-blocked-step.v1`: a bounded, zeroizing artifact that binds
-local Task ID, stable remote Task ID, exact `SubmitChoseWord` operation,
-current position, optional positive dynamic allocation, request digest,
-response digest, rejection kind and canonical receive time.
-Decode requires the encrypted artifact digest plus the durable Task/request
-binding and rejects unknown fields, another operation/reason, zero or changed
-digests, invalid position/allocation and non-canonical time. After fresh
-context/Task rebinding, `CidarenAttemptFlow::restore_definite_rejection`
-requires the allocation to remain identical and reconstructs only the exact
-FailedClosed `SubmitChoseWord` state; it cannot issue another mutation. The
-flow's `CidarenBlockedStepMaterialization` first compares the unencoded
-artifact with the definite rejection across operation, reason, position,
-dynamic allocation, request/response digests and receive time, then encodes it
-into one all-or-nothing handoff containing the artifact,
-`RequiredChildrenPending` diagnosis, operation, request/response digests and
-receive time. A mismatched artifact/rejection pair fails as protocol drift;
-callers cannot obtain the artifact while independently substituting another
-diagnosis or ledger tuple.
-The shared Question remote-step outcome still
-has no blocked variant carrying this artifact and diagnosis. Until Main adds
-that contract, Cidaren cannot emit a durable blocked step, and it never
-relabels the rejection Completed, HumanRequired or retryable.
+drift.
+
+For only that exact rejection on an ordinary-unit selection plan, the accepted
+response digest and receive time are committed with the existing
+`cidaren.pre-question-attempt.v2`
+`ready-to-start` continuation. Recovery fresh-rebinds the local/remote Task and
+dynamic allocation before `StartAnswer`; it cannot reconstruct the word map or
+issue a second `SubmitChoseWord`. The rejection is not a completion diagnosis,
+successful word-selection receipt or verified outcome, and no separate blocked
+artifact/Core outcome is required. A self-built plan returning the same
+envelope remains unobserved protocol drift.
 
 Before `StartAnswer`, eligible learning Tasks build the donor's exact grouped
 word map from a fresh Task-bound `StudyTask/Info` inventory. An ordinary unit
 uses one `{course_id:list_id: [words...]}` entry; a self-built task may contain
-several entries. No audited eligible call site submits a bare word array. After start,
+several entries. No audited eligible call site submits a bare word array. After
+start,
 the Provider-private state machine emits only one remote operation at a time:
 
 ```text
-SubmitChoseWord receipt (when required)
+SubmitChoseWord receipt or exact existing-selection rejection (when required)
 -> StartAnswer payload
 -> current Question or reading card
 -> VerifyAnswer payload with rotated topic_code
@@ -984,11 +973,12 @@ This mapping does not use task score: no passing threshold is evidenced. The
 donor exposes accumulated `time_spent`, but no required-duration threshold or
 duration-failure result fact, so progress cannot be diagnosed as
 `DurationInsufficient`. A fresh Task snapshot alone also cannot diagnose
-`RequiredChildrenPending`; issues 48/49 establish it only for one definite
-mid-attempt rejection pending a shared blocked-step contract. No audited field
-establishes a prerequisite lock, teacher review, human action, attempt limit or
-retake rule. Cidaren also has no registered TaskExecution slot; only the
-verified submission readback supplies terminal completion facts.
+`RequiredChildrenPending`; issues 48/49 establish only a pre-Question
+existing-selection continuation, not a Task-level completion diagnosis. No
+audited field establishes a prerequisite lock, teacher review, human action,
+attempt limit or retake rule. Cidaren also has no registered TaskExecution
+slot; only the verified submission readback supplies terminal completion
+facts.
 
 The later Core Strict Completion attempt ledger does not add a Cidaren retry
 protocol. A verified `WindowClosed` diagnosis and Core's fallback

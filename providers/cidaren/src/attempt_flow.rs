@@ -13,7 +13,6 @@ use asterism_provider_api::{
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::blocked_step_artifact::{CidarenBlockedStepArtifact, CidarenBlockedStepMaterialization};
 use crate::pre_question_artifact::CidarenPreQuestionState;
 use crate::{
     CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_READY_TO_ADVANCE_PHASE, CIDAREN_READY_TO_VERIFY_PHASE,
@@ -30,9 +29,6 @@ use crate::{
 const MAX_CORRELATION_ID_BYTES: usize = 512;
 const MAX_TOPIC_CODE_BYTES: usize = 4_096;
 const MAX_VERIFIED_STEPS: u32 = 256;
-
-pub const CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE: &str =
-    "cidaren.required-children-pending.v1";
 
 /// One donor-observed remote mutation in the Cidaren answer lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,74 +89,12 @@ pub struct CidarenAttemptFlow {
     position: u32,
     phase: Option<CidarenAttemptPhase>,
     last_response_binding: Option<CidarenQuestionResponseBinding>,
-    last_definite_rejection: Option<CidarenDefiniteRejection>,
 }
 
 #[derive(Clone, Copy)]
 struct CidarenQuestionResponseBinding {
     response_digest: [u8; 32],
     received_at: Timestamp,
-}
-
-/// Definite, non-replayable Provider rejection retained before the shared
-/// Question-step contract can persist a blocked outcome.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CidarenDefiniteRejection {
-    operation: CidarenAttemptOperation,
-    kind: CidarenAssessmentRejectionKind,
-    position: u32,
-    remote_attempt_task_id: Option<i64>,
-    request_digest: [u8; 32],
-    response_digest: [u8; 32],
-    received_at: Timestamp,
-}
-
-impl CidarenDefiniteRejection {
-    pub(crate) const fn from_recovery(
-        position: u32,
-        remote_attempt_task_id: Option<i64>,
-        request_digest: [u8; 32],
-        response_digest: [u8; 32],
-        received_at: Timestamp,
-    ) -> Self {
-        Self {
-            operation: CidarenAttemptOperation::SubmitChoseWord,
-            kind: CidarenAssessmentRejectionKind::RequiredChildrenPending,
-            position,
-            remote_attempt_task_id,
-            request_digest,
-            response_digest,
-            received_at,
-        }
-    }
-
-    pub const fn operation(self) -> CidarenAttemptOperation {
-        self.operation
-    }
-
-    pub const fn kind(self) -> CidarenAssessmentRejectionKind {
-        self.kind
-    }
-
-    pub const fn position(self) -> u32 {
-        self.position
-    }
-
-    pub const fn remote_attempt_task_id(self) -> Option<i64> {
-        self.remote_attempt_task_id
-    }
-
-    pub const fn response_digest(self) -> [u8; 32] {
-        self.response_digest
-    }
-
-    pub const fn request_digest(self) -> [u8; 32] {
-        self.request_digest
-    }
-
-    pub const fn received_at(self) -> Timestamp {
-        self.received_at
-    }
 }
 
 enum CidarenAttemptPhase {
@@ -198,7 +132,9 @@ struct CidarenCurrentQuestion {
 }
 
 enum CidarenAttemptContinuation {
-    SelectWords,
+    SelectWords {
+        can_continue_after_existing_selection_rejection: bool,
+    },
     Start,
     Verify {
         current: Box<CidarenCurrentQuestion>,
@@ -432,7 +368,6 @@ impl CidarenAttemptFlow {
             position: 1,
             phase: Some(phase),
             last_response_binding: None,
-            last_definite_rejection: None,
         })
     }
 
@@ -487,7 +422,6 @@ impl CidarenAttemptFlow {
             position,
             phase: Some(phase),
             last_response_binding: None,
-            last_definite_rejection: None,
         })
     }
 
@@ -589,54 +523,6 @@ impl CidarenAttemptFlow {
             position: question.position,
             phase: Some(restored_phase),
             last_response_binding: None,
-            last_definite_rejection: None,
-        })
-    }
-
-    /// Restores one already decoded definite rejection after fresh context and
-    /// Task rebinding. The recovered flow remains permanently `FailedClosed`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed error for a foreign Task artifact or changed dynamic
-    /// remote allocation.
-    pub fn restore_definite_rejection(
-        context: &ProviderContext,
-        remote_task_id: &str,
-        detail: &RemoteTaskDetail,
-        artifact: &CidarenBlockedStepArtifact,
-    ) -> ProviderResult<Self> {
-        validate_context(context)?;
-        if artifact.remote_task_id() != remote_task_id {
-            return Err(remote_changed(
-                "Cidaren blocked-step artifact belongs to another Task",
-            ));
-        }
-        let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
-        let remote_attempt_task_id =
-            binding.rebind_remote_attempt_task_id(artifact.remote_attempt_task_id())?;
-        if remote_attempt_task_id != artifact.remote_attempt_task_id() {
-            return Err(remote_changed(
-                "Cidaren blocked-step recovery changed the remote attempt allocation",
-            ));
-        }
-        let task_id = artifact.task_id();
-        let position = artifact.position();
-        let rejection = artifact.definite_rejection();
-        let context_binding = context_binding(context);
-        Ok(Self {
-            binding,
-            context_binding,
-            flow_binding: flow_binding(context_binding, task_id, remote_task_id),
-            remote_task_id: remote_task_id.to_owned(),
-            remote_attempt_task_id,
-            task_id,
-            position,
-            phase: Some(CidarenAttemptPhase::FailedClosed(
-                CidarenAttemptOperation::SubmitChoseWord,
-            )),
-            last_response_binding: None,
-            last_definite_rejection: Some(rejection),
         })
     }
 
@@ -672,56 +558,6 @@ impl CidarenAttemptFlow {
             }
             None => CidarenAttemptFlowStatus::Invalid,
         }
-    }
-
-    /// Returns one exact definite remote rejection after the flow has failed
-    /// closed. It is never retry authority and is cleared on every fresh or
-    /// recovered flow construction.
-    pub const fn definite_rejection(&self) -> Option<CidarenDefiniteRejection> {
-        self.last_definite_rejection
-    }
-
-    /// Encodes the exact rejected step for a future encrypted durable blocked
-    /// outcome. Current shared adapters do not persist or return this artifact.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed error if the retained rejection cannot be rebound to
-    /// this flow's Task identity or encoded within the Provider bound.
-    pub fn definite_rejection_artifact(
-        &self,
-    ) -> ProviderResult<Option<crate::EncodedCidarenBlockedStepArtifact>> {
-        let Some(rejection) = self.last_definite_rejection else {
-            return Ok(None);
-        };
-        CidarenBlockedStepArtifact::from_definite_rejection(
-            self.task_id,
-            &self.remote_task_id,
-            rejection,
-        )?
-        .encode()
-        .map(Some)
-    }
-
-    /// Produces one all-or-nothing Provider bundle for a future shared blocked
-    /// step outcome. Current shared adapters do not consume this handoff.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed error if the definite rejection or its encoded artifact
-    /// cannot satisfy the exact Provider binding.
-    pub fn blocked_step_materialization(
-        &self,
-    ) -> ProviderResult<Option<CidarenBlockedStepMaterialization>> {
-        let Some(rejection) = self.last_definite_rejection else {
-            return Ok(None);
-        };
-        let artifact = CidarenBlockedStepArtifact::from_definite_rejection(
-            self.task_id,
-            &self.remote_task_id,
-            rejection,
-        )?;
-        CidarenBlockedStepMaterialization::try_new(artifact, rejection).map(Some)
     }
 
     /// Encodes the current pre-Question phase for Main's encrypted attempt
@@ -945,9 +781,13 @@ impl CidarenAttemptFlow {
                     return Err(error);
                 }
             };
+        let can_continue_after_existing_selection_rejection =
+            plan.can_continue_after_existing_selection_rejection();
         self.issue(
             CidarenAttemptOperation::SubmitChoseWord,
-            CidarenAttemptContinuation::SelectWords,
+            CidarenAttemptContinuation::SelectWords {
+                can_continue_after_existing_selection_rejection,
+            },
             CidarenIssuedAction::SubmitChoseWord(request),
             0,
         )
@@ -1324,21 +1164,9 @@ impl CidarenAttemptFlow {
             response_digest: outcome.response_digest,
             received_at: outcome.received_at,
         };
-        let rejection_kind = outcome.response.rejection_kind();
         let applied = self.apply_response(continuation, outcome.response, outcome.received_at);
         if applied.is_err() {
             self.phase = Some(CidarenAttemptPhase::FailedClosed(operation));
-            if let Some(kind) = rejection_kind {
-                self.last_definite_rejection = Some(CidarenDefiniteRejection {
-                    operation,
-                    kind,
-                    position: self.position,
-                    remote_attempt_task_id: self.remote_attempt_task_id,
-                    request_digest: outcome.request_digest,
-                    response_digest: outcome.response_digest,
-                    received_at: outcome.received_at,
-                });
-            }
         } else {
             self.last_response_binding = Some(response_binding);
         }
@@ -1395,11 +1223,19 @@ impl CidarenAttemptFlow {
         received_at: asterism_domain::Timestamp,
     ) -> ProviderResult<()> {
         match continuation {
-            CidarenAttemptContinuation::SelectWords => match response {
+            CidarenAttemptContinuation::SelectWords {
+                can_continue_after_existing_selection_rejection,
+            } => match response {
                 CidarenAssessmentResponse::Receipt {
                     kind: CidarenAssessmentReceiptKind::Accepted,
                     ..
                 } => {
+                    self.phase = Some(CidarenAttemptPhase::ReadyToStart);
+                    Ok(())
+                }
+                CidarenAssessmentResponse::Rejected {
+                    kind: CidarenAssessmentRejectionKind::RequiredChildrenPending,
+                } if can_continue_after_existing_selection_rejection => {
                     self.phase = Some(CidarenAttemptPhase::ReadyToStart);
                     Ok(())
                 }
@@ -1425,7 +1261,11 @@ impl CidarenAttemptFlow {
                     });
                     Ok(())
                 }
-                CidarenAssessmentResponse::Rejected { kind } => Err(definite_rejection_error(kind)),
+                CidarenAssessmentResponse::Rejected {
+                    kind: CidarenAssessmentRejectionKind::RequiredChildrenPending,
+                } => Err(protocol_drift(
+                    "Cidaren self-built word selection returned an unobserved existing-selection rejection",
+                )),
                 _ => Err(protocol_drift(
                     "Cidaren SubmitChoseWord returned an unexpected response",
                 )),
@@ -1884,17 +1724,6 @@ fn internal(message: impl Into<String>) -> ProviderError {
 
 fn invalid_response(message: impl Into<String>) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidResponse, message)
-}
-
-fn definite_rejection_error(kind: CidarenAssessmentRejectionKind) -> ProviderError {
-    let message = match kind {
-        CidarenAssessmentRejectionKind::RequiredChildrenPending => {
-            "Cidaren word selection is blocked by incomplete required children"
-        }
-    };
-    let mut error = ProviderError::new(ProviderErrorKind::InvalidResponse, message);
-    error.provider_code = Some(CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE.to_owned());
-    error
 }
 
 fn protocol_drift(message: impl Into<String>) -> ProviderError {
@@ -2431,13 +2260,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_children_rejection_retains_definite_non_replayable_evidence() {
+    async fn required_children_rejection_continues_to_fresh_start_without_reselection() {
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([
+                required_children_rejection(),
+                response(&start_payload()),
+            ])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let task_id = TaskId::new();
+        let (detail, plan) = word_selection_plan();
+        let mut flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail, Some(plan))
+                .unwrap();
+        let outcome = flow
+            .issue_word_selection(request_at())
+            .unwrap()
+            .execute(transport.clone(), &context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+        assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToStart);
+        assert!(flow.issue_word_selection(request_at()).is_err());
+
+        let continuation = flow.pre_question_continuation().unwrap().unwrap();
+        assert_eq!(continuation.phase(), crate::CIDAREN_READY_TO_START_PHASE);
+        assert!(continuation.response_digest().is_some());
+        assert_eq!(continuation.received_at(), Some(request_at()));
+        let artifact_digest = continuation.artifact().digest();
+        let (artifact, _, _, _) = continuation.into_parts();
+        let value = artifact.into_secret_value();
+        let artifact = CidarenPreQuestionArtifact::decode_bound(
+            &value,
+            artifact_digest,
+            task_id,
+            "class-task:2002",
+        )
+        .unwrap();
+        let recovered_context = recovered_context(&context);
+        let mut restored = CidarenAttemptFlow::restore_pre_question(
+            &recovered_context,
+            task_id,
+            "class-task:2002",
+            &detail,
+            artifact,
+            None,
+        )
+        .unwrap();
+        assert_eq!(restored.status(), CidarenAttemptFlowStatus::ReadyToStart);
+
+        let outcome = restored
+            .issue_start(request_at())
+            .unwrap()
+            .execute(transport.clone(), &recovered_context)
+            .await
+            .unwrap();
+        restored.accept(outcome).unwrap();
+        assert!(restored.current_question().is_some());
+        assert_eq!(
+            *transport.operations.lock().unwrap(),
+            [
+                CidarenAttemptOperation::SubmitChoseWord,
+                CidarenAttemptOperation::StartAnswer,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn self_built_required_children_rejection_remains_fail_closed() {
         let transport = Arc::new(FixtureTransport {
             responses: Mutex::new(VecDeque::from([required_children_rejection()])),
             operations: Mutex::new(Vec::new()),
         });
         let context = context();
-        let (detail, plan) = word_selection_plan();
+        let (detail, plan) = word_selection_plan_for("Self Built Learning");
         let mut flow = CidarenAttemptFlow::try_new(
             &context,
             TaskId::new(),
@@ -2452,40 +2349,14 @@ mod tests {
             .execute(transport, &context)
             .await
             .unwrap();
-        let error = flow.accept(outcome).unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
         assert_eq!(
-            error.provider_code.as_deref(),
-            Some(CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE)
+            flow.accept(outcome).unwrap_err().kind,
+            ProviderErrorKind::ProtocolDrift
         );
-        assert!(!error.is_retryable());
         assert_eq!(
             flow.status(),
             CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::SubmitChoseWord)
         );
-        let rejection = flow.definite_rejection().unwrap();
-        assert_eq!(
-            rejection.operation(),
-            CidarenAttemptOperation::SubmitChoseWord
-        );
-        assert_eq!(
-            rejection.kind(),
-            CidarenAssessmentRejectionKind::RequiredChildrenPending
-        );
-        assert_ne!(rejection.request_digest(), [0; 32]);
-        assert_ne!(rejection.response_digest(), [0; 32]);
-        assert_eq!(rejection.received_at(), request_at());
-        let blocked = flow.blocked_step_materialization().unwrap().unwrap();
-        assert_eq!(
-            blocked.diagnosis(),
-            asterism_domain::CompletionDiagnosis::RequiredChildrenPending
-        );
-        assert_eq!(blocked.operation(), rejection.operation());
-        assert_eq!(blocked.request_digest(), rejection.request_digest());
-        assert_eq!(blocked.response_digest(), rejection.response_digest());
-        assert_eq!(blocked.received_at(), rejection.received_at());
-        assert_definite_rejection_recovery(&context, &detail, &flow, rejection);
-        assert!(flow.issue_word_selection(request_at()).is_err());
     }
 
     #[tokio::test]
@@ -3030,69 +2901,6 @@ mod tests {
         }
     }
 
-    fn assert_definite_rejection_recovery(
-        context: &ProviderContext,
-        detail: &RemoteTaskDetail,
-        flow: &CidarenAttemptFlow,
-        rejection: CidarenDefiniteRejection,
-    ) {
-        let encoded = flow.definite_rejection_artifact().unwrap().unwrap();
-        let digest = encoded.digest();
-        let value = encoded.into_secret_value();
-        let decode = || {
-            crate::CidarenBlockedStepArtifact::decode_bound(
-                &value,
-                digest,
-                flow.task_id,
-                "class-task:2002",
-                rejection.request_digest(),
-            )
-            .unwrap()
-        };
-        let decoded = decode();
-        assert_eq!(decoded.position(), 1);
-        assert_eq!(decoded.remote_attempt_task_id(), Some(92_002));
-        assert_eq!(decoded.response_digest(), rejection.response_digest());
-        assert_eq!(decoded.received_at(), rejection.received_at());
-
-        let recovered = recovered_context(context);
-        let restored = CidarenAttemptFlow::restore_definite_rejection(
-            &recovered,
-            "class-task:2002",
-            detail,
-            &decoded,
-        )
-        .unwrap();
-        assert_eq!(
-            restored.status(),
-            CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::SubmitChoseWord)
-        );
-        assert_eq!(restored.definite_rejection(), Some(rejection));
-        assert_eq!(
-            restored
-                .definite_rejection_artifact()
-                .unwrap()
-                .unwrap()
-                .digest(),
-            digest
-        );
-
-        let mut changed_detail = detail.clone();
-        changed_detail.task.normalized["task_id"] = json!(92_003);
-        changed_detail.normalized_detail["task"]["task_id"] = json!(92_003);
-        assert_eq!(
-            CidarenAttemptFlow::restore_definite_rejection(
-                &recovered,
-                "class-task:2002",
-                &changed_detail,
-                &decode(),
-            )
-            .unwrap_err()
-            .kind,
-            ProviderErrorKind::RemoteChanged
-        );
-    }
-
     fn required_children_rejection() -> CidarenAssessmentResponse {
         parse_word_selection_response(include_bytes!(
             "../../../fixtures/providers/cidaren/questions/submit-chose-word-required-children.json"
@@ -3146,8 +2954,12 @@ mod tests {
     }
 
     fn word_selection_plan() -> (RemoteTaskDetail, CidarenWordSelectionPlan) {
+        word_selection_plan_for("Synthetic List 02")
+    }
+
+    fn word_selection_plan_for(title: &str) -> (RemoteTaskDetail, CidarenWordSelectionPlan) {
         let mut detail = detail();
-        detail.task.title = "Synthetic List 02".to_owned();
+        detail.task.title = title.to_owned();
         detail.task.source_type = SourceType::Practice;
         detail.task.normalized["task_type"] = json!("learning");
         detail.task.normalized["task_id"] = json!(92002);

@@ -22,8 +22,8 @@ pub enum CidarenAssessmentReceiptKind {
     WordSelectionRequired,
 }
 
-/// Exact donor rejection semantics that are definite but cannot yet cross the
-/// shared durable Question-step outcome boundary.
+/// Exact donor rejection semantics with an audited state-machine transition.
+/// Near matches remain ordinary protocol failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CidarenAssessmentRejectionKind {
     RequiredChildrenPending,

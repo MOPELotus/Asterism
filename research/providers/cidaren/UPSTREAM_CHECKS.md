@@ -1094,6 +1094,34 @@ groups when a self-built inventory spans units. The signed mutation builder
 remains unchanged and continues bounding, compact-encoding and zeroizing that
 exact map.
 
+### 2026-08-16 existing-selection continuation correction
+
+The same source re-read found that the earlier blocked-step interpretation was
+incomplete. In `ularch@c8de5f4`, the ordinary-learning caller catches a failed
+`SubmitChoseWord`, records that the task is already started and proceeds to
+`StartAnswer`. Issue 49's maintainer comment supplies the missing semantic
+explanation: the affected learning Task already had word selection, while the
+old automation assumed it had not and tried to select every word again.
+
+This entry supersedes the blocked-step/Core-Gap direction recorded immediately
+above. Asterism does not copy the donor's broad exception catch. Only the exact
+issues 48/49 five-field response is classified as
+`RequiredChildrenPending`, and only an ordinary-unit plan may rotate that
+response into the durable pre-Question artifact phase
+`cidaren.ready-to-start` with the accepted response
+digest and receive time. Recovery fresh-rebinds the Task and dynamic
+allocation, cannot rebuild or resend the word map, and issues `StartAnswer` as
+the next distinct operation. The same response on a self-built plan,
+near-match envelopes and all unrelated failures still fail closed.
+
+Because the exact rejection is now an evidenced pre-Question continuation,
+not a Task completion diagnosis, the provisional
+`cidaren.question-blocked-step.v1`, definite-rejection materialization and
+`CIDAREN-CORE-GAP-QUESTION-BLOCKED` are removed. The existing shared
+Question-read continuation already carries the required durable state and
+operation-ledger response binding; no shared Core/Storage/Engine change is
+needed for this donor behavior.
+
 ## Check procedure
 
 For the next checkpoint:

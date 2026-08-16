@@ -374,27 +374,12 @@ placeholder identities, result codes, status values and pagination shape.
   48/49 five-field prerequisite envelope. Parser tests classify the exact
   shape as Provider-private `RequiredChildrenPending`, reject message/data/
   version/field-count near matches, and keep the localized message out of
-  Debug. Flow tests retain operation, raw response digest and receive time in
-  `CidarenDefiniteRejection`, remain FailedClosed/non-retryable and prohibit a
-  second `SubmitChoseWord`; the public adapter preserves the stable provider
-  code while the shared durable blocked-step outcome remains a Core Gap.
-- Blocked-step artifact tests freeze `cidaren.question-blocked-step.v1` and
-  require exact local/remote Task, `SubmitChoseWord`, rejection kind,
-  bounded current position, optional positive dynamic allocation,
-  request/response digests and nanosecond UTC receive time. The zeroizing
-  encoded value has a stable digest; decode rejects digest, Task, request,
-  operation, reason, position, allocation, unknown-field, zero-digest and
-  non-canonical-time drift. Fresh flow recovery accepts the original allocation,
-  rejects a changed fresh Task ID and re-encodes the same artifact digest while
-  remaining FailedClosed. Debug never exposes the stable remote Task identity.
-- Materialization tests consume the unencoded artifact and exact definite
-  rejection into one `CidarenBlockedStepMaterialization`; construction first
-  compares operation, reason, position, allocation, request/response digests
-  and receive time, and a changed response digest fails as `ProtocolDrift`.
-  Getters and the consuming `into_parts` handoff must agree on
-  `RequiredChildrenPending`, `SubmitChoseWord`, request/response digests and
-  receive time. This prevents a future shared adapter from pairing the artifact
-  with another diagnosis or operation ledger entry.
+  Debug. Flow and public-adapter tests require the exact rejection to produce a
+  response-bound `cidaren.ready-to-start` continuation, reject another
+  `SubmitChoseWord`, restore only after fresh Task/allocation rebinding and
+  issue `StartAnswer` as the next operation. The same exact response on a
+  self-built plan remains `ProtocolDrift`/FailedClosed. No blocked artifact or
+  completion diagnosis is fabricated.
 - Mode 73 parses as FillBlank only when its bounded answer count equals its
   word-length count; no answer wire shape is inferred from the public log.
 - `SearchWord` parsing bounds both JSON and the donor's literal

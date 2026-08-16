@@ -49,10 +49,13 @@ not credentials or executable request material:
 - [issues 48](https://github.com/ularch/Easy_Cidaren/issues/48) and
   [49](https://github.com/ularch/Easy_Cidaren/issues/49) repeatedly record the
   same definite five-field incomplete-section `SubmitChoseWord` rejection. A
-  sanitized response-only fixture now freezes that exact public envelope; the
-  Provider classifies and retains its digest/time without copying any Task,
-  account, word-map or log context. Shared blocked Question-step
-  representation remains a Core Gap;
+  maintainer comment on issue 49 explains that the current learning Task had
+  already selected words, and the reopened default source continues to
+  `StartAnswer` after the selection call fails. A sanitized response-only
+  fixture freezes that exact public envelope; the Provider permits only that
+  response on the donor-evidenced ordinary-unit route to rotate to a durable
+  start continuation, without copying any Task, account, word-map or log
+  context;
 - [issue 72](https://github.com/ularch/Easy_Cidaren/issues/72) records the
   exact remote-state response `code=20001`, `msg=需要选词！`, `data=null` from
   `StartAnswer`; release 1.5.2 reported a fix even though the reopened shared

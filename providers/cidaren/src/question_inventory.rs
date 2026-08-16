@@ -679,14 +679,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_children_rejection_survives_the_public_adapter_as_non_retryable() {
+    async fn required_children_rejection_rotates_to_start_without_reselection() {
         let rejection = parse_word_selection_response(include_bytes!(
             "../../../fixtures/providers/cidaren/questions/submit-chose-word-required-children.json"
         ))
         .unwrap();
         let boundaries = Arc::new(FixtureBoundaries::new(
             detail("learning", 92002),
-            vec![rejection],
+            vec![rejection, response(&question_payload())],
         ));
         let capability = CidarenQuestionInventory::try_new(
             boundaries.clone(),
@@ -704,16 +704,28 @@ mod tests {
             .unwrap();
         let prepared = prepare_operation(&capability, &context, task_id, initial, &settings).await;
 
-        let error = prepared.execute(&context).await.unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
-        assert_eq!(
-            error.provider_code.as_deref(),
-            Some(crate::CIDAREN_REQUIRED_CHILDREN_PENDING_PROVIDER_CODE)
-        );
-        assert!(!error.is_retryable());
+        let ProviderQuestionReadStepOutcome::Continue { continuation, .. } =
+            prepared.execute(&context).await.unwrap()
+        else {
+            panic!("known existing-selection rejection must continue to StartAnswer");
+        };
+        assert_eq!(continuation.phase(), crate::CIDAREN_READY_TO_START_PHASE);
+
+        let prepared =
+            prepare_operation(&capability, &context, task_id, continuation, &settings).await;
+        assert_eq!(prepared.operation_type(), "cidaren.start-answer.v1");
+        let ProviderQuestionReadStepOutcome::Materialize(materialization) =
+            prepared.execute(&context).await.unwrap()
+        else {
+            panic!("fresh StartAnswer must materialize the first Question");
+        };
+        assert_eq!(materialization.questions().len(), 1);
         assert_eq!(
             *boundaries.operations.lock().unwrap(),
-            [CidarenAttemptOperation::SubmitChoseWord]
+            [
+                CidarenAttemptOperation::SubmitChoseWord,
+                CidarenAttemptOperation::StartAnswer,
+            ]
         );
     }
 
