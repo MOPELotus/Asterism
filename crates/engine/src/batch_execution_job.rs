@@ -9,7 +9,9 @@ use asterism_provider_api::{
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
-    BatchExecutionAttemptStartRequest, BatchExecutionParentSnapshotBindOutcome,
+    BatchExecutionAttemptStartRequest, BatchExecutionChildPlanMaterializeOutcome,
+    BatchExecutionChildPlanMaterializeRequest, BatchExecutionChildPlanRecord,
+    BatchExecutionChildPlanRepository, BatchExecutionParentSnapshotBindOutcome,
     BatchExecutionParentSnapshotBindRequest, BatchExecutionParentSnapshotRepositoryFactory,
     BatchExecutionParentSnapshotResolveRequest, BatchExecutionPlanningInputRepository,
     BatchExecutionPlanningInputResolveRequest, BatchExecutionRepository, CourseRuntimeRepository,
@@ -31,6 +33,7 @@ pub struct BatchExecutionPlanningResult {
     pub batch_execution: BatchExecution,
     pub attempt: BatchExecutionAttempt,
     pub execution_batch_plan: ProviderExecutionBatchPlan,
+    pub child_plans: Vec<BatchExecutionChildPlanRecord>,
     pub planned_fresh: bool,
 }
 
@@ -40,6 +43,7 @@ pub struct BatchExecutionPlanningResult {
 pub struct BatchExecutionPlanningService {
     batches: Arc<dyn BatchExecutionRepository>,
     planning_inputs: Arc<dyn BatchExecutionPlanningInputRepository>,
+    child_plans: Arc<dyn BatchExecutionChildPlanRepository>,
     accounts: Arc<dyn ProviderAccountRuntimeRepository>,
     courses: Arc<dyn CourseRuntimeRepository>,
     settings: Arc<dyn ProviderRuntimeSettingsRepository>,
@@ -57,9 +61,14 @@ impl std::fmt::Debug for BatchExecutionPlanningService {
 }
 
 impl BatchExecutionPlanningService {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the planner keeps independently mockable Core repository and Provider registry boundaries"
+    )]
     pub fn new(
         batches: Arc<dyn BatchExecutionRepository>,
         planning_inputs: Arc<dyn BatchExecutionPlanningInputRepository>,
+        child_plans: Arc<dyn BatchExecutionChildPlanRepository>,
         accounts: Arc<dyn ProviderAccountRuntimeRepository>,
         courses: Arc<dyn CourseRuntimeRepository>,
         settings: Arc<dyn ProviderRuntimeSettingsRepository>,
@@ -69,6 +78,7 @@ impl BatchExecutionPlanningService {
         Self {
             batches,
             planning_inputs,
+            child_plans,
             accounts,
             courses,
             settings,
@@ -187,10 +197,14 @@ impl BatchExecutionPlanningService {
                 batch.expected_child_count,
             )?;
             let (_, execution_batch_plan) = prepared.into_parts();
+            let child_plans = self
+                .materialize_child_plans(&command, &batch, &attempt, &execution_batch_plan)
+                .await?;
             return Ok(BatchExecutionPlanningResult {
                 batch_execution: batch,
                 attempt,
                 execution_batch_plan,
+                child_plans,
                 planned_fresh: false,
             });
         }
@@ -254,11 +268,40 @@ impl BatchExecutionPlanningService {
             BatchExecutionParentSnapshotBindOutcome::Bound(_)
             | BatchExecutionParentSnapshotBindOutcome::AlreadyBound(_) => {}
         }
+        let child_plans = self
+            .materialize_child_plans(&command, &batch, &attempt, &execution_batch_plan)
+            .await?;
         Ok(BatchExecutionPlanningResult {
             batch_execution: batch,
             attempt,
             execution_batch_plan,
+            child_plans,
             planned_fresh: true,
+        })
+    }
+
+    async fn materialize_child_plans(
+        &self,
+        command: &PlanBatchExecutionCommand,
+        batch: &BatchExecution,
+        attempt: &BatchExecutionAttempt,
+        execution_batch_plan: &ProviderExecutionBatchPlan,
+    ) -> Result<Vec<BatchExecutionChildPlanRecord>, BatchExecutionPlanningError> {
+        let outcome = self
+            .child_plans
+            .materialize_batch_execution_child_plans(BatchExecutionChildPlanMaterializeRequest {
+                batch_execution_id: batch.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: command.scheduler_job_id,
+                worker_id: &command.worker_id,
+                execution_batch_plan,
+                correlation_id: &command.correlation_id,
+                at: command.at,
+            })
+            .await?;
+        Ok(match outcome {
+            BatchExecutionChildPlanMaterializeOutcome::Created(records)
+            | BatchExecutionChildPlanMaterializeOutcome::Existing(records) => records,
         })
     }
 }
@@ -565,6 +608,7 @@ mod tests {
         let secret_store = Arc::new(SqliteSecretStore::new(database.clone(), keyring));
         let service = BatchExecutionPlanningService::new(
             batch_repository.clone(),
+            batch_repository.clone(),
             batch_repository,
             Arc::new(SqliteProviderAccountRepository::new(database.clone())),
             Arc::new(SqliteCourseProgressRepository::new(database.clone())),
@@ -584,12 +628,34 @@ mod tests {
         let first = service.plan(command.clone()).await.unwrap();
         assert!(first.planned_fresh);
         assert_eq!(first.execution_batch_plan.children().len(), 2);
+        assert_eq!(first.child_plans.len(), 2);
+        assert_eq!(first.child_plans[0].position, 1);
+        assert_eq!(first.child_plans[1].position, 2);
         assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
-        let restored = service.plan(command).await.unwrap();
+        let restored = service.plan(command.clone()).await.unwrap();
         assert!(!restored.planned_fresh);
         assert_eq!(restored.execution_batch_plan, first.execution_batch_plan);
+        assert_eq!(restored.child_plans, first.child_plans);
         assert_eq!(restored.attempt, first.attempt);
         assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM batch_execution_child_plan_phases \
+                 WHERE batch_execution_id = ?",
+            )
+            .bind(batch.id.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM executions")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            0
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM batch_execution_parent_snapshots \
@@ -601,6 +667,21 @@ mod tests {
             .unwrap(),
             1
         );
+        sqlx::query(
+            "UPDATE batch_execution_child_plans SET artifact_digest = zeroblob(32) \
+             WHERE batch_execution_id = ? AND position = 2",
+        )
+        .bind(batch.id.to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            service.plan(command).await,
+            Err(BatchExecutionPlanningError::Storage(
+                StorageError::BatchExecutionStateConflict
+            ))
+        ));
+        assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
     }
 
     async fn insert_fixture(
@@ -642,9 +723,36 @@ mod tests {
         )
         .bind(course_id.to_string())
         .bind(account_id.to_string())
-        .bind(at)
+        .bind(&at)
         .execute(database.pool())
         .await
         .unwrap();
+        for position in 1_u32..=2 {
+            sqlx::query(
+                "INSERT INTO tasks \
+                 (id, provider_account_id, course_id, remote_id, remote_fingerprint, source_type, \
+                  assessment_class, title, remote_state, orchestration_state, discovered_at, \
+                  updated_at, capabilities_json) \
+                 VALUES (?, ?, ?, ?, ?, 'resource', 'routine', ?, 'pending', 'ready', ?, ?, ?)",
+            )
+            .bind(asterism_domain::TaskId::new().to_string())
+            .bind(account_id.to_string())
+            .bind(course_id.to_string())
+            .bind(format!("remote-task-{position}"))
+            .bind(format!("remote-task-fingerprint-{position}"))
+            .bind(format!("Task {position}"))
+            .bind(&at)
+            .bind(&at)
+            .bind(
+                serde_json::to_string(&vec![
+                    TaskCapability::ResourceExecution,
+                    TaskCapability::DurationReport,
+                ])
+                .unwrap(),
+            )
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
     }
 }

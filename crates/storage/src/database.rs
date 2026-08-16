@@ -148,7 +148,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 76);
+        assert_eq!(migration_count, 77);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -371,6 +371,21 @@ mod tests {
                 "bound_at",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn batch_child_plan_migration_is_present_on_a_fresh_database() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ( \
+                'batch_execution_child_plans', 'batch_execution_child_plan_phases' \
+             )",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(tables, 2);
     }
 
     #[tokio::test]

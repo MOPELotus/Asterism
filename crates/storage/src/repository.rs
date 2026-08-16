@@ -27,7 +27,7 @@ use asterism_domain::{
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
     ExecutionMutationPlan, ExecutionMutationSequencePlan, ExecutionParentBatchSnapshot,
-    ProviderBatchExecutionPlanningInput, ProviderExecutionPlanArtifact,
+    ProviderBatchExecutionPlanningInput, ProviderExecutionBatchPlan, ProviderExecutionPlanArtifact,
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
     ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
@@ -2309,6 +2309,49 @@ pub trait BatchExecutionPlanningInputRepository: Send + Sync {
         &self,
         request: BatchExecutionPlanningInputResolveRequest<'_>,
     ) -> Result<ResolvedBatchExecutionPlanningInput, SecretStoreError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchExecutionChildPlanRecord {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub position: u32,
+    pub task_id: TaskId,
+    pub artifact_digest: [u8; 32],
+    pub sequence_digest: [u8; 32],
+    pub materialized_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct BatchExecutionChildPlanMaterializeRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub execution_batch_plan: &'a ProviderExecutionBatchPlan,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchExecutionChildPlanMaterializeOutcome {
+    Created(Vec<BatchExecutionChildPlanRecord>),
+    Existing(Vec<BatchExecutionChildPlanRecord>),
+}
+
+/// Atomically binds every ordered Provider child plan to one already
+/// discovered local Task after the encrypted parent pair exists.
+#[async_trait]
+pub trait BatchExecutionChildPlanRepository: Send + Sync {
+    async fn materialize_batch_execution_child_plans(
+        &self,
+        request: BatchExecutionChildPlanMaterializeRequest<'_>,
+    ) -> Result<BatchExecutionChildPlanMaterializeOutcome, StorageError>;
+
+    async fn find_batch_execution_child_plans(
+        &self,
+        batch_execution_id: asterism_domain::BatchExecutionId,
+    ) -> Result<Vec<BatchExecutionChildPlanRecord>, StorageError>;
 }
 
 #[derive(Clone, Debug)]

@@ -5208,3 +5208,31 @@ is persisted by this slice: a crash after parent binding is recoverable because
 the Provider can reconstruct the plan, but child Tasks, Executions, artifacts,
 mutation sequences, credits and jobs still require one atomic materialization
 transaction before remote mutation is allowed.
+
+## Two-hundred-and-eightieth Phase 0 slice
+
+The parent planner now durably materializes the complete ordered child plan
+immediately after the encrypted parent pair is bound. Migration 077 stores one
+row per parent ordinal with the exact already-discovered local Task binding,
+hash-only remote identity, Provider call groups, credential-free artifact,
+artifact digest, sequence type/digest and materialization time. Every
+receipt-conditional phase is stored separately with its occurrence bounds,
+rejection behavior, advance condition and optional observation gate.
+
+Materialization requires the same live parent job claim, lease and Attempt as
+planning. Storage independently rechecks the Running parent, expected child
+count, account/Course Provider, encrypted-parent authority and batch digests,
+uniform canonical capability set, exact local Task remote identity and Task
+capability coverage. It resolves all children before writing any row, then
+inserts the full order and sanitized audit in one transaction. Existing rows
+are accepted only when every Task, call group, artifact payload/digest,
+sequence/digest and phase matches the recovered Provider plan; partial rows or
+any changed field fail closed.
+
+Engine performs this transaction on both the fresh and restart paths. Coverage
+proves the restart returns identical durable child records without another
+fresh Provider call and detects a tampered child artifact digest. These are
+planning records only: no child `Execution`, Task state transition, credit
+reservation or scheduler job exists yet. The next transaction can now create
+those Executions from one durable, parent-bound source instead of invoking or
+trusting the Provider again.
