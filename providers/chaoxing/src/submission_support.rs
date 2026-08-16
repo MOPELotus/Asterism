@@ -376,6 +376,33 @@ impl ChaoxingSubmissionForm {
         }
         Ok(self)
     }
+
+    pub(crate) fn bind_chapter_target(
+        self,
+        knowledge_id: &str,
+        work_id: &str,
+        job_id: &str,
+    ) -> ProviderResult<Self> {
+        for (name, expected) in [
+            ("knowledgeid", knowledge_id),
+            ("oldWorkId", work_id),
+            ("jobid", job_id),
+            ("originJobId", job_id),
+        ] {
+            if self
+                .fields
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .map(|(_, value)| value.as_str())
+                != Some(expected)
+            {
+                return Err(remote_changed(
+                    "Chaoxing Chapter Work form lost its fresh target binding",
+                ));
+            }
+        }
+        Ok(self)
+    }
 }
 
 fn validate_remote_question_partition(
@@ -2222,6 +2249,8 @@ mod tests {
         let form = ChaoxingSubmissionForm::parse(CHAPTER_EDITOR, identity, &plan)
             .unwrap()
             .bind_user("9001")
+            .unwrap()
+            .bind_chapter_target("4001", "job-work", "job-work")
             .unwrap();
         let fields = form.fields().iter().cloned().collect::<BTreeMap<_, _>>();
         assert_eq!(fields.get("knowledgeid").map(String::as_str), Some("4001"));
@@ -2240,6 +2269,13 @@ mod tests {
         }
         assert!(!fields.contains_key("ignoredFutureField"));
         assert!(!format!("{form:?}").contains("SAFE_CHAPTER_EPHEMERAL_TOKEN"));
+
+        let foreign = CHAPTER_EDITOR.replacen("value=\"4001\"", "value=\"4002\"", 1);
+        let foreign = ChaoxingSubmissionForm::parse(&foreign, identity, &plan)
+            .unwrap()
+            .bind_chapter_target("4001", "job-work", "job-work")
+            .unwrap_err();
+        assert_eq!(foreign.kind, ProviderErrorKind::RemoteChanged);
     }
 
     #[tokio::test]

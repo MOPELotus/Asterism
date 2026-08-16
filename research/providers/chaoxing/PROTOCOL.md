@@ -333,6 +333,12 @@ when the exact attachment is Completed. Per-Question facts stay Unverified when
 the card exposes no answer readback. Answer resolution and live validation
 remain active work; Exam keeps its separate attempt/gate/verification family.
 
+The Chapter Work form also repeats the freshly rebound target. Before POST,
+`knowledgeid` must equal the current Chapter, `oldWorkId` must equal the card's
+fresh Work route identity, and both `jobid` and `originJobId` must equal the
+fresh card job. Missing or conflicting hidden fields are remote drift; the
+Provider never forwards a fresh page whose form crosses that target boundary.
+
 The 2026-06 Chapter-test donor separately records completed/waiting results in a
 `selectWorkQuestionYiPiYue` iframe. Its current DOM keeps each Question in
 `div.singleQuesId[data=qid]`, exposes a localized Question type and visible
