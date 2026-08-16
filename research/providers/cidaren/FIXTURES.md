@@ -384,12 +384,14 @@ placeholder identities, result codes, status values and pagination shape.
   non-canonical-time drift. Fresh flow recovery accepts the original allocation,
   rejects a changed fresh Task ID and re-encodes the same artifact digest while
   remaining FailedClosed. Debug never exposes the stable remote Task identity.
-- Materialization tests consume the encoded artifact and exact definite
-  rejection into one `CidarenBlockedStepMaterialization`; getters and the
-  consuming `into_parts` handoff must agree on `RequiredChildrenPending`,
-  `SubmitChoseWord`, request/response digests and receive time. This prevents a
-  future shared adapter from pairing the artifact with another diagnosis or
-  operation ledger entry.
+- Materialization tests consume the unencoded artifact and exact definite
+  rejection into one `CidarenBlockedStepMaterialization`; construction first
+  compares operation, reason, position, allocation, request/response digests
+  and receive time, and a changed response digest fails as `ProtocolDrift`.
+  Getters and the consuming `into_parts` handoff must agree on
+  `RequiredChildrenPending`, `SubmitChoseWord`, request/response digests and
+  receive time. This prevents a future shared adapter from pairing the artifact
+  with another diagnosis or operation ledger entry.
 - Mode 73 parses as FillBlank only when its bounded answer count equals its
   word-length count; no answer wire shape is inferred from the public log.
 - `SearchWord` parsing bounds both JSON and the donor's literal

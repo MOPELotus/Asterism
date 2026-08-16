@@ -750,10 +750,14 @@ digests, invalid position/allocation and non-canonical time. After fresh
 context/Task rebinding, `CidarenAttemptFlow::restore_definite_rejection`
 requires the allocation to remain identical and reconstructs only the exact
 FailedClosed `SubmitChoseWord` state; it cannot issue another mutation. The
-flow's `CidarenBlockedStepMaterialization` exposes one all-or-nothing handoff
-containing the encoded artifact, `RequiredChildrenPending` diagnosis,
-operation, request/response digests and receive time. Callers cannot obtain the
-artifact while independently substituting another diagnosis or ledger tuple.
+flow's `CidarenBlockedStepMaterialization` first compares the unencoded
+artifact with the definite rejection across operation, reason, position,
+dynamic allocation, request/response digests and receive time, then encodes it
+into one all-or-nothing handoff containing the artifact,
+`RequiredChildrenPending` diagnosis, operation, request/response digests and
+receive time. A mismatched artifact/rejection pair fails as protocol drift;
+callers cannot obtain the artifact while independently substituting another
+diagnosis or ledger tuple.
 The shared Question remote-step outcome still
 has no blocked variant carrying this artifact and diagnosis. Until Main adds
 that contract, Cidaren cannot emit a durable blocked step, and it never

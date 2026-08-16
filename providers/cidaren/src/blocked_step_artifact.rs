@@ -57,11 +57,18 @@ pub struct CidarenBlockedStepMaterialization {
 
 impl CidarenBlockedStepMaterialization {
     pub(crate) fn try_new(
-        artifact: EncodedCidarenBlockedStepArtifact,
+        artifact: CidarenBlockedStepArtifact,
         rejection: CidarenDefiniteRejection,
     ) -> ProviderResult<Self> {
         if rejection.operation() != CidarenAttemptOperation::SubmitChoseWord
             || rejection.kind() != CidarenAssessmentRejectionKind::RequiredChildrenPending
+            || artifact.operation() != rejection.operation()
+            || artifact.rejection_kind() != rejection.kind()
+            || artifact.position() != rejection.position()
+            || artifact.remote_attempt_task_id() != rejection.remote_attempt_task_id()
+            || artifact.request_digest() != rejection.request_digest()
+            || artifact.response_digest() != rejection.response_digest()
+            || artifact.received_at() != rejection.received_at()
             || rejection.request_digest() == [0; 32]
             || rejection.response_digest() == [0; 32]
         {
@@ -69,8 +76,10 @@ impl CidarenBlockedStepMaterialization {
                 "Cidaren blocked-step materialization is invalid",
             ));
         }
+        let encoded_artifact = artifact.encode()?;
+        drop(artifact);
         Ok(Self {
-            artifact,
+            artifact: encoded_artifact,
             diagnosis: CompletionDiagnosis::RequiredChildrenPending,
             operation: rejection.operation(),
             request_digest: rejection.request_digest(),
@@ -543,10 +552,8 @@ mod tests {
             "class-task:2002",
             rejection,
         )
-        .unwrap()
-        .encode()
         .unwrap();
-        let artifact_digest = artifact.digest();
+        let artifact_digest = artifact.encode().unwrap().digest();
         let materialization =
             CidarenBlockedStepMaterialization::try_new(artifact, rejection).unwrap();
         assert_eq!(
@@ -570,6 +577,29 @@ mod tests {
         assert_eq!(request, [7; 32]);
         assert_eq!(response, [9; 32]);
         assert_eq!(observed_at, received_at);
+    }
+
+    #[test]
+    fn blocked_step_materialization_rejects_mismatched_evidence() {
+        let task_id = TaskId::new();
+        let received_at = Utc.with_ymd_and_hms(2026, 8, 16, 4, 5, 6).unwrap();
+        let rejection =
+            CidarenDefiniteRejection::from_recovery(7, Some(92_002), [7; 32], [9; 32], received_at);
+        let artifact = CidarenBlockedStepArtifact::try_new(
+            task_id,
+            "class-task:2002",
+            CidarenAttemptOperation::SubmitChoseWord,
+            CidarenAssessmentRejectionKind::RequiredChildrenPending,
+            7,
+            Some(92_002),
+            [7; 32],
+            [8; 32],
+            received_at,
+        )
+        .unwrap();
+
+        let error = CidarenBlockedStepMaterialization::try_new(artifact, rejection).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
     }
 
     #[test]

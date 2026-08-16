@@ -1049,7 +1049,7 @@ future record.
 The recovery artifact and flow state were complete, but a future caller could
 still read the rejection and encoded artifact as separate Provider values and
 accidentally pair them with another diagnosis or ledger tuple.
-`CidarenBlockedStepMaterialization` now consumes the exact encoded artifact and
+`CidarenBlockedStepMaterialization` now consumes the exact artifact and
 definite rejection into one immutable handoff containing
 `RequiredChildrenPending`, `SubmitChoseWord`, request digest, response digest
 and receive time. Its getters and consuming `into_parts` expose the same frozen
@@ -1059,6 +1059,21 @@ The current shared adapter still does not return this handoff. Main owns the
 new shared outcome and persistence, while Cidaren now supplies one atomic value
 rather than requiring Core to reconstruct Provider semantics from parallel
 fields.
+
+### 2026-08-16 blocked-step atomic binding follow-up
+
+The first atomic handoff accepted an already encoded artifact next to the
+definite rejection. Although the normal flow created both from one value, that
+constructor shape did not itself prove they represented the same position,
+dynamic allocation, request/response digests and receive time.
+
+The materialization constructor now accepts the unencoded Provider artifact,
+compares every shared field with the definite rejection and only then performs
+canonical encoding. A deliberately changed response digest is covered as
+`ProtocolDrift`; operation, reason, position, allocation, request digest and
+receive-time drift use the same fail-closed boundary. This is Provider-owned
+binding work only; Main still owns encrypted persistence and the shared blocked
+Question-step outcome.
 
 ## Check procedure
 

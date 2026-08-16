@@ -720,8 +720,7 @@ impl CidarenAttemptFlow {
             self.task_id,
             &self.remote_task_id,
             rejection,
-        )?
-        .encode()?;
+        )?;
         CidarenBlockedStepMaterialization::try_new(artifact, rejection).map(Some)
     }
 
