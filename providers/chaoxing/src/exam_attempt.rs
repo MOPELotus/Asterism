@@ -999,7 +999,7 @@ pub(crate) fn parse_exam_cover(html: &str) -> ProviderResult<ChaoxingExamCover> 
             "Chaoxing Exam cover returned a non-startable state",
         ));
     }
-    let exam_answer_id = input_value(&document, "#testUserRelationId")
+    let exam_answer_id = unique_input_value(&document, "#testUserRelationId")?
         .filter(|value| valid_component(value))
         .ok_or_else(|| protocol_drift("Chaoxing Exam cover has no attempt identity"))?;
     let monitor_enc = input_value(&document, "#monitorEnc").unwrap_or_default();
@@ -1044,7 +1044,7 @@ pub(crate) fn parse_exam_attempt(
         .filter(|value| !value.is_empty() && value.len() <= MAX_ATTEMPT_ENC_BYTES)
         .ok_or_else(|| protocol_drift("Chaoxing Exam start returned no bounded enc"))?;
     let document = Html::parse_document(html);
-    let exam_answer_id = input_value(&document, "#testUserRelationId")
+    let exam_answer_id = unique_input_value(&document, "#testUserRelationId")?
         .unwrap_or_else(|| expected_answer_id.to_owned());
     if exam_answer_id != expected_answer_id || !valid_component(&exam_answer_id) {
         return Err(protocol_drift(
@@ -1134,6 +1134,29 @@ fn input_value(document: &Html, selector_text: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn unique_input_value(document: &Html, selector_text: &str) -> ProviderResult<Option<String>> {
+    let selector = Selector::parse(selector_text).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Exam identity selector is invalid",
+        )
+    })?;
+    let mut nodes = document.select(&selector);
+    let Some(node) = nodes.next() else {
+        return Ok(None);
+    };
+    if nodes.next().is_some() {
+        return Err(protocol_drift(
+            "Chaoxing Exam page duplicated an attempt identity field",
+        ));
+    }
+    node.value()
+        .attr("value")
+        .map(str::to_owned)
+        .map(Some)
+        .ok_or_else(|| protocol_drift("Chaoxing Exam attempt identity has no value"))
 }
 
 fn bounded_u64_input(document: &Html, selector_text: &str) -> ProviderResult<u64> {
@@ -1375,6 +1398,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cover_and_start_do_not_trim_or_duplicate_attempt_identity() {
+        for cover in [
+            COVER.replace(r#"value="answer-1""#, r#"value=" answer-1""#),
+            COVER.replace(
+                r#"<input id="testUserRelationId" value="answer-1">"#,
+                r#"<input id="testUserRelationId" value="answer-1"><input id="testUserRelationId" value="answer-1">"#,
+            ),
+        ] {
+            assert_eq!(
+                parse_exam_cover(&cover).unwrap_err().kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+
+        let url = Url::parse(
+            "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew?courseId=100&classId=200&tId=exam-1&id=answer-1&enc=SAFE_ATTEMPT_ENC",
+        )
+        .unwrap();
+        for start in [
+            START.replace(r#"value="answer-1""#, r#"value="answer-1 ""#),
+            START.replace(
+                r#"<input id="testUserRelationId" value="answer-1">"#,
+                r#"<input id="testUserRelationId" value="answer-1"><input id="testUserRelationId" value="answer-1">"#,
+            ),
+        ] {
+            assert_eq!(
+                parse_exam_attempt(&url, &start, "answer-1")
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+
+        let missing = START.replace(r#"<input id="testUserRelationId" value="answer-1">"#, "");
+        assert_eq!(
+            parse_exam_attempt(&url, &missing, "answer-1")
+                .unwrap()
+                .exam_answer_id
+                .as_str(),
+            "answer-1"
+        );
     }
 
     #[test]

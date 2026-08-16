@@ -542,6 +542,13 @@ performed. Missing, duplicate, padded or unknown values are ProtocolDrift. A
 true code, face or captcha gate stops the Native start path as
 `HumanRequired(BrowserRequired)`; this parser does not solve the challenge.
 
+`testUserRelationId` is the attempt identity later sent as `examAnswerId`.
+The cover must expose exactly one raw bounded value. The start page is allowed
+to omit the field and retain the already bound cover identity, matching the
+existing fallback contract; if the field is present, exactly one element must
+exist and its untrimmed value must equal the bound identity. Padded or duplicate
+attempt IDs are ProtocolDrift before dynamic `enc` state is accepted.
+
 Core persists `chaoxing.exam-start.v1` and the canonical request digest before
 the Provider performs one `phone/start`. The Native transport accepts only the
 bound redirect and returned `examAnswerId`, then reads the complete

@@ -266,6 +266,11 @@ required unique binary inputs. Exact `0` is false and `1` is true. Removing a
 field, duplicating it, padding its value or replacing it with `2` must fail as
 ProtocolDrift instead of defaulting the corresponding browser gate to false.
 
+Cover/start identity regressions pad or duplicate `testUserRelationId` and
+require ProtocolDrift rather than trimming or taking the first match. The cover
+must contain the field. The start page may omit it and safely retain the exact
+already-bound cover ID; if it is present, its raw value must match.
+
 `detail-result-partial.html` retains four complete result identities while only
 the second original Question is selected. It proves that v3 continuation
 binding sends one save with `start=1`, reaches final submission after one

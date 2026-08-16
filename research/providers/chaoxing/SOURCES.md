@@ -92,6 +92,9 @@ validation is still required.
   The same cover re-read confirms required `faceRecognitionCompare` and
   `captchaCheck` inputs. Asterism now requires one raw `0|1` value for each;
   missing, duplicate, padded or unknown values are drift rather than false.
+  The same cover/start audit now binds `testUserRelationId` without trimming or
+  first-match selection: cover requires one exact value, while start may omit
+  it but may not supply a padded, foreign or duplicate replacement.
   The donor revision is unchanged and no challenge-solving path was added.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence
