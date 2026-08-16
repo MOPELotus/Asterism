@@ -1097,7 +1097,6 @@ fn parse_chapter_result_answers(
         let remote_id = question
             .value()
             .attr("data")
-            .map(str::trim)
             .filter(|value| valid_question_id(value))
             .ok_or_else(|| {
                 protocol_drift("Chaoxing Chapter Work result Question identity is invalid")
@@ -1273,7 +1272,6 @@ fn parse_selected_exam_result(
         let remote_id = identity
             .value()
             .attr("value")
-            .map(str::trim)
             .filter(|value| valid_question_id(value))
             .ok_or_else(|| protocol_drift("Chaoxing Exam result Question identity is invalid"))?;
         if !remote_ids.insert(remote_id.to_owned()) {
@@ -2525,6 +2523,15 @@ mod tests {
         let duplicate = ChaoxingChapterWorkVerificationDocument::try_new(duplicate).unwrap();
         assert!(parse_chapter_work_verification_snapshot(&duplicate, &plan, &draft).is_err());
 
+        let padded = CHAPTER_RESULT.replacen(r#"data="work-q-1""#, r#"data=" work-q-1""#, 1);
+        let padded = ChaoxingChapterWorkVerificationDocument::try_new(padded).unwrap();
+        assert_eq!(
+            parse_chapter_work_verification_snapshot(&padded, &plan, &draft)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
         for document in [
             CHAPTER_RESULT.replacen("82.5", "82.5000", 1),
             CHAPTER_RESULT.replacen("82.5", "100.001", 1),
@@ -2911,6 +2918,15 @@ mod tests {
         );
         let duplicate_field = ChaoxingExamVerificationDocument::try_new(duplicate_field).unwrap();
         assert!(parse_exam_verification_snapshot(&duplicate_field, &plan, &draft).is_err());
+
+        let padded = EXAM_RESULT.replacen(r#"value="exam-q-1""#, r#"value=" exam-q-1""#, 1);
+        let padded = ChaoxingExamVerificationDocument::try_new(padded).unwrap();
+        assert_eq!(
+            parse_exam_verification_snapshot(&padded, &plan, &draft)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 
     #[test]

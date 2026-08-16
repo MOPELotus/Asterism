@@ -84,7 +84,9 @@ The combined donors establish these currently observed families:
 The Provider unit matrix now pins every observed numeric classification and
 keeps unknown codes as `QuestionKind::Unknown`. This does not claim mutation
 support. A parsed type lowers coverage when unanswered; it must not disappear
-from the complete snapshot or receive a guessed value.
+from the complete snapshot or receive a guessed value. Result QID attributes
+are likewise exact: Chapter `data` and Exam `questionId.value` are not trimmed
+before binding, and padded identities fail closed.
 
 ## Result evidence and read-only historical bootstrap
 

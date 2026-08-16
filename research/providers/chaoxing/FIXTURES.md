@@ -186,6 +186,10 @@ duplicate IDs and malformed, out-of-range or conflicting scores fail closed. The
 synthetic parser evidence and does not claim that Native HTTP can reach the
 iframe result route.
 
+Chapter and Exam result regressions also pad one otherwise matching QID inside
+the raw `data` or `questionId.value` attribute. Both must fail as ProtocolDrift;
+the parser does not trim remote identity attributes into a Draft binding.
+
 The same fixture's `正确答案` fields exercise Provider-native candidate mapping.
 Tests require the complete QID/order/type set and current option IDs, producing
 exact single-choice, multiple-choice and true/false candidates with sanitized

@@ -95,7 +95,8 @@ validation is still required.
   truncated away. Controlled `未作答`/`待批阅`/`暂无答案`-family Work values are
   retained as missing evidence, producing Inconclusive/Unverified rather than
   ProtocolDrift or rejection. No donor revision changed and no mutation path
-  was added.
+  was added. Chapter and Exam result identity attributes are now also checked
+  without trimming, so padded QIDs cannot be normalized into the current Draft.
 - 2026-08-16: re-checked the two current sign-in donor default branches after
   the QR checkpoint; Ylim remains `7ed64ff547d3` and `mini-hbut` remains
   `952640e2540f`. An exact Ylim `preSign()` re-read recovered an omitted

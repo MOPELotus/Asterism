@@ -488,6 +488,12 @@ parsing. A node such as `我的答案：B 我的答案：AD` cannot confirm the 
 fall through as an ordinary mismatch; it is protocol drift because the remote
 answer evidence is structurally ambiguous.
 
+Result identity attributes are exact protocol fields. Chapter
+`singleQuesId[data]` and Exam `input[name=questionId][value]` are validated
+without trimming; a padded value such as `" exam-q-1"` is ProtocolDrift, not a
+recoverable spelling of `exam-q-1`. This matches the editor/attempt binding rule
+that remote identities are never repaired before comparison.
+
 Controlled empty/pending Work values (`未作答`, `未答`, `待批阅`, `等待批阅`,
 `答案待公布`, `暂无答案` and the equivalent empty cutoff) are not malformed remote
 protocol and are not answer mismatches. The parser returns no selected answer
