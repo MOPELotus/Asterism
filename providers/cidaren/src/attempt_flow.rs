@@ -1264,7 +1264,7 @@ impl CidarenAttemptFlow {
                 CidarenAssessmentResponse::Rejected {
                     kind: CidarenAssessmentRejectionKind::RequiredChildrenPending,
                 } => Err(protocol_drift(
-                    "Cidaren self-built word selection returned an unobserved existing-selection rejection",
+                    "Cidaren word-selection route returned an unobserved existing-selection rejection",
                 )),
                 _ => Err(protocol_drift(
                     "Cidaren SubmitChoseWord returned an unexpected response",

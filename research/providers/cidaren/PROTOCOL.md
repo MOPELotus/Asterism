@@ -741,15 +741,15 @@ envelope as `CidarenAssessmentRejectionKind::RequiredChildrenPending`;
 message/data/version changes or extra fields remain ordinary fail-closed shape
 drift.
 
-For only that exact rejection on an ordinary-unit selection plan, the accepted
-response digest and receive time are committed with the existing
+For only that exact rejection on an ordinary class-unit selection plan, the
+accepted response digest and receive time are committed with the existing
 `cidaren.pre-question-attempt.v2`
 `ready-to-start` continuation. Recovery fresh-rebinds the local/remote Task and
 dynamic allocation before `StartAnswer`; it cannot reconstruct the word map or
 issue a second `SubmitChoseWord`. The rejection is not a completion diagnosis,
 successful word-selection receipt or verified outcome, and no separate blocked
-artifact/Core outcome is required. A self-built plan returning the same
-envelope remains unobserved protocol drift.
+artifact/Core outcome is required. A self-built class or direct `StudyTask`
+plan returning the same envelope remains unobserved protocol drift.
 
 Before `StartAnswer`, eligible learning Tasks build the donor's exact grouped
 word map from a fresh Task-bound `StudyTask/Info` inventory. An ordinary unit

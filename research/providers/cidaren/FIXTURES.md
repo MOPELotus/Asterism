@@ -378,8 +378,9 @@ placeholder identities, result codes, status values and pagination shape.
   response-bound `cidaren.ready-to-start` continuation, reject another
   `SubmitChoseWord`, restore only after fresh Task/allocation rebinding and
   issue `StartAnswer` as the next operation. The same exact response on a
-  self-built plan remains `ProtocolDrift`/FailedClosed. No blocked artifact or
-  completion diagnosis is fabricated.
+  self-built class or direct `StudyTask` plan remains
+  `ProtocolDrift`/FailedClosed. No blocked artifact or completion diagnosis is
+  fabricated.
 - Mode 73 parses as FillBlank only when its bounded answer count equals its
   word-length count; no answer wire shape is inferred from the public log.
 - `SearchWord` parsing bounds both JSON and the donor's literal

@@ -38,7 +38,7 @@ README screenshots, public issue payloads/logs and packaged-release bytecode.
 | `Resource/CoursePage/{course_id}.json` | credential-free self-built word inventory | Implemented |
 | `Course/StudyWordInfo` | bounded meaning/phrase/example evidence | Implemented |
 | `Course/SearchWord` | prototype alias fallback | Implemented |
-| `SubmitChoseWord` | durable grouped-word-map one-shot pre-Question mutation plus exact issues 48/49 existing-selection rejection classification | Grouped `course_id:list_id -> words` maps match every eligible donor call site. The exact rejection on an ordinary-unit plan rotates to durable `ready-to-start` and fresh `StartAnswer` without replaying selection; self-built plans and near matches fail closed |
+| `SubmitChoseWord` | durable grouped-word-map one-shot pre-Question mutation plus exact issues 48/49 existing-selection rejection classification | Grouped `course_id:list_id -> words` maps match every eligible donor call site. The exact rejection on an ordinary class-unit plan rotates to durable `ready-to-start` and fresh `StartAnswer` without replaying selection; self-built class/direct `StudyTask` plans and near matches fail closed |
 | `StartAnswer` | durable non-idempotent attempt start; class request selector is donor-fixed at `task_type=2` while the decoded current-step echo retains class row type 1/2 | Implemented; request selector and response-row identity are validated as separate facts |
 | `VerifyAnswer` | one answer/relation per durable operation with rotated token | Implemented |
 | `SubmitAnswerAndSave` | durable answer/reading-card advance | Implemented |

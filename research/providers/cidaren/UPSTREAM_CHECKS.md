@@ -1102,17 +1102,23 @@ incomplete. In `ularch@c8de5f4`, the ordinary-learning caller catches a failed
 `StartAnswer`. Issue 49's maintainer comment supplies the missing semantic
 explanation: the affected learning Task already had word selection, while the
 old automation assumed it had not and tried to select every word again.
+The historical `github123666/cidaren@1409858` was re-read to bound the route:
+it explicitly executes direct `StudyTask` assessment operations, but its
+`complete_practice` path has no continue-on-selection-error behavior. The
+current catch is therefore evidence for ordinary class learning only, not a
+generic response rule for every mutation family.
 
 This entry supersedes the blocked-step/Core-Gap direction recorded immediately
 above. Asterism does not copy the donor's broad exception catch. Only the exact
 issues 48/49 five-field response is classified as
-`RequiredChildrenPending`, and only an ordinary-unit plan may rotate that
+`RequiredChildrenPending`, and only an ordinary class-unit plan may rotate that
 response into the durable pre-Question artifact phase
-`cidaren.ready-to-start` with the accepted response
-digest and receive time. Recovery fresh-rebinds the Task and dynamic
+`cidaren.ready-to-start` with the accepted response digest and receive time.
+Recovery fresh-rebinds the Task and dynamic
 allocation, cannot rebuild or resend the word map, and issues `StartAnswer` as
-the next distinct operation. The same response on a self-built plan,
-near-match envelopes and all unrelated failures still fail closed.
+the next distinct operation. The same response on a self-built class or direct
+`StudyTask` plan, near-match envelopes and all unrelated failures still fail
+closed.
 
 Because the exact rejection is now an evidenced pre-Question continuation,
 not a Task completion diagnosis, the provisional

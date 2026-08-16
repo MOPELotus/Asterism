@@ -645,13 +645,15 @@ pub fn build_word_selection_plan(
         return Ok(None);
     }
     let word_count = inventory.words.len();
-    let can_continue_after_existing_selection_rejection = matches!(
-        binding.route(),
-        CidarenWordInventoryRoute::StudyTaskInfo {
-            release_id: None,
-            ..
-        }
-    );
+    let can_continue_after_existing_selection_rejection =
+        binding.remote_task_id.starts_with("class-task:")
+            && matches!(
+                binding.route(),
+                CidarenWordInventoryRoute::StudyTaskInfo {
+                    release_id: None,
+                    ..
+                }
+            );
     let mut groups = Map::new();
     for entry in &inventory.words {
         let key = format!("{}:{}", inventory.course_id, entry.list_id);
@@ -1606,6 +1608,24 @@ mod tests {
         );
         assert!(!plan.can_continue_after_existing_selection_rejection());
 
+        let learning = study_detail();
+        let binding = CidarenAnswerEvidenceBinding::from_fresh_detail(
+            "study-task:course-a:course-a_02",
+            &learning,
+            &units,
+        )
+        .unwrap();
+        let inventory =
+            parse_study_task_info_response(STUDY_INFO.as_bytes(), &binding, None).unwrap();
+        let plan = build_word_selection_plan(&binding, &inventory)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            plan.word_map(),
+            &json!({"course-a:course-a_02": ["alpha", "beta"]})
+        );
+        assert!(!plan.can_continue_after_existing_selection_rejection());
+
         let test = detail("class-task:2002", "test", -1, "Synthetic List 02");
         let binding =
             CidarenAnswerEvidenceBinding::from_fresh_detail("class-task:2002", &test, &units)
@@ -1660,6 +1680,40 @@ mod tests {
             normalized_detail: json!({
                 "schema": "cidaren.class-task.detail.v1",
                 "release_id": "2002",
+                "task": normalized,
+            }),
+        }
+    }
+
+    fn study_detail() -> RemoteTaskDetail {
+        let normalized = json!({
+            "schema": "cidaren.study-task.v1",
+            "task_id": 71002,
+            "course_id": "course-a",
+            "list_id": "course-a_02",
+            "task_type": "study",
+            "progress": 0,
+        });
+        RemoteTaskDetail {
+            task: RemoteTask {
+                remote_id: "study-task:course-a:course-a_02".to_owned(),
+                course_remote_id: Some("course:course-a".to_owned()),
+                title: "Synthetic List 02".to_owned(),
+                source_type: SourceType::Practice,
+                assessment_class: AssessmentClass::Routine,
+                remote_state: RemoteState::InProgress,
+                opens_at: None,
+                due_at: None,
+                closes_at: None,
+                capabilities: Vec::new(),
+                fingerprint: "synthetic".to_owned(),
+                normalized: normalized.clone(),
+                raw_sanitized: serde_json::Map::new().into(),
+            },
+            normalized_detail: json!({
+                "schema": "cidaren.study-task.detail.v1",
+                "course_id": "course-a",
+                "list_id": "course-a_02",
                 "task": normalized,
             }),
         }
