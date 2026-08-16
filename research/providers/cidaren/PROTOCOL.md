@@ -651,6 +651,17 @@ The current clean-room protocol layer additionally freezes:
   while retaining sanitized top-level order, parent tag and child wire content
   needed to reproduce the donor's sentence-selection semantics exactly.
 
+The reopened donor has two distinct `task_type` semantics on this boundary.
+Its UI fixes `PublicInfo.task_type_int = 2` before every class `StartAnswer`,
+including when the selected inventory row is class learning, while ordinary
+study uses request selector `3`. The decoded current-step payload instead
+echoes the actual inventory row family: `1` for class learning, `2` for class
+test and `3` for ordinary study. Asterism therefore keeps the Start request
+selector and response-identity type as separate fields. A class-learning
+request remains `task_type=2 + release_id`, but its decoded response must echo
+type `1`; accepting request selector `2` as response identity would erase the
+fresh row binding.
+
 Public issue 99 contains a current `topic_mode=73` payload which the donor
 explicitly does not implement. Its redacted structure has `answer_num=2`, two
 positive `w_lens`, no options, one ordinary rotating `topic_code` and a

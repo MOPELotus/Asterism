@@ -25,6 +25,9 @@ const MAX_TIME_SPENT_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 pub struct CidarenAssessmentBinding {
     family: CidarenTaskFamily,
     task_id: i64,
+    // The decoded payload echoes the inventory row family (class learning 1,
+    // class test 2, ordinary study 3), which is distinct from StartAnswer's
+    // donor-fixed request selector for every class Task.
     response_task_type: u8,
     stable_binding: String,
 }
@@ -180,7 +183,7 @@ impl CidarenTaskFamily {
         }
     }
 
-    const fn task_type(self) -> u8 {
+    const fn start_request_task_type(self) -> u8 {
         match self {
             Self::Class => 2,
             Self::Study => 3,
@@ -218,7 +221,7 @@ pub fn build_start_answer_request(
         ("task_id".to_owned(), binding.task_id.to_string()),
         (
             "task_type".to_owned(),
-            binding.family.task_type().to_string(),
+            binding.family.start_request_task_type().to_string(),
         ),
         ("opt_img_w".to_owned(), "684".to_owned()),
         ("opt_font_size".to_owned(), "37".to_owned()),
@@ -666,6 +669,45 @@ mod tests {
         assert_eq!(query(&request, "task_type"), Some("3"));
         assert_eq!(query(&request, "course_id"), Some("course-a"));
         assert!(query(&request, "release_id").is_none());
+    }
+
+    #[test]
+    fn class_learning_keeps_request_selector_separate_from_response_identity() {
+        let mut detail = class_detail();
+        detail.task.normalized["task_type"] = json!("learning");
+        detail.normalized_detail["task"]["task_type"] = json!("learning");
+        let binding =
+            CidarenAssessmentBinding::from_fresh_detail("class-task:2002", &detail).unwrap();
+
+        let request = build_start_answer_request(&binding, 1_710_000_000_000);
+        assert_eq!(request.path, "ClassTask/StartAnswer");
+        assert_eq!(query(&request, "task_type"), Some("2"));
+        assert_eq!(query(&request, "release_id"), Some("2002"));
+
+        let mut payload: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+        ))
+        .unwrap();
+        payload["task_type"] = json!(1);
+        let identity = crate::parse_attempt_question(&payload, "class-task:2002", 1)
+            .unwrap()
+            .response_identity()
+            .unwrap();
+        binding
+            .validate_attempt_response_identity(identity)
+            .unwrap();
+        payload["task_type"] = json!(2);
+        let wrong_identity = crate::parse_attempt_question(&payload, "class-task:2002", 1)
+            .unwrap()
+            .response_identity()
+            .unwrap();
+        assert_eq!(
+            binding
+                .validate_attempt_response_identity(wrong_identity)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
     }
 
     #[test]

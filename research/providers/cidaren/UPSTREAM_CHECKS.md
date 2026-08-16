@@ -953,6 +953,27 @@ cannot persist a blocked `RequiredChildrenPending` result with response digest
 and observation time. Cidaren therefore keeps the response fail-closed and
 non-replayable; Main owns the required shared blocked-step extension.
 
+### 2026-08-16 class Start-selector identity follow-up
+
+The recorded refs were re-resolved as
+`ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and
+historical `main@1409858800f3c4bd27577a08049bf1f8d17a069c`. The public and
+owner tag sets still end at `1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`;
+the historical tags still end at `v3.73`, and the release lists have no newer
+published entry. No donor protocol or capability delta entered scope.
+
+Re-reading the reopened donor's `main_window.py` and `main_api.py` clarified an
+existing asymmetric identity rule. The UI fixes `PublicInfo.task_type_int=2`
+for class execution even when the selected inventory row is class learning,
+and `StartAnswer` sends that value with `release_id`. Decoded payloads instead
+echo the actual row family, including type `1` for class learning. The Rust
+binding already retained separate request-family and response-row fields; this
+checkpoint names the request field explicitly and adds a regression proving a
+class-learning Start request sends `2` while only response type `1` satisfies
+the fresh row identity. Dynamic allocation, stable release identity and
+non-replay semantics are unchanged.
+
 ## Check procedure
 
 For the next checkpoint:

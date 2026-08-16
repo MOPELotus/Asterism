@@ -329,6 +329,10 @@ placeholder identities, result codes, status values and pagination shape.
   Reading-card identity JSON and hash material are cleared immediately.
 - Request-vector tests freeze `StartAnswer`, `VerifyAnswer`,
   `SubmitAnswerAndSave`, `SkipAnswer` and `SubmitChoseWord` field/sign order.
+  A dedicated class-learning vector freezes the donor's asymmetric type
+  semantics: Start sends the class request selector `2`, while the decoded
+  response identity must match the fresh learning row as type `1`; treating
+  the request selector as the response row type fails `RemoteChanged`.
 - Mutation serialization consumes and recursively clears its temporary JSON
   tree, including copied answer, topic-code and word-map values, before keeping
   only the zeroizing serialized request body.

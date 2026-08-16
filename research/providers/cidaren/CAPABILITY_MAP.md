@@ -64,7 +64,9 @@ The current checkpoint (not a completion boundary):
     `topic_code`;
 15. freezes fresh binding and exact request/signature vectors for
     `StartAnswer`, `VerifyAnswer`, `SubmitAnswerAndSave`, `SkipAnswer` and
-    `SubmitChoseWord`;
+    `SubmitChoseWord`, including the donor's distinct class Start selector
+    (`2` for both learning/test) versus decoded row identity (`1` learning,
+    `2` test);
 16. normalizes bounded word-info evidence and donor answer strategies, then
     loads only the task-bound word evidence needed by the current Question,
     including bounded `SearchWord` prototype and completion-example fallback;
