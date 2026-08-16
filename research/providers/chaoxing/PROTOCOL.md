@@ -488,6 +488,13 @@ parsing. A node such as `我的答案：B 我的答案：AD` cannot confirm the 
 fall through as an ordinary mismatch; it is protocol drift because the remote
 answer evidence is structurally ambiguous.
 
+Controlled empty/pending Work values (`未作答`, `未答`, `待批阅`, `等待批阅`,
+`答案待公布`, `暂无答案` and the equivalent empty cutoff) are not malformed remote
+protocol and are not answer mismatches. The parser returns no selected answer
+evidence, so the whole snapshot is Inconclusive and every Draft Question remains
+Unverified. Other non-empty malformed choice or true/false text remains
+ProtocolDrift.
+
 These contracts are covered by explicitly synthetic donor-compatible fixtures
 and capability-level tests, including recovery verification with no Receipt.
 They are native/offline evidence only; the Provider remains Development and no

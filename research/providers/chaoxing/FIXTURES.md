@@ -142,8 +142,11 @@ accept `A、C` as an explicit separated choice set but reject arbitrary text suc
 as `not-B`, duplicate `BB`, multi-valued single-choice `AB`, substring
 true/false `不正确`, mixed `错误但对`, and a duplicate-label value such as
 `我的答案：B 我的答案：AD` as protocol drift. The duplicate-label rule is also
-covered for Exam results. They contain no real token, answer, route or account
-fact and do not prove the endpoint works against the current live platform.
+covered for Exam results. Separate Work regressions replace a selected answer
+with `未作答`, `待批阅` or `暂无答案` and require an Inconclusive snapshot whose
+Draft Questions remain Unverified rather than a ProtocolDrift error or
+rejection. They contain no real token, answer, route or account fact and do not
+prove the endpoint works against the current live platform.
 
 `submission-editor-fill.html` and `submission-view-fill.html` pin the exact
 single-blank independent Work subset. The complete two-Question editor keeps an

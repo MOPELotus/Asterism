@@ -1509,7 +1509,11 @@ fn parse_selected_work_result(
         else {
             return Ok(None);
         };
-        let actual = parse_visible_answer(&normalized_text(answer_node.text()), type_code)?;
+        let actual = match parse_visible_answer(&normalized_text(answer_node.text()), type_code) {
+            Ok(actual) => actual,
+            Err(error) if error.kind == ProviderErrorKind::UnsupportedTask => return Ok(None),
+            Err(error) => return Err(error),
+        };
         question_statuses.insert(
             remote_id.to_owned(),
             if actual == *expected {
@@ -1769,6 +1773,11 @@ fn parse_labeled_visible_answer(
     .min()
     .map_or(value, |end| &value[..end])
     .trim();
+    if value.is_empty() {
+        return Err(unsupported(
+            "Chaoxing Work result has no exact visible answer value",
+        ));
+    }
     match type_code {
         "0" | "1" => {
             let mut answer = value
@@ -2280,12 +2289,41 @@ mod tests {
                 ProviderErrorKind::ProtocolDrift
             );
         }
+        for (value, type_code) in [
+            ("我的答案：未作答", "0"),
+            ("我的答案：待批阅", "1"),
+            ("我的答案：暂无答案", "3"),
+        ] {
+            assert_eq!(
+                parse_visible_answer(value, type_code).unwrap_err().kind,
+                ProviderErrorKind::UnsupportedTask
+            );
+        }
         assert_eq!(
             parse_exam_visible_answer("我的答案：B 我的答案：AD", "0")
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::ProtocolDrift
         );
+    }
+
+    #[tokio::test]
+    async fn selected_work_placeholders_remain_inconclusive() {
+        let draft = draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        for placeholder in ["未作答", "待批阅", "暂无答案"] {
+            let view = VIEW.replace("我的答案：B", &format!("我的答案：{placeholder}"));
+            let view = ChaoxingWorkVerificationDocument::try_new(
+                ChaoxingWorkVerificationRoute::View,
+                view,
+            )
+            .unwrap();
+            let snapshot = parse_verification_snapshot(&view, &plan, &draft).unwrap();
+            assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+            assert!(snapshot.questions.iter().all(|question| {
+                question.status == SubmissionQuestionVerificationStatus::Unverified
+            }));
+        }
     }
 
     #[tokio::test]

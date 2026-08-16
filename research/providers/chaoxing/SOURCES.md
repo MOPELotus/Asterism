@@ -92,7 +92,10 @@ validation is still required.
   reject duplicates/single-choice multi-values, while true/false accepts only
   complete controlled tokens. Work and Exam selected result nodes now also
   require exactly one `我的答案` label, so a later conflicting value cannot be
-  truncated away. No donor revision changed and no mutation path was added.
+  truncated away. Controlled `未作答`/`待批阅`/`暂无答案`-family Work values are
+  retained as missing evidence, producing Inconclusive/Unverified rather than
+  ProtocolDrift or rejection. No donor revision changed and no mutation path
+  was added.
 - 2026-08-16: re-checked the two current sign-in donor default branches after
   the QR checkpoint; Ylim remains `7ed64ff547d3` and `mini-hbut` remains
   `952640e2540f`. An exact Ylim `preSign()` re-read recovered an omitted
