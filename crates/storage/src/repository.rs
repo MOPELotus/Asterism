@@ -2355,6 +2355,48 @@ pub trait BatchExecutionChildPlanRepository: Send + Sync {
 }
 
 #[derive(Clone, Debug)]
+pub struct BatchExecutionRuntimeSettingsResolveRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchExecutionRuntimeSettingsBindRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub snapshot: &'a ExecutionRuntimeSettingsSnapshot,
+    pub schema: &'a ProviderRuntimeSettingsSchema,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchExecutionRuntimeSettingsBindOutcome {
+    Bound(ExecutionRuntimeSettingsSnapshot),
+    Existing(ExecutionRuntimeSettingsSnapshot),
+}
+
+/// Freezes one account-level settings snapshot for the parent Attempt before
+/// fresh Provider planning and returns it unchanged on worker restart.
+#[async_trait]
+pub trait BatchExecutionRuntimeSettingsRepository: Send + Sync {
+    async fn find_batch_execution_runtime_settings(
+        &self,
+        request: BatchExecutionRuntimeSettingsResolveRequest<'_>,
+    ) -> Result<Option<ExecutionRuntimeSettingsSnapshot>, StorageError>;
+
+    async fn bind_batch_execution_runtime_settings(
+        &self,
+        request: BatchExecutionRuntimeSettingsBindRequest<'_>,
+    ) -> Result<BatchExecutionRuntimeSettingsBindOutcome, StorageError>;
+}
+
+#[derive(Clone, Debug)]
 pub struct ExecutionBillingReservation<'a> {
     pub quote: &'a PriceQuote,
     pub reservation: &'a CreditReservation,

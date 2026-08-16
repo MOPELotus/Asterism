@@ -5236,3 +5236,27 @@ planning records only: no child `Execution`, Task state transition, credit
 reservation or scheduler job exists yet. The next transaction can now create
 those Executions from one durable, parent-bound source instead of invoking or
 trusting the Provider again.
+
+## Two-hundred-and-eighty-first Phase 0 slice
+
+Parent planning now freezes one account-level runtime settings snapshot before
+the first Provider inventory call. Migration 078 binds the resolved values,
+per-key sources, Provider and account override revisions, Core completion
+policy and capture time to the exact `BatchExecutionAttempt`. Task-scoped
+sources and revisions are forbidden at this Course parent boundary.
+
+Storage requires the live parent claim/lease/Attempt and Running state, checks
+the actual account Provider, validates the resolved snapshot against the
+registered schema, and accepts a second bind only when the whole typed value is
+identical. Engine first loads this frozen value on every run; only when absent
+does it read current Provider/account layers, resolve sources and derive the
+completion policy, then bind the candidate before Provider planning. A restart
+therefore does not inherit later defaults or overrides even when it only needs
+the parent-only restore hook.
+
+The planning result carries the frozen settings beside the ordered public plan
+and durable child records so the following child-Execution transaction has one
+stable source. Child Task-specific overrides are intentionally not merged here:
+the next transaction must either prove they were already represented in the
+parent authorization or reject conflicting per-Task settings rather than
+silently broadening one child after the batch was planned.

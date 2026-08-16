@@ -148,7 +148,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 77);
+        assert_eq!(migration_count, 78);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -386,6 +386,17 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tables, 2);
+    }
+
+    #[tokio::test]
+    async fn batch_runtime_settings_migration_is_present_on_a_fresh_database() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let columns = sqlx::query("PRAGMA table_info(batch_execution_runtime_settings)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(columns.len(), 10);
     }
 
     #[tokio::test]

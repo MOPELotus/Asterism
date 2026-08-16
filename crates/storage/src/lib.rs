@@ -85,6 +85,8 @@ pub use repository::{
     BatchExecutionParentSnapshotRepositoryFactory, BatchExecutionParentSnapshotResolveRequest,
     BatchExecutionPlanningInputRecord, BatchExecutionPlanningInputRepository,
     BatchExecutionPlanningInputResolveRequest, BatchExecutionRepository,
+    BatchExecutionRuntimeSettingsBindOutcome, BatchExecutionRuntimeSettingsBindRequest,
+    BatchExecutionRuntimeSettingsRepository, BatchExecutionRuntimeSettingsResolveRequest,
     BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest,
     BrowserBridgeCommandArtifactRepository, BrowserBridgeCommandDispatchRecord,
     BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandIssueRequest,

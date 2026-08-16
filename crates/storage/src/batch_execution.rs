@@ -8,7 +8,8 @@ use asterism_domain::{
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
     ExecutionMutationSequenceAdvanceCondition, ProviderBatchExecutionPlanningInput,
-    ProviderExecutionBatchPlan,
+    ProviderExecutionBatchPlan, ProviderRuntimeSettingSource, ProviderRuntimeSettingsSchema,
+    ProviderSettingValue, ResolvedProviderRuntimeSettings,
 };
 use asterism_scheduler::ScheduledJobKind;
 use asterism_secrets::{
@@ -24,8 +25,11 @@ use crate::{
     BatchExecutionChildPlanMaterializeRequest, BatchExecutionChildPlanRecord,
     BatchExecutionChildPlanRepository, BatchExecutionPlanningInputRecord,
     BatchExecutionPlanningInputRepository, BatchExecutionPlanningInputResolveRequest,
-    BatchExecutionRepository, BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest,
-    Database, ResolvedBatchExecutionPlanningInput, SecretKeyring, StorageError,
+    BatchExecutionRepository, BatchExecutionRuntimeSettingsBindOutcome,
+    BatchExecutionRuntimeSettingsBindRequest, BatchExecutionRuntimeSettingsRepository,
+    BatchExecutionRuntimeSettingsResolveRequest, BatchExecutionScheduleOutcome,
+    BatchExecutionScheduleRequest, Database, ExecutionRuntimeSettingsSnapshot,
+    ResolvedBatchExecutionPlanningInput, SecretKeyring, StorageError,
     outbox::enqueue_in_transaction,
     secret::{decrypt, encrypt, fetch_secret, insert_secret_audit, insert_secret_blob},
 };
@@ -623,6 +627,295 @@ impl BatchExecutionChildPlanRepository for SqliteBatchExecutionRepository {
         transaction.commit().await?;
         Ok(records)
     }
+}
+
+#[async_trait]
+impl BatchExecutionRuntimeSettingsRepository for SqliteBatchExecutionRepository {
+    async fn find_batch_execution_runtime_settings(
+        &self,
+        request: BatchExecutionRuntimeSettingsResolveRequest<'_>,
+    ) -> Result<Option<ExecutionRuntimeSettingsSnapshot>, StorageError> {
+        validate_worker_context(request.worker_id, "batch-runtime-settings-resolve")?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_batch_worker_claims(
+            &mut transaction,
+            request.batch_execution_id,
+            request.attempt_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+        )
+        .await?;
+        let snapshot =
+            fetch_batch_runtime_settings(&mut transaction, request.batch_execution_id).await?;
+        if snapshot.as_ref().is_some_and(|(attempt_id, _, state)| {
+            *attempt_id != request.attempt_id || state != "running"
+        }) {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        transaction.commit().await?;
+        Ok(snapshot.map(|(_, snapshot, _)| snapshot))
+    }
+
+    async fn bind_batch_execution_runtime_settings(
+        &self,
+        request: BatchExecutionRuntimeSettingsBindRequest<'_>,
+    ) -> Result<BatchExecutionRuntimeSettingsBindOutcome, StorageError> {
+        validate_worker_context(request.worker_id, request.correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_batch_worker_claims(
+            &mut transaction,
+            request.batch_execution_id,
+            request.attempt_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+        )
+        .await?;
+        let binding: (String, String) = sqlx::query_as(
+            "SELECT account.provider_id, batch.state FROM batch_executions AS batch \
+             INNER JOIN provider_accounts AS account ON account.id = batch.provider_account_id \
+             WHERE batch.id = ?",
+        )
+        .bind(request.batch_execution_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let provider_id = ProviderId::new(binding.0)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        validate_batch_runtime_settings_snapshot(
+            request.snapshot,
+            request.schema,
+            &provider_id,
+            request.at,
+        )?;
+        if binding.1 != "running" {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        if let Some((attempt_id, existing, state)) =
+            fetch_batch_runtime_settings(&mut transaction, request.batch_execution_id).await?
+        {
+            transaction.commit().await?;
+            return if attempt_id == request.attempt_id
+                && state == "running"
+                && existing == *request.snapshot
+            {
+                Ok(BatchExecutionRuntimeSettingsBindOutcome::Existing(existing))
+            } else {
+                Err(StorageError::BatchExecutionStateConflict)
+            };
+        }
+        sqlx::query(
+            "INSERT INTO batch_execution_runtime_settings \
+             (batch_execution_id, batch_execution_attempt_id, provider_id, schema_version, \
+              resolved_settings_json, sources_json, provider_revision, \
+              provider_account_revision, completion_policy_json, captured_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(request.batch_execution_id.to_string())
+        .bind(request.attempt_id.to_string())
+        .bind(request.snapshot.provider_id.as_str())
+        .bind(i64::from(request.snapshot.resolved.schema_version))
+        .bind(serde_json::to_string(&request.snapshot.resolved.values)?)
+        .bind(serde_json::to_string(&request.snapshot.sources)?)
+        .bind(request.snapshot.provider_revision.map(i64::from))
+        .bind(request.snapshot.provider_account_revision.map(i64::from))
+        .bind(serde_json::to_string(&request.snapshot.completion_policy)?)
+        .bind(encode_timestamp(request.snapshot.captured_at))
+        .execute(&mut *transaction)
+        .await?;
+        insert_batch_runtime_settings_audit(
+            &mut transaction,
+            request.batch_execution_id,
+            request.attempt_id,
+            request.snapshot,
+            request.worker_id,
+            request.correlation_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(BatchExecutionRuntimeSettingsBindOutcome::Bound(
+            request.snapshot.clone(),
+        ))
+    }
+}
+
+async fn fetch_batch_runtime_settings(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+) -> Result<
+    Option<(
+        BatchExecutionAttemptId,
+        ExecutionRuntimeSettingsSnapshot,
+        String,
+    )>,
+    StorageError,
+> {
+    let row = sqlx::query(
+        "SELECT settings.batch_execution_attempt_id, settings.provider_id AS snapshot_provider_id, \
+                settings.schema_version, settings.resolved_settings_json, settings.sources_json, \
+                settings.provider_revision, settings.provider_account_revision, \
+                settings.completion_policy_json, settings.captured_at, \
+                account.provider_id AS actual_provider_id, batch.state \
+         FROM batch_execution_runtime_settings AS settings \
+         INNER JOIN batch_executions AS batch ON batch.id = settings.batch_execution_id \
+         INNER JOIN provider_accounts AS account ON account.id = batch.provider_account_id \
+         WHERE settings.batch_execution_id = ?",
+    )
+    .bind(batch_execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.as_ref().map(decode_batch_runtime_settings).transpose()
+}
+
+fn decode_batch_runtime_settings(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<
+    (
+        BatchExecutionAttemptId,
+        ExecutionRuntimeSettingsSnapshot,
+        String,
+    ),
+    StorageError,
+> {
+    let provider_id = ProviderId::new(row.try_get::<String, _>("snapshot_provider_id")?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let actual_provider_id = ProviderId::new(row.try_get::<String, _>("actual_provider_id")?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    if provider_id != actual_provider_id {
+        return Err(StorageError::InvalidData(
+            "batch runtime settings Provider binding is invalid".to_owned(),
+        ));
+    }
+    let snapshot = ExecutionRuntimeSettingsSnapshot {
+        provider_id,
+        resolved: ResolvedProviderRuntimeSettings {
+            schema_version: u32::try_from(row.try_get::<i64, _>("schema_version")?).map_err(
+                |_| {
+                    StorageError::InvalidData("batch settings schema version is invalid".to_owned())
+                },
+            )?,
+            values: serde_json::from_str::<std::collections::BTreeMap<String, ProviderSettingValue>>(
+                row.try_get("resolved_settings_json")?,
+            )?,
+        },
+        sources: serde_json::from_str(row.try_get("sources_json")?)?,
+        completion_policy: serde_json::from_str(row.try_get("completion_policy_json")?)?,
+        provider_revision: decode_optional_batch_revision(row.try_get("provider_revision")?)?,
+        provider_account_revision: decode_optional_batch_revision(
+            row.try_get("provider_account_revision")?,
+        )?,
+        task_revision: None,
+        captured_at: decode_timestamp(row.try_get("captured_at")?)?,
+    };
+    if !valid_batch_runtime_settings_shape(&snapshot) {
+        return Err(StorageError::InvalidData(
+            "persisted batch runtime settings are invalid".to_owned(),
+        ));
+    }
+    Ok((
+        BatchExecutionAttemptId::from_str(row.try_get("batch_execution_attempt_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        snapshot,
+        row.try_get("state")?,
+    ))
+}
+
+fn validate_batch_runtime_settings_snapshot(
+    snapshot: &ExecutionRuntimeSettingsSnapshot,
+    schema: &ProviderRuntimeSettingsSchema,
+    provider_id: &ProviderId,
+    at: Timestamp,
+) -> Result<(), StorageError> {
+    if snapshot.provider_id != *provider_id
+        || snapshot.captured_at != at
+        || snapshot.completion_policy.captured_at != at
+        || snapshot.task_revision.is_some()
+        || schema.validate_resolved(&snapshot.resolved).is_err()
+        || !valid_batch_runtime_settings_shape(snapshot)
+    {
+        return Err(StorageError::BatchExecutionStateConflict);
+    }
+    Ok(())
+}
+
+fn valid_batch_runtime_settings_shape(snapshot: &ExecutionRuntimeSettingsSnapshot) -> bool {
+    let revisions_valid = [
+        snapshot.provider_revision,
+        snapshot.provider_account_revision,
+    ]
+    .into_iter()
+    .flatten()
+    .all(|revision| revision > 0);
+    let keys_match = snapshot.sources.len() == snapshot.resolved.values.len()
+        && snapshot
+            .resolved
+            .values
+            .keys()
+            .all(|key| snapshot.sources.contains_key(key));
+    let sources_bound = snapshot.sources.values().all(|source| match source {
+        ProviderRuntimeSettingSource::SchemaDefault => true,
+        ProviderRuntimeSettingSource::Provider => snapshot.provider_revision.is_some(),
+        ProviderRuntimeSettingSource::ProviderAccount => {
+            snapshot.provider_account_revision.is_some()
+        }
+        ProviderRuntimeSettingSource::Task => false,
+    });
+    snapshot.resolved.schema_version > 0
+        && snapshot.task_revision.is_none()
+        && snapshot.completion_policy.captured_at == snapshot.captured_at
+        && snapshot.completion_policy.validate().is_ok()
+        && revisions_valid
+        && keys_match
+        && sources_bound
+        && serde_json::to_vec(&snapshot.resolved.values)
+            .is_ok_and(|value| value.len() <= 1024 * 1024)
+        && serde_json::to_vec(&snapshot.sources).is_ok_and(|value| value.len() <= 1024 * 1024)
+        && serde_json::to_vec(&snapshot.completion_policy)
+            .is_ok_and(|value| value.len() <= 1024 * 1024)
+}
+
+fn decode_optional_batch_revision(value: Option<i64>) -> Result<Option<u32>, StorageError> {
+    value
+        .map(|revision| {
+            u32::try_from(revision)
+                .map_err(|_| StorageError::InvalidData("settings revision is invalid".to_owned()))
+        })
+        .transpose()
+}
+
+async fn insert_batch_runtime_settings_audit(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+    attempt_id: BatchExecutionAttemptId,
+    snapshot: &ExecutionRuntimeSettingsSnapshot,
+    worker_id: &str,
+    correlation_id: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'worker', ?, 'batch_execution_runtime_settings_frozen', \
+                 'batch_execution', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(snapshot.captured_at))
+    .bind(worker_id)
+    .bind(batch_execution_id.to_string())
+    .bind(correlation_id)
+    .bind(
+        serde_json::json!({
+            "attempt_id": attempt_id,
+            "provider_id": snapshot.provider_id,
+            "schema_version": snapshot.resolved.schema_version,
+            "provider_revision": snapshot.provider_revision,
+            "provider_account_revision": snapshot.provider_account_revision,
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn stored_child_plans_match(

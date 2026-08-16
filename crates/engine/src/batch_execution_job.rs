@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use asterism_domain::{
-    BatchExecution, BatchExecutionAttempt, BatchExecutionId, ExecutionState, ScheduleId, Timestamp,
+    BatchExecution, BatchExecutionAttempt, BatchExecutionId, ExecutionState, ProviderAccountId,
+    ProviderId, ScheduleId, Timestamp,
 };
 use asterism_provider_api::{
     BatchExecutionPlanningRequest, PreparedProviderBatchExecutionPlan, ProviderContext,
-    ProviderError, ProviderExecutionBatchPlan, ProviderRegistry,
+    ProviderError, ProviderExecutionBatchPlan, ProviderRegistry, ProviderRuntimeSettingsSchema,
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
@@ -14,9 +15,11 @@ use asterism_storage::{
     BatchExecutionChildPlanRepository, BatchExecutionParentSnapshotBindOutcome,
     BatchExecutionParentSnapshotBindRequest, BatchExecutionParentSnapshotRepositoryFactory,
     BatchExecutionParentSnapshotResolveRequest, BatchExecutionPlanningInputRepository,
-    BatchExecutionPlanningInputResolveRequest, BatchExecutionRepository, CourseRuntimeRepository,
-    ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRepository,
-    ProviderRuntimeSettingsTarget, StorageError,
+    BatchExecutionPlanningInputResolveRequest, BatchExecutionRepository,
+    BatchExecutionRuntimeSettingsBindOutcome, BatchExecutionRuntimeSettingsBindRequest,
+    BatchExecutionRuntimeSettingsRepository, BatchExecutionRuntimeSettingsResolveRequest,
+    CourseRuntimeRepository, ExecutionRuntimeSettingsSnapshot, ProviderAccountRuntimeRepository,
+    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, StorageError,
 };
 
 #[derive(Clone, Debug)]
@@ -34,6 +37,7 @@ pub struct BatchExecutionPlanningResult {
     pub attempt: BatchExecutionAttempt,
     pub execution_batch_plan: ProviderExecutionBatchPlan,
     pub child_plans: Vec<BatchExecutionChildPlanRecord>,
+    pub runtime_settings: ExecutionRuntimeSettingsSnapshot,
     pub planned_fresh: bool,
 }
 
@@ -44,6 +48,7 @@ pub struct BatchExecutionPlanningService {
     batches: Arc<dyn BatchExecutionRepository>,
     planning_inputs: Arc<dyn BatchExecutionPlanningInputRepository>,
     child_plans: Arc<dyn BatchExecutionChildPlanRepository>,
+    batch_settings: Arc<dyn BatchExecutionRuntimeSettingsRepository>,
     accounts: Arc<dyn ProviderAccountRuntimeRepository>,
     courses: Arc<dyn CourseRuntimeRepository>,
     settings: Arc<dyn ProviderRuntimeSettingsRepository>,
@@ -69,6 +74,7 @@ impl BatchExecutionPlanningService {
         batches: Arc<dyn BatchExecutionRepository>,
         planning_inputs: Arc<dyn BatchExecutionPlanningInputRepository>,
         child_plans: Arc<dyn BatchExecutionChildPlanRepository>,
+        batch_settings: Arc<dyn BatchExecutionRuntimeSettingsRepository>,
         accounts: Arc<dyn ProviderAccountRuntimeRepository>,
         courses: Arc<dyn CourseRuntimeRepository>,
         settings: Arc<dyn ProviderRuntimeSettingsRepository>,
@@ -79,6 +85,7 @@ impl BatchExecutionPlanningService {
             batches,
             planning_inputs,
             child_plans,
+            batch_settings,
             accounts,
             courses,
             settings,
@@ -149,27 +156,16 @@ impl BatchExecutionPlanningService {
             .task_execution
             .as_ref()
             .ok_or(BatchExecutionPlanningError::ProviderUnavailable)?;
-        let provider_settings = self
-            .settings
-            .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::Provider {
-                provider_id: account.provider_id.clone(),
-            })
-            .await?;
-        let account_settings = self
-            .settings
-            .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::ProviderAccount {
-                provider_id: account.provider_id.clone(),
-                provider_account_id: account.id,
-            })
-            .await?;
-        let runtime_settings = provider
-            .runtime_settings
-            .resolve(
-                provider_settings.as_ref().map(|record| &record.patch),
-                account_settings.as_ref().map(|record| &record.patch),
-                None,
+        let runtime_settings = self
+            .freeze_runtime_settings(
+                &command,
+                &batch,
+                &attempt,
+                &account.provider_id,
+                account.id,
+                &provider.runtime_settings,
             )
-            .map_err(|_| BatchExecutionPlanningError::RuntimeSettingsInvalid)?;
+            .await?;
         let access = SecretAccess {
             actor: SecretActor::CoreService("batch-execution-planner"),
             correlation_id: command.correlation_id.clone(),
@@ -205,6 +201,7 @@ impl BatchExecutionPlanningService {
                 attempt,
                 execution_batch_plan,
                 child_plans,
+                runtime_settings,
                 planned_fresh: false,
             });
         }
@@ -242,7 +239,7 @@ impl BatchExecutionPlanningService {
                     remote_course_id: &course.remote_id,
                     requested_capabilities: &batch.requested_capabilities,
                     expected_child_count: batch.expected_child_count,
-                    runtime_settings: &runtime_settings,
+                    runtime_settings: &runtime_settings.resolved,
                     planning_input: &resolved_input.input,
                 },
             )
@@ -276,6 +273,7 @@ impl BatchExecutionPlanningService {
             attempt,
             execution_batch_plan,
             child_plans,
+            runtime_settings,
             planned_fresh: true,
         })
     }
@@ -302,6 +300,91 @@ impl BatchExecutionPlanningService {
         Ok(match outcome {
             BatchExecutionChildPlanMaterializeOutcome::Created(records)
             | BatchExecutionChildPlanMaterializeOutcome::Existing(records) => records,
+        })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the frozen snapshot binds the exact parent, account, Provider schema and live worker claim"
+    )]
+    async fn freeze_runtime_settings(
+        &self,
+        command: &PlanBatchExecutionCommand,
+        batch: &BatchExecution,
+        attempt: &BatchExecutionAttempt,
+        provider_id: &ProviderId,
+        provider_account_id: ProviderAccountId,
+        schema: &ProviderRuntimeSettingsSchema,
+    ) -> Result<ExecutionRuntimeSettingsSnapshot, BatchExecutionPlanningError> {
+        let claim = BatchExecutionRuntimeSettingsResolveRequest {
+            batch_execution_id: batch.id,
+            attempt_id: attempt.id,
+            scheduler_job_id: command.scheduler_job_id,
+            worker_id: &command.worker_id,
+            at: command.at,
+        };
+        if let Some(snapshot) = self
+            .batch_settings
+            .find_batch_execution_runtime_settings(claim)
+            .await?
+        {
+            if snapshot.provider_id != *provider_id
+                || snapshot.task_revision.is_some()
+                || schema.validate_resolved(&snapshot.resolved).is_err()
+            {
+                return Err(BatchExecutionPlanningError::RuntimeSettingsInvalid);
+            }
+            return Ok(snapshot);
+        }
+        let provider_settings = self
+            .settings
+            .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::Provider {
+                provider_id: provider_id.clone(),
+            })
+            .await?;
+        let account_settings = self
+            .settings
+            .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::ProviderAccount {
+                provider_id: provider_id.clone(),
+                provider_account_id,
+            })
+            .await?;
+        let (resolved, sources) = schema
+            .resolve_with_sources(
+                provider_settings.as_ref().map(|record| &record.patch),
+                account_settings.as_ref().map(|record| &record.patch),
+                None,
+            )
+            .map_err(|_| BatchExecutionPlanningError::RuntimeSettingsInvalid)?;
+        let completion_policy = schema
+            .completion_policy_snapshot(&resolved, command.at)
+            .map_err(|_| BatchExecutionPlanningError::RuntimeSettingsInvalid)?;
+        let candidate = ExecutionRuntimeSettingsSnapshot {
+            provider_id: provider_id.clone(),
+            resolved,
+            sources,
+            completion_policy,
+            provider_revision: provider_settings.as_ref().map(|record| record.revision),
+            provider_account_revision: account_settings.as_ref().map(|record| record.revision),
+            task_revision: None,
+            captured_at: command.at,
+        };
+        let outcome = self
+            .batch_settings
+            .bind_batch_execution_runtime_settings(BatchExecutionRuntimeSettingsBindRequest {
+                batch_execution_id: batch.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: command.scheduler_job_id,
+                worker_id: &command.worker_id,
+                correlation_id: &command.correlation_id,
+                snapshot: &candidate,
+                schema,
+                at: command.at,
+            })
+            .await?;
+        Ok(match outcome {
+            BatchExecutionRuntimeSettingsBindOutcome::Bound(snapshot)
+            | BatchExecutionRuntimeSettingsBindOutcome::Existing(snapshot) => snapshot,
         })
     }
 }
@@ -609,6 +692,7 @@ mod tests {
         let service = BatchExecutionPlanningService::new(
             batch_repository.clone(),
             batch_repository.clone(),
+            batch_repository.clone(),
             batch_repository,
             Arc::new(SqliteProviderAccountRepository::new(database.clone())),
             Arc::new(SqliteCourseProgressRepository::new(database.clone())),
@@ -637,6 +721,7 @@ mod tests {
         assert_eq!(restored.execution_batch_plan, first.execution_batch_plan);
         assert_eq!(restored.child_plans, first.child_plans);
         assert_eq!(restored.attempt, first.attempt);
+        assert_eq!(restored.runtime_settings, first.runtime_settings);
         assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -655,6 +740,17 @@ mod tests {
                 .await
                 .unwrap(),
             0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM batch_execution_runtime_settings \
+                 WHERE batch_execution_id = ?",
+            )
+            .bind(batch.id.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            1
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
