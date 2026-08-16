@@ -6,6 +6,25 @@ sufficiently consistent semantics. Platform endpoints, steps, payloads, DOM and
 recovery details remain in Provider code: unify platform-level intent, not
 Provider steps.
 
+## Release sequencing
+
+The first pre-release is a near-term delivery milestone after both of these
+conditions are satisfied:
+
+- real-account login, Session and account binding work through the public
+  product path, with at least the safe read-only validation required by the
+  declared release scope;
+- the public delivery surfaces are usable: generated OpenAPI client, WebUI and
+  Asterism-Plugin/Yunzai call the same Core actions and expose Development
+  Provider limitations honestly.
+
+The first pre-release does not wait for the second Provider batch and does not
+claim that every mutation live gate or every Development Provider is Verified.
+Its API compatibility promise is explicitly pre-release scoped. The second
+batch (`zhihuishu`, `zjy`, `icve`), later Provider batches and final stable API /
+OpenAPI compatibility freeze are internally classified as **Further Future**
+and are not implicit dependencies of the first pre-release.
+
 ## Progress, dependencies and goals
 
 - `CourseAggregateProgress` / `UnitAggregateProgress` represent total and

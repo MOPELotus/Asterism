@@ -5324,3 +5324,20 @@ caller can construct exact credit reservations. Integration coverage proves
 atomic rollback on insufficient aggregate balance, successful two-child
 reservation and scheduling, replay without double debit, and parent-only
 recovery without another fresh Provider scan.
+
+## Release milestone decision
+
+The first pre-release is now gated by real-account login through the public
+product path plus completion of the public delivery surfaces, not by a second
+Provider batch. The release scope must prove login, Session, account binding
+and the declared safe read-only path with a real account. WebUI and
+Asterism-Plugin/Yunzai must consume the generated client and the same Core
+actions, while Development Provider and unexecuted mutation live gates remain
+explicitly labeled rather than being promoted to Verified.
+
+The second Provider batch and all later batches are classified internally as
+`Further Future`. They preserve the existing upstream-first and Provider DoD
+rules when resumed, but they do not block the first pre-release or imply a
+current scheduling commitment. Final stable API/OpenAPI compatibility freeze
+also remains a separate later milestone; the first pre-release carries only
+the compatibility statement declared for that pre-release line.

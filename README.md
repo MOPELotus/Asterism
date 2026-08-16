@@ -28,7 +28,7 @@ completion/progress/score、自动答题或提交、需要浏览器/Capture，�
 - 支持自动执行、延迟审批、手动审批和仅通知等策略；
 - 以事务化点数、调度、执行租约和 Event Outbox 保证关键状态一致性；
 - 为敏感凭据、非幂等 mutation、浏览器自动化和公网部署设置明确可靠性与安全边界；
-- 第一批 Provider 完成后立即准备 OpenAPI Client Generation，并建设正式 WebUI 与 Asterism-Plugin；第二批完成后再冻结兼容基线。
+- 第一批 Provider、OpenAPI Client、正式 WebUI 与 Asterism-Plugin 并行收口；首次 pre-release 在真实账号登录链路完成验证且公共交付面可用后发布。第二批及以后内部暂列 `Further Future`，不阻塞首次 pre-release；最终兼容基线另行收口。
 
 ## 当前进度
 
@@ -134,9 +134,10 @@ CLI / WebUI / Asterism-Plugin
 | Phase 0 | Core、Storage、Scheduler、Auth、内部 API / CLI | 开发中 |
 | 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已建立 Password → Cookie → Course / Chapter / Resource / Work / Exam 链路；WELearn 已覆盖 Password/OIDC、Capture Cookie、Course / Unit / SCO、fresh CMI、DurationReport 与 donor completion/progress/score execution；UAI 已覆盖 Password/JWT/Capture、层级 inventory、detail/progress/duration、加密 Question/Answer/Submission、exit-ticket、单一 oral、discussion 与上传前置链；Cidaren 已覆盖 token/composite Capture、class/study inventory、`jv=99` HKDF/AES-GCM、Question/Answer/SubmissionBuild、BrowserBridge 与一次性答题状态机。共享持久 Attempt/Artifact 合约、其余 donor 流程和真实账号验证仍在继续） |
 | 公共交付面 | OpenAPI Client Generation Readiness、Refine v5 + shadcn/ui WebUI、Asterism-Plugin | 已并行开发；不作为第一批 Provider 能力留空或停止的理由 |
-| 第二批 | `zhihuishu`、`zjy`、`icve` | 计划中 |
-| 兼容性收口 | 稳定并冻结 API / OpenAPI 基线，完成 WebUI / Plugin 兼容性收口 | 第二批完成后开始 |
-| 后续批次 | `fif`、`itest`、`utalk` 及其他已分配 Provider ID 的平台 | 规划中 |
+| 首次 Pre-release | 发布范围内实际账号登录验证、公共交付面可用、完整 CI / Release readiness | 当前近期发布目标；不等待第二批，也不等同于所有 Provider 已达到 `Verified` |
+| 第二批 | `zhihuishu`、`zjy`、`icve` | `Further Future`；不属于首次 pre-release 关键路径 |
+| 兼容性收口 | 稳定并冻结 API / OpenAPI 基线，完成 WebUI / Plugin 最终兼容性收口 | `Further Future`；首次 pre-release 可保留明确的预发布兼容声明 |
+| 后续批次 | `fif`、`itest`、`utalk` 及其他已分配 Provider ID 的平台 | `Further Future` |
 
 第一批不会以 Demo 或功能残缺的 MVP 作为完成状态。Provider 的研究来源、采用方式、许可证和真实验证情况会记录在 [UPSTREAMS.md](UPSTREAMS.md)。
 
@@ -305,4 +306,4 @@ Commit 使用统一格式：
 
 ## 项目状态
 
-Asterism 当前没有稳定版本或兼容性承诺。正式 WebUI 与 Asterism-Plugin 在第一批 Provider 完成后开始建设；公开 API 与 OpenAPI 兼容基线在第二批完成并经过真实验证后稳定和冻结。
+Asterism 当前没有稳定版本或兼容性承诺。正式 WebUI 与 Asterism-Plugin 已与第一批 Provider 并行建设；首次 pre-release 在实际账号登录链路通过验证并完成公共交付面后发布。第二批及后续内部暂列 `Further Future`，不阻塞该版本；公开 API / OpenAPI 的最终稳定兼容基线留待后续单独冻结。
