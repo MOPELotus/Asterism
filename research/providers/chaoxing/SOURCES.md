@@ -98,6 +98,9 @@ validation is still required.
   Samueli/mini-only `tid`/`ut`, while mini follows its broader pre-sign request
   with a different `/pptSign` route. Asterism now explicitly freezes only
   `YlimPreSignStuSignAjax`; no hybrid donor chain remains.
+  The same strict source comparison corrected receipt parsing to byte-exact
+  equality: surrounding whitespace around `success`, the already-signed text
+  or `success2` now fails as protocol drift instead of being trimmed.
 - 2026-08-16: refreshed all eight recorded donor default branches. Seven heads
   remain unchanged. `mini-hbut` advanced from `64fb2f06e10c` to
   `952640e2540f`; its three-commit delta changes schedule cleanup, a separate

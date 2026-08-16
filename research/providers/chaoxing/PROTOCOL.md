@@ -825,9 +825,11 @@ success2       -> WindowClosed Receipt
 
 Response documents are bounded, zeroized and represented outside the parser
 only by the preparation binding, response digest and controlled enum. These
-classifications are not a send path. `Accepted` is not verified completion,
-and even `AlreadySigned` remains an endpoint/preflight response rather than the
-required independent fresh account-result readback.
+three bodies are matched byte-for-byte, as in Ylim's strict equality checks;
+leading or trailing whitespace is protocol drift rather than normalization.
+These classifications are not a send path. `Accepted` is not verified
+completion, and even `AlreadySigned` remains an endpoint/preflight response
+rather than the required independent fresh account-result readback.
 
 QR sign-in has a separately bounded Capture-input checkpoint. Ylim's fixed
 source names the dynamic submit fields and its refresh path constructs a

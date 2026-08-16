@@ -129,9 +129,11 @@ policy and remains independently guarded.
 - Preparation-bound, bounded/zeroizing pure parsers now distinguish preflight
   evidence from mutation Receipts. `#statuscontent` may be structurally empty
   (`NoCompletionMarker`) or exactly `签到成功` (`AlreadySigned`); the exact
-  `stuSignajax` bodies map to `Accepted`, `AlreadySigned` or `WindowClosed`.
-  Unknown/missing/duplicate values fail closed. These types have no transport
-  implementation and none is an independent completion verification.
+  byte-for-byte `stuSignajax` bodies map to `Accepted`, `AlreadySigned` or
+  `WindowClosed`. Surrounding whitespace is protocol drift because the donor
+  uses strict string equality. Unknown/missing/duplicate values fail closed.
+  These types have no transport implementation and none is an independent
+  completion verification.
 - `preSign` is not added to the Native read transport merely because it uses
   HTTP GET. The pinned PortSource says the request must be issued before a sign
   record can be created, and always calls it inside `handleSign`. It therefore

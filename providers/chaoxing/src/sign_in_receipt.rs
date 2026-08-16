@@ -238,7 +238,7 @@ pub fn parse_pre_sign_evidence(
 pub fn parse_sign_receipt(
     document: &ChaoxingSignReceiptDocument,
 ) -> ProviderResult<ChaoxingSignReceipt> {
-    let kind = match document.response.trim() {
+    let kind = match document.response.as_str() {
         "success" => ChaoxingSignReceiptKind::Accepted,
         "您已签到过了" => ChaoxingSignReceiptKind::AlreadySigned,
         "success2" => ChaoxingSignReceiptKind::WindowClosed,
@@ -331,27 +331,9 @@ mod tests {
     fn receipt_classes_are_bound_but_not_completion() {
         let preparation = preparation();
         for (fixture, expected) in [
-            (
-                include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../fixtures/providers/chaoxing/sign/receipt-accepted.txt"
-                )),
-                ChaoxingSignReceiptKind::Accepted,
-            ),
-            (
-                include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../fixtures/providers/chaoxing/sign/receipt-already-signed.txt"
-                )),
-                ChaoxingSignReceiptKind::AlreadySigned,
-            ),
-            (
-                include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../fixtures/providers/chaoxing/sign/receipt-window-closed.txt"
-                )),
-                ChaoxingSignReceiptKind::WindowClosed,
-            ),
+            ("success", ChaoxingSignReceiptKind::Accepted),
+            ("您已签到过了", ChaoxingSignReceiptKind::AlreadySigned),
+            ("success2", ChaoxingSignReceiptKind::WindowClosed),
         ] {
             let document =
                 ChaoxingSignReceiptDocument::for_preparation(&preparation, fixture).unwrap();
@@ -375,7 +357,27 @@ mod tests {
             let error = parse_pre_sign_evidence(&document).unwrap_err();
             assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
         }
-        for response in ["ok", "failed", "success PRIVATE_DETAIL"] {
+        for response in [
+            "ok",
+            "failed",
+            "success PRIVATE_DETAIL",
+            " success",
+            "success\n",
+            "\n您已签到过了",
+            "success2 ",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/providers/chaoxing/sign/receipt-accepted.txt"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/providers/chaoxing/sign/receipt-already-signed.txt"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/providers/chaoxing/sign/receipt-window-closed.txt"
+            )),
+        ] {
             let document =
                 ChaoxingSignReceiptDocument::for_preparation(&preparation, response).unwrap();
             let error = parse_sign_receipt(&document).unwrap_err();

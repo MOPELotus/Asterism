@@ -399,11 +399,15 @@ every fixture before staging it.
   exposes the code. The fixture does not classify the opaque `analysis2`
   response and does not prove the donor-commented location prerequisite is a
   universal ordinary-sign server requirement.
-  Separate bounded documents bind both pre-sign pages and all three exact
-  donor-observed response strings to that preparation digest. Regressions reject
-  missing/duplicate/unknown `#statuscontent`, unknown opaque mutation text and
-  oversized bodies, while keeping preflight evidence, mutation Receipt and
-  independent completion verification as three distinct concepts.
+  Separate bounded documents bind both pre-sign pages and the three exact
+  donor-observed response tokens to that preparation digest. The historical
+  `.txt` samples intentionally retain their file-ending newline and are now
+  drift regressions rather than success fixtures; byte-exact success tokens are
+  asserted independently. Regressions reject missing/duplicate/unknown
+  `#statuscontent`, unknown opaque mutation text, leading/trailing whitespace
+  around receipt tokens and oversized bodies, while keeping preflight evidence,
+  mutation Receipt and independent completion verification as three distinct
+  concepts.
   A future transport fixture must additionally ledger `preSign` as the first
   issued operation in the sign mutation sequence, because the PortSource says
   that request is required for the later sign record. Each donor-specific
