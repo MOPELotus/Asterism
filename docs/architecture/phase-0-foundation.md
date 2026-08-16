@@ -5038,3 +5038,22 @@ authority or batch bytes.
 This is a persistence and dispatch boundary only. It does not create child
 Executions, schedule a batch, or grant a Provider a mutation sink; those remain
 explicit capability and Engine decisions after the parent snapshot is frozen.
+
+## Two-hundred-and-seventy-third Phase 0 slice
+
+Provider API now has one generic, order-preserving child dispatch plan bound to
+the encrypted parent's authority and complete-batch digests. Every child keeps
+its one-based ordinal, redacted remote Task identity, exact Provider execution
+call plan, required Provider plan artifact and artifact-bound conditional
+mutation sequence in the same immutable value. Provider namespaces are
+rechecked across the artifact, sequence, operations and observation gates.
+
+A complete batch requires contiguous ordinals, unique remote Task identities,
+unique artifact and sequence digests, one Provider and at most 8,192 children.
+This prevents Core from reconstructing a batch by zipping independent target,
+artifact and sequence arrays where one reordered element could widen another
+child's authority. The value remains planning evidence only: it does not map a
+remote identity to a local Task, create an Execution, change Task state,
+reserve credit, enqueue scheduler work or expose a mutation sink. Those
+transactional parent/child operations remain the next shared Storage/Engine
+slice.

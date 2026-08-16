@@ -1950,6 +1950,201 @@ impl ProviderExecutionPlan {
     }
 }
 
+const MAX_PROVIDER_EXECUTION_BATCH_CHILDREN: usize = 8_192;
+const MAX_PROVIDER_EXECUTION_BATCH_CHILDREN_U32: u32 = 8_192;
+const MAX_PROVIDER_EXECUTION_CHILD_REMOTE_ID_BYTES: usize = 512;
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProviderExecutionChildPlan {
+    position: u32,
+    remote_task_id: String,
+    execution_plan: ProviderExecutionPlan,
+    mutation_sequence_plan: ExecutionMutationSequencePlan,
+}
+
+impl ProviderExecutionChildPlan {
+    /// Freezes one exact child dispatch projection without granting mutation
+    /// authority. Core must still bind the remote identity to one local Task
+    /// and create the child Execution transactionally.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid positions/remote identities, missing or foreign child
+    /// artifacts, a sequence detached from that artifact, or foreign sequence
+    /// operation namespaces.
+    pub fn try_new(
+        position: u32,
+        remote_task_id: impl Into<String>,
+        execution_plan: ProviderExecutionPlan,
+        mutation_sequence_plan: ExecutionMutationSequencePlan,
+    ) -> ProviderResult<Self> {
+        let remote_task_id = remote_task_id.into();
+        let provider_id = execution_plan.provider_id();
+        let artifact = execution_plan.artifact();
+        if !(1..=MAX_PROVIDER_EXECUTION_BATCH_CHILDREN_U32).contains(&position)
+            || remote_task_id.is_empty()
+            || remote_task_id.len() > MAX_PROVIDER_EXECUTION_CHILD_REMOTE_ID_BYTES
+            || remote_task_id.trim() != remote_task_id
+            || remote_task_id.chars().any(char::is_control)
+            || artifact.is_none_or(|artifact| artifact.provider_id() != provider_id)
+            || artifact.is_none_or(|artifact| {
+                artifact.artifact_digest() != mutation_sequence_plan.artifact_digest()
+            })
+            || !execution_mutation_sequence_belongs_to_provider(
+                provider_id,
+                &mutation_sequence_plan,
+            )
+        {
+            return Err(invalid_provider_execution_child_plan());
+        }
+        Ok(Self {
+            position,
+            remote_task_id,
+            execution_plan,
+            mutation_sequence_plan,
+        })
+    }
+
+    pub const fn position(&self) -> u32 {
+        self.position
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub const fn execution_plan(&self) -> &ProviderExecutionPlan {
+        &self.execution_plan
+    }
+
+    pub const fn mutation_sequence_plan(&self) -> &ExecutionMutationSequencePlan {
+        &self.mutation_sequence_plan
+    }
+}
+
+impl fmt::Debug for ProviderExecutionChildPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderExecutionChildPlan")
+            .field("position", &self.position)
+            .field("remote_task_id", &"[REDACTED]")
+            .field("execution_plan", &self.execution_plan)
+            .field("mutation_sequence_plan", &self.mutation_sequence_plan)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProviderExecutionBatchPlan {
+    provider_id: ProviderId,
+    authority_digest: [u8; 32],
+    batch_digest: [u8; 32],
+    children: Vec<ProviderExecutionChildPlan>,
+}
+
+impl ProviderExecutionBatchPlan {
+    /// Binds one complete ordered child projection to the exact private parent
+    /// authority and complete batch snapshot already frozen by Core.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty/oversized batches, non-contiguous positions, foreign
+    /// children, duplicate remote tasks, or reused child artifact/sequence
+    /// identities.
+    pub fn try_new(
+        parent: &ExecutionParentBatchSnapshot,
+        children: Vec<ProviderExecutionChildPlan>,
+    ) -> ProviderResult<Self> {
+        let provider_id = parent.provider_id();
+        let remote_ids = children
+            .iter()
+            .map(ProviderExecutionChildPlan::remote_task_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let artifact_digests = children
+            .iter()
+            .filter_map(|child| child.execution_plan.artifact())
+            .map(ProviderExecutionPlanArtifact::artifact_digest)
+            .collect::<std::collections::BTreeSet<_>>();
+        let sequence_digests = children
+            .iter()
+            .map(|child| child.mutation_sequence_plan.plan_digest())
+            .collect::<std::collections::BTreeSet<_>>();
+        if children.is_empty()
+            || children.len() > MAX_PROVIDER_EXECUTION_BATCH_CHILDREN
+            || children.iter().enumerate().any(|(index, child)| {
+                u32::try_from(index + 1) != Ok(child.position)
+                    || child.execution_plan.provider_id() != provider_id
+            })
+            || remote_ids.len() != children.len()
+            || artifact_digests.len() != children.len()
+            || sequence_digests.len() != children.len()
+        {
+            return Err(invalid_provider_execution_batch_plan());
+        }
+        Ok(Self {
+            provider_id: provider_id.clone(),
+            authority_digest: parent.authority_digest(),
+            batch_digest: parent.batch_digest(),
+            children,
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub const fn authority_digest(&self) -> [u8; 32] {
+        self.authority_digest
+    }
+
+    pub const fn batch_digest(&self) -> [u8; 32] {
+        self.batch_digest
+    }
+
+    pub fn children(&self) -> &[ProviderExecutionChildPlan] {
+        &self.children
+    }
+}
+
+impl fmt::Debug for ProviderExecutionBatchPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderExecutionBatchPlan")
+            .field("provider_id", &self.provider_id)
+            .field("authority_digest", &"[HASHED]")
+            .field("batch_digest", &"[HASHED]")
+            .field("child_count", &self.children.len())
+            .finish()
+    }
+}
+
+fn execution_mutation_sequence_belongs_to_provider(
+    provider_id: &ProviderId,
+    plan: &ExecutionMutationSequencePlan,
+) -> bool {
+    valid_provider_execution_artifact_type(provider_id, plan.sequence_type())
+        && plan.phases().iter().all(|phase| {
+            valid_provider_execution_artifact_type(provider_id, phase.operation_type())
+                && phase.required_observation_type().is_none_or(|observation| {
+                    valid_provider_execution_artifact_type(provider_id, observation)
+                })
+        })
+}
+
+fn invalid_provider_execution_child_plan() -> crate::ProviderError {
+    crate::ProviderError::new(
+        crate::ProviderErrorKind::InvalidResponse,
+        "Provider execution child plan is invalid",
+    )
+}
+
+fn invalid_provider_execution_batch_plan() -> crate::ProviderError {
+    crate::ProviderError::new(
+        crate::ProviderErrorKind::InvalidResponse,
+        "Provider execution batch plan is invalid",
+    )
+}
+
 fn valid_provider_execution_artifact_type(provider_id: &ProviderId, value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 96
@@ -3472,6 +3667,49 @@ mod execution_parent_batch_snapshot_tests {
 mod provider_execution_plan_tests {
     use super::*;
 
+    fn child(
+        position: u32,
+        remote_task_id: &str,
+        target_seconds: u64,
+    ) -> ProviderExecutionChildPlan {
+        let provider_id = ProviderId::new("welearn").unwrap();
+        let artifact = ProviderExecutionPlanArtifact::try_new(
+            provider_id.clone(),
+            "welearn.atomic-child.v1",
+            serde_json::json!({
+                "remote_task_id": remote_task_id,
+                "target_seconds": target_seconds,
+            }),
+        )
+        .unwrap();
+        let phase = ExecutionMutationSequencePhase::try_new(
+            "welearn.atomic-start.v1",
+            1,
+            1,
+            false,
+            ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached,
+            None,
+        )
+        .unwrap();
+        let sequence = ExecutionMutationSequencePlan::try_new(
+            artifact.artifact_digest(),
+            "welearn.atomic-duration-completion.v1",
+            vec![phase],
+        )
+        .unwrap();
+        let execution_plan = ProviderExecutionPlan::try_new(
+            provider_id,
+            vec![vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ]],
+            Some(artifact),
+        )
+        .unwrap();
+        ProviderExecutionChildPlan::try_new(position, remote_task_id, execution_plan, sequence)
+            .unwrap()
+    }
+
     #[test]
     fn artifact_is_provider_bound_hashed_bounded_and_redacted() {
         let provider_id = ProviderId::new("welearn").unwrap();
@@ -3529,6 +3767,87 @@ mod provider_execution_plan_tests {
         .unwrap();
         assert_eq!(plan.calls().len(), 1);
         assert!(plan.artifact().is_some());
+    }
+
+    #[test]
+    fn batch_plan_binds_ordered_unique_children_to_private_parent_digests() {
+        let parent = ExecutionParentBatchSnapshot::try_new(
+            ProviderId::new("welearn").unwrap(),
+            "welearn.parent-authority.v1",
+            SecretValue::new(b"parent-authority".to_vec()),
+            "welearn.batch-plan.v1",
+            SecretValue::new(b"complete-batch".to_vec()),
+        )
+        .unwrap();
+        let first = child(1, "sco:course:one", 60);
+        let debug = format!("{first:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sco:course:one"));
+        let plan = ProviderExecutionBatchPlan::try_new(
+            &parent,
+            vec![first, child(2, "sco:course:two", 120)],
+        )
+        .unwrap();
+        assert_eq!(plan.provider_id(), parent.provider_id());
+        assert_eq!(plan.authority_digest(), parent.authority_digest());
+        assert_eq!(plan.batch_digest(), parent.batch_digest());
+        assert_eq!(plan.children().len(), 2);
+        assert!(format!("{plan:?}").contains("child_count: 2"));
+
+        assert!(
+            ProviderExecutionBatchPlan::try_new(&parent, vec![child(2, "sco:course:one", 60)])
+                .is_err()
+        );
+        assert!(
+            ProviderExecutionBatchPlan::try_new(
+                &parent,
+                vec![
+                    child(1, "sco:course:duplicate", 60),
+                    child(2, "sco:course:duplicate", 120),
+                ],
+            )
+            .is_err()
+        );
+
+        let provider_id = ProviderId::new("welearn").unwrap();
+        let artifact = ProviderExecutionPlanArtifact::try_new(
+            provider_id.clone(),
+            "welearn.atomic-child.v1",
+            serde_json::json!({"remote_task_id": "sco:course:one", "target_seconds": 60}),
+        )
+        .unwrap();
+        let other = ProviderExecutionPlanArtifact::try_new(
+            provider_id.clone(),
+            "welearn.atomic-child.v1",
+            serde_json::json!({"remote_task_id": "sco:course:other", "target_seconds": 60}),
+        )
+        .unwrap();
+        let sequence = ExecutionMutationSequencePlan::try_new(
+            other.artifact_digest(),
+            "welearn.atomic-duration-completion.v1",
+            vec![
+                ExecutionMutationSequencePhase::try_new(
+                    "welearn.atomic-start.v1",
+                    1,
+                    1,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached,
+                    None,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let execution_plan = ProviderExecutionPlan::try_new(
+            provider_id,
+            vec![vec![TaskCapability::ResourceExecution]],
+            Some(artifact),
+        )
+        .unwrap();
+        assert!(
+            ProviderExecutionChildPlan::try_new(1, "sco:course:one", execution_plan, sequence,)
+                .is_err()
+        );
     }
 }
 
