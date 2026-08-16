@@ -1,4 +1,15 @@
-.codex-docs/
+# Internal planning, research and agent material. The public repository keeps
+# only the root README as Markdown documentation.
+*.md
+!/README.md
+/AGENTS.md
+/UPSTREAMS.md
+/.agents/
+/.codex/
+/.codex-docs/
+/docs/
+/research/
+
 /target/
 /asterism.toml
 *.db
