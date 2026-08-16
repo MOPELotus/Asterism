@@ -1652,18 +1652,22 @@ fn valid_remote_type_code(value: &str) -> bool {
 }
 
 fn provider_type_code(kind: QuestionKind, metadata: &serde_json::Value) -> ProviderResult<&str> {
+    let page_kind = metadata
+        .get("page_kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| protocol_drift("Chaoxing Question has no page-kind binding"))?;
     let type_code = metadata
         .get("provider_type_code")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| protocol_drift("Chaoxing Question has no Provider type code"))?;
-    match (kind, type_code) {
-        (QuestionKind::SingleChoice, 0) => Ok("0"),
-        (QuestionKind::MultipleChoice, 1) => Ok("1"),
-        (QuestionKind::FillBlank, 2) => Ok("2"),
-        (QuestionKind::TrueFalse, 3) => Ok("3"),
-        (QuestionKind::ShortAnswer, 4) => Ok("4"),
+    match (page_kind, kind, type_code) {
+        (_, QuestionKind::SingleChoice, 0) => Ok("0"),
+        (_, QuestionKind::MultipleChoice, 1) => Ok("1"),
+        (_, QuestionKind::FillBlank, 2) => Ok("2"),
+        (_, QuestionKind::TrueFalse, 3) => Ok("3"),
+        ("chapter_work_mobile", QuestionKind::ShortAnswer, 4) => Ok("4"),
         _ => Err(unsupported(
-            "Chaoxing native submission does not support this Question type code",
+            "Chaoxing native submission does not support this Question type for this module",
         )),
     }
 }
@@ -1970,6 +1974,10 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/work/submission-view.html");
     const PARTIAL_VIEW: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/submission-view-partial.html");
+    const FILL_EDITOR: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/submission-editor-fill.html");
+    const FILL_VIEW: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/submission-view-fill.html");
     const CHAPTER_QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
     const CHAPTER_EDITOR: &str =
@@ -2068,6 +2076,76 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_work_single_blank_is_bound_from_editor_through_result() {
+        let draft = work_fill_draft().await;
+        draft.validate().unwrap();
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        assert!(plan.is_partial());
+        let identity = WorkSubmissionIdentity::parse("work:100:200:work-1").unwrap();
+        let form = ChaoxingSubmissionForm::parse(FILL_EDITOR, identity, &plan).unwrap();
+        let fields = form.fields().iter().cloned().collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            fields.get("answerwqbid").map(String::as_str),
+            Some("work-preview-q-1,work-preview-q-2,")
+        );
+        assert_eq!(
+            fields.get("answerwork-preview-q-1").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            fields.get("answerwork-preview-q-2").map(String::as_str),
+            Some("bounded fill answer")
+        );
+        assert_eq!(
+            fields.get("answertypework-preview-q-2").map(String::as_str),
+            Some("2")
+        );
+        assert!(!format!("{form:?}").contains("bounded fill answer"));
+
+        let view = ChaoxingWorkVerificationDocument::try_new(
+            ChaoxingWorkVerificationRoute::View,
+            FILL_VIEW.to_owned(),
+        )
+        .unwrap();
+        let snapshot = parse_verification_snapshot(&view, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(snapshot.questions.len(), 1);
+        assert_eq!(
+            snapshot.questions[0].status,
+            SubmissionQuestionVerificationStatus::Confirmed
+        );
+
+        let changed = FILL_VIEW.replace("bounded fill answer", "different fill answer");
+        let changed =
+            ChaoxingWorkVerificationDocument::try_new(ChaoxingWorkVerificationRoute::View, changed)
+                .unwrap();
+        let snapshot = parse_verification_snapshot(&changed, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Rejected);
+
+        let missing = FILL_VIEW.replace(
+            "<div class=\"mark_answer\"><span>我的答案：bounded fill answer</span></div>",
+            "",
+        );
+        let missing =
+            ChaoxingWorkVerificationDocument::try_new(ChaoxingWorkVerificationRoute::View, missing)
+                .unwrap();
+        let snapshot = parse_verification_snapshot(&missing, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+
+        let mut forged_short = draft;
+        forged_short.items[0].question.kind = QuestionKind::ShortAnswer;
+        forged_short.items[0].question.metadata_sanitized["provider_type_code"] =
+            serde_json::json!(4);
+        assert_eq!(
+            ChaoxingSubmissionPlan::from_draft(&forged_short)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::UnsupportedTask
         );
     }
 
@@ -2823,6 +2901,56 @@ mod tests {
             unanswered_question_ids: vec![QuestionId::new(), QuestionId::new()],
         };
         draft
+    }
+
+    async fn work_fill_draft() -> SubmissionDraft {
+        let task_id = TaskId::new();
+        let questions = parse_work_preview_question_page(QUESTIONS)
+            .unwrap()
+            .iter()
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let selected_question = questions[1].clone();
+        let selected_answer = selected(
+            selected_question.id,
+            NormalizedAnswer::Texts(vec!["bounded fill answer".to_owned()]),
+        );
+        let context = ProviderContext {
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            account_id: asterism_domain::ProviderAccountId::new(),
+            credential_refs: vec![asterism_domain::SecretId::new()],
+            correlation_id: "chaoxing-work-fill-submission-support".to_owned(),
+        };
+        let preview = ChaoxingSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context,
+                "work:100:200:work-1",
+                std::slice::from_ref(&selected_question),
+                std::slice::from_ref(&selected_answer),
+            )
+            .await
+            .unwrap();
+        SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            provider_version: crate::metadata::development_metadata()
+                .unwrap()
+                .implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 2,
+                minimum_coverage_millis: 500,
+                unanswered_question_ids: vec![questions[0].id],
+            },
+            items: vec![SubmissionDraftItem {
+                question: selected_question,
+                selected: selected_answer,
+            }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        }
     }
 
     async fn chapter_result_draft() -> SubmissionDraft {

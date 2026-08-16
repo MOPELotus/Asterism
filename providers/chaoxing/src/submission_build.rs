@@ -192,7 +192,7 @@ fn validate_answer_shape(
             Ok(())
         }
         (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values))
-            if values.len() == 1 && task_kind != SubmissionTaskKind::Exam =>
+            if values.len() == 1 && task_kind == SubmissionTaskKind::ChapterWork =>
         {
             Ok(())
         }
@@ -433,6 +433,74 @@ mod tests {
         assert!(!encoded.contains("First"));
         assert!(!encoded.contains("addStudentWorkNew"));
         assert!(!encoded.contains("pyFlag"));
+    }
+
+    #[tokio::test]
+    async fn independent_work_preview_accepts_only_one_bound_fill_blank() {
+        let task_id = TaskId::new();
+        let questions = parse_work_preview_question_page(WORK_PREVIEW)
+            .unwrap()
+            .iter()
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let fill = questions[1].clone();
+        let selected = selection(
+            fill.id,
+            NormalizedAnswer::Texts(vec!["bounded fill answer".to_owned()]),
+        );
+        let capability = ChaoxingSubmissionBuild::try_new().unwrap();
+        let preview = capability
+            .build_submission_preview(
+                &context(),
+                "work:100:200:work-1",
+                std::slice::from_ref(&fill),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(preview.format, "chaoxing.work.form.v1");
+        assert_eq!(preview.fields.len(), 2);
+        assert_eq!(preview.fields[0].field_name, "answerwork-preview-q-2");
+        assert_eq!(preview.fields[1].field_name, "answertypework-preview-q-2");
+        assert!(
+            !serde_json::to_string(&preview)
+                .unwrap()
+                .contains("bounded fill answer")
+        );
+
+        let mut multi_blank = fill.clone();
+        multi_blank.metadata_sanitized["blank_count"] = serde_json::json!(2);
+        assert_eq!(
+            capability
+                .build_submission_preview(
+                    &context(),
+                    "work:100:200:work-1",
+                    std::slice::from_ref(&multi_blank),
+                    std::slice::from_ref(&selected),
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::InvalidResponse
+        );
+
+        let mut short = fill;
+        short.kind = QuestionKind::ShortAnswer;
+        short.metadata_sanitized["provider_type_code"] = serde_json::json!(4);
+        assert_eq!(
+            capability
+                .build_submission_preview(
+                    &context(),
+                    "work:100:200:work-1",
+                    std::slice::from_ref(&short),
+                    std::slice::from_ref(&selected),
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::InvalidResponse
+        );
     }
 
     #[tokio::test]

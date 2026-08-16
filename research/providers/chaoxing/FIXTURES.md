@@ -44,9 +44,11 @@ fixtures/providers/chaoxing/
     detail-submitted.html
     detail-closed.html
     submission-editor.html
+    submission-editor-fill.html
     submission-editor-partial.html
     submission-prompt.html
     submission-view.html
+    submission-view-fill.html
     submission-view-partial.html
     chapter-submission-editor.html
     chapter-result.html
@@ -135,6 +137,15 @@ JSON acknowledgement that remains only a Receipt, prompt-as-Pending semantics,
 and exact server-visible answer comparison on the result view. They contain no
 real token, answer, route or account fact and do not prove the endpoint works
 against the current live platform.
+
+`submission-editor-fill.html` and `submission-view-fill.html` pin the exact
+single-blank independent Work subset. The complete two-Question editor keeps an
+unselected choice empty, discards a stale fill value, retains type code 2 and
+sends one exact Draft text through `answer{qid}`. The result fixture confirms or
+rejects only the selected fill at its original position from one bounded visible
+`我的答案` value; a missing value is Inconclusive. Tests reject `blank_count=2`
+and a forged independent short-answer type. These fixtures are synthetic donor
+contract evidence, not live teacher-policy validation.
 
 `submission-editor-partial.html` and `submission-view-partial.html` cover the
 Core-frozen subset path. Four fresh controls include two selected Questions, one
@@ -351,6 +362,11 @@ every fixture before staging it.
 - Coverage regression must include a complete snapshot containing an unanswered
   supported Question, an unsupported observed Question and an unknown type; the
   denominator is the complete snapshot and no missing value is invented.
+- Independent Work fill regression requires `provider_type_code=2`, a
+  page-derived `blank_count=1`, one Draft text, one fresh `answer{qid}` field and
+  one exact visible result value. Multi-blank concatenation and independent
+  short-answer mutation remain unsupported rather than borrowing Chapter Work
+  semantics.
 - Retake fixtures must show fresh QIDs/option mappings and separate Chapter
   `redoTest` from Exam `reTest`; they may not authorize mutation during the
   read-only bootstrap test path.

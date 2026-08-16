@@ -436,12 +436,16 @@ mobile donor confirms the same answer/type grammar but exposes a different
 global parameter set. Asterism therefore does not persist or blindly copy an
 executable donor payload.
 
-`SubmissionBuild` remains credential-free and value-free. It accepts only
+`SubmissionBuild` remains credential-free and value-free. It accepts
 single-choice, multiple-choice and true/false Questions whose remote option
-identities have the unambiguous donor grammar. It validates the complete
-Question/SelectedAnswer binding and returns only the two expected field names
-per Question. Fill-blank, short-answer and complex shapes fail closed until a
-current live fixture proves their exact multi-blank/editor encoding.
+identities have the unambiguous donor grammar. The pinned primary donor also
+maps type 2 to the same `answer{qid}` / `answertype{qid}` pair and sends one
+answer field per Question. Asterism therefore accepts an independent Work fill
+only when the current page binds exactly one blank and the Draft carries exactly
+one text value. It validates the complete Question/SelectedAnswer binding and
+returns only the two expected field names per Question. Multi-blank,
+short-answer and complex Work shapes remain fail-closed until their exact
+editor and result/grading semantics are established.
 
 `SubmissionExecute` reloads that immutable Draft, rebuilds the expected preview,
 rediscovers the current Course and Work inventory, and follows the fresh Work
@@ -464,9 +468,12 @@ Work and follows the current detail route. `/work/dowork` is Pending. A
 `/work/prompt` page with submission/waiting evidence is also Pending because it
 does not expose the submitted values. Only an allowlisted `/work/view` result
 whose complete unique QID/type set exposes `我的答案` and exactly matches every
-Draft answer becomes Confirmed with remote Completed. A complete mismatch is
-Rejected; incomplete result facts are Inconclusive. CSS selection state, list
-text, HTTP 200 and the acknowledgement JSON never substitute for this readback.
+Draft answer becomes Confirmed with remote Completed. Type 2 confirmation
+additionally requires the same one-blank Question binding and one exact bounded
+visible text value; a different value is Rejected and a missing value is
+Inconclusive. A complete mismatch is Rejected; incomplete result facts are
+Inconclusive. CSS selection state, list text, HTTP 200 and the acknowledgement
+JSON never substitute for this readback.
 
 These contracts are covered by explicitly synthetic donor-compatible fixtures
 and capability-level tests, including recovery verification with no Receipt.

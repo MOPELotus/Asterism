@@ -208,7 +208,7 @@ re-enumerated before implementation:
   `activelist`/`signDetail` routes, `type=2`, `status=1` active filtering,
   structured `Time.time`, and normal/QR/gesture/location/code dispatch;
 - `superdaobo/mini-hbut` `main` at
-  `64fb2f06e10c95a77a39f17d45c6e2b573ad63a2` (GPL-3.0-or-later,
+  `952640e2540f9daf927ec940a2a2862b5cd4dd34` (GPL-3.0-or-later,
   Reference): README/configuration, complete `chaoxing_checkin` module and
   tests, the same list/detail routes, numeric-or-string IDs/times, and its
   independent variant/status normalization.
@@ -257,3 +257,10 @@ de-duplication ledger, recursively reconnects from `onClosed`, and limits the
 SDK to two automatic reconnects with delivery acknowledgements disabled. These
 observations make durable subscription ownership, ordered recovery and explicit
 acknowledgement state concrete Core gaps rather than optional hardening.
+
+The 2026-08-16 delta refresh advanced only `mini-hbut`, from the originally
+audited `64fb2f06e10c` to `952640e2540f`. Its three new commits affect schedule
+cleanup, a separate OIDC identity platform, root/website documentation and
+website behavior. Recursive Git tree comparison confirms that every
+Chaoxing-check-in source, protocol document and related UI blob is byte-identical,
+so this pin update carries no Chaoxing capability or protocol delta.

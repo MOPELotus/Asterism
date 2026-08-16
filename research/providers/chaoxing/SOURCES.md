@@ -1,6 +1,6 @@
 # chaoxing upstream sources
 
-Audit date: 2026-08-15
+Audit date: 2026-08-16
 
 This is a static source audit. No donor or Asterism implementation was live-tested
 against a real account during this audit, so every live-validation claim remains
@@ -11,7 +11,7 @@ pending.
 | [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `9699e632b492cdc55ea35a1ab05b6dfcbfb7cf70` | 2026-08-14 | Reference | Password/Cookie login, course/folder inventory, Chapter cards, Video/Audio fallback, Document, Live, Read, Chapter Work, sign-in and learning-count behavior | Pending |
 | [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c4bab71f79d762b45210643dd537d` | 2024-09-29 | Reference | Password/QR login, SSO validation, mobile course/Chapter APIs, Video/Document, Work/Exam export/save/submit, retake facts, face/captcha branches | Pending; protocol age is a risk |
 | [`Ylim314/chaoxing-sign`](https://github.com/Ylim314/chaoxing-sign) | `7ed64ff547d352708066ff61f1b1dc1fb1be32f1` | 2026-03-09 | PortSource | Current `activelist`/`signDetail` reads, sign activity/status codes, structured time fields, normal/QR/gesture/location/code dispatch, WebIM event monitoring and application-local sign logs | Pending |
-| [`superdaobo/mini-hbut`](https://github.com/superdaobo/mini-hbut) | `64fb2f06e10c95a77a39f17d45c6e2b573ad63a2` | 2026-08-14 | Reference | Independent current activity-list/detail routes, numeric-or-string identities/times, variant normalization and sign-state heuristics | Pending |
+| [`superdaobo/mini-hbut`](https://github.com/superdaobo/mini-hbut) | `952640e2540f9daf927ec940a2a2862b5cd4dd34` | 2026-08-16 | Reference | Independent current activity-list/detail routes, numeric-or-string identities/times, variant normalization and sign-state heuristics | Pending; current delta does not change the Chaoxing protocol tree |
 | [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b36996d27d00577015663ec39e782500` | 2026-06-17 | PortSource | Browser Work/Exam inventory, rich editor filling, result inspection, retry/retake policy and current DOM reliability rules | Donor reports real use; Asterism validation pending |
 | [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f9a6d52d1169bae9ea5971e0863c7` | 2026-07-01 | Reference | Current media/PPT/Read/Chapter-test/Work/Exam lifecycle, thresholded save/submit, extended Question types and browser controls | Pending |
 | [`LangHY/chaoxing-exam`](https://github.com/LangHY/chaoxing-exam) | `14e1dfd9cf11cd54dabb494dd01e318856d9b8d3` | 2026-06-19 | Reference | Chapter-test navigation, fill/short editor behavior, result standards, score and `redoTest` pitfalls | Donor reports Chapter-test coverage; Asterism validation pending |
@@ -84,6 +84,17 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-16: refreshed all eight recorded donor default branches. Seven heads
+  remain unchanged. `mini-hbut` advanced from `64fb2f06e10c` to
+  `952640e2540f`; its three-commit delta changes schedule cleanup, a separate
+  OIDC identity platform, root/website documentation and website behavior. A
+  complete recursive-tree comparison shows every Chaoxing check-in module,
+  Chaoxing protocol document and related UI blob unchanged, so the current pin
+  advances without a Chaoxing capability or wire delta. Re-reading Samueli's
+  fixed Work form confirms type 2 still uses one `answer{qid}` plus
+  `answertype{qid}` field. Asterism now fixture-covers only the exact
+  page-bound single-blank independent Work subset and keeps multi-blank and
+  short-answer semantics fail-closed.
 - 2026-08-15: re-checked Ylim's ordinary `handleSign` chain at the fixed pin.
   Its source explicitly requires issuing `preSign` before a later sign record
   can be created and always calls it before variant dispatch. Asterism
