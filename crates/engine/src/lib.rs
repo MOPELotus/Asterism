@@ -7,6 +7,7 @@ mod assessment;
 mod auth_bootstrap;
 mod auth_bootstrap_credential;
 mod auth_session;
+mod batch_execution_job;
 mod browser_bridge_credential;
 mod browser_bridge_session;
 mod browser_bridge_workflow;
@@ -61,6 +62,10 @@ pub use auth_session::{
     AuthSessionBegin, AuthSessionCredentialCommit, AuthSessionCredentialRequest,
     AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest,
     ExternalOauthCallbackRequest, InteractiveAuthPollRequest, InteractiveAuthPollResult,
+};
+pub use batch_execution_job::{
+    BatchExecutionPlanningError, BatchExecutionPlanningResult, BatchExecutionPlanningService,
+    PlanBatchExecutionCommand,
 };
 pub use browser_bridge_credential::{
     BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorConfig,

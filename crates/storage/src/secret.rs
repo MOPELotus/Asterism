@@ -313,6 +313,15 @@ impl crate::InteractiveAuthContinuationRepositoryFactory for SqliteSecretStore {
     }
 }
 
+impl crate::BatchExecutionParentSnapshotRepositoryFactory for SqliteSecretStore {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn crate::BatchExecutionParentSnapshotRepository> {
+        Arc::new(self.batch_execution_parent_snapshots(provider_id))
+    }
+}
+
 #[async_trait]
 impl SecretStore for SqliteSecretStore {
     async fn put(

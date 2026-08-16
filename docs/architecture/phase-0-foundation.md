@@ -5180,3 +5180,31 @@ hook or persist its public ordered child projection. Engine still has to
 resolve the input and account settings, perform the one fresh parent planning
 call, bind the returned private parent pair, then atomically materialize every
 child or recover the exact already-created set.
+
+## Two-hundred-and-seventy-ninth Phase 0 slice
+
+Engine now owns the claim-bound parent planning orchestration. It starts or
+reuses the exact `BatchExecutionAttempt`, rechecks the persisted parent,
+Provider account and Course binding, resolves only Provider/account runtime
+settings, and opens the encrypted planning input and parent snapshot through a
+Core-service access scoped to the worker correlation. Providers receive the
+opaque credential references and fresh Course identity, but no Storage,
+scheduler, lease or secret-write capability.
+
+On the first pass Engine invokes the Provider's read-only batch hook once. It
+then asks the same Provider to reconstruct the ordered child plan solely from
+the returned private parent pair and rejects any difference before persistence.
+Only after that deterministic cross-check does Core encrypt and bind the parent
+snapshot. A restart first resolves the already-bound pair and uses the
+parent-only recovery hook, so it cannot rescan membership or redistribute
+targets. Integration coverage drives real SQLite scheduling, encrypted input,
+claim/lease/Attempt creation and parent binding, then proves a second planner
+run returns the identical two-child plan while the fresh Provider call count
+remains one.
+
+Storage also exposes a runtime Course lookup and a Provider-scoped parent
+snapshot factory selected only after account binding. No ordered child record
+is persisted by this slice: a crash after parent binding is recoverable because
+the Provider can reconstruct the plan, but child Tasks, Executions, artifacts,
+mutation sequences, credits and jobs still require one atomic materialization
+transaction before remote mutation is allowed.

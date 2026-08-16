@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 
-use crate::{CourseAggregateProgressRecord, CourseProgressRepository, Database, StorageError};
+use crate::{
+    CourseAggregateProgressRecord, CourseProgressRepository, CourseRuntimeRepository, Database,
+    StorageError,
+};
 
 #[derive(Clone, Debug)]
 pub struct SqliteCourseProgressRepository {
@@ -146,6 +149,25 @@ impl CourseProgressRepository for SqliteCourseProgressRepository {
         };
         progress.validate().map_err(|_| invalid_progress())?;
         Ok(Some(CourseAggregateProgressRecord { course, progress }))
+    }
+}
+
+#[async_trait]
+impl CourseRuntimeRepository for SqliteCourseProgressRepository {
+    async fn find_runtime_course(
+        &self,
+        course_id: CourseId,
+    ) -> Result<Option<Course>, StorageError> {
+        sqlx::query(
+            "SELECT id, provider_account_id, remote_id, title, term, teacher, remote_status, \
+                    metadata_json, last_seen_at FROM courses WHERE id = ?",
+        )
+        .bind(course_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?
+        .as_ref()
+        .map(decode_course)
+        .transpose()
     }
 }
 

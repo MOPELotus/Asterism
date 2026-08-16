@@ -438,6 +438,16 @@ pub trait TaskRuntimeRepository: Send + Sync {
     }
 }
 
+/// Internal Course lookup for an already claimed parent batch. Authorization
+/// remains anchored in the `BatchExecution`'s account/Course binding.
+#[async_trait]
+pub trait CourseRuntimeRepository: Send + Sync {
+    async fn find_runtime_course(
+        &self,
+        course_id: CourseId,
+    ) -> Result<Option<Course>, StorageError>;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskLifecycleReceipt {
     pub id: TaskActionReceiptId,
@@ -2804,6 +2814,15 @@ pub trait BatchExecutionParentSnapshotRepository: Send + Sync {
         &self,
         request: BatchExecutionParentSnapshotResolveRequest<'_>,
     ) -> Result<Option<ResolvedBatchExecutionParentSnapshot>, SecretStoreError>;
+}
+
+/// Creates one permanently Provider-scoped encrypted parent snapshot boundary
+/// after Core resolves the Provider from the bound account.
+pub trait BatchExecutionParentSnapshotRepositoryFactory: Send + Sync {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn BatchExecutionParentSnapshotRepository>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
