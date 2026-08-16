@@ -11,7 +11,8 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_MESSAGE_BYTES: usize = 2_048;
 const ASSESSMENT_STEP_FAMILY: &str = "assessment_step";
 const WORD_SELECTION_FAMILY: &str = "word_selection";
-const REQUIRED_CHILDREN_PENDING_MESSAGE: &str = "对不起，存在小节任务未完成，请先完成小节任务";
+const EXISTING_WORD_SELECTION_REJECTION_MESSAGE: &str =
+    "对不起，存在小节任务未完成，请先完成小节任务";
 
 /// Bounded donor acknowledgement classification. A terminal acknowledgement
 /// is only a mutation receipt; it never substitutes for fresh verification.
@@ -254,7 +255,7 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
             root,
         )
     })?;
-    if required_children_pending_rejection(object, code, message.as_deref()) {
+    if existing_word_selection_rejection(object, code, message.as_deref()) {
         return Ok(CidarenAssessmentResponse::Rejected {
             kind: CidarenAssessmentRejectionKind::ExistingWordSelection,
         });
@@ -291,13 +292,13 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
     })
 }
 
-fn required_children_pending_rejection(
+fn existing_word_selection_rejection(
     object: &serde_json::Map<String, Value>,
     code: i64,
     message: Option<&str>,
 ) -> bool {
     code == 0
-        && message == Some(REQUIRED_CHILDREN_PENDING_MESSAGE)
+        && message == Some(EXISTING_WORD_SELECTION_REJECTION_MESSAGE)
         && object.len() == 5
         && matches!(object.get("data"), Some(Value::Null))
         && object.get("jv").and_then(Value::as_str) == Some("0")
@@ -476,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn required_children_rejection_is_exact_and_word_selection_scoped() {
+    fn existing_word_selection_rejection_is_exact_and_word_selection_scoped() {
         let document = include_bytes!(
             "../../../fixtures/providers/cidaren/questions/submit-chose-word-required-children.json"
         );
@@ -487,7 +488,7 @@ mod tests {
         );
         let debug = format!("{response:?}");
         assert!(debug.contains("ExistingWordSelection"));
-        assert!(!debug.contains(REQUIRED_CHILDREN_PENDING_MESSAGE));
+        assert!(!debug.contains(EXISTING_WORD_SELECTION_REJECTION_MESSAGE));
         assert!(parse_assessment_response(document, None).is_err());
 
         let exact: Value = serde_json::from_slice(document).unwrap();

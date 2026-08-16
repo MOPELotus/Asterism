@@ -377,7 +377,9 @@ placeholder identities, result codes, status values and pagination shape.
   48/49 five-field prerequisite envelope. Parser tests classify the exact
   shape as Provider-private `ExistingWordSelection`, reject message/data/
   version/field-count near matches, and keep the localized message out of
-  Debug. Flow and public-adapter tests require the exact rejection to produce a
+  Debug. The historical fixture filename follows the raw server message; code
+  and test names use the audited existing-selection meaning. Flow and
+  public-adapter tests require the exact rejection to produce a
   response-bound `cidaren.ready-to-start` continuation, reject another
   `SubmitChoseWord`, restore only after fresh Task/allocation rebinding and
   expose the non-zero response digest/receive time before issuing `StartAnswer`

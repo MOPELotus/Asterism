@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_children_rejection_rotates_to_start_without_reselection() {
+    async fn existing_word_selection_rotates_to_start_without_reselection() {
         let rejection = parse_word_selection_response(include_bytes!(
             "../../../fixtures/providers/cidaren/questions/submit-chose-word-required-children.json"
         ))

@@ -2260,10 +2260,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_children_rejection_continues_to_fresh_start_without_reselection() {
+    async fn existing_word_selection_continues_to_fresh_start_without_reselection() {
         let transport = Arc::new(FixtureTransport {
             responses: Mutex::new(VecDeque::from([
-                required_children_rejection(),
+                existing_word_selection_rejection(),
                 response(&start_payload()),
             ])),
             operations: Mutex::new(Vec::new()),
@@ -2328,9 +2328,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_built_required_children_rejection_remains_fail_closed() {
+    async fn self_built_existing_word_selection_remains_fail_closed() {
         let transport = Arc::new(FixtureTransport {
-            responses: Mutex::new(VecDeque::from([required_children_rejection()])),
+            responses: Mutex::new(VecDeque::from([existing_word_selection_rejection()])),
             operations: Mutex::new(Vec::new()),
         });
         let context = context();
@@ -2901,7 +2901,7 @@ mod tests {
         }
     }
 
-    fn required_children_rejection() -> CidarenAssessmentResponse {
+    fn existing_word_selection_rejection() -> CidarenAssessmentResponse {
         parse_word_selection_response(include_bytes!(
             "../../../fixtures/providers/cidaren/questions/submit-chose-word-required-children.json"
         ))
