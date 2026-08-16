@@ -24,6 +24,7 @@ const MAX_UPLOAD_GRANT_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_UPLOAD_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_UPLOAD_TOKEN_BYTES: usize = 8 * 1_024;
 const MAX_UPLOAD_KEY_BYTES: usize = 1_024;
+const MAX_UPLOAD_HASH_BYTES: usize = 1_024;
 const MAX_UPLOAD_ARTIFACT_BYTES: usize = 64 * 1_024 * 1_024;
 const MAX_UPLOAD_SUBMISSION_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_UPLOAD_VERIFICATION_BYTES: usize = 4 * 1_024 * 1_024;
@@ -135,6 +136,52 @@ impl Drop for UaiUploadGrant {
     }
 }
 
+/// Definite accepted Qiniu response bound to the exact granted object key.
+pub struct UaiUploadObjectResult {
+    file_key: String,
+    object_hash: Option<Zeroizing<String>>,
+    response_digest: [u8; 32],
+}
+
+impl UaiUploadObjectResult {
+    pub fn file_key(&self) -> &str {
+        &self.file_key
+    }
+
+    pub fn object_hash(&self) -> Option<&str> {
+        self.object_hash.as_deref().map(String::as_str)
+    }
+
+    pub const fn response_digest(&self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    fn into_file_key(mut self) -> String {
+        std::mem::take(&mut self.file_key)
+    }
+}
+
+impl fmt::Debug for UaiUploadObjectResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiUploadObjectResult")
+            .field("file_key", &"[ROUTE]")
+            .field(
+                "object_hash",
+                &self.object_hash.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("response_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+impl Drop for UaiUploadObjectResult {
+    fn drop(&mut self) {
+        self.file_key.zeroize();
+        self.response_digest.zeroize();
+    }
+}
+
 /// Exact object-store result retaining the immutable Task/module/artifact
 /// binding required by the final Provider plan and future shared Draft.
 pub struct UaiUploadedArtifact {
@@ -147,6 +194,9 @@ pub struct UaiUploadedArtifact {
     file_key: String,
     artifact_digest: String,
     intent_fingerprint: String,
+    object_request_digest: [u8; 32],
+    object_response_digest: [u8; 32],
+    object_hash: Option<Zeroizing<String>>,
 }
 
 impl UaiUploadedArtifact {
@@ -186,6 +236,19 @@ impl UaiUploadedArtifact {
         &self.task_fingerprint
     }
 
+    pub const fn object_request_digest(&self) -> [u8; 32] {
+        self.object_request_digest
+    }
+
+    pub const fn object_response_digest(&self) -> [u8; 32] {
+        self.object_response_digest
+    }
+
+    pub fn object_hash(&self) -> Option<&str> {
+        self.object_hash.as_deref().map(String::as_str)
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_grant(
         grant: &UaiUploadGrant,
         returned_file_key: String,
@@ -206,6 +269,108 @@ impl UaiUploadedArtifact {
             file_key: returned_file_key,
             artifact_digest: grant.artifact_digest.clone(),
             intent_fingerprint: grant.intent_fingerprint.clone(),
+            object_request_digest: [0; 32],
+            object_response_digest: [0; 32],
+            object_hash: None,
+        })
+    }
+
+    pub(crate) fn from_object_result(
+        grant: &UaiUploadGrant,
+        multipart: &UaiMultipartUpload,
+        result: &UaiUploadObjectResult,
+    ) -> ProviderResult<Self> {
+        if result.file_key() != grant.file_key()
+            || multipart.request_digest() == [0; 32]
+            || result.response_digest() == [0; 32]
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI object result is foreign to the upload grant",
+            ));
+        }
+        Ok(Self {
+            remote_task_id: grant.remote_task_id.clone(),
+            task_fingerprint: grant.task_fingerprint.clone(),
+            course_resource_id: grant.course_resource_id.clone(),
+            unit_id: grant.unit_id.clone(),
+            group_id: grant.group_id.clone(),
+            upload_position: grant.upload_position,
+            file_key: result.file_key.clone(),
+            artifact_digest: grant.artifact_digest.clone(),
+            intent_fingerprint: grant.intent_fingerprint.clone(),
+            object_request_digest: multipart.request_digest(),
+            object_response_digest: result.response_digest(),
+            object_hash: result.object_hash.clone(),
+        })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the encrypted object state restores every independent upload binding"
+    )]
+    pub(crate) fn restore_object_state(
+        mut remote_task_id: String,
+        mut task_fingerprint: String,
+        mut course_resource_id: String,
+        mut unit_id: String,
+        mut group_id: String,
+        upload_position: u32,
+        mut file_key: String,
+        mut artifact_digest: String,
+        mut intent_fingerprint: String,
+        object_request_digest: [u8; 32],
+        object_response_digest: [u8; 32],
+        object_hash: Option<Zeroizing<String>>,
+    ) -> ProviderResult<Self> {
+        let expected_remote_task_id = format!("group:{course_resource_id}:{unit_id}:{group_id}");
+        let valid_hash = object_hash.as_deref().is_none_or(|value| {
+            !value.trim().is_empty()
+                && value.len() <= MAX_UPLOAD_HASH_BYTES
+                && !value.chars().any(char::is_control)
+        });
+        if !is_remote_component(&course_resource_id)
+            || !is_remote_component(&unit_id)
+            || !is_remote_component(&group_id)
+            || remote_task_id != expected_remote_task_id
+            || remote_task_id.len() > 512
+            || !valid_private_binding(&task_fingerprint, "v1:", 512)
+            || !(1..=2).contains(&upload_position)
+            || file_key.is_empty()
+            || file_key.len() > MAX_UPLOAD_KEY_BYTES
+            || file_key.chars().any(char::is_control)
+            || !valid_private_binding(&artifact_digest, "sha256:", 256)
+            || !valid_private_binding(&intent_fingerprint, "uai-upload-v1:", 256)
+            || object_request_digest == [0; 32]
+            || object_response_digest == [0; 32]
+            || !valid_hash
+        {
+            remote_task_id.zeroize();
+            task_fingerprint.zeroize();
+            course_resource_id.zeroize();
+            unit_id.zeroize();
+            group_id.zeroize();
+            file_key.zeroize();
+            artifact_digest.zeroize();
+            intent_fingerprint.zeroize();
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI recovered object-upload state is invalid",
+            ));
+        }
+        Ok(Self {
+            remote_task_id,
+            task_fingerprint,
+            course_resource_id,
+            unit_id,
+            group_id,
+            upload_position,
+            file_key,
+            artifact_digest,
+            intent_fingerprint,
+            object_request_digest,
+            object_response_digest,
+            object_hash,
         })
     }
 
@@ -221,6 +386,9 @@ impl UaiUploadedArtifact {
             file_key: "course/42/nothing.mp3".to_owned(),
             artifact_digest: "sha256:synthetic-artifact".to_owned(),
             intent_fingerprint: "uai-upload-v1:synthetic-intent".to_owned(),
+            object_request_digest: [3; 32],
+            object_response_digest: [4; 32],
+            object_hash: Some(Zeroizing::new("synthetic-qiniu-etag".to_owned())),
         }
     }
 }
@@ -238,6 +406,12 @@ impl fmt::Debug for UaiUploadedArtifact {
             .field("file_key", &"[ROUTE]")
             .field("artifact_digest", &self.artifact_digest)
             .field("intent_fingerprint", &self.intent_fingerprint)
+            .field("object_request_digest", &"[HASHED]")
+            .field("object_response_digest", &"[HASHED]")
+            .field(
+                "object_hash",
+                &self.object_hash.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -252,6 +426,8 @@ impl Drop for UaiUploadedArtifact {
         self.file_key.zeroize();
         self.artifact_digest.zeroize();
         self.intent_fingerprint.zeroize();
+        self.object_request_digest.zeroize();
+        self.object_response_digest.zeroize();
     }
 }
 
@@ -982,7 +1158,10 @@ pub fn build_upload_multipart(
 ///
 /// Returns a typed invalid-response or remote-changed error for malformed,
 /// oversized or mismatched responses.
-pub fn parse_upload_result(document: &str, expected_file_key: &str) -> ProviderResult<String> {
+pub fn parse_upload_object_result(
+    document: &str,
+    expected_file_key: &str,
+) -> ProviderResult<UaiUploadObjectResult> {
     if document.is_empty() || document.len() > MAX_UPLOAD_RESPONSE_BYTES {
         return Err(invalid_response(
             "UAI object upload response is empty or oversized",
@@ -992,10 +1171,12 @@ pub fn parse_upload_result(document: &str, expected_file_key: &str) -> ProviderR
         serde_json::from_str::<Value>(document)
             .map_err(|_| invalid_response("UAI object upload response is not valid JSON"))?,
     );
-    let key = root
+    let root = root
         .as_value()
         .as_object()
-        .and_then(|root| root.get("key"))
+        .ok_or_else(|| protocol_drift("UAI object upload response is not an object"))?;
+    let key = root
+        .get("key")
         .and_then(Value::as_str)
         .filter(|key| !key.is_empty() && key.len() <= MAX_UPLOAD_KEY_BYTES)
         .ok_or_else(|| protocol_drift("UAI object upload response has no file key"))?;
@@ -1005,7 +1186,35 @@ pub fn parse_upload_result(document: &str, expected_file_key: &str) -> ProviderR
             "UAI object upload response changed the granted file key",
         ));
     }
-    Ok(key.to_owned())
+    let object_hash = match root.get("hash") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value))
+            if !value.trim().is_empty()
+                && value.len() <= MAX_UPLOAD_HASH_BYTES
+                && !value.chars().any(char::is_control) =>
+        {
+            Some(Zeroizing::new(value.to_owned()))
+        }
+        Some(_) => {
+            return Err(protocol_drift("UAI object upload response hash is invalid"));
+        }
+    };
+    Ok(UaiUploadObjectResult {
+        file_key: key.to_owned(),
+        object_hash,
+        response_digest: Sha256::digest(document.as_bytes()).into(),
+    })
+}
+
+/// Compatibility projection retaining only the donor-required object key.
+///
+/// # Errors
+///
+/// Applies the complete typed object-result validation before discarding the
+/// optional bounded hash and response digest.
+pub fn parse_upload_result(document: &str, expected_file_key: &str) -> ProviderResult<String> {
+    parse_upload_object_result(document, expected_file_key)
+        .map(UaiUploadObjectResult::into_file_key)
 }
 
 fn build_upload_intent(
@@ -1658,6 +1867,15 @@ mod tests {
 
     #[test]
     fn object_upload_result_must_repeat_the_exact_granted_key() {
+        let document = r#"{"hash":"synthetic-qiniu-etag","key":"course/42/nothing.mp3"}"#;
+        let result = parse_upload_object_result(document, "course/42/nothing.mp3").unwrap();
+        assert_eq!(result.file_key(), "course/42/nothing.mp3");
+        assert_eq!(result.object_hash(), Some("synthetic-qiniu-etag"));
+        assert_eq!(
+            result.response_digest(),
+            <[u8; 32]>::from(Sha256::digest(document.as_bytes()))
+        );
+        assert!(!format!("{result:?}").contains("synthetic-qiniu-etag"));
         assert_eq!(
             parse_upload_result(
                 r#"{"key":"course/42/nothing.mp3"}"#,
@@ -1668,6 +1886,20 @@ mod tests {
         );
         assert!(
             parse_upload_result(r#"{"key":"other/file.mp3"}"#, "course/42/nothing.mp3").is_err()
+        );
+        assert!(
+            parse_upload_object_result(
+                r#"{"hash":"","key":"course/42/nothing.mp3"}"#,
+                "course/42/nothing.mp3",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_upload_object_result(
+                r#"{"hash":7,"key":"course/42/nothing.mp3"}"#,
+                "course/42/nothing.mp3",
+            )
+            .is_err()
         );
     }
 
@@ -1680,14 +1912,26 @@ mod tests {
             &intent,
         )
         .unwrap();
+        let multipart = build_upload_multipart(&grant, &artifact).unwrap();
+        let object_result = parse_upload_object_result(
+            r#"{"hash":"synthetic-qiniu-etag","key":"course/42/nothing.mp3"}"#,
+            grant.file_key(),
+        )
+        .unwrap();
         let uploaded =
-            UaiUploadedArtifact::from_grant(&grant, "course/42/nothing.mp3".to_owned()).unwrap();
+            UaiUploadedArtifact::from_object_result(&grant, &multipart, &object_result).unwrap();
         assert_eq!(uploaded.remote_task_id(), intent.remote_task_id());
         assert_eq!(uploaded.group_id(), intent.group_id());
         assert_eq!(uploaded.upload_position(), intent.upload_position());
         assert_eq!(uploaded.file_key(), grant.file_key());
         assert_eq!(uploaded.artifact_digest(), artifact.digest());
         assert_eq!(uploaded.intent_fingerprint(), intent.fingerprint());
+        assert_eq!(uploaded.object_request_digest(), multipart.request_digest());
+        assert_eq!(
+            uploaded.object_response_digest(),
+            object_result.response_digest()
+        );
+        assert_eq!(uploaded.object_hash(), Some("synthetic-qiniu-etag"));
         assert!(!format!("{uploaded:?}").contains("course/42/nothing.mp3"));
         assert!(UaiUploadedArtifact::from_grant(&grant, "other/key.mp3".to_owned()).is_err());
     }

@@ -1190,7 +1190,10 @@ The grant remains tied to the same intent/artifact and a swapped artifact fails
 before multipart emission. Token and artifact bytes stay in zeroizing owners,
 audio/mpeg artifacts are bounded to 64 MiB, the multipart request has fixed
 fields for the audited Qiniu origin, and the object-store response must repeat
-the granted file key. Because that request is fully determined before dispatch,
+the granted file key. Its typed accepted-result owner preserves the exact
+response digest and an optional bounded nonempty `hash`/Qiniu ETag when present;
+key-only customized responses remain compatible, while a malformed present
+hash fails closed. Because that request is fully determined before dispatch,
 the Provider hashes its fixed POST origin, deterministic content type and full
 zeroizing multipart body (including token, key and artifact bytes) into a
 stable request digest. A changed token or any body byte changes the digest. CMS
@@ -1203,9 +1206,14 @@ fresh Course instance and openid. Native HTTP sends the URL, headers and body
 from those same request owners, while semantic intent fingerprints remain
 separate. A successful response becomes a strong uploaded-artifact
 owner retaining remote Task, Task fingerprint, Course/Unit/Group, positional
-upload module, exact key, artifact digest and intent fingerprint; its route
-data is redacted in debug and zeroized on drop. It also preserves the donor's
-4 KiB minimal-MP3 artifact as an explicit option.
+upload module, exact key, artifact digest, intent fingerprint, exact multipart
+request digest, response digest and optional hash; its route/hash data is
+redacted in debug and zeroized on drop. The same complete successor can encode
+bounded zeroizing `uai.upload.object.v1` bytes. Decode requires the independently
+persisted issue request and accepted receipt response digests and reconstructs
+the complete uploaded-artifact binding without retaining the grant token. This
+is still mutation output, not independent object readback. The Provider also
+preserves the donor's 4 KiB minimal-MP3 artifact as an explicit option.
 
 For a Group containing only one `multiFileUpload`, the Provider re-reads exact
 Task detail after object upload and requires the same Task fingerprint,
@@ -1259,15 +1267,17 @@ rules for staged upload. Each mutating phase can advance only from its definite
 parsed receipt, while its exact request digest is persisted at issue time. The
 Qiniu POST response repeating the exact key remains a mutation receipt; no
 audited donor route performs a separate object-store readback, and Asterism does
-not relabel that response as verification. This solves the conditional topology
-but not Provider output recovery: the shared receipt retains only a response
-digest and acceptance bit, while final UAI submission requires the exact object
-key produced by the grant and confirmed by Qiniu. Core's sanitized scheduling
-artifact also cannot own or recover the bounded audio bytes, and an artifact
-digest alone is not a recoverable owner/account/Task-bound handle. The upload
-sequence must therefore remain Provider-private until the shared Artifact/Draft
-and encrypted stage-output capability can bind those bytes, the returned key
-and, for mixed Groups, the ordinary sub-Draft into one durable Attempt.
+not relabel that response as verification. UAI can now reconstruct the exact
+Provider output from encrypted `uai.upload.object.v1`, but Core still has no
+atomic receipt-plus-state repository: its ordinary receipt retains only a
+response digest and acceptance bit, while final UAI submission requires the
+exact object key produced by the grant and confirmed by Qiniu. Core's sanitized
+scheduling artifact also cannot own or recover the bounded audio bytes, and an
+artifact digest alone is not a recoverable owner/account/Task-bound handle. The
+upload sequence must therefore remain Provider-private until the shared
+Artifact/Draft and encrypted stage-output capability atomically binds those
+bytes, the returned object state and, for mixed Groups, the ordinary sub-Draft
+into one durable Attempt.
 
 Once an exact single or compound final plan already exists, UAI now projects a
 credential-free `uai.upload.final-plan.v1` scheduling artifact whose binding

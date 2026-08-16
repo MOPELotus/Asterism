@@ -491,3 +491,11 @@ therefore freezes existing donor-required mutation input and the already
 materialized exact request digest, then requires it to reproduce the
 independently stored compact artifact and sequence digests. It adds no upload
 route, retry rule or verification shortcut.
+
+The object-state checkpoint later on 2026-08-16 reused the same immediately
+preceding unchanged four-donor head/tag query and re-read the Qiniu primary
+response contract. The donor still requires only the exact returned key, while
+the primary API documents optional normal `hash`/ETag evidence. Asterism now
+preserves a valid bounded present hash and exact response digest in typed
+Provider state, keeps key-only customized responses compatible and continues
+to treat the response as a mutation receipt rather than independent readback.
