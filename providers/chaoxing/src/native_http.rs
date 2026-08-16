@@ -80,6 +80,7 @@ const EXAM_PREVIEW_BASE: &str = "https://mooc1-api.chaoxing.com/exam-ans/exam/ph
 const EXAM_SUBMISSION_BASE: &str =
     "https://mooc1.chaoxing.com/exam-ans/exam/test/reVersionSubmitTestNew";
 const EXAM_REQUESTED_WITH: &str = "com.chaoxing.mobile";
+const WORK_REQUESTED_WITH: &str = "XMLHttpRequest";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const WORK_LIST_PATH: &str = "/mooc2/work/list";
 const WORK_SUBMISSION_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew";
@@ -752,15 +753,16 @@ impl NativeChaoxingInventoryTransport {
         referer: &Url,
         form: &ChaoxingSubmissionForm,
     ) -> ProviderResult<asterism_domain::SubmissionReceipt> {
+        let request = build_work_submission_request(
+            &self.client,
+            session,
+            static_url(WORK_SUBMISSION_BASE)?,
+            referer,
+            form.fields(),
+        )?;
         let response = self
             .client
-            .post(static_url(WORK_SUBMISSION_BASE)?)
-            .header(COOKIE, session.header_value()?)
-            .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
-            .header(REFERER, referer.as_str())
-            .header("x-requested-with", EXAM_REQUESTED_WITH)
-            .form(form.fields())
-            .send()
+            .execute(request)
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
         validate_response_status(&response)?;
@@ -2167,6 +2169,24 @@ fn build_exam_submission_request(
         .map_err(|error| classify_reqwest_error(&error))
 }
 
+fn build_work_submission_request(
+    client: &Client,
+    session: &ChaoxingCookieSession,
+    url: Url,
+    referer: &Url,
+    body: &[(String, String)],
+) -> ProviderResult<Request> {
+    client
+        .post(url)
+        .header(COOKIE, session.header_value()?)
+        .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+        .header(REFERER, referer.as_str())
+        .header("x-requested-with", WORK_REQUESTED_WITH)
+        .form(body)
+        .build()
+        .map_err(|error| classify_reqwest_error(&error))
+}
+
 async fn classify_response(response: Response) -> ProviderResult<SensitiveHtml> {
     validate_response_head(&response)?;
     read_response_body(response).await
@@ -2849,6 +2869,40 @@ mod tests {
             Some(EXAM_REQUESTED_WITH)
         );
         assert_eq!(EXAM_REQUESTED_WITH, "com.chaoxing.mobile");
+    }
+
+    #[test]
+    fn work_submission_request_uses_the_donor_web_ajax_header() {
+        let client = Client::new();
+        let session = ChaoxingCookieSession::try_new("_uid=9001; uf=SAFE_UF").unwrap();
+        let referer = Url::parse(
+            "https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew?courseId=100&classId=200",
+        )
+        .unwrap();
+        let request = build_work_submission_request(
+            &client,
+            &session,
+            Url::parse(WORK_SUBMISSION_BASE).unwrap(),
+            &referer,
+            &[("pyFlag".to_owned(), String::new())],
+        )
+        .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("x-requested-with")
+                .and_then(|value| value.to_str().ok()),
+            Some(WORK_REQUESTED_WITH)
+        );
+        assert_eq!(WORK_REQUESTED_WITH, "XMLHttpRequest");
+        assert_eq!(
+            request
+                .headers()
+                .get(REFERER)
+                .and_then(|value| value.to_str().ok()),
+            Some(referer.as_str())
+        );
     }
 
     #[test]

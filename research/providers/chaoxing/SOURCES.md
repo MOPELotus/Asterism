@@ -105,6 +105,12 @@ validation is still required.
   mobile header, but the Native final dispatch had substituted the independent
   Work/browser value `XMLHttpRequest`. The transport now builds and tests the
   actual request with the same mobile header as its persisted digest.
+- 2026-08-16: re-read Samueli's web `addStudentWorkNew` POST at
+  `9699e632b492`. The exact donor request uses the fresh editor route as Referer
+  and `X-Requested-With: XMLHttpRequest`. Asterism had accidentally reused the
+  mobile Exam request-family constant for independent and Chapter Work final
+  POSTs. Work now has a separate web-AJAX constant and a built-request regression
+  covering both that header and the retained Referer.
 - 2026-08-16: re-checked the pinned agent skill's result-page guidance at
   `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence
   and explicitly audits empty answer rows, not arbitrary substring-derived
