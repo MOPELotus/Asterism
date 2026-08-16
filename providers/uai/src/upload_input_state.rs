@@ -147,6 +147,24 @@ impl UaiUploadInputState {
     pub const fn ordinary_draft_digest(&self) -> Option<[u8; 32]> {
         self.ordinary_draft_digest
     }
+
+    pub(crate) const fn is_compound(&self) -> bool {
+        self.ordinary_draft_id.is_some()
+    }
+
+    pub(crate) fn validate_compound_draft(
+        &self,
+        expected_ordinary_draft: &SubmissionDraft,
+    ) -> ProviderResult<()> {
+        let expected_digest = compound_draft_digest(expected_ordinary_draft)?;
+        if self.ordinary_draft_id == Some(expected_ordinary_draft.id)
+            && self.ordinary_draft_digest == Some(expected_digest)
+        {
+            Ok(())
+        } else {
+            Err(foreign_input_state())
+        }
+    }
 }
 
 impl fmt::Debug for UaiUploadInputState {

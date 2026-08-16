@@ -1304,6 +1304,19 @@ Artifact/Draft and encrypted stage-output capability atomically binds those
 bytes, the returned object state and, for mixed Groups, the ordinary sub-Draft
 into one durable Attempt.
 
+Decoded states are not accepted merely because each codec succeeds in
+isolation. `UaiUploadStageRecovery` freshly re-prepares the upload intent from
+the recovered input's exact remote Task and bytes, requires position 1 for
+single input or position 2 plus the complete expected Draft for compound input,
+and compares Task fingerprint, Course/Unit/Group, artifact digest and intent
+fingerprint across the fresh intent, grant and object successor. It internally
+re-materializes the exact token/key/artifact multipart owner only to reproduce
+the stored object request digest, then drops it without exposing or dispatching
+the request. A rotated token paired with an older successful object state
+therefore fails. Only this complete chain may enter the existing fresh
+single/compound final-plan preparation; the adapter performs no Qiniu replay
+and does not promote the object receipt to verification.
+
 Once an exact single or compound final plan already exists, UAI now projects a
 credential-free `uai.upload.final-plan.v1` scheduling artifact whose binding
 digest covers the complete semantic plan without exposing the object key or

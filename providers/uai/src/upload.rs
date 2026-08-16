@@ -581,6 +581,14 @@ impl UaiUploadIntent {
         &self.fingerprint
     }
 
+    pub(crate) fn task_fingerprint(&self) -> &str {
+        &self.task_fingerprint
+    }
+
+    pub(crate) fn artifact_digest(&self) -> &str {
+        &self.artifact_digest
+    }
+
     pub(crate) fn matches_artifact(&self, artifact: &UaiUploadArtifact) -> bool {
         self.artifact_digest == artifact.digest()
     }

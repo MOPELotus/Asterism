@@ -516,3 +516,11 @@ requirement. Asterism's compact binary `uai.upload.input.v1` therefore preserves
 the already bounded MP3 bytes plus exact single-Task or immutable compound-Draft
 binding without changing the donor upload protocol. It is local recovery state,
 not evidence that Core has persisted or authorized an Attempt.
+
+The cross-stage recovery checkpoint later on 2026-08-16 reused that unchanged
+four-donor head/tag result. No donor added an object-stat readback or any rule
+allowing a new token to inherit an older Qiniu success. UAI therefore reconnects
+the existing audited intent/grant/object lineage and exact multipart digest
+locally, drops the reconstructed request without dispatch and enters only fresh
+final-plan preparation. This adds recovery validation, not a replay authority
+or new donor capability.

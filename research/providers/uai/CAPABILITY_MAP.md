@@ -60,6 +60,15 @@ expected compound Draft before any fresh intent preparation. Provider codecs
 therefore cover every planned upload state, while Core's encrypted relational
 repository, atomic transitions and invocation remain the executable gap.
 
+Provider recovery now also reconnects the decoded input/grant/object states
+before final planning. It freshly rebuilds the intent, requires single position
+1 or compound position 2, compares the complete Task hierarchy/fingerprint,
+artifact and intent lineage across all three states, and re-materializes the
+multipart body only inside a redacted zeroizing owner to verify its exact
+stored request digest. The body is dropped without dispatch, so a rotated token
+cannot inherit an older object success. Only the validated chain enters fresh
+single or complete-Draft-bound compound final-plan preparation.
+
 ## Current implementation checkpoint
 
 The current crate advertises Authentication, CourseInventory, TaskInventory,
