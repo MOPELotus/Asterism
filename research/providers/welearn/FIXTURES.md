@@ -403,6 +403,9 @@ only structural field names, response codes and bounded placeholder shapes.
   plan from one function, prove both digest pairs remain equal before and after
   moving the parts out, redact all Course/SCO/target material from Debug, and
   cover both Fanyuchang target vectors and Auto aggregate-derived children.
+  A maximum-size regression carries all 8,192 ordered Fanyuchang children
+  through that same preparation, reaches Core position 8,192 and retains the
+  complete private batch below the independent 8 MiB bound.
 - Durable atomic-child recovery tests decode the parent authority and complete
   batch snapshot together, accept both Fanyuchang and Auto target shapes, and
   reject cross-attempt Course, flow, Unit selection, aggregate, expected-child

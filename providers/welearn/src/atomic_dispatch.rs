@@ -622,4 +622,48 @@ mod tests {
                 })
         );
     }
+
+    #[test]
+    fn maximum_prepared_core_batch_preserves_every_ordered_child() {
+        const MAXIMUM_CHILDREN: usize = 8_192;
+
+        let template = tasks().remove(0);
+        let mut maximum = Vec::with_capacity(MAXIMUM_CHILDREN);
+        for index in 0..MAXIMUM_CHILDREN {
+            let mut task = template.clone();
+            task.remote_id = format!("sco:1001:core-batch-{index:04}");
+            task.normalized["sco_id"] = serde_json::json!(format!("core-batch-{index:04}"));
+            task.normalized["sco_index"] = serde_json::json!(index);
+            maximum.push(task);
+        }
+        let batch =
+            build_batch_plan(&maximum, WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            batch.course_remote_id.clone(),
+            WellearnBatchFlow::FanyuchangDuration,
+            batch.selection.clone(),
+            batch.entries[0].remote_task_id.clone(),
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_execution_batch_plan(&authority, batch, Some(vec![1; MAXIMUM_CHILDREN]))
+                .unwrap();
+
+        assert_eq!(
+            prepared.execution_batch_plan().children().len(),
+            MAXIMUM_CHILDREN
+        );
+        assert_eq!(
+            prepared
+                .execution_batch_plan()
+                .children()
+                .last()
+                .unwrap()
+                .position(),
+            u32::try_from(MAXIMUM_CHILDREN).unwrap()
+        );
+        assert!(prepared.parent_snapshot().batch().expose_secret().len() <= 8 * 1_024 * 1_024);
+    }
 }
