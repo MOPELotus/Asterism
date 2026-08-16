@@ -26,7 +26,7 @@ pub enum CidarenAssessmentReceiptKind {
 /// Near matches remain ordinary protocol failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CidarenAssessmentRejectionKind {
-    RequiredChildrenPending,
+    ExistingWordSelection,
 }
 
 /// Strict decoded result of one Cidaren assessment protocol call.
@@ -256,7 +256,7 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
     })?;
     if required_children_pending_rejection(object, code, message.as_deref()) {
         return Ok(CidarenAssessmentResponse::Rejected {
-            kind: CidarenAssessmentRejectionKind::RequiredChildrenPending,
+            kind: CidarenAssessmentRejectionKind::ExistingWordSelection,
         });
     }
     if code == 20_004 {
@@ -483,10 +483,10 @@ mod tests {
         let response = parse_word_selection_response(document).unwrap();
         assert_eq!(
             response.rejection_kind(),
-            Some(CidarenAssessmentRejectionKind::RequiredChildrenPending)
+            Some(CidarenAssessmentRejectionKind::ExistingWordSelection)
         );
         let debug = format!("{response:?}");
-        assert!(debug.contains("RequiredChildrenPending"));
+        assert!(debug.contains("ExistingWordSelection"));
         assert!(!debug.contains(REQUIRED_CHILDREN_PENDING_MESSAGE));
         assert!(parse_assessment_response(document, None).is_err());
 

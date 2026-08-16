@@ -1234,7 +1234,7 @@ impl CidarenAttemptFlow {
                     Ok(())
                 }
                 CidarenAssessmentResponse::Rejected {
-                    kind: CidarenAssessmentRejectionKind::RequiredChildrenPending,
+                    kind: CidarenAssessmentRejectionKind::ExistingWordSelection,
                 } if can_continue_after_existing_selection_rejection => {
                     self.phase = Some(CidarenAttemptPhase::ReadyToStart);
                     Ok(())
@@ -1262,7 +1262,7 @@ impl CidarenAttemptFlow {
                     Ok(())
                 }
                 CidarenAssessmentResponse::Rejected {
-                    kind: CidarenAssessmentRejectionKind::RequiredChildrenPending,
+                    kind: CidarenAssessmentRejectionKind::ExistingWordSelection,
                 } => Err(protocol_drift(
                     "Cidaren word-selection route returned an unobserved existing-selection rejection",
                 )),

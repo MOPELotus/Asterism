@@ -375,7 +375,7 @@ placeholder identities, result codes, status values and pagination shape.
   assessment-step parser still rejects missing decoded data.
 - `submit-chose-word-required-children.json` freezes only the public issues
   48/49 five-field prerequisite envelope. Parser tests classify the exact
-  shape as Provider-private `RequiredChildrenPending`, reject message/data/
+  shape as Provider-private `ExistingWordSelection`, reject message/data/
   version/field-count near matches, and keep the localized message out of
   Debug. Flow and public-adapter tests require the exact rejection to produce a
   response-bound `cidaren.ready-to-start` continuation, reject another

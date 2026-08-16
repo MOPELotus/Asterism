@@ -1111,8 +1111,9 @@ generic response rule for every mutation family.
 This entry supersedes the blocked-step/Core-Gap direction recorded immediately
 above. Asterism does not copy the donor's broad exception catch. Only the exact
 issues 48/49 five-field response is classified as
-`RequiredChildrenPending`, and only an ordinary class-unit plan may rotate that
-response into the durable pre-Question artifact phase
+`ExistingWordSelection` (renamed from the provisional
+`RequiredChildrenPending` label), and only an ordinary class-unit plan may
+rotate that response into the durable pre-Question artifact phase
 `cidaren.ready-to-start` with the accepted response digest and receive time.
 Recovery fresh-rebinds the Task and dynamic
 allocation, cannot rebuild or resend the word map, and issues `StartAnswer` as

@@ -739,7 +739,7 @@ Task already had word selection, while the reopened ordinary-learning source
 catches that selection failure as "task already started" and immediately
 continues to `StartAnswer`. The clean-room flow does not copy the donor's broad
 exception handler: the word-selection parser accepts only the exact five-field
-envelope as `CidarenAssessmentRejectionKind::RequiredChildrenPending`;
+envelope as `CidarenAssessmentRejectionKind::ExistingWordSelection`;
 message/data/version changes or extra fields remain ordinary fail-closed shape
 drift.
 
