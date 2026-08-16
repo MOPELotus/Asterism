@@ -84,6 +84,14 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-16: re-checked the pinned agent skill's result-page guidance at
+  `f72619a0b369`; it treats `我的答案` as visible per-Question result evidence
+  and explicitly audits empty answer rows, not arbitrary substring-derived
+  values. Asterism tightened independent Work verification accordingly:
+  choices now allow only uppercase option IDs plus explicit separators and
+  reject duplicates/single-choice multi-values, while true/false accepts only
+  complete controlled tokens. No donor revision changed and no mutation path
+  was added.
 - 2026-08-16: re-checked the two current sign-in donor default branches after
   the QR checkpoint; Ylim remains `7ed64ff547d3` and `mini-hbut` remains
   `952640e2540f`. An exact Ylim `preSign()` re-read recovered an omitted

@@ -137,9 +137,12 @@ The submission fixtures are donor-compatible synthetic shapes rather
 than captured responses. They cover strict editor identity/type matching,
 allowlisted hidden-field forwarding, removal of stale answer values, a bounded
 JSON acknowledgement that remains only a Receipt, prompt-as-Pending semantics,
-and exact server-visible answer comparison on the result view. They contain no
-real token, answer, route or account fact and do not prove the endpoint works
-against the current live platform.
+and exact server-visible answer comparison on the result view. Regressions
+accept `A、C` as an explicit separated choice set but reject arbitrary text such
+as `not-B`, duplicate `BB`, multi-valued single-choice `AB`, substring
+true/false `不正确` and mixed `错误但对` as protocol drift. They contain no real
+token, answer, route or account fact and do not prove the endpoint works against
+the current live platform.
 
 `submission-editor-fill.html` and `submission-view-fill.html` pin the exact
 single-blank independent Work subset. The complete two-Question editor keeps an

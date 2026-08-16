@@ -72,7 +72,7 @@ The combined donors establish these currently observed families:
 
 | Chaoxing code/shape | Donor evidence | Current boundary |
 |---|---|---|
-| `0` single, `1` multiple, `3` true/false | all current donors | Parsed, native mutation and strict visible-answer verification |
+| `0` single, `1` multiple, `3` true/false | all current donors | Parsed, native mutation and strict visible-answer verification. Work results accept only uppercase option IDs plus audited separators, reject duplicates/single-choice multi-values, and use complete true/false tokens rather than substring matching |
 | `2` fill | CxKitty, OCS, agent skill and `chaoxing-exam` | Parsed blank cardinality now gates mutation: exactly one bound blank/value is encoded for Chapter/Exam and exact single-blank visible text is fixture-covered for Chapter history/standard evidence plus Exam submitted-value verification. Multi-blank and pending/manual-grading states remain fail-closed pending exact fixtures |
 | `4..9` text/short/reference answers | OCS and browser donors | Parsed as ShortAnswer; exact Browser/editor mutation and reference-answer provenance still need fixtures |
 | `10` | OCS treats as text completion; existing Asterism evidence maps it Composite | Donor-variant conflict: retain fail-closed submission until a route-specific fixture disambiguates it |

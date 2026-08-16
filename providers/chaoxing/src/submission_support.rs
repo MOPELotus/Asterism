@@ -1775,26 +1775,32 @@ fn parse_labeled_visible_answer(
         "0" | "1" => {
             let mut answer = value
                 .chars()
-                .filter(char::is_ascii_uppercase)
+                .filter(|character| {
+                    !character.is_whitespace() && !matches!(character, ',' | '，' | '、' | ';')
+                })
                 .collect::<Vec<_>>();
-            answer.sort_unstable();
-            answer.dedup();
-            if answer.is_empty() {
+            if answer.is_empty() || answer.iter().any(|value| !value.is_ascii_uppercase()) {
                 return Err(protocol_drift(
-                    "Chaoxing Work result choice answer is empty",
+                    "Chaoxing Work result choice answer is malformed",
+                ));
+            }
+            answer.sort_unstable();
+            if answer.windows(2).any(|pair| pair[0] == pair[1])
+                || (type_code == "0" && answer.len() != 1)
+            {
+                return Err(protocol_drift(
+                    "Chaoxing Work result choice answer is duplicated or ambiguous",
                 ));
             }
             Ok(answer.into_iter().collect())
         }
-        "3" if contains_any(value, &["正确", "对", "true", "TRUE", "√"]) => {
-            Ok("true".to_owned())
-        }
-        "3" if contains_any(value, &["错误", "错", "false", "FALSE", "×"]) => {
-            Ok("false".to_owned())
-        }
-        "3" => Err(protocol_drift(
-            "Chaoxing Work result true/false answer is invalid",
-        )),
+        "3" => match value {
+            "正确" | "对" | "true" | "TRUE" | "√" => Ok("true".to_owned()),
+            "错误" | "错" | "false" | "FALSE" | "×" => Ok("false".to_owned()),
+            _ => Err(protocol_drift(
+                "Chaoxing Work result true/false answer is invalid",
+            )),
+        },
         "2" => parse_visible_text_answer(value),
         _ => Err(unsupported(
             "Chaoxing Work result answer type is unsupported",
@@ -2218,6 +2224,46 @@ mod tests {
                 .unwrap();
         let snapshot = parse_verification_snapshot(&changed, &plan, &draft).unwrap();
         assert_eq!(snapshot.status, SubmissionVerificationStatus::Rejected);
+
+        for malformed in [
+            VIEW.replace("我的答案：B", "我的答案：not-B"),
+            VIEW.replace("我的答案：B", "我的答案：BB"),
+            VIEW.replace("我的答案：B", "我的答案：AB"),
+        ] {
+            let malformed = ChaoxingWorkVerificationDocument::try_new(
+                ChaoxingWorkVerificationRoute::View,
+                malformed,
+            )
+            .unwrap();
+            assert_eq!(
+                parse_verification_snapshot(&malformed, &plan, &draft)
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+    }
+
+    #[test]
+    fn visible_result_tokens_reject_substrings_and_duplicate_choices() {
+        assert_eq!(parse_visible_answer("我的答案：A、C", "1").unwrap(), "AC");
+        assert_eq!(parse_visible_answer("我的答案：正确", "3").unwrap(), "true");
+        assert_eq!(
+            parse_visible_answer("我的答案：错误", "3").unwrap(),
+            "false"
+        );
+        for (value, type_code) in [
+            ("我的答案：not-B", "0"),
+            ("我的答案：BB", "1"),
+            ("我的答案：AB", "0"),
+            ("我的答案：不正确", "3"),
+            ("我的答案：错误但对", "3"),
+        ] {
+            assert_eq!(
+                parse_visible_answer(value, type_code).unwrap_err().kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
     }
 
     #[tokio::test]
