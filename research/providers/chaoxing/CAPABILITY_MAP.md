@@ -120,6 +120,11 @@ policy and remains independently guarded.
   course/class/activity IDs plus binding/credential/message digests. Shared
   durable subscription ownership, encrypted credential handoff, leases,
   reconnect/backoff, ordered de-duplication and event recovery are a Core Gap.
+  The pinned donor's `handleListen` forwards each SDK text callback directly,
+  recursively calls itself on close, and configures only `autoReconnectNumMax=2`
+  with `delivery=false`; it persists no message ID, cursor, lease or
+  acknowledgement state. Asterism therefore retains only the bounded event
+  identity and digest and does not infer delivery or recovery semantics.
   Event discovery never authorizes or verifies sign-in.
 - Independent Work and Exam list parsers are covered by synthetic sanitized
   fixtures and compose behind `TaskInventoryCapability`.

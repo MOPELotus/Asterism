@@ -105,8 +105,12 @@ validation is still required.
   `atype=2`, `aid`, `courseInfo.courseid` and `courseInfo.classid` identifying
   a sign event. Asterism now has an unregistered, context-bound Native
   bootstrap GET plus zeroizing credential and event-identity parsers. It does
-  not open the Easemob connection. Ylim's `sign_history` was separately traced
-  to local Prisma rows and is explicitly excluded as remote verification.
+  not open the Easemob connection. Ylim's listener has no message-ID/cursor or
+  de-duplication persistence, recursively reconnects on close and disables
+  delivery acknowledgements after two SDK reconnects; those details are
+  recorded as shared subscription Core gaps. Ylim's `sign_history` was
+  separately traced to local Prisma rows and is explicitly excluded as remote
+  verification.
 - 2026-08-15: retained Ylim's exact `#statuscontent` and `stuSignajax` response
   vocabulary in bounded, zeroizing, preparation-bound pure parsers. Empty
   pre-sign status, exact completed text, `success`, already-signed text and

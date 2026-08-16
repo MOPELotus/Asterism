@@ -252,3 +252,8 @@ bounded Native bootstrap GET and pure identity parsing only. The WebSocket
 connection and durable event lifecycle are a shared Core/runtime gap. The same
 audit proved that Ylim's displayed sign history is its own Prisma `SignLog`,
 not a server-visible Chaoxing result and therefore not verification evidence.
+The donor listener forwards SDK callbacks without a message ID/cursor or
+de-duplication ledger, recursively reconnects from `onClosed`, and limits the
+SDK to two automatic reconnects with delivery acknowledgements disabled. These
+observations make durable subscription ownership, ordered recovery and explicit
+acknowledgement state concrete Core gaps rather than optional hardening.

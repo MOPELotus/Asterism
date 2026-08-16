@@ -811,10 +811,15 @@ digests exposed. A sign event retains the course/class/activity identity and
 message digest, then still requires fresh course/activity/detail rebinding.
 Other `atype` values are ignored and malformed sign events fail atomically.
 
-Opening and maintaining the Easemob connection is not implemented. It requires
-a shared durable subscription owner, encrypted credential handoff, lease and
-reconnect/backoff policy, ordered event de-duplication/recovery and a separate
-durable mutation workflow. No WebIM event is authorization or completion.
+Opening and maintaining the Easemob connection is not implemented. The donor
+listener forwards every SDK text callback without reading a message ID or
+cursor, recursively starts another listener from `onClosed`, and configures
+only `autoReconnectNumMax=2` with `delivery=false`. Asterism therefore needs a
+shared durable subscription owner, encrypted credential handoff, lease and
+reconnect/backoff policy, ordered event de-duplication/recovery and explicit
+acknowledgement state before it can consume events continuously. A message
+digest is evidence of the received payload, not an ordered delivery cursor.
+No WebIM event is authorization or completion.
 Ylim's `sign_history` cannot close the verification gap: the endpoint reads
 only its own Prisma `SignLog`, populated locally after the same opaque mutation,
 and never reads a Chaoxing account result.

@@ -382,7 +382,10 @@ every fixture before staging it.
   credentials to account/correlation without exposing token/UID/name, retain
   only course/class/activity IDs from a sign event, ignore non-sign events and
   reject malformed sign identities. They do not simulate a WebSocket session,
-  reconnect, acknowledgement, mutation or completion readback.
+  reconnect, acknowledgement, mutation or completion readback. Future
+  subscription fixtures must carry an explicit event identity/cursor and
+  persisted lease/recovery state; the donor's callback shape supplies none, so
+  a message digest alone cannot stand in for ordered de-duplication.
 - Learning-count fixtures must expose a fresh server-visible count before and
   after one visit. `studentstudyAjax`, `setlog` and monitor responses alone are
   insufficient, and a synthetic local target counter is not verification.
