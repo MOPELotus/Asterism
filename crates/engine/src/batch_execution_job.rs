@@ -10,7 +10,9 @@ use asterism_provider_api::{
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
-    BatchExecutionAttemptStartRequest, BatchExecutionChildPlanMaterializeOutcome,
+    BatchExecutionAttemptStartRequest, BatchExecutionChildExecutionCreateOutcome,
+    BatchExecutionChildExecutionCreateRequest, BatchExecutionChildExecutionRecord,
+    BatchExecutionChildExecutionRepository, BatchExecutionChildPlanMaterializeOutcome,
     BatchExecutionChildPlanMaterializeRequest, BatchExecutionChildPlanRecord,
     BatchExecutionChildPlanRepository, BatchExecutionParentSnapshotBindOutcome,
     BatchExecutionParentSnapshotBindRequest, BatchExecutionParentSnapshotRepositoryFactory,
@@ -37,6 +39,7 @@ pub struct BatchExecutionPlanningResult {
     pub attempt: BatchExecutionAttempt,
     pub execution_batch_plan: ProviderExecutionBatchPlan,
     pub child_plans: Vec<BatchExecutionChildPlanRecord>,
+    pub child_executions: Vec<BatchExecutionChildExecutionRecord>,
     pub runtime_settings: ExecutionRuntimeSettingsSnapshot,
     pub planned_fresh: bool,
 }
@@ -48,6 +51,7 @@ pub struct BatchExecutionPlanningService {
     batches: Arc<dyn BatchExecutionRepository>,
     planning_inputs: Arc<dyn BatchExecutionPlanningInputRepository>,
     child_plans: Arc<dyn BatchExecutionChildPlanRepository>,
+    child_executions: Arc<dyn BatchExecutionChildExecutionRepository>,
     batch_settings: Arc<dyn BatchExecutionRuntimeSettingsRepository>,
     accounts: Arc<dyn ProviderAccountRuntimeRepository>,
     courses: Arc<dyn CourseRuntimeRepository>,
@@ -74,6 +78,7 @@ impl BatchExecutionPlanningService {
         batches: Arc<dyn BatchExecutionRepository>,
         planning_inputs: Arc<dyn BatchExecutionPlanningInputRepository>,
         child_plans: Arc<dyn BatchExecutionChildPlanRepository>,
+        child_executions: Arc<dyn BatchExecutionChildExecutionRepository>,
         batch_settings: Arc<dyn BatchExecutionRuntimeSettingsRepository>,
         accounts: Arc<dyn ProviderAccountRuntimeRepository>,
         courses: Arc<dyn CourseRuntimeRepository>,
@@ -85,6 +90,7 @@ impl BatchExecutionPlanningService {
             batches,
             planning_inputs,
             child_plans,
+            child_executions,
             batch_settings,
             accounts,
             courses,
@@ -196,11 +202,15 @@ impl BatchExecutionPlanningService {
             let child_plans = self
                 .materialize_child_plans(&command, &batch, &attempt, &execution_batch_plan)
                 .await?;
+            let child_executions = self
+                .create_child_executions(&command, &batch, &attempt)
+                .await?;
             return Ok(BatchExecutionPlanningResult {
                 batch_execution: batch,
                 attempt,
                 execution_batch_plan,
                 child_plans,
+                child_executions,
                 runtime_settings,
                 planned_fresh: false,
             });
@@ -268,11 +278,15 @@ impl BatchExecutionPlanningService {
         let child_plans = self
             .materialize_child_plans(&command, &batch, &attempt, &execution_batch_plan)
             .await?;
+        let child_executions = self
+            .create_child_executions(&command, &batch, &attempt)
+            .await?;
         Ok(BatchExecutionPlanningResult {
             batch_execution: batch,
             attempt,
             execution_batch_plan,
             child_plans,
+            child_executions,
             runtime_settings,
             planned_fresh: true,
         })
@@ -300,6 +314,29 @@ impl BatchExecutionPlanningService {
         Ok(match outcome {
             BatchExecutionChildPlanMaterializeOutcome::Created(records)
             | BatchExecutionChildPlanMaterializeOutcome::Existing(records) => records,
+        })
+    }
+
+    async fn create_child_executions(
+        &self,
+        command: &PlanBatchExecutionCommand,
+        batch: &BatchExecution,
+        attempt: &BatchExecutionAttempt,
+    ) -> Result<Vec<BatchExecutionChildExecutionRecord>, BatchExecutionPlanningError> {
+        let outcome = self
+            .child_executions
+            .create_batch_execution_child_executions(BatchExecutionChildExecutionCreateRequest {
+                batch_execution_id: batch.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: command.scheduler_job_id,
+                worker_id: &command.worker_id,
+                correlation_id: &command.correlation_id,
+                at: command.at,
+            })
+            .await?;
+        Ok(match outcome {
+            BatchExecutionChildExecutionCreateOutcome::Created(records)
+            | BatchExecutionChildExecutionCreateOutcome::Existing(records) => records,
         })
     }
 
@@ -693,6 +730,7 @@ mod tests {
             batch_repository.clone(),
             batch_repository.clone(),
             batch_repository.clone(),
+            batch_repository.clone(),
             batch_repository,
             Arc::new(SqliteProviderAccountRepository::new(database.clone())),
             Arc::new(SqliteCourseProgressRepository::new(database.clone())),
@@ -713,13 +751,17 @@ mod tests {
         assert!(first.planned_fresh);
         assert_eq!(first.execution_batch_plan.children().len(), 2);
         assert_eq!(first.child_plans.len(), 2);
+        assert_eq!(first.child_executions.len(), 2);
         assert_eq!(first.child_plans[0].position, 1);
         assert_eq!(first.child_plans[1].position, 2);
+        assert_eq!(first.child_executions[0].position, 1);
+        assert_eq!(first.child_executions[1].position, 2);
         assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
         let restored = service.plan(command.clone()).await.unwrap();
         assert!(!restored.planned_fresh);
         assert_eq!(restored.execution_batch_plan, first.execution_batch_plan);
         assert_eq!(restored.child_plans, first.child_plans);
+        assert_eq!(restored.child_executions, first.child_executions);
         assert_eq!(restored.attempt, first.attempt);
         assert_eq!(restored.runtime_settings, first.runtime_settings);
         assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
@@ -739,7 +781,45 @@ mod tests {
                 .fetch_one(database.pool())
                 .await
                 .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM executions WHERE state = 'requested'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM batch_execution_child_executions \
+                 WHERE batch_execution_id = ?",
+            )
+            .bind(batch.id.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM scheduled_jobs WHERE job_kind = 'execution'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
             0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM tasks WHERE orchestration_state = 'ready'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            2
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -764,8 +844,11 @@ mod tests {
             1
         );
         sqlx::query(
-            "UPDATE batch_execution_child_plans SET artifact_digest = zeroblob(32) \
-             WHERE batch_execution_id = ? AND position = 2",
+            "UPDATE execution_provider_plan_artifacts SET artifact_digest = zeroblob(32) \
+             WHERE execution_id = ( \
+                 SELECT execution_id FROM batch_execution_child_executions \
+                 WHERE batch_execution_id = ? AND child_position = 2 \
+             )",
         )
         .bind(batch.id.to_string())
         .execute(database.pool())

@@ -5260,3 +5260,35 @@ stable source. Child Task-specific overrides are intentionally not merged here:
 the next transaction must either prove they were already represented in the
 parent authorization or reject conflicting per-Task settings rather than
 silently broadening one child after the batch was planned.
+
+## Two-hundred-and-eighty-second Phase 0 slice
+
+Migration 079 and the parent planner now create one immutable child
+`Execution` for every durable batch-plan ordinal. Storage performs this under
+the same live parent job claim, lease and Attempt, requires the Running parent,
+complete ordered child-plan set and frozen parent settings, then preflights all
+children before writing any of them. Each Task must still belong to the bound
+Provider, remain remotely executable and be locally ready or failed, must have
+no conflicting Task-scoped runtime override and must not already own another
+active Execution.
+
+The atomic write stores each child in Requested state with a parent-scoped
+idempotency key, exact canonical capability set, ordered call groups, the
+credential-free Provider artifact and the frozen account-level settings. A
+separate `(batch_execution_id, child_position)` mapping preserves parent order,
+and Requested outbox events plus a sanitized audit record are committed with
+the children. This draft boundary deliberately does not change Task state,
+reserve credit or enqueue child execution jobs, so no Provider mutation can
+become scheduler-visible before the later activation transaction succeeds.
+
+Restart accepts existing children only when every immutable binding still
+matches the parent plan: Task, caller identity, request source, idempotency
+scope/key, capability calls, artifact payload and digest, frozen settings and
+capture time. Missing auxiliary rows, partial child mappings or altered values
+fail closed. Engine returns the child Execution mappings on both fresh and
+parent-only recovery paths. Integration coverage proves two children are
+created once, remain Requested while their Tasks stay ready, create no
+execution jobs, survive restart without another Provider scan and reject a
+tampered persisted Provider artifact. The next slice can atomically activate
+these drafts by reserving credit, moving Tasks to scheduled and publishing the
+ordered child jobs while preserving the parent sequence boundary.

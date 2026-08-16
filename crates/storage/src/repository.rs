@@ -2396,6 +2396,46 @@ pub trait BatchExecutionRuntimeSettingsRepository: Send + Sync {
     ) -> Result<BatchExecutionRuntimeSettingsBindOutcome, StorageError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchExecutionChildExecutionRecord {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub position: u32,
+    pub task_id: TaskId,
+    pub execution_id: ExecutionId,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchExecutionChildExecutionCreateRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchExecutionChildExecutionCreateOutcome {
+    Created(Vec<BatchExecutionChildExecutionRecord>),
+    Existing(Vec<BatchExecutionChildExecutionRecord>),
+}
+
+/// Creates immutable child `Execution` records from the already durable parent
+/// child plans without changing Task state or making them scheduler-visible.
+#[async_trait]
+pub trait BatchExecutionChildExecutionRepository: Send + Sync {
+    async fn create_batch_execution_child_executions(
+        &self,
+        request: BatchExecutionChildExecutionCreateRequest<'_>,
+    ) -> Result<BatchExecutionChildExecutionCreateOutcome, StorageError>;
+
+    async fn find_batch_execution_child_executions(
+        &self,
+        batch_execution_id: asterism_domain::BatchExecutionId,
+    ) -> Result<Vec<BatchExecutionChildExecutionRecord>, StorageError>;
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionBillingReservation<'a> {
     pub quote: &'a PriceQuote,

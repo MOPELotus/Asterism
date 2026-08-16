@@ -78,6 +78,8 @@ pub use repository::{
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, BatchExecutionAttemptStartRequest,
+    BatchExecutionChildExecutionCreateOutcome, BatchExecutionChildExecutionCreateRequest,
+    BatchExecutionChildExecutionRecord, BatchExecutionChildExecutionRepository,
     BatchExecutionChildPlanMaterializeOutcome, BatchExecutionChildPlanMaterializeRequest,
     BatchExecutionChildPlanRecord, BatchExecutionChildPlanRepository,
     BatchExecutionParentSnapshotBindOutcome, BatchExecutionParentSnapshotBindRequest,

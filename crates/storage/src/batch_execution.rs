@@ -2,14 +2,14 @@ use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, BatchExecution, BatchExecutionAttempt,
-    BatchExecutionAttemptId, BatchExecutionId, ExecutionState, ProviderAccountId,
+    BatchExecutionAttemptId, BatchExecutionId, ExecutionId, ExecutionState, ProviderAccountId,
     ProviderErrorClass, ProviderId, SecretId, TaskCapability, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
     ExecutionMutationSequenceAdvanceCondition, ProviderBatchExecutionPlanningInput,
-    ProviderExecutionBatchPlan, ProviderRuntimeSettingSource, ProviderRuntimeSettingsSchema,
-    ProviderSettingValue, ResolvedProviderRuntimeSettings,
+    ProviderExecutionBatchPlan, ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource,
+    ProviderRuntimeSettingsSchema, ProviderSettingValue, ResolvedProviderRuntimeSettings,
 };
 use asterism_scheduler::ScheduledJobKind;
 use asterism_secrets::{
@@ -21,7 +21,9 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use crate::{
-    BatchExecutionAttemptStartRequest, BatchExecutionChildPlanMaterializeOutcome,
+    BatchExecutionAttemptStartRequest, BatchExecutionChildExecutionCreateOutcome,
+    BatchExecutionChildExecutionCreateRequest, BatchExecutionChildExecutionRecord,
+    BatchExecutionChildExecutionRepository, BatchExecutionChildPlanMaterializeOutcome,
     BatchExecutionChildPlanMaterializeRequest, BatchExecutionChildPlanRecord,
     BatchExecutionChildPlanRepository, BatchExecutionPlanningInputRecord,
     BatchExecutionPlanningInputRepository, BatchExecutionPlanningInputResolveRequest,
@@ -737,6 +739,538 @@ impl BatchExecutionRuntimeSettingsRepository for SqliteBatchExecutionRepository 
             request.snapshot.clone(),
         ))
     }
+}
+
+#[async_trait]
+#[allow(
+    clippy::too_many_lines,
+    reason = "immutable child Execution, calls, settings, artifact, mapping, audit and outbox writes stay atomic"
+)]
+impl BatchExecutionChildExecutionRepository for SqliteBatchExecutionRepository {
+    async fn create_batch_execution_child_executions(
+        &self,
+        request: BatchExecutionChildExecutionCreateRequest<'_>,
+    ) -> Result<BatchExecutionChildExecutionCreateOutcome, StorageError> {
+        validate_worker_context(request.worker_id, request.correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_batch_worker_claims(
+            &mut transaction,
+            request.batch_execution_id,
+            request.attempt_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+        )
+        .await?;
+        let row = sqlx::query(BATCH_EXECUTION_SELECT_BY_ID)
+            .bind(request.batch_execution_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let batch = decode_batch_execution(&row)?;
+        if batch.state != ExecutionState::Running {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        let (settings_attempt_id, runtime_settings, settings_state) =
+            fetch_batch_runtime_settings(&mut transaction, batch.id)
+                .await?
+                .ok_or(StorageError::BatchExecutionStateConflict)?;
+        if settings_attempt_id != request.attempt_id || settings_state != "running" {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        let child_plan_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM batch_execution_child_plans WHERE batch_execution_id = ?",
+        )
+        .bind(batch.id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if u32::try_from(child_plan_count).ok() != Some(batch.expected_child_count) {
+            return Err(StorageError::BatchExecutionStateConflict);
+        }
+        let existing = load_child_execution_records(&mut transaction, batch.id).await?;
+        if !existing.is_empty() {
+            if existing.len() != usize::try_from(batch.expected_child_count).unwrap_or(usize::MAX)
+                || !stored_child_executions_match(
+                    &mut transaction,
+                    &batch,
+                    &runtime_settings,
+                    &existing,
+                )
+                .await?
+            {
+                return Err(StorageError::BatchExecutionStateConflict);
+            }
+            transaction.commit().await?;
+            return Ok(BatchExecutionChildExecutionCreateOutcome::Existing(
+                existing,
+            ));
+        }
+
+        let rows = sqlx::query(
+            "SELECT plan.position, plan.task_id, plan.provider_id, plan.calls_json, \
+                    plan.artifact_type, plan.artifact_digest, plan.artifact_payload_json, \
+                    task.orchestration_state, task.remote_state, account.provider_id AS actual_provider_id \
+             FROM batch_execution_child_plans AS plan \
+             INNER JOIN tasks AS task ON task.id = plan.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             WHERE plan.batch_execution_id = ? ORDER BY plan.position",
+        )
+        .bind(batch.id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut prepared = Vec::with_capacity(rows.len());
+        for row in rows {
+            let position = u32::try_from(row.try_get::<i64, _>("position")?).map_err(|_| {
+                StorageError::InvalidData("batch child position is invalid".to_owned())
+            })?;
+            let task_id = TaskId::from_str(row.try_get("task_id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let provider_id = ProviderId::new(row.try_get::<String, _>("provider_id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let actual_provider_id =
+                ProviderId::new(row.try_get::<String, _>("actual_provider_id")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let calls: Vec<Vec<TaskCapability>> = serde_json::from_str(row.try_get("calls_json")?)?;
+            let artifact = ProviderExecutionPlanArtifact::try_new(
+                provider_id.clone(),
+                row.try_get::<String, _>("artifact_type")?,
+                serde_json::from_str(row.try_get("artifact_payload_json")?)?,
+            )
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let persisted_artifact_digest = decode_storage_digest(row.try_get("artifact_digest")?)?;
+            let active_task_settings: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM provider_runtime_settings \
+                 WHERE scope = 'task' AND task_id = ?",
+            )
+            .bind(task_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            let other_active_executions: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM executions WHERE task_id = ? \
+                 AND state IN ('requested', 'scheduled', 'running', 'recovering', \
+                               'retry_waiting', 'human_required')",
+            )
+            .bind(task_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if provider_id != runtime_settings.provider_id
+                || provider_id != actual_provider_id
+                || canonical_capabilities(&calls) != batch.requested_capabilities
+                || artifact.artifact_digest() != persisted_artifact_digest
+                || active_task_settings != 0
+                || other_active_executions != 0
+                || !matches!(
+                    row.try_get::<String, _>("orchestration_state")?.as_str(),
+                    "ready" | "failed"
+                )
+                || matches!(
+                    row.try_get::<String, _>("remote_state")?.as_str(),
+                    "expired" | "removed"
+                )
+            {
+                return Err(StorageError::BatchExecutionStateConflict);
+            }
+            prepared.push((position, task_id, calls, artifact));
+        }
+
+        let mut records = Vec::with_capacity(prepared.len());
+        for (position, task_id, calls, artifact) in prepared {
+            let execution_id = ExecutionId::new();
+            let created_at = runtime_settings.captured_at;
+            sqlx::query(
+                "INSERT INTO executions \
+                 (id, task_id, requested_capabilities_json, submission_draft_id, requested_by, \
+                  request_source, quote_id, state, scheduled_at, started_at, finished_at, \
+                  created_at, idempotency_scope, idempotency_key) \
+                 VALUES (?, ?, ?, NULL, ?, ?, NULL, 'requested', NULL, NULL, NULL, ?, ?, ?)",
+            )
+            .bind(execution_id.to_string())
+            .bind(task_id.to_string())
+            .bind(serde_json::to_string(&batch.requested_capabilities)?)
+            .bind(batch.requested_by.map(|id| id.to_string()))
+            .bind(enum_name(batch.request_source)?)
+            .bind(encode_timestamp(created_at))
+            .bind(format!("batch-execution:{}", batch.id))
+            .bind(format!("child:{position}"))
+            .execute(&mut *transaction)
+            .await?;
+            insert_child_capability_steps(&mut transaction, execution_id, &calls).await?;
+            insert_child_runtime_settings(&mut transaction, execution_id, &runtime_settings)
+                .await?;
+            insert_child_provider_artifact(&mut transaction, execution_id, created_at, &artifact)
+                .await?;
+            sqlx::query(
+                "INSERT INTO batch_execution_child_executions \
+                 (batch_execution_id, child_position, execution_id, created_at) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(batch.id.to_string())
+            .bind(i64::from(position))
+            .bind(execution_id.to_string())
+            .bind(encode_timestamp(created_at))
+            .execute(&mut *transaction)
+            .await?;
+            enqueue_in_transaction(
+                &mut transaction,
+                &EventEnvelope::at(
+                    request.correlation_id,
+                    DomainEvent::ExecutionStateChanged {
+                        execution_id,
+                        state: ExecutionState::Requested,
+                    },
+                    created_at,
+                ),
+            )
+            .await?;
+            records.push(BatchExecutionChildExecutionRecord {
+                batch_execution_id: batch.id,
+                position,
+                task_id,
+                execution_id,
+                created_at,
+            });
+        }
+        insert_batch_child_executions_audit(
+            &mut transaction,
+            &batch,
+            request.attempt_id,
+            records.len(),
+            request.worker_id,
+            request.correlation_id,
+            request.at,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(BatchExecutionChildExecutionCreateOutcome::Created(records))
+    }
+
+    async fn find_batch_execution_child_executions(
+        &self,
+        batch_execution_id: BatchExecutionId,
+    ) -> Result<Vec<BatchExecutionChildExecutionRecord>, StorageError> {
+        let mut transaction = self.database.pool().begin().await?;
+        let records = load_child_execution_records(&mut transaction, batch_execution_id).await?;
+        transaction.commit().await?;
+        Ok(records)
+    }
+}
+
+async fn insert_child_capability_steps(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    calls: &[Vec<TaskCapability>],
+) -> Result<(), StorageError> {
+    let mut position = 0_u8;
+    for (call_index, call) in calls.iter().enumerate() {
+        for (member_index, capability) in call.iter().copied().enumerate() {
+            position = position.checked_add(1).ok_or_else(|| {
+                StorageError::InvalidData("batch child capability plan is invalid".to_owned())
+            })?;
+            sqlx::query(
+                "INSERT INTO execution_capability_steps \
+                 (execution_id, position, call_position, call_member_position, capability, state) \
+                 VALUES (?, ?, ?, ?, ?, 'pending')",
+            )
+            .bind(execution_id.to_string())
+            .bind(i64::from(position))
+            .bind(i64::try_from(call_index + 1).expect("execution calls are bounded"))
+            .bind(i64::try_from(member_index + 1).expect("call members are bounded"))
+            .bind(enum_name(capability)?)
+            .execute(&mut **transaction)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn insert_child_runtime_settings(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    snapshot: &ExecutionRuntimeSettingsSnapshot,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO execution_runtime_settings \
+         (execution_id, provider_id, schema_version, resolved_settings_json, sources_json, \
+          provider_revision, provider_account_revision, task_revision, completion_policy_json, \
+          captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+    )
+    .bind(execution_id.to_string())
+    .bind(snapshot.provider_id.as_str())
+    .bind(i64::from(snapshot.resolved.schema_version))
+    .bind(serde_json::to_string(&snapshot.resolved.values)?)
+    .bind(serde_json::to_string(&snapshot.sources)?)
+    .bind(snapshot.provider_revision.map(i64::from))
+    .bind(snapshot.provider_account_revision.map(i64::from))
+    .bind(serde_json::to_string(&snapshot.completion_policy)?)
+    .bind(encode_timestamp(snapshot.captured_at))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn insert_child_provider_artifact(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    captured_at: Timestamp,
+    artifact: &ProviderExecutionPlanArtifact,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO execution_provider_plan_artifacts \
+         (execution_id, provider_id, artifact_type, artifact_digest, payload_json, captured_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(execution_id.to_string())
+    .bind(artifact.provider_id().as_str())
+    .bind(artifact.artifact_type())
+    .bind(artifact.artifact_digest().to_vec())
+    .bind(serde_json::to_string(artifact.payload_sanitized())?)
+    .bind(encode_timestamp(captured_at))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn load_child_execution_records(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+) -> Result<Vec<BatchExecutionChildExecutionRecord>, StorageError> {
+    sqlx::query(
+        "SELECT mapping.batch_execution_id, mapping.child_position, plan.task_id, \
+                mapping.execution_id, mapping.created_at \
+         FROM batch_execution_child_executions AS mapping \
+         INNER JOIN batch_execution_child_plans AS plan \
+                 ON plan.batch_execution_id = mapping.batch_execution_id \
+                AND plan.position = mapping.child_position \
+         WHERE mapping.batch_execution_id = ? ORDER BY mapping.child_position",
+    )
+    .bind(batch_execution_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?
+    .iter()
+    .map(decode_child_execution_record)
+    .collect()
+}
+
+fn decode_child_execution_record(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<BatchExecutionChildExecutionRecord, StorageError> {
+    Ok(BatchExecutionChildExecutionRecord {
+        batch_execution_id: BatchExecutionId::from_str(row.try_get("batch_execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        position: u32::try_from(row.try_get::<i64, _>("child_position")?).map_err(|_| {
+            StorageError::InvalidData("batch child execution position is invalid".to_owned())
+        })?,
+        task_id: TaskId::from_str(row.try_get("task_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        execution_id: ExecutionId::from_str(row.try_get("execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        created_at: decode_timestamp(row.try_get("created_at")?)?,
+    })
+}
+
+async fn stored_child_executions_match(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch: &BatchExecution,
+    runtime_settings: &ExecutionRuntimeSettingsSnapshot,
+    records: &[BatchExecutionChildExecutionRecord],
+) -> Result<bool, StorageError> {
+    for record in records {
+        let row = sqlx::query(
+            "SELECT execution.task_id, execution.requested_capabilities_json, \
+                    execution.submission_draft_id, execution.requested_by, \
+                    execution.request_source, execution.quote_id, execution.created_at, \
+                    execution.idempotency_scope, execution.idempotency_key, \
+                    plan.provider_id AS child_provider_id, \
+                    plan.artifact_type AS child_artifact_type, \
+                    plan.artifact_digest AS child_artifact_digest, \
+                    plan.artifact_payload_json AS child_artifact_payload_json, \
+                    artifact.provider_id AS artifact_provider_id, \
+                    artifact.artifact_type AS artifact_type, \
+                    artifact.artifact_digest AS artifact_digest, \
+                    artifact.payload_json AS artifact_payload_json, \
+                    artifact.captured_at AS artifact_captured_at, \
+                    settings.provider_id AS settings_provider_id, \
+                    settings.schema_version, settings.resolved_settings_json, settings.sources_json, \
+                    settings.provider_revision, settings.provider_account_revision, \
+                    settings.task_revision, settings.completion_policy_json, settings.captured_at \
+             FROM executions AS execution \
+             INNER JOIN batch_execution_child_plans AS plan \
+                     ON plan.batch_execution_id = ? AND plan.position = ? \
+             INNER JOIN execution_runtime_settings AS settings \
+                     ON settings.execution_id = execution.id \
+             INNER JOIN execution_provider_plan_artifacts AS artifact \
+                     ON artifact.execution_id = execution.id \
+             WHERE execution.id = ?",
+        )
+        .bind(batch.id.to_string())
+        .bind(i64::from(record.position))
+        .bind(record.execution_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let child_provider_id = ProviderId::new(row.try_get::<String, _>("child_provider_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let child_artifact = ProviderExecutionPlanArtifact::try_new(
+            child_provider_id,
+            row.try_get::<String, _>("child_artifact_type")?,
+            serde_json::from_str(row.try_get("child_artifact_payload_json")?)?,
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let artifact_provider_id =
+            ProviderId::new(row.try_get::<String, _>("artifact_provider_id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let execution_artifact = ProviderExecutionPlanArtifact::try_new(
+            artifact_provider_id,
+            row.try_get::<String, _>("artifact_type")?,
+            serde_json::from_str(row.try_get("artifact_payload_json")?)?,
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let steps = load_execution_calls(transaction, record.execution_id).await?;
+        if row.try_get::<String, _>("task_id")? != record.task_id.to_string()
+            || serde_json::from_str::<Vec<TaskCapability>>(
+                row.try_get("requested_capabilities_json")?,
+            )? != batch.requested_capabilities
+            || row
+                .try_get::<Option<String>, _>("submission_draft_id")?
+                .is_some()
+            || row.try_get::<Option<String>, _>("requested_by")?
+                != batch.requested_by.map(|id| id.to_string())
+            || row.try_get::<String, _>("request_source")? != enum_name(batch.request_source)?
+            || row.try_get::<Option<String>, _>("quote_id")?.is_some()
+            || decode_timestamp(row.try_get("created_at")?)? != record.created_at
+            || row.try_get::<Option<String>, _>("idempotency_scope")?
+                != Some(format!("batch-execution:{}", batch.id))
+            || row.try_get::<Option<String>, _>("idempotency_key")?
+                != Some(format!("child:{}", record.position))
+            || child_artifact.artifact_digest()
+                != decode_storage_digest(row.try_get("child_artifact_digest")?)?
+            || execution_artifact != child_artifact
+            || execution_artifact.artifact_digest()
+                != decode_storage_digest(row.try_get("artifact_digest")?)?
+            || decode_timestamp(row.try_get("artifact_captured_at")?)? != record.created_at
+            || steps != load_child_calls(transaction, batch.id, record.position).await?
+            || row.try_get::<String, _>("settings_provider_id")?
+                != runtime_settings.provider_id.as_str()
+            || u32::try_from(row.try_get::<i64, _>("schema_version")?).ok()
+                != Some(runtime_settings.resolved.schema_version)
+            || row.try_get::<String, _>("resolved_settings_json")?
+                != serde_json::to_string(&runtime_settings.resolved.values)?
+            || row.try_get::<String, _>("sources_json")?
+                != serde_json::to_string(&runtime_settings.sources)?
+            || decode_optional_batch_revision(row.try_get("provider_revision")?)?
+                != runtime_settings.provider_revision
+            || decode_optional_batch_revision(row.try_get("provider_account_revision")?)?
+                != runtime_settings.provider_account_revision
+            || row.try_get::<Option<i64>, _>("task_revision")?.is_some()
+            || row.try_get::<String, _>("completion_policy_json")?
+                != serde_json::to_string(&runtime_settings.completion_policy)?
+            || decode_timestamp(row.try_get("captured_at")?)? != runtime_settings.captured_at
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn load_execution_calls(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+) -> Result<Vec<Vec<TaskCapability>>, StorageError> {
+    let rows = sqlx::query(
+        "SELECT call_position, call_member_position, capability \
+         FROM execution_capability_steps WHERE execution_id = ? \
+         ORDER BY call_position, call_member_position",
+    )
+    .bind(execution_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    group_call_rows(&rows)
+}
+
+async fn load_child_calls(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch_execution_id: BatchExecutionId,
+    position: u32,
+) -> Result<Vec<Vec<TaskCapability>>, StorageError> {
+    let calls: String = sqlx::query_scalar(
+        "SELECT calls_json FROM batch_execution_child_plans \
+         WHERE batch_execution_id = ? AND position = ?",
+    )
+    .bind(batch_execution_id.to_string())
+    .bind(i64::from(position))
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(serde_json::from_str(&calls)?)
+}
+
+fn group_call_rows(
+    rows: &[sqlx::sqlite::SqliteRow],
+) -> Result<Vec<Vec<TaskCapability>>, StorageError> {
+    let mut calls = Vec::<Vec<TaskCapability>>::new();
+    for row in rows {
+        let call_position =
+            usize::try_from(row.try_get::<i64, _>("call_position")?).map_err(|_| {
+                StorageError::InvalidData("execution call position is invalid".to_owned())
+            })?;
+        let member_position = usize::try_from(row.try_get::<i64, _>("call_member_position")?)
+            .map_err(|_| {
+                StorageError::InvalidData("execution call member is invalid".to_owned())
+            })?;
+        if call_position != calls.len() && call_position != calls.len() + 1 {
+            return Err(StorageError::InvalidData(
+                "execution call positions are not contiguous".to_owned(),
+            ));
+        }
+        if call_position == calls.len() + 1 {
+            calls.push(Vec::new());
+        }
+        let call = calls
+            .get_mut(call_position.saturating_sub(1))
+            .ok_or_else(|| StorageError::InvalidData("execution call is invalid".to_owned()))?;
+        if member_position != call.len() + 1 {
+            return Err(StorageError::InvalidData(
+                "execution call members are not contiguous".to_owned(),
+            ));
+        }
+        call.push(decode_enum(row.try_get("capability")?)?);
+    }
+    Ok(calls)
+}
+
+async fn insert_batch_child_executions_audit(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    batch: &BatchExecution,
+    attempt_id: BatchExecutionAttemptId,
+    child_count: usize,
+    worker_id: &str,
+    correlation_id: &str,
+    at: Timestamp,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'worker', ?, 'batch_execution_child_executions_created', \
+                 'batch_execution', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(at))
+    .bind(worker_id)
+    .bind(batch.id.to_string())
+    .bind(correlation_id)
+    .bind(
+        serde_json::json!({
+            "attempt_id": attempt_id,
+            "child_count": child_count,
+            "execution_ids": "[REDACTED]",
+            "scheduler_visible": false,
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn fetch_batch_runtime_settings(
