@@ -3057,6 +3057,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn acknowledgement_rejects_duplicate_status_or_message_aliases() {
+        for document in [
+            r#"{"status":true,"status":true,"msg":"提交成功"}"#,
+            r#"{"status":true,"msg":"提交成功","message":"提交成功"}"#,
+        ] {
+            assert_eq!(
+                parse_submission_receipt(document).unwrap_err().kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+    }
+
     async fn draft() -> SubmissionDraft {
         let task_id = TaskId::new();
         let mut questions = parse_work_preview_question_page(QUESTIONS)

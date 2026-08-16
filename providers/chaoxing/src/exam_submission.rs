@@ -880,6 +880,23 @@ mod tests {
         assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
     }
 
+    #[test]
+    fn submission_response_rejects_duplicate_semantic_fields() {
+        let received_at = Utc.timestamp_millis_opt(1_700_000_000_500).unwrap();
+        for document in [
+            r#"{"status":"success","status":"success","data":"1700000001000|3580|SAFE_NEXT_ENC"}"#,
+            r#"{"status":"success","msg":"保存成功","message":"保存成功","data":"1700000001000|3580|SAFE_NEXT_ENC"}"#,
+            r#"{"status":"success","data":"1700000001000|3580|SAFE_NEXT_ENC","data":"1700000001000|3580|SAFE_NEXT_ENC"}"#,
+        ] {
+            assert_eq!(
+                parse_exam_submission_response(document, false, received_at)
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+    }
+
     fn accept_save(
         command: ChaoxingExamSubmissionCommand,
         document: &str,

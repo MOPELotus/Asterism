@@ -477,6 +477,8 @@ second POST. A bounded `{status:true}` JSON response becomes an `accepted`
 `SubmissionReceipt` with no route token or answer data. It is never completion.
 Captcha and face/browser challenges are typed `HumanRequired`; expiry and
 deletion become `RemoteChanged`; malformed or unknown responses fail closed.
+`status` is unique, and `msg`/`message` are aliases for one unique semantic
+field; duplicate keys or both aliases in one acknowledgement are protocol drift.
 
 `SubmissionVerify` is an independent read-only slot and does not need a Receipt,
 which lets Core recover an ambiguous submit. It rediscovers the same Course and
@@ -632,6 +634,11 @@ An ambiguous final submit may be recovered as accepted only when that same
 fresh exact row is already Completed, after which this independent result
 verification still runs. Synthetic fixtures and Provider integration tests
 cover this boundary; live account validation remains pending.
+
+Exam acknowledgement parsing likewise requires one unique `status`, one
+`data` for temporary saves and at most one semantic message across the
+`msg|message` aliases. Duplicate semantic fields fail as protocol drift instead
+of inheriting parser-specific first- or last-value behavior.
 
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.

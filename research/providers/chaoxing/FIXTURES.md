@@ -251,7 +251,10 @@ Inconclusive handling for missing, extra, unsupported or drifted binding facts;
 duplicate IDs fail closed. The synthetic result score additionally proves exact
 fixed-point projection for 0, 82.5 and 99.999 plus `None` when absent, without
 changing answer status. Unknown compatible JSON extensions are ignored, but
-malformed state, rejection, identity drift and timing regression fail closed.
+malformed state, rejection, duplicate `status`/`data` or `msg|message` semantic
+fields, identity drift and timing regression fail closed. Work acknowledgement
+regressions apply the same uniqueness rule to boolean `status` and the message
+aliases.
 All IDs, signatures and crypto-looking values are synthetic placeholders.
 
 Cover regressions pin CxKitty's exact decimal `needcode` declaration grammar.
