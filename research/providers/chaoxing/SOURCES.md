@@ -105,6 +105,10 @@ validation is still required.
   mobile header, but the Native final dispatch had substituted the independent
   Work/browser value `XMLHttpRequest`. The transport now builds and tests the
   actual request with the same mobile header as its persisted digest.
+  The same session actor supplies the Exam cover `userId` before the resulting
+  `testUserRelationId` is sent as `examAnswerId`. Asterism's encrypted
+  pre-Question command is now v2, includes that zeroizing actor in its digest
+  and rejects an execution-time `_uid|UID` change before the one-shot start.
 - 2026-08-16: re-read Samueli's web `addStudentWorkNew` POST at
   `9699e632b492`. The exact donor request uses the fresh editor route as Referer
   and `X-Requested-With: XMLHttpRequest`. Asterism had accidentally reused the

@@ -983,6 +983,7 @@ mod tests {
             task_id,
             "exam:100:200:exam-1",
             &request,
+            "9001",
             parse_exam_cover(COVER).unwrap(),
         )
         .unwrap();
@@ -1080,6 +1081,7 @@ mod tests {
             task_id,
             "exam:100:200:exam-1",
             &request,
+            "9001",
             parse_exam_cover(COVER).unwrap(),
         )
         .unwrap();

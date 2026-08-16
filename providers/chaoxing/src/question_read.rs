@@ -1010,6 +1010,7 @@ mod tests {
                 task_id,
                 remote_task_id,
                 request,
+                "9001",
                 crate::exam_attempt::ChaoxingExamCover {
                     title: "Fixture Exam".to_owned(),
                     exam_answer_id: Zeroizing::new("answer-1".to_owned()),

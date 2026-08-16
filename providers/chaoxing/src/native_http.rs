@@ -563,7 +563,7 @@ impl NativeChaoxingInventoryTransport {
                 HumanRequiredReason::BrowserRequired,
             ));
         }
-        ChaoxingExamStartCommand::from_cover(task_id, remote_task_id, request, cover_facts)
+        ChaoxingExamStartCommand::from_cover(task_id, remote_task_id, request, user_id, cover_facts)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -572,6 +572,18 @@ impl NativeChaoxingInventoryTransport {
         session: &ChaoxingCookieSession,
         command: &ChaoxingExamStartCommand,
     ) -> ProviderResult<ChaoxingExamStartOutcome> {
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Exam start requires one identity Cookie",
+            )
+        })?;
+        if !command.belongs_to_user(user_id) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Exam identity Cookie changed after start preparation",
+            ));
+        }
         let start_url = build_url(
             EXAM_START_BASE,
             &[

@@ -371,6 +371,9 @@ every fixture before staging it.
 - A changed `enc_task`, `examAnswerId`, course/class route or command digest must
   fail before the one-shot start; an issued transport error must remain
   ambiguous and must never be represented by a fixture retry.
+- The pre-Question v2 command also binds the exact cover `_uid|UID` actor. Actor
+  changes alter the request digest, invalid actors fail construction, and a
+  different execution-time Cookie must fail before `phone/start` dispatch.
 - Exam preview state supersedes start-page state. Every answer-save operation
   must have a distinct persisted request digest; only an accepted response may
   rotate the continuation. Temporary-save ambiguity is never replayed, final

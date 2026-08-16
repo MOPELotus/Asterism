@@ -845,6 +845,7 @@ async fn materialize_exam_artifact(
         task_id,
         "exam:100:200:exam-1",
         &request,
+        "9001",
         parse_exam_cover(EXAM_COVER).unwrap(),
     )
     .unwrap();

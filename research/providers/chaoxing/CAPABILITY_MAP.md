@@ -308,7 +308,7 @@ policy and remains independently guarded.
 - Pending independent Exam rows with a structural `goTest` entry now advertise
   `QuestionInventory` and `QuestionParse`. The fresh read rebinds the exact
   course/class/exam identity and `enc_task`, obtains the donor cover, freezes a
-  versioned exact `phone/start` command and hands it to Core's durable
+  versioned exact `phone/start` command bound to the cover actor and hands it to Core's durable
   pre-Question attempt ledger. Before sending, the Provider repeats the
   read-only discovery and requires the encrypted command digest to remain
   identical. Core records the operation type/request digest first; the Native

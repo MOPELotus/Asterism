@@ -589,6 +589,14 @@ remains ambiguous and cannot be auto-replayed. Cover or start responses
 requiring an exam code, face check or captcha return `HumanRequired` for
 BrowserBridge/Capture handoff.
 
+The cover request obtains `examAnswerId` for one unique `_uid|UID` Cookie. The
+encrypted pre-Question command is therefore schema v2 and retains that actor as
+zeroizing binding state; the actor also participates in the request digest even
+though `phone/start` identifies the attempt through `examAnswerId`. Immediately
+before the one-shot send, Native HTTP resolves the Cookie again and requires the
+same exact actor. Missing, duplicate or changed identity Cookies fail before
+dispatch rather than using another account's session with the durable command.
+
 `SubmissionBuild` exposes only the donor's value-free Exam form field names.
 After an immutable Draft claims the v3 artifact, the Provider requires Core's
 complete coverage denominator to equal the artifact Question count, matches

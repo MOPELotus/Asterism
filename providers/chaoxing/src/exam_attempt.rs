@@ -19,7 +19,7 @@ const MAX_TITLE_BYTES: usize = 512;
 const MAX_EXAM_STATE_BYTES: usize = 128 * 1_024;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
 
-pub const CHAOXING_EXAM_PRE_QUESTION_TYPE: &str = "chaoxing.exam-pre-question.v1";
+pub const CHAOXING_EXAM_PRE_QUESTION_TYPE: &str = "chaoxing.exam-pre-question.v2";
 pub const CHAOXING_EXAM_READY_TO_START_PHASE: &str = "chaoxing.exam-ready-to-start";
 pub const CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE: &str = "chaoxing.exam-question-attempt.v3";
 pub const CHAOXING_EXAM_QUESTIONS_READY_PHASE: &str = "chaoxing.exam-questions-ready";
@@ -109,6 +109,7 @@ pub struct ChaoxingExamStartCommand {
     exam_id: Zeroizing<String>,
     enc_task: Zeroizing<String>,
     exam_answer_id: Zeroizing<String>,
+    user_id: Zeroizing<String>,
     request_digest: [u8; 32],
 }
 
@@ -117,6 +118,7 @@ impl ChaoxingExamStartCommand {
         task_id: TaskId,
         remote_task_id: &str,
         request: &ChaoxingExamQuestionRequest<'_>,
+        user_id: &str,
         cover: ChaoxingExamCover,
     ) -> ProviderResult<Self> {
         let command = Self {
@@ -129,6 +131,7 @@ impl ChaoxingExamStartCommand {
             exam_id: Zeroizing::new(request.exam_id().to_owned()),
             enc_task: Zeroizing::new(request.enc_task().to_owned()),
             exam_answer_id: cover.exam_answer_id,
+            user_id: Zeroizing::new(user_id.to_owned()),
             request_digest: [0; 32],
         };
         command.validate_bound(task_id, remote_task_id)?;
@@ -152,6 +155,7 @@ impl ChaoxingExamStartCommand {
                 exam_id: &self.exam_id,
                 enc_task: &self.enc_task,
                 exam_answer_id: &self.exam_answer_id,
+                user_id: &self.user_id,
             })
             .map_err(|_| invalid_response("Chaoxing Exam start command could not be encoded"))?,
         );
@@ -183,6 +187,7 @@ impl ChaoxingExamStartCommand {
             exam_id: Zeroizing::new(std::mem::take(&mut wire.exam_id)),
             enc_task: Zeroizing::new(std::mem::take(&mut wire.enc_task)),
             exam_answer_id: Zeroizing::new(std::mem::take(&mut wire.exam_answer_id)),
+            user_id: Zeroizing::new(std::mem::take(&mut wire.user_id)),
             request_digest: [0; 32],
         };
         command.validate_bound(task_id, remote_task_id)?;
@@ -199,6 +204,7 @@ impl ChaoxingExamStartCommand {
             || !valid_component(&self.cpi)
             || !valid_component(&self.exam_id)
             || !valid_component(&self.exam_answer_id)
+            || !valid_component(&self.user_id)
             || self.enc_task.is_empty()
             || self.enc_task.len() > MAX_ENC_TASK_BYTES
             || self.enc_task.chars().any(char::is_control)
@@ -224,6 +230,7 @@ impl ChaoxingExamStartCommand {
             method: "GET",
             endpoint: "/exam-ans/exam/phone/start",
             requested_with: "com.chaoxing.mobile",
+            user_id: &self.user_id,
             course_id: &self.course_id,
             class_id: &self.class_id,
             exam_id: &self.exam_id,
@@ -277,6 +284,10 @@ impl ChaoxingExamStartCommand {
 
     pub(crate) fn exam_answer_id(&self) -> &str {
         &self.exam_answer_id
+    }
+
+    pub(crate) fn belongs_to_user(&self, user_id: &str) -> bool {
+        self.user_id.as_str() == user_id
     }
 
     pub(crate) fn valid_start_redirect(&self, url: &Url) -> bool {
@@ -622,6 +633,7 @@ struct ExamStartCommandWireRef<'a> {
     exam_id: &'a str,
     enc_task: &'a str,
     exam_answer_id: &'a str,
+    user_id: &'a str,
 }
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -637,6 +649,7 @@ struct ExamStartCommandWire {
     exam_id: String,
     enc_task: String,
     exam_answer_id: String,
+    user_id: String,
 }
 
 #[derive(Serialize)]
@@ -644,6 +657,7 @@ struct ExamStartRequestIdentity<'a> {
     method: &'static str,
     endpoint: &'static str,
     requested_with: &'static str,
+    user_id: &'a str,
     course_id: &'a str,
     class_id: &'a str,
     exam_id: &'a str,
@@ -1548,6 +1562,39 @@ mod tests {
         assert_eq!(request.exam_id(), "exam-1");
         assert_eq!(request.enc_task(), "SAFE_ENC");
         assert!(!format!("{request:?}").contains("SAFE_ENC"));
+
+        let task_id = TaskId::new();
+        let first = ChaoxingExamStartCommand::from_cover(
+            task_id,
+            "exam:100:200:exam-1",
+            &request,
+            "9001",
+            parse_exam_cover(COVER).unwrap(),
+        )
+        .unwrap();
+        let second = ChaoxingExamStartCommand::from_cover(
+            task_id,
+            "exam:100:200:exam-1",
+            &request,
+            "9002",
+            parse_exam_cover(COVER).unwrap(),
+        )
+        .unwrap();
+        assert!(first.belongs_to_user("9001"));
+        assert!(!first.belongs_to_user("9002"));
+        assert_ne!(first.request_digest(), second.request_digest());
+        assert_eq!(
+            ChaoxingExamStartCommand::from_cover(
+                task_id,
+                "exam:100:200:exam-1",
+                &request,
+                " bad-user ",
+                parse_exam_cover(COVER).unwrap(),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 
     #[test]
