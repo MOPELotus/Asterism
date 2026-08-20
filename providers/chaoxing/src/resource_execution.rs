@@ -100,11 +100,53 @@ pub(crate) trait ChaoxingVideoTransport: Send + Sync {
     async fn report_video_progress(
         &self,
         context: &ProviderContext,
-        route: ChaoxingCourseRoute<'_>,
-        target: &ChaoxingMediaResourceTarget,
-        status: &ChaoxingVideoStatus,
-        playing_time_seconds: u64,
-    ) -> ProviderResult<bool>;
+        request: ChaoxingMediaReportRequest<'_>,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<ChaoxingMediaReportOutcome>;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ChaoxingMediaReportRequest<'a> {
+    pub(crate) route: ChaoxingCourseRoute<'a>,
+    pub(crate) target: &'a ChaoxingMediaResourceTarget,
+    pub(crate) status: &'a ChaoxingVideoStatus,
+    pub(crate) playing_time_seconds: u64,
+    pub(crate) first_ordinal: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ChaoxingMediaReportOutcome {
+    passed: bool,
+    last_ordinal: u32,
+}
+
+impl ChaoxingMediaReportOutcome {
+    pub(crate) fn try_new(
+        passed: bool,
+        first_ordinal: u32,
+        last_ordinal: u32,
+    ) -> ProviderResult<Self> {
+        if !(1..=100_000).contains(&first_ordinal)
+            || !(first_ordinal..=100_000).contains(&last_ordinal)
+            || last_ordinal - first_ordinal > 1
+        {
+            return Err(protocol_drift(
+                "Chaoxing media report ordinal range is invalid",
+            ));
+        }
+        Ok(Self {
+            passed,
+            last_ordinal,
+        })
+    }
+
+    pub(crate) const fn passed(self) -> bool {
+        self.passed
+    }
+
+    pub(crate) const fn last_ordinal(self) -> u32 {
+        self.last_ordinal
+    }
 }
 
 pub(crate) struct ChaoxingLiveStatus {
@@ -474,7 +516,8 @@ impl ChaoxingResourceExecution {
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "the video call keeps its Execution, route, fresh target, settings and event boundaries explicit"
+        clippy::too_many_lines,
+        reason = "the media call keeps its Execution, frozen timing, ordered issue/receipt and fresh verification boundaries explicit"
     )]
     async fn execute_media(
         &self,
@@ -496,6 +539,12 @@ impl ChaoxingResourceExecution {
                 .await?;
             return Ok(media_outcome(target.kind().resource_kind(), true));
         }
+        let mutations = events.mutation_sink().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Chaoxing media execution requires a durable Core mutation sink",
+            )
+        })?;
         let status = self.video.video_status(context, target).await?;
         let duration = status.duration_seconds();
         let mut playing_time = status
@@ -512,6 +561,7 @@ impl ChaoxingResourceExecution {
                 })),
             ))
             .await?;
+        let mut mutation_ordinal = 0_u32;
         loop {
             if playing_time < duration {
                 let next = playing_time
@@ -525,10 +575,23 @@ impl ChaoxingResourceExecution {
                     .await;
                 playing_time = next;
             }
-            let passed = self
+            let first_ordinal = next_resource_mutation_ordinal(mutation_ordinal)?;
+            let report = self
                 .video
-                .report_video_progress(context, route, target, &status, playing_time)
+                .report_video_progress(
+                    context,
+                    ChaoxingMediaReportRequest {
+                        route,
+                        target,
+                        status: &status,
+                        playing_time_seconds: playing_time,
+                        first_ordinal,
+                    },
+                    mutations,
+                )
                 .await?;
+            mutation_ordinal = report.last_ordinal();
+            let passed = report.passed();
             let percent = video_percent(playing_time, duration);
             events
                 .report(ProviderProgress {
@@ -642,14 +705,14 @@ impl ChaoxingResourceExecution {
                     )?)
                     .await;
             }
-            mutation_ordinal = next_live_mutation_ordinal(mutation_ordinal)?;
+            mutation_ordinal = next_resource_mutation_ordinal(mutation_ordinal)?;
             let accepted = self
                 .live
                 .report_live_progress(context, route, target, &status, mutation_ordinal, mutations)
                 .await?;
             if !accepted {
                 self.live_sleeper.sleep(Duration::from_secs(5)).await;
-                mutation_ordinal = next_live_mutation_ordinal(mutation_ordinal)?;
+                mutation_ordinal = next_resource_mutation_ordinal(mutation_ordinal)?;
                 let _retry_accepted = self
                     .live
                     .report_live_progress(
@@ -1232,11 +1295,11 @@ fn real_playback_duration(
     Ok(Duration::from_millis(milliseconds))
 }
 
-fn next_live_mutation_ordinal(current: u32) -> ProviderResult<u32> {
+fn next_resource_mutation_ordinal(current: u32) -> ProviderResult<u32> {
     current
         .checked_add(1)
         .filter(|ordinal| *ordinal <= 100_000)
-        .ok_or_else(|| protocol_drift("Chaoxing Live mutation ordinal overflowed"))
+        .ok_or_else(|| protocol_drift("Chaoxing resource mutation ordinal overflowed"))
 }
 
 fn video_percent(playing_time: u64, duration: u64) -> u8 {
@@ -1283,6 +1346,7 @@ mod tests {
         completed_video: AtomicBool,
         completed_audio: AtomicBool,
         completed_live: AtomicBool,
+        reject_next_media: AtomicBool,
         reject_next_live: AtomicBool,
         resource_calls: AtomicUsize,
         execute_calls: AtomicUsize,
@@ -1300,6 +1364,7 @@ mod tests {
                 completed_video: AtomicBool::new(false),
                 completed_audio: AtomicBool::new(false),
                 completed_live: AtomicBool::new(false),
+                reject_next_media: AtomicBool::new(false),
                 reject_next_live: AtomicBool::new(false),
                 resource_calls: AtomicUsize::new(0),
                 execute_calls: AtomicUsize::new(0),
@@ -1471,20 +1536,26 @@ mod tests {
         async fn report_video_progress(
             &self,
             _context: &ProviderContext,
-            _route: ChaoxingCourseRoute<'_>,
-            target: &ChaoxingMediaResourceTarget,
-            _status: &ChaoxingVideoStatus,
-            playing_time_seconds: u64,
-        ) -> ProviderResult<bool> {
+            request: ChaoxingMediaReportRequest<'_>,
+            mutations: &(dyn ExecutionMutationSink + Send + Sync),
+        ) -> ProviderResult<ChaoxingMediaReportOutcome> {
+            let rejected = self.reject_next_media.swap(false, Ordering::Relaxed);
+            mutations
+                .issue(&ExecutionMutationIssue::new(
+                    request.first_ordinal,
+                    "chaoxing.media.progress",
+                    [u8::try_from(request.first_ordinal).unwrap(); 32],
+                )?)
+                .await?;
             self.video_reports
                 .lock()
                 .unwrap()
-                .push(playing_time_seconds);
-            let completed = match target.kind() {
-                ChaoxingMediaKind::Video => playing_time_seconds == 135,
-                ChaoxingMediaKind::Audio => playing_time_seconds == 65,
+                .push(request.playing_time_seconds);
+            let completed = match request.target.kind() {
+                ChaoxingMediaKind::Video => request.playing_time_seconds == 135,
+                ChaoxingMediaKind::Audio => request.playing_time_seconds == 65,
             };
-            match target.kind() {
+            match request.target.kind() {
                 ChaoxingMediaKind::Video => {
                     self.completed_video.store(completed, Ordering::Relaxed);
                 }
@@ -1492,7 +1563,34 @@ mod tests {
                     self.completed_audio.store(completed, Ordering::Relaxed);
                 }
             }
-            Ok(completed)
+            mutations
+                .record_receipt(ExecutionMutationReceipt::new(
+                    request.first_ordinal,
+                    [u8::try_from(request.first_ordinal + 10).unwrap(); 32],
+                    !rejected,
+                )?)
+                .await?;
+            let last_ordinal = if rejected {
+                let fallback_ordinal = next_resource_mutation_ordinal(request.first_ordinal)?;
+                mutations
+                    .issue(&ExecutionMutationIssue::new(
+                        fallback_ordinal,
+                        "chaoxing.media.progress",
+                        [u8::try_from(fallback_ordinal).unwrap(); 32],
+                    )?)
+                    .await?;
+                mutations
+                    .record_receipt(ExecutionMutationReceipt::new(
+                        fallback_ordinal,
+                        [u8::try_from(fallback_ordinal + 10).unwrap(); 32],
+                        true,
+                    )?)
+                    .await?;
+                fallback_ordinal
+            } else {
+                request.first_ordinal
+            };
+            ChaoxingMediaReportOutcome::try_new(completed, request.first_ordinal, last_ordinal)
         }
     }
 
@@ -1782,6 +1880,7 @@ mod tests {
     #[tokio::test]
     async fn video_execution_uses_frozen_speed_and_verifies_the_fresh_card() {
         let fixture = Arc::new(FixtureProvider::new(false));
+        fixture.reject_next_media.store(true, Ordering::Relaxed);
         let mut execution = ChaoxingResourceExecution::try_new(
             fixture.clone(),
             fixture.clone(),
@@ -1791,7 +1890,10 @@ mod tests {
         )
         .unwrap();
         execution.video_sleeper = fixture.clone();
-        let events = RecordingEvents::default();
+        let events = RecordingEvents {
+            mutations_enabled: true,
+            ..RecordingEvents::default()
+        };
         let outcome = execution
             .execute(
                 &context(),
@@ -1811,6 +1913,17 @@ mod tests {
         );
         assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            *events.mutation_events.lock().unwrap(),
+            [
+                "issue:1:chaoxing.media.progress",
+                "receipt:1:false",
+                "issue:2:chaoxing.media.progress",
+                "receipt:2:true",
+                "issue:3:chaoxing.media.progress",
+                "receipt:3:true",
+            ]
+        );
         assert_eq!(events.progress.load(Ordering::Relaxed), 3);
         assert_eq!(events.logs.load(Ordering::Relaxed), 3);
     }
@@ -1827,7 +1940,10 @@ mod tests {
         )
         .unwrap();
         execution.video_sleeper = fixture.clone();
-        let events = RecordingEvents::default();
+        let events = RecordingEvents {
+            mutations_enabled: true,
+            ..RecordingEvents::default()
+        };
         let outcome = execution
             .execute(
                 &context(),
@@ -1846,8 +1962,36 @@ mod tests {
             [Duration::from_secs(30)]
         );
         assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            *events.mutation_events.lock().unwrap(),
+            ["issue:1:chaoxing.media.progress", "receipt:1:true"]
+        );
         assert_eq!(events.progress.load(Ordering::Relaxed), 2);
         assert_eq!(events.logs.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn media_execution_requires_durable_issue_before_status_or_send() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        let error = execution
+            .execute(
+                &context(),
+                &execution_request("resource:100:200:4001:job-video"),
+                &RecordingEvents::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+        assert!(fixture.video_reports.lock().unwrap().is_empty());
+        assert!(!fixture.completed_video.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

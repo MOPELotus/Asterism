@@ -42,7 +42,8 @@ use crate::{
     parse_exam_submission_response, parse_submission_receipt,
     resource_execution::{
         ChaoxingImmediateResourceTransport, ChaoxingLiveStatus, ChaoxingLiveTransport,
-        ChaoxingVideoStatus, ChaoxingVideoTransport, live_post_mutation_error,
+        ChaoxingMediaReportOutcome, ChaoxingMediaReportRequest, ChaoxingVideoStatus,
+        ChaoxingVideoTransport, live_post_mutation_error,
     },
     resource_inventory::{
         ChaoxingChapterWorkTarget, ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
@@ -69,6 +70,9 @@ const IMMEDIATE_MUTATION_OPERATION: &str = "chaoxing.resource.immediate-complete
 const IMMEDIATE_REQUEST_DIGEST_DOMAIN: &[u8] = b"asterism.chaoxing.immediate-resource-request.v1\0";
 const IMMEDIATE_RESPONSE_DIGEST_DOMAIN: &[u8] =
     b"asterism.chaoxing.immediate-resource-response.v1\0";
+const MEDIA_MUTATION_OPERATION: &str = "chaoxing.media.progress";
+const MEDIA_REQUEST_DIGEST_DOMAIN: &[u8] = b"asterism.chaoxing.media-request.v1\0";
+const MEDIA_RESPONSE_DIGEST_DOMAIN: &[u8] = b"asterism.chaoxing.media-response.v1\0";
 const VIDEO_STATUS_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const VIDEO_REPORT_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const VIDEO_REFERER: &str =
@@ -937,57 +941,73 @@ impl NativeChaoxingInventoryTransport {
     async fn report_video_progress_once(
         &self,
         session: &ChaoxingCookieSession,
-        route: ChaoxingCourseRoute<'_>,
-        target: &ChaoxingMediaResourceTarget,
-        status: &ChaoxingVideoStatus,
-        playing_time_seconds: u64,
-    ) -> ProviderResult<bool> {
-        let candidates = target.rt().map_or_else(
-            || vec![ChaoxingVideoRt::NineTenths, ChaoxingVideoRt::One],
-            |rt| vec![rt],
-        );
-        for rt in candidates {
-            let response = self
+        request: ChaoxingMediaReportRequest<'_>,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<ChaoxingMediaReportOutcome> {
+        let candidates = media_report_candidates(request.target.rt(), request.first_ordinal)?;
+        for (ordinal, rt) in candidates {
+            let url = video_report_url(
+                session,
+                request.route,
+                request.target,
+                request.status,
+                request.playing_time_seconds,
+                rt,
+            )?;
+            let request_digest = media_mutation_request_digest(
+                ordinal,
+                request.target.job_id(),
+                request.target.kind(),
+                &url,
+            )?;
+            let http_request = self
                 .client
-                .get(video_report_url(
-                    session,
-                    route,
-                    target,
-                    status,
-                    playing_time_seconds,
-                    rt,
-                )?)
+                .get(url)
                 .header(COOKIE, session.header_value()?)
                 .header(ACCEPT, "application/json,text/plain,*/*")
-                .header(REFERER, media_referer(target.kind()))
-                .send()
-                .await
+                .header(REFERER, media_referer(request.target.kind()))
+                .build()
                 .map_err(|error| classify_reqwest_error(&error))?;
-            if response.status() == StatusCode::FORBIDDEN {
-                match read_response_body(response).await {
-                    Ok(body)
-                        if body.as_str().contains("验证码")
-                            || body.as_str().contains("validate") =>
-                    {
-                        return Err(ProviderError::human_required(
-                            "Chaoxing Video progress requires an image captcha",
-                            HumanRequiredReason::ImageCaptcha,
-                        ));
-                    }
-                    Ok(_)
-                    | Err(ProviderError {
-                        kind: ProviderErrorKind::InvalidResponse,
-                        ..
-                    }) => {}
-                    Err(error) => return Err(error),
+            let issue =
+                ExecutionMutationIssue::new(ordinal, MEDIA_MUTATION_OPERATION, request_digest)?;
+            mutations.issue(&issue).await?;
+            let response = self
+                .client
+                .execute(http_request)
+                .await
+                .map_err(|error| media_post_mutation_error(classify_reqwest_error(&error)))?;
+            let response_status = response.status();
+            let response_result = validate_response_status(&response);
+            let body = read_live_mutation_body(response)
+                .await
+                .map_err(media_post_mutation_error)?;
+            let response_digest = media_mutation_response_digest(response_status, body.as_str())?;
+            if response_status == StatusCode::FORBIDDEN {
+                record_media_receipt(mutations, ordinal, response_digest, false).await?;
+                if body.as_str().contains("验证码") || body.as_str().contains("validate") {
+                    return Err(ProviderError::human_required(
+                        "Chaoxing Video progress requires an image captcha",
+                        HumanRequiredReason::ImageCaptcha,
+                    ));
                 }
                 continue;
             }
-            validate_response_status(&response)?;
-            let body = read_response_body(response).await?;
-            let report: VideoReportResponse = serde_json::from_str(body.as_str())
-                .map_err(|_| protocol_drift("Chaoxing Video report JSON is malformed"))?;
-            return Ok(report.is_passed);
+            if let Err(error) = response_result {
+                record_media_receipt(mutations, ordinal, response_digest, false).await?;
+                return Err(media_post_mutation_error(error));
+            }
+            let Ok(report) = serde_json::from_str::<VideoReportResponse>(body.as_str()) else {
+                record_media_receipt(mutations, ordinal, response_digest, false).await?;
+                return Err(media_post_mutation_error(protocol_drift(
+                    "Chaoxing Video report JSON is malformed",
+                )));
+            };
+            record_media_receipt(mutations, ordinal, response_digest, true).await?;
+            return ChaoxingMediaReportOutcome::try_new(
+                report.is_passed,
+                request.first_ordinal,
+                ordinal,
+            );
         }
         Err(ProviderError::new(
             ProviderErrorKind::Authorization,
@@ -1592,30 +1612,12 @@ impl ChaoxingVideoTransport for NativeChaoxingInventoryTransport {
     async fn report_video_progress(
         &self,
         context: &ProviderContext,
-        route: ChaoxingCourseRoute<'_>,
-        target: &ChaoxingMediaResourceTarget,
-        status: &ChaoxingVideoStatus,
-        playing_time_seconds: u64,
-    ) -> ProviderResult<bool> {
-        let (session, renewed) = self.session_for_operation(context).await?;
-        match self
-            .report_video_progress_once(&session, route, target, status, playing_time_seconds)
+        request: ChaoxingMediaReportRequest<'_>,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<ChaoxingMediaReportOutcome> {
+        let session = self.session_for_operation(context).await?.0;
+        self.report_video_progress_once(&session, request, mutations)
             .await
-        {
-            Err(error) if should_renew_after(&error, renewed) => {
-                let session = self.sessions.renew_session(context).await?;
-                let refreshed = self.video_status_once(&session, target).await?;
-                self.report_video_progress_once(
-                    &session,
-                    route,
-                    target,
-                    &refreshed,
-                    playing_time_seconds,
-                )
-                .await
-            }
-            result => result,
-        }
     }
 }
 
@@ -2346,6 +2348,94 @@ fn immediate_mutation_response_digest(status: StatusCode, body: &str) -> Provide
     Ok(hash.finalize().into())
 }
 
+fn media_mutation_request_digest(
+    ordinal: u32,
+    job_id: &str,
+    kind: ChaoxingMediaKind,
+    url: &Url,
+) -> ProviderResult<[u8; 32]> {
+    if !(1..=100_000).contains(&ordinal)
+        || job_id.is_empty()
+        || job_id.len() > 128
+        || job_id.chars().any(char::is_control)
+        || url.scheme() != "https"
+        || url.host_str() != Some("mooc1.chaoxing.com")
+        || !url.path().starts_with("/mooc-ans/multimedia/log/a/")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.as_str().len() > 32 * 1_024
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing media request identity is invalid",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(MEDIA_REQUEST_DIGEST_DOMAIN);
+    hash.update(ordinal.to_be_bytes());
+    hash_immediate_component(&mut hash, b"GET")?;
+    hash_immediate_component(&mut hash, kind.resource_kind().as_bytes())?;
+    hash_immediate_component(&mut hash, job_id.as_bytes())?;
+    hash_immediate_component(&mut hash, url.as_str().as_bytes())?;
+    hash_immediate_component(&mut hash, media_referer(kind).as_bytes())?;
+    Ok(hash.finalize().into())
+}
+
+fn media_report_candidates(
+    frozen_rt: Option<ChaoxingVideoRt>,
+    first_ordinal: u32,
+) -> ProviderResult<Vec<(u32, ChaoxingVideoRt)>> {
+    let modes = frozen_rt.map_or_else(
+        || vec![ChaoxingVideoRt::NineTenths, ChaoxingVideoRt::One],
+        |rt| vec![rt],
+    );
+    modes
+        .into_iter()
+        .enumerate()
+        .map(|(offset, rt)| {
+            let offset = u32::try_from(offset).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "Chaoxing media mutation ordinal is invalid",
+                )
+            })?;
+            let ordinal = first_ordinal
+                .checked_add(offset)
+                .filter(|value| (1..=100_000).contains(value))
+                .ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::InvalidResponse,
+                        "Chaoxing media mutation ordinal overflowed",
+                    )
+                })?;
+            Ok((ordinal, rt))
+        })
+        .collect()
+}
+
+fn media_mutation_response_digest(status: StatusCode, body: &str) -> ProviderResult<[u8; 32]> {
+    let mut hash = Sha256::new();
+    hash.update(MEDIA_RESPONSE_DIGEST_DOMAIN);
+    hash.update(status.as_u16().to_be_bytes());
+    hash_immediate_component(&mut hash, body.as_bytes())?;
+    Ok(hash.finalize().into())
+}
+
+async fn record_media_receipt(
+    mutations: &(dyn ExecutionMutationSink + Send + Sync),
+    ordinal: u32,
+    response_digest: [u8; 32],
+    accepted: bool,
+) -> ProviderResult<()> {
+    let receipt = ExecutionMutationReceipt::new(ordinal, response_digest, accepted)
+        .map_err(media_post_mutation_error)?;
+    mutations
+        .record_receipt(receipt)
+        .await
+        .map_err(media_post_mutation_error)
+}
+
 fn hash_immediate_component(hash: &mut Sha256, value: &[u8]) -> ProviderResult<()> {
     let length = u64::try_from(value.len()).map_err(|_| {
         ProviderError::new(
@@ -2799,6 +2889,21 @@ fn immediate_post_mutation_error(error: ProviderError) -> ProviderError {
     )
 }
 
+fn media_post_mutation_error(error: ProviderError) -> ProviderError {
+    if error.kind == ProviderErrorKind::HumanRequired {
+        return error;
+    }
+    let reason = if error.kind == ProviderErrorKind::Authentication {
+        HumanRequiredReason::SessionExpired
+    } else {
+        HumanRequiredReason::ManualIntervention
+    };
+    ProviderError::human_required(
+        "Chaoxing media progress was issued and requires fresh progress recovery",
+        reason,
+    )
+}
+
 fn has_identity_cookie(cookie: &str) -> bool {
     cookie.split(';').any(|field| {
         let Some((name, value)) = field.trim().split_once('=') else {
@@ -2946,6 +3051,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture keeps Video and Audio request identities and their shared mutation digest boundary in one audit"
+    )]
     fn video_routes_bind_identity_tokens_and_donor_signature() {
         let session = ChaoxingCookieSession::try_new("_uid=777; fid=888; uf=SAFE_UF").unwrap();
         let course = course();
@@ -3001,6 +3110,20 @@ mod tests {
             !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
         }));
         assert!(!report.as_str().contains("SAFE_UF"));
+        let first_report_digest =
+            media_mutation_request_digest(1, target.job_id(), target.kind(), &report).unwrap();
+        assert_eq!(
+            first_report_digest,
+            media_mutation_request_digest(1, target.job_id(), target.kind(), &report).unwrap()
+        );
+        assert_ne!(
+            first_report_digest,
+            media_mutation_request_digest(2, target.job_id(), target.kind(), &report).unwrap()
+        );
+        assert_ne!(
+            first_report_digest,
+            media_mutation_response_digest(StatusCode::OK, r#"{"isPassed":false}"#).unwrap()
+        );
 
         let audio = crate::resource_inventory::locate_media_resource_target(
             RESOURCE_MIXED,
@@ -3027,6 +3150,10 @@ mod tests {
             audio_report.path(),
             "/mooc-ans/multimedia/log/a/300/SAFE_AUDIO_TOKEN"
         );
+        assert_ne!(
+            first_report_digest,
+            media_mutation_request_digest(1, audio.job_id(), audio.kind(), &audio_report).unwrap()
+        );
         for (key, expected) in [
             ("objectId", "SAFE_AUDIO_OBJECT"),
             ("otherInfo", "SAFE_AUDIO_REPORT-rt_1"),
@@ -3040,6 +3167,20 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn media_report_candidates_reserve_one_ordinal_per_frozen_rt_attempt() {
+        assert_eq!(
+            media_report_candidates(None, 7).unwrap(),
+            [(7, ChaoxingVideoRt::NineTenths), (8, ChaoxingVideoRt::One),]
+        );
+        assert_eq!(
+            media_report_candidates(Some(ChaoxingVideoRt::One), 7).unwrap(),
+            [(7, ChaoxingVideoRt::One)]
+        );
+        let error = media_report_candidates(None, 100_000).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
     }
 
     #[test]
