@@ -776,6 +776,7 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         binding: &WellearnResourceExecutionBinding,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnResourceExecutionDocuments> {
+        binding.validate_remote_identity(course_id, sco_id)?;
         let plan = binding.plan();
         plan.validate()?;
         let crate::WellearnResourceExecutionPlan {
@@ -1332,6 +1333,7 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         binding: &WellearnDurationReportBinding,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnDurationReportDocuments> {
+        binding.validate_remote_identity(course_id, sco_id)?;
         let plan = binding.plan();
         plan.validate()?;
         let crate::WellearnDurationReportPlan {

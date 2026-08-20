@@ -1,29 +1,124 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{RemoteState, TaskCapability};
+use asterism_domain::{
+    CourseId, ExecutionId, ProviderAccountId, RemoteState, TaskCapability, TaskId,
+};
 use asterism_provider_api::{
     BatchExecutionPlanningRequest, ExecutionEventSink, ExecutionMutationSequenceRecoverySnapshot,
-    ExecutionOutcome, ExecutionParentBatchSnapshot, ExecutionRecoveryOutcome, ExecutionRequest,
-    PreparedProviderBatchExecutionPlan, ProviderBatchExecutionMaterializationBinding,
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionBatchPlan,
-    ProviderIdentity, ProviderMetadata, ProviderResult, TaskExecutionCapability,
+    ExecutionOutcome, ExecutionParentBatchSnapshot, ExecutionPlanningRequest,
+    ExecutionRecoveryOutcome, ExecutionRequest, PreparedProviderBatchExecutionPlan,
+    ProviderBatchExecutionMaterializationBinding, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderExecutionBatchPlan, ProviderExecutionPlan,
+    ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderResult,
+    ResolvedProviderRuntimeSettings, TaskExecutionCapability,
 };
 use asterism_secrets::SecretValue;
 use async_trait::async_trait;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::{
     WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE, WELLEARN_PUBLIC_BATCH_MATERIALIZATION_BINDING_TYPE,
     WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionRecovery,
     WellearnBatchExecutionPlanner, WellearnBatchMaterializationScope,
-    WellearnBatchRuntimeSettingsRevision, WellearnPublicBatchExecutionInput,
-    WellearnPublicBatchMaterializationBinding, metadata::development_metadata,
-    restore_batch_execution_plan,
+    WellearnBatchRuntimeSettingsRevision, WellearnDurationReportBinding,
+    WellearnPublicBatchExecutionInput, WellearnPublicBatchMaterializationBinding,
+    WellearnResourceExecutionBinding, duration_report::derive_duration_report_plan,
+    metadata::development_metadata, resource_execution::derive_resource_execution_plan,
+    restore_batch_execution_plan, runtime_settings::WellearnRuntimeSettings,
 };
 
 const ATOMIC_BATCH_CHILD_CAPABILITIES: [TaskCapability; 2] = [
     TaskCapability::DurationReport,
     TaskCapability::ResourceExecution,
 ];
+const WELLEARN_SINGLETON_EXECUTION_PLAN_BINDING_VERSION: u16 = 1;
+const WELLEARN_SINGLETON_EXECUTION_PLAN_BINDING_DIGEST_DOMAIN: &[u8] =
+    b"asterism.welearn.singleton-execution-plan-binding.v1\0";
+pub const WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE: &str =
+    "welearn.singleton-execution-plan.v1";
+
+#[derive(Serialize)]
+struct WellearnSingletonExecutionPlanBindingWire<'a> {
+    version: u16,
+    provider_id: &'a str,
+    provider_account_id: ProviderAccountId,
+    execution_id: ExecutionId,
+    task_id: TaskId,
+    course_id: Option<CourseId>,
+    remote_task_id: &'a str,
+    capability_plan: &'a [TaskCapability],
+    runtime_settings: &'a ResolvedProviderRuntimeSettings,
+}
+
+pub(crate) fn singleton_execution_plan_artifact(
+    context: &ProviderContext,
+    execution_id: ExecutionId,
+    task_id: TaskId,
+    course_id: Option<CourseId>,
+    remote_task_id: &str,
+    capability_plan: &[TaskCapability],
+    runtime_settings: &ResolvedProviderRuntimeSettings,
+) -> ProviderResult<ProviderExecutionPlanArtifact> {
+    if context.provider_id.as_str() != crate::metadata::PROVIDER_ID
+        || remote_task_id.is_empty()
+        || remote_task_id.len() > 512
+        || remote_task_id.trim() != remote_task_id
+        || remote_task_id.chars().any(char::is_control)
+        || crate::cmi::parse_sco_identity(remote_task_id).is_err()
+        || !matches!(
+            capability_plan,
+            [TaskCapability::ResourceExecution]
+                | [TaskCapability::DurationReport]
+                | [
+                    TaskCapability::DurationReport,
+                    TaskCapability::ResourceExecution
+                ]
+        )
+        || WellearnRuntimeSettings::resolve(runtime_settings).is_err()
+    {
+        return Err(invalid_singleton_execution_plan());
+    }
+    let encoded = serde_json::to_vec(&WellearnSingletonExecutionPlanBindingWire {
+        version: WELLEARN_SINGLETON_EXECUTION_PLAN_BINDING_VERSION,
+        provider_id: context.provider_id.as_str(),
+        provider_account_id: context.account_id,
+        execution_id,
+        task_id,
+        course_id,
+        remote_task_id,
+        capability_plan,
+        runtime_settings,
+    })
+    .map_err(|_| invalid_singleton_execution_plan())?;
+    let mut digest = Sha256::new();
+    digest.update(WELLEARN_SINGLETON_EXECUTION_PLAN_BINDING_DIGEST_DOMAIN);
+    digest.update(encoded);
+    ProviderExecutionPlanArtifact::try_new(
+        context.provider_id.clone(),
+        WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE,
+        serde_json::json!({
+            "schema": WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE,
+            "binding_digest": <[u8; 32]>::from(digest.finalize()),
+        }),
+    )
+    .map_err(|_| invalid_singleton_execution_plan())
+}
+
+pub(crate) fn singleton_execution_plan_artifact_for_request(
+    context: &ProviderContext,
+    request: &ExecutionRequest,
+) -> ProviderResult<ProviderExecutionPlanArtifact> {
+    singleton_execution_plan_artifact(
+        context,
+        request.execution_id,
+        request.task_id,
+        request.course_id,
+        &request.remote_task_id,
+        &request.capability_plan,
+        &request.runtime_settings,
+    )
+}
 
 /// Dispatches `WELearn`'s independent `ResourceExecution` and `DurationReport`
 /// capabilities through the single shared `TaskExecution` registry slot. Core
@@ -221,6 +316,52 @@ impl ProviderIdentity for WellearnTaskExecution {
 
 #[async_trait]
 impl TaskExecutionCapability for WellearnTaskExecution {
+    async fn prepare_execution_plan(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionPlanningRequest<'_>,
+    ) -> ProviderResult<ProviderExecutionPlan> {
+        let calls =
+            self.execution_call_plan(request.requested_capabilities, request.runtime_settings)?;
+        let capability_plan = calls.iter().flatten().copied().collect::<Vec<_>>();
+        let artifact = singleton_execution_plan_artifact(
+            context,
+            request.execution_id,
+            request.task_id,
+            request.course_id,
+            request.remote_task_id,
+            &capability_plan,
+            request.runtime_settings,
+        )?;
+        for (index, capability) in capability_plan.iter().copied().enumerate() {
+            let active = ExecutionRequest {
+                execution_id: request.execution_id,
+                task_id: request.task_id,
+                remote_task_id: request.remote_task_id.to_owned(),
+                course_id: request.course_id,
+                requested_capabilities: vec![capability],
+                capability_plan: capability_plan.clone(),
+                capability_step_position: u8::try_from(index + 1)
+                    .map_err(|_| invalid_singleton_execution_plan())?,
+                runtime_settings: request.runtime_settings.clone(),
+                provider_plan_artifact: Some(artifact.clone()),
+            };
+            match capability {
+                TaskCapability::DurationReport => {
+                    let plan = derive_duration_report_plan(&active)?;
+                    WellearnDurationReportBinding::try_new(context, &active, plan)?;
+                }
+                TaskCapability::ResourceExecution => {
+                    let plan = derive_resource_execution_plan(&active)?;
+                    WellearnResourceExecutionBinding::try_new(context, &active, plan)?;
+                }
+                _ => return Err(invalid_singleton_execution_plan()),
+            }
+        }
+        ProviderExecutionPlan::try_new(self.metadata.id.clone(), calls, Some(artifact))
+            .map_err(|_| invalid_singleton_execution_plan())
+    }
+
     async fn prepare_batch_execution_plan(
         &self,
         context: &ProviderContext,
@@ -370,9 +511,11 @@ impl TaskExecutionCapability for WellearnTaskExecution {
         }
         match request.requested_capabilities.as_slice() {
             [TaskCapability::ResourceExecution] => {
+                validate_singleton_execution_plan_artifact(context, request)?;
                 self.resource.execute(context, request, events).await
             }
             [TaskCapability::DurationReport] => {
+                validate_singleton_execution_plan_artifact(context, request)?;
                 self.duration.execute(context, request, events).await
             }
             _ => Err(ProviderError::new(
@@ -422,6 +565,7 @@ impl TaskExecutionCapability for WellearnTaskExecution {
         }
         match request.requested_capabilities.as_slice() {
             [TaskCapability::ResourceExecution] => {
+                validate_singleton_execution_plan_artifact(context, request)?;
                 self.resource.verify_execution(context, request).await
             }
             _ => Err(ProviderError::new(
@@ -473,6 +617,24 @@ fn invalid_atomic_batch_child_dispatch() -> ProviderError {
     )
 }
 
+fn validate_singleton_execution_plan_artifact(
+    context: &ProviderContext,
+    request: &ExecutionRequest,
+) -> ProviderResult<()> {
+    let expected = singleton_execution_plan_artifact_for_request(context, request)?;
+    if request.provider_plan_artifact.as_ref() != Some(&expected) {
+        return Err(invalid_singleton_execution_plan());
+    }
+    Ok(())
+}
+
+fn invalid_singleton_execution_plan() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn singleton execution plan is invalid or detached from its frozen artifact",
+    )
+}
+
 fn atomic_batch_runtime_unavailable() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
@@ -482,11 +644,15 @@ fn atomic_batch_runtime_unavailable() -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
 
     use asterism_domain::{ProviderAccountId, ProviderId, RemoteState, SecretId, TaskId};
     use asterism_provider_api::{
-        ProviderExecutionPlanArtifact, ProviderProgress, ProviderRuntimeSettingsSchema,
+        ProviderExecutionPlanArtifact, ProviderProgress, ProviderRuntimeSettingsPatch,
+        ProviderRuntimeSettingsSchema, ProviderSettingValue,
     };
     use asterism_secrets::SecretValue;
 
@@ -550,6 +716,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn singleton_planning_freezes_one_artifact_for_every_ordered_call() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let metadata = development_metadata().unwrap();
+        let execution = WellearnTaskExecution::try_new(
+            Arc::new(FixtureCapability {
+                metadata: metadata.clone(),
+                expected: TaskCapability::ResourceExecution,
+                calls: calls.clone(),
+            }),
+            Arc::new(FixtureCapability {
+                metadata,
+                expected: TaskCapability::DurationReport,
+                calls,
+            }),
+        )
+        .unwrap();
+        let context = context();
+        let schema = crate::runtime_settings::runtime_settings_schema();
+        let runtime_settings = schema
+            .resolve(
+                None,
+                None,
+                Some(&ProviderRuntimeSettingsPatch {
+                    schema_version: schema.version,
+                    values: BTreeMap::from([
+                        (
+                            crate::runtime_settings::RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
+                            ProviderSettingValue::Choice("selected_score".to_owned()),
+                        ),
+                        (
+                            crate::runtime_settings::RESOURCE_COMPLETION_TIME_MODE_KEY.to_owned(),
+                            ProviderSettingValue::Choice("zero_time".to_owned()),
+                        ),
+                        (
+                            crate::runtime_settings::RESOURCE_COMPLETION_CMI_FORMAT_KEY.to_owned(),
+                            ProviderSettingValue::Choice("interaction_info_suffix".to_owned()),
+                        ),
+                        (
+                            crate::runtime_settings::RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
+                            ProviderSettingValue::Choice("legacy_minimal_task_referer".to_owned()),
+                        ),
+                    ]),
+                }),
+            )
+            .unwrap();
+        let execution_id = ExecutionId::new();
+        let task_id = TaskId::new();
+        let requested = [
+            TaskCapability::ResourceExecution,
+            TaskCapability::DurationReport,
+        ];
+        let planning = ExecutionPlanningRequest {
+            execution_id,
+            task_id,
+            remote_task_id: "sco:1001:301",
+            course_id: None,
+            requested_capabilities: &requested,
+            runtime_settings: &runtime_settings,
+        };
+        let plan = execution
+            .prepare_execution_plan(&context, &planning)
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.calls(),
+            &[
+                vec![TaskCapability::DurationReport],
+                vec![TaskCapability::ResourceExecution],
+            ]
+        );
+        let artifact = plan.artifact().unwrap();
+        assert_eq!(
+            artifact.artifact_type(),
+            WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE
+        );
+
+        let mut duration = ExecutionRequest {
+            execution_id,
+            task_id,
+            remote_task_id: planning.remote_task_id.to_owned(),
+            course_id: None,
+            requested_capabilities: vec![TaskCapability::DurationReport],
+            capability_plan: ATOMIC_BATCH_CHILD_CAPABILITIES.to_vec(),
+            capability_step_position: 1,
+            runtime_settings: runtime_settings.clone(),
+            provider_plan_artifact: Some(artifact.clone()),
+        };
+        let duration_binding = WellearnDurationReportBinding::try_new(
+            &context,
+            &duration,
+            derive_duration_report_plan(&duration).unwrap(),
+        )
+        .unwrap();
+        duration.requested_capabilities = vec![TaskCapability::ResourceExecution];
+        duration.capability_step_position = 2;
+        let resource_binding = WellearnResourceExecutionBinding::try_new(
+            &context,
+            &duration,
+            derive_resource_execution_plan(&duration).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            duration_binding
+                .to_provider_execution_plan_artifact()
+                .unwrap(),
+            *artifact
+        );
+        assert_eq!(
+            resource_binding
+                .to_provider_execution_plan_artifact()
+                .unwrap(),
+            *artifact
+        );
+        assert_eq!(
+            duration_binding
+                .mutation_sequence_plan(false)
+                .unwrap()
+                .artifact_digest(),
+            resource_binding
+                .mutation_sequence_plan()
+                .unwrap()
+                .artifact_digest()
+        );
+
+        let drifted = singleton_execution_plan_artifact(
+            &context,
+            ExecutionId::new(),
+            task_id,
+            None,
+            planning.remote_task_id,
+            &ATOMIC_BATCH_CHILD_CAPABILITIES,
+            &runtime_settings,
+        )
+        .unwrap();
+        assert_ne!(artifact.artifact_digest(), drifted.artifact_digest());
+        duration.provider_plan_artifact = None;
+        assert!(
+            execution
+                .execute(&context, &duration, &FixtureEvents)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn composite_plan_dispatches_only_each_core_authorized_step() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let metadata = development_metadata().unwrap();
@@ -583,20 +894,19 @@ mod tests {
                 TaskCapability::ResourceExecution,
             ]
         );
+        let context = context();
+        let base = singleton_request(&context, ATOMIC_BATCH_CHILD_CAPABILITIES.to_vec());
+        let mut duration_request = base.clone();
+        duration_request.requested_capabilities = vec![TaskCapability::DurationReport];
+        let mut resource_request = base;
+        resource_request.requested_capabilities = vec![TaskCapability::ResourceExecution];
+        resource_request.capability_step_position = 2;
         let duration = execution
-            .execute(
-                &context(),
-                &request(TaskCapability::DurationReport, 1),
-                &FixtureEvents,
-            )
+            .execute(&context, &duration_request, &FixtureEvents)
             .await
             .unwrap();
         let resource = execution
-            .execute(
-                &context(),
-                &request(TaskCapability::ResourceExecution, 2),
-                &FixtureEvents,
-            )
+            .execute(&context, &resource_request, &FixtureEvents)
             .await
             .unwrap();
 
@@ -759,6 +1069,29 @@ mod tests {
                 .unwrap(),
             provider_plan_artifact: None,
         }
+    }
+
+    fn singleton_request(
+        context: &ProviderContext,
+        capability_plan: Vec<TaskCapability>,
+    ) -> ExecutionRequest {
+        let runtime_settings = crate::runtime_settings::runtime_settings_schema()
+            .resolve(None, None, None)
+            .unwrap();
+        let mut request = ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
+            task_id: TaskId::new(),
+            remote_task_id: "sco:1001:301".to_owned(),
+            course_id: None,
+            requested_capabilities: vec![capability_plan[0]],
+            capability_plan,
+            capability_step_position: 1,
+            runtime_settings,
+            provider_plan_artifact: None,
+        };
+        request.provider_plan_artifact =
+            Some(singleton_execution_plan_artifact_for_request(context, &request).unwrap());
+        request
     }
 
     fn atomic_request() -> ExecutionRequest {

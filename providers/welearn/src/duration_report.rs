@@ -7,8 +7,8 @@ use asterism_provider_api::{
     ExecutionEventSink, ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
     ExecutionMutationSequencePlan, ExecutionMutationVerification, ExecutionOutcome,
     ExecutionRequest, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
-    ProviderIdentity, ProviderMetadata, ProviderProgress, ProviderResult, TaskDetailCapability,
-    TaskExecutionCapability,
+    ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderProgress,
+    ProviderResult, TaskDetailCapability, TaskExecutionCapability,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -265,6 +265,7 @@ pub struct WellearnDurationReportBinding {
     remote_task_id: String,
     runtime_settings_schema_version: u32,
     plan: WellearnDurationReportPlan,
+    execution_plan_artifact: ProviderExecutionPlanArtifact,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -296,7 +297,6 @@ impl WellearnDurationReportBinding {
         if context.provider_id.as_str() != crate::metadata::PROVIDER_ID
             || !request.has_valid_capability_step()
             || request.requested_capabilities != [TaskCapability::DurationReport]
-            || request.provider_plan_artifact.is_some()
             || plan != derive_duration_report_plan(request)?
         {
             return Err(invalid_duration_report_binding());
@@ -310,13 +310,43 @@ impl WellearnDurationReportBinding {
             remote_task_id: request.remote_task_id.clone(),
             runtime_settings_schema_version: request.runtime_settings.schema_version,
             plan,
+            execution_plan_artifact:
+                crate::execution::singleton_execution_plan_artifact_for_request(context, request)?,
         };
         binding.validate_shape()?;
+        binding.validate_request_artifact(request.provider_plan_artifact.as_ref())?;
         Ok(binding)
     }
 
     pub const fn plan(&self) -> WellearnDurationReportPlan {
         self.plan
+    }
+
+    pub(crate) fn validate_remote_identity(
+        &self,
+        course_id: &str,
+        sco_id: &str,
+    ) -> ProviderResult<()> {
+        let (bound_course_id, bound_sco_id) = parse_sco_identity(&self.remote_task_id)
+            .map_err(|_| invalid_duration_report_binding())?;
+        if bound_course_id != course_id || bound_sco_id != sco_id {
+            return Err(invalid_duration_report_binding());
+        }
+        Ok(())
+    }
+
+    /// Projects the private binding into the only sanitized artifact identity
+    /// accepted by Core sequence recovery. The sequence uses the final
+    /// artifact digest, never the inner binding digest directly.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid binding or generic artifact projection.
+    pub fn to_provider_execution_plan_artifact(
+        &self,
+    ) -> ProviderResult<ProviderExecutionPlanArtifact> {
+        self.validate_shape()?;
+        Ok(self.execution_plan_artifact.clone())
     }
 
     /// Encodes one bounded deny-unknown v1 binding.
@@ -379,6 +409,8 @@ impl WellearnDurationReportBinding {
             remote_task_id: wire.remote_task_id,
             runtime_settings_schema_version: wire.runtime_settings_schema_version,
             plan: WellearnDurationReportPlan::try_from(wire.plan)?,
+            execution_plan_artifact:
+                crate::execution::singleton_execution_plan_artifact_for_request(context, request)?,
         };
         decoded.validate(context, request, plan)?;
         Ok(decoded)
@@ -490,7 +522,8 @@ impl WellearnDurationReportBinding {
             }
         }
         ExecutionMutationSequencePlan::try_new(
-            self.binding_digest()?,
+            self.to_provider_execution_plan_artifact()?
+                .artifact_digest(),
             WELLEARN_DURATION_REPORT_SEQUENCE_TYPE,
             phases,
         )
@@ -510,12 +543,30 @@ impl WellearnDurationReportBinding {
             .map_err(|_| invalid_duration_report_binding())?;
         if self.provider_id.as_str() != crate::metadata::PROVIDER_ID
             || self.runtime_settings_schema_version == 0
+            || self.execution_plan_artifact.provider_id() != &self.provider_id
+            || self.execution_plan_artifact.artifact_type()
+                != crate::execution::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE
             || self.remote_task_id.is_empty()
             || self.remote_task_id.len() > 512
             || self.remote_task_id.trim() != self.remote_task_id
             || self.remote_task_id.chars().any(char::is_control)
             || parse_sco_identity(&self.remote_task_id).is_err()
         {
+            return Err(invalid_duration_report_binding());
+        }
+        Ok(())
+    }
+
+    fn validate_request_artifact(
+        &self,
+        artifact: Option<&ProviderExecutionPlanArtifact>,
+    ) -> ProviderResult<()> {
+        if artifact.is_some_and(
+            |artifact| match self.to_provider_execution_plan_artifact() {
+                Ok(expected) => expected != *artifact,
+                Err(_) => true,
+            },
+        ) {
             return Err(invalid_duration_report_binding());
         }
         Ok(())
@@ -819,7 +870,7 @@ fn select_duration(configured: WellearnDurationTarget, request: &ExecutionReques
     }
 }
 
-fn derive_duration_report_plan(
+pub(crate) fn derive_duration_report_plan(
     request: &ExecutionRequest,
 ) -> ProviderResult<WellearnDurationReportPlan> {
     let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
@@ -1225,6 +1276,47 @@ mod tests {
         .unwrap();
         assert_eq!(decoded, binding);
         assert_eq!(decoded.plan(), plan);
+        binding.validate_remote_identity("1001", "301").unwrap();
+        assert!(binding.validate_remote_identity("1002", "301").is_err());
+        assert!(binding.validate_remote_identity("1001", "302").is_err());
+
+        let artifact = binding.to_provider_execution_plan_artifact().unwrap();
+        assert_eq!(artifact.provider_id(), &context.provider_id);
+        assert_eq!(
+            artifact.artifact_type(),
+            crate::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE
+        );
+        assert_eq!(
+            artifact.payload_sanitized()["schema"],
+            crate::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE
+        );
+        assert_eq!(
+            artifact.payload_sanitized()["binding_digest"]
+                .as_array()
+                .map(Vec::len),
+            Some(32)
+        );
+        assert_eq!(
+            artifact,
+            binding.to_provider_execution_plan_artifact().unwrap()
+        );
+        let mut other_execution = request.clone();
+        other_execution.execution_id = ExecutionId::new();
+        let other_binding =
+            WellearnDurationReportBinding::try_new(&context, &other_execution, plan).unwrap();
+        assert_ne!(
+            artifact.artifact_digest(),
+            other_binding
+                .to_provider_execution_plan_artifact()
+                .unwrap()
+                .artifact_digest()
+        );
+        let mut request_with_artifact = request.clone();
+        request_with_artifact.provider_plan_artifact = Some(artifact.clone());
+        assert_eq!(
+            WellearnDurationReportBinding::try_new(&context, &request_with_artifact, plan).unwrap(),
+            binding
+        );
 
         let debug = format!("{binding:?}");
         assert!(debug.contains("[REDACTED]"));
@@ -1266,6 +1358,20 @@ mod tests {
             )
             .is_err()
         );
+
+        let mut artifact_drift = request;
+        artifact_drift.provider_plan_artifact = Some(
+            ProviderExecutionPlanArtifact::try_new(
+                context.provider_id.clone(),
+                crate::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE,
+                serde_json::json!({
+                    "schema": crate::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE,
+                    "binding_digest": ([7_u8; 32].to_vec()),
+                }),
+            )
+            .unwrap(),
+        );
+        assert!(WellearnDurationReportBinding::try_new(&context, &artifact_drift, plan).is_err());
     }
 
     #[test]
@@ -1277,6 +1383,13 @@ mod tests {
             WellearnDurationReportBinding::try_new(&context, &preserve_request, preserve_plan)
                 .unwrap();
         let initialized = preserve.mutation_sequence_plan(false).unwrap();
+        assert_eq!(
+            initialized.artifact_digest(),
+            preserve
+                .to_provider_execution_plan_artifact()
+                .unwrap()
+                .artifact_digest()
+        );
         assert_eq!(
             initialized.sequence_type(),
             WELLEARN_DURATION_REPORT_SEQUENCE_TYPE
@@ -1293,6 +1406,11 @@ mod tests {
             WellearnDurationMutationKind::Finalize.as_str()
         );
         let uninitialized = preserve.mutation_sequence_plan(true).unwrap();
+        assert_eq!(
+            initialized.artifact_digest(),
+            uninitialized.artifact_digest()
+        );
+        assert_ne!(initialized.plan_digest(), uninitialized.plan_digest());
         assert_eq!(uninitialized.phases().len(), 3);
         assert_eq!(
             uninitialized.phases()[0].operation_type(),

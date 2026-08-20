@@ -94,7 +94,7 @@ pub use duration_report::{
     WellearnDurationReport, WellearnDurationReportBinding, WellearnDurationReportDocuments,
     WellearnDurationReportPlan, WellearnDurationReportTransport,
 };
-pub use execution::WellearnTaskExecution;
+pub use execution::{WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE, WellearnTaskExecution};
 pub use inventory_capabilities::{
     WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnInventoryDocument,
     WellearnTaskInventory, WellearnTaskInventoryDocuments, WellearnTaskInventoryTransport,

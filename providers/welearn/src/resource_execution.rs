@@ -7,8 +7,8 @@ use asterism_provider_api::{
     ExecutionEventSink, ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
     ExecutionMutationSequencePlan, ExecutionMutationVerification, ExecutionOutcome,
     ExecutionRequest, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
-    ProviderIdentity, ProviderMetadata, ProviderProgress, ProviderResult, TaskDetailCapability,
-    TaskExecutionCapability,
+    ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderProgress,
+    ProviderResult, TaskDetailCapability, TaskExecutionCapability,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -328,6 +328,7 @@ pub struct WellearnResourceExecutionBinding {
     remote_task_id: String,
     runtime_settings_schema_version: u32,
     plan: WellearnResourceExecutionPlan,
+    execution_plan_artifact: ProviderExecutionPlanArtifact,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -360,7 +361,6 @@ impl WellearnResourceExecutionBinding {
         if context.provider_id.as_str() != crate::metadata::PROVIDER_ID
             || !request.has_valid_capability_step()
             || request.requested_capabilities != [TaskCapability::ResourceExecution]
-            || request.provider_plan_artifact.is_some()
             || plan != derive_resource_execution_plan(request)?
         {
             return Err(invalid_resource_execution_binding());
@@ -374,13 +374,43 @@ impl WellearnResourceExecutionBinding {
             remote_task_id: request.remote_task_id.clone(),
             runtime_settings_schema_version: request.runtime_settings.schema_version,
             plan,
+            execution_plan_artifact:
+                crate::execution::singleton_execution_plan_artifact_for_request(context, request)?,
         };
         binding.validate_shape()?;
+        binding.validate_request_artifact(request.provider_plan_artifact.as_ref())?;
         Ok(binding)
     }
 
     pub const fn plan(&self) -> WellearnResourceExecutionPlan {
         self.plan
+    }
+
+    pub(crate) fn validate_remote_identity(
+        &self,
+        course_id: &str,
+        sco_id: &str,
+    ) -> ProviderResult<()> {
+        let (bound_course_id, bound_sco_id) = parse_sco_identity(&self.remote_task_id)
+            .map_err(|_| invalid_resource_execution_binding())?;
+        if bound_course_id != course_id || bound_sco_id != sco_id {
+            return Err(invalid_resource_execution_binding());
+        }
+        Ok(())
+    }
+
+    /// Projects the private binding into the only sanitized artifact identity
+    /// accepted by Core sequence recovery. The sequence uses the final
+    /// artifact digest, never the inner binding digest directly.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid binding or generic artifact projection.
+    pub fn to_provider_execution_plan_artifact(
+        &self,
+    ) -> ProviderResult<ProviderExecutionPlanArtifact> {
+        self.validate_shape()?;
+        Ok(self.execution_plan_artifact.clone())
     }
 
     /// Encodes one bounded, deny-unknown v1 authority. The output contains no
@@ -444,6 +474,8 @@ impl WellearnResourceExecutionBinding {
             remote_task_id: wire.remote_task_id,
             runtime_settings_schema_version: wire.runtime_settings_schema_version,
             plan: WellearnResourceExecutionPlan::try_from(wire.plan)?,
+            execution_plan_artifact:
+                crate::execution::singleton_execution_plan_artifact_for_request(context, request)?,
         };
         decoded.validate(context, request, plan)?;
         Ok(decoded)
@@ -493,7 +525,8 @@ impl WellearnResourceExecutionBinding {
             },
         )?);
         ExecutionMutationSequencePlan::try_new(
-            self.binding_digest()?,
+            self.to_provider_execution_plan_artifact()?
+                .artifact_digest(),
             WELLEARN_RESOURCE_EXECUTION_SEQUENCE_TYPE,
             phases,
         )
@@ -514,6 +547,9 @@ impl WellearnResourceExecutionBinding {
             .map_err(|_| invalid_resource_execution_binding())?;
         if self.provider_id.as_str() != crate::metadata::PROVIDER_ID
             || self.runtime_settings_schema_version == 0
+            || self.execution_plan_artifact.provider_id() != &self.provider_id
+            || self.execution_plan_artifact.artifact_type()
+                != crate::execution::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE
             || self.plan.requires_atomic_authority()
             || self.remote_task_id.is_empty()
             || self.remote_task_id.len() > 512
@@ -521,6 +557,21 @@ impl WellearnResourceExecutionBinding {
             || self.remote_task_id.chars().any(char::is_control)
             || parse_sco_identity(&self.remote_task_id).is_err()
         {
+            return Err(invalid_resource_execution_binding());
+        }
+        Ok(())
+    }
+
+    fn validate_request_artifact(
+        &self,
+        artifact: Option<&ProviderExecutionPlanArtifact>,
+    ) -> ProviderResult<()> {
+        if artifact.is_some_and(
+            |artifact| match self.to_provider_execution_plan_artifact() {
+                Ok(expected) => expected != *artifact,
+                Err(_) => true,
+            },
+        ) {
             return Err(invalid_resource_execution_binding());
         }
         Ok(())
@@ -931,7 +982,7 @@ fn select_score(configured: WellearnResourceScore, request: &ExecutionRequest) -
     }
 }
 
-fn derive_resource_execution_plan(
+pub(crate) fn derive_resource_execution_plan(
     request: &ExecutionRequest,
 ) -> ProviderResult<WellearnResourceExecutionPlan> {
     let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
@@ -1430,14 +1481,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded, binding);
+        binding.validate_remote_identity("1001", "301").unwrap();
+        assert!(binding.validate_remote_identity("1002", "301").is_err());
+        assert!(binding.validate_remote_identity("1001", "302").is_err());
         assert!(!String::from_utf8(encoded).unwrap().contains("credential"));
+
+        let artifact = binding.to_provider_execution_plan_artifact().unwrap();
+        assert_eq!(artifact.provider_id(), &context.provider_id);
+        assert_eq!(
+            artifact.artifact_type(),
+            crate::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE
+        );
+        assert_eq!(
+            artifact.payload_sanitized()["schema"],
+            crate::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE
+        );
+        assert_eq!(
+            artifact.payload_sanitized()["binding_digest"]
+                .as_array()
+                .map(Vec::len),
+            Some(32)
+        );
+        assert_eq!(
+            artifact,
+            binding.to_provider_execution_plan_artifact().unwrap()
+        );
+        let mut other_execution = request.clone();
+        other_execution.execution_id = ExecutionId::new();
+        let other_binding =
+            WellearnResourceExecutionBinding::try_new(&context, &other_execution, plan).unwrap();
+        assert_ne!(
+            artifact.artifact_digest(),
+            other_binding
+                .to_provider_execution_plan_artifact()
+                .unwrap()
+                .artifact_digest()
+        );
+
+        let mut request_with_artifact = request.clone();
+        request_with_artifact.provider_plan_artifact = Some(artifact.clone());
+        assert_eq!(
+            WellearnResourceExecutionBinding::try_new(&context, &request_with_artifact, plan)
+                .unwrap(),
+            binding
+        );
 
         let sequence = binding.mutation_sequence_plan().unwrap();
         assert_eq!(
             sequence.sequence_type(),
             WELLEARN_RESOURCE_EXECUTION_SEQUENCE_TYPE
         );
-        assert_ne!(sequence.artifact_digest(), [0; 32]);
+        assert_eq!(sequence.artifact_digest(), artifact.artifact_digest());
         assert_eq!(sequence.phases().len(), 3);
         assert_eq!(
             sequence.phases()[0].operation_type(),
@@ -1498,6 +1592,22 @@ mod tests {
         let mut score = original;
         score["plan"]["score_percent"] = serde_json::json!(81);
         assert!(rejects(&score));
+
+        let mut artifact_drift = request.clone();
+        artifact_drift.provider_plan_artifact = Some(
+            ProviderExecutionPlanArtifact::try_new(
+                context.provider_id.clone(),
+                crate::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE,
+                serde_json::json!({
+                    "schema": crate::WELLEARN_SINGLETON_EXECUTION_PLAN_ARTIFACT_TYPE,
+                    "binding_digest": ([7_u8; 32].to_vec()),
+                }),
+            )
+            .unwrap(),
+        );
+        assert!(
+            WellearnResourceExecutionBinding::try_new(&context, &artifact_drift, plan).is_err()
+        );
 
         assert!(
             WellearnResourceExecutionBinding::decode(
