@@ -56,12 +56,12 @@ use asterism_storage::{
     QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
     QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
     QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
-    QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionTransition,
-    QuestionSnapshot, ResolvedBatchExecutionChildParentSnapshot,
-    ResolvedQuestionSessionContinuation, SchedulerRepository, StorageError,
-    StrictCompletionExecutionObservationRecord, StrictCompletionExecutionObservationRequest,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, TaskRuntimeRepository,
-    VerificationRecoveryStartRequest,
+    QuestionSessionOperationIssueRequest, QuestionSessionOperationState,
+    QuestionSessionOperationTerminalRequest, QuestionSessionTransition, QuestionSnapshot,
+    ResolvedBatchExecutionChildParentSnapshot, ResolvedQuestionSessionContinuation,
+    SchedulerRepository, StorageError, StrictCompletionExecutionObservationRecord,
+    StrictCompletionExecutionObservationRequest, SubmissionReceiptPersistRequest,
+    SubmissionResultPersistRequest, TaskRuntimeRepository, VerificationRecoveryStartRequest,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1224,6 +1224,35 @@ where
                 )
                 .await;
         }
+        if receipt.is_none()
+            && let Some(resolved) = resolved_session.as_ref()
+            && let Some(operation) = resolved.latest_operation.as_ref()
+            && operation.state == QuestionSessionOperationState::Accepted
+            && operation.execution_id == execution_id
+            && operation.execution_attempt_id == attempt_id
+            && operation.continuation_revision == resolved.metadata.revision
+            && let Some(accepted_result) = resolved.accepted_result.as_ref()
+        {
+            let record = SubmissionAttemptReceipt {
+                submission_draft_id: prepared.draft.id,
+                execution_id,
+                execution_attempt_id: attempt_id,
+                receipt: accepted_result.receipt.clone(),
+            };
+            record
+                .validate_for_draft(&prepared.draft)
+                .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
+            self.executions
+                .persist_submission_receipt(SubmissionReceiptPersistRequest {
+                    record: &record,
+                    scheduler_job_id: job.id,
+                    worker_id: claimed_worker(job)?,
+                    correlation_id,
+                    at: Utc::now().max(now).max(record.receipt.received_at),
+                })
+                .await?;
+            receipt = Some(record);
+        }
         if let (Some(artifacts), Some(resolved)) = (artifacts.as_ref(), resolved_session.as_ref())
             && let Some(mut operation) = resolved.latest_operation.clone()
             && matches!(
@@ -1233,13 +1262,15 @@ where
         {
             if operation.state == QuestionSessionOperationState::Issued {
                 operation = match artifacts
-                    .finish_question_session_operation(
-                        &operation,
-                        QuestionSessionOperationState::Ambiguous,
-                        None,
-                        now.max(operation.issued_at),
-                        correlation_id,
-                    )
+                    .finish_question_session_operation(QuestionSessionOperationTerminalRequest {
+                        operation: &operation,
+                        terminal_state: QuestionSessionOperationState::Ambiguous,
+                        result_digest: None,
+                        receipt: None,
+                        result_artifact: None,
+                        completed_at: now.max(operation.issued_at),
+                        access: &access,
+                    })
                     .await?
                 {
                     QuestionSessionOperationFinishOutcome::Finished(operation)
@@ -1254,14 +1285,17 @@ where
             let recovered = {
                 let continuation = provider_session_continuation(resolved);
                 let ambiguous = provider_ambiguous_operation(&operation);
-                let provider = prepared.execute.recover_ambiguous_submission_operation(
-                    &prepared.context,
-                    &prepared.remote_task_id,
-                    &prepared.draft,
-                    continuation,
-                    &ambiguous,
-                    &prepared.runtime_settings,
-                );
+                let provider = prepared
+                    .execute
+                    .recover_ambiguous_submission_operation_with_artifact(
+                        &prepared.context,
+                        &prepared.remote_task_id,
+                        &prepared.draft,
+                        continuation,
+                        resolved.recovery_artifact.as_ref(),
+                        &ambiguous,
+                        &prepared.runtime_settings,
+                    );
                 tokio::pin!(provider);
                 let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
                 heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -3368,6 +3402,17 @@ where
                 if latest.state == QuestionSessionOperationState::Accepted
                     && latest.continuation_revision == resolved.metadata.revision
                 {
+                    if let Some(accepted_result) = resolved.accepted_result.as_ref() {
+                        return self
+                            .persist_durable_submission_receipt_and_verify(
+                                job,
+                                attempt,
+                                prepared,
+                                accepted_result.receipt.clone(),
+                                correlation_id,
+                            )
+                            .await;
+                    }
                     return self
                         .verify_submission_claimed(job, attempt, prepared, None, correlation_id)
                         .await;
@@ -3376,11 +3421,15 @@ where
                     QuestionSessionOperationState::Issued => {
                         let finished = artifacts
                             .finish_question_session_operation(
-                                &latest,
-                                QuestionSessionOperationState::Ambiguous,
-                                None,
-                                Utc::now().max(latest.issued_at),
-                                correlation_id,
+                                QuestionSessionOperationTerminalRequest {
+                                    operation: &latest,
+                                    terminal_state: QuestionSessionOperationState::Ambiguous,
+                                    result_digest: None,
+                                    receipt: None,
+                                    result_artifact: None,
+                                    completed_at: Utc::now().max(latest.issued_at),
+                                    access,
+                                },
                             )
                             .await?;
                         if !matches!(
@@ -3403,14 +3452,17 @@ where
                         let recovered = {
                             let continuation = provider_session_continuation(&resolved);
                             let ambiguous = provider_ambiguous_operation(&latest);
-                            let provider = prepared.execute.recover_ambiguous_submission_operation(
-                                &prepared.context,
-                                &prepared.remote_task_id,
-                                &prepared.draft,
-                                continuation,
-                                &ambiguous,
-                                &prepared.runtime_settings,
-                            );
+                            let provider = prepared
+                                .execute
+                                .recover_ambiguous_submission_operation_with_artifact(
+                                    &prepared.context,
+                                    &prepared.remote_task_id,
+                                    &prepared.draft,
+                                    continuation,
+                                    resolved.recovery_artifact.as_ref(),
+                                    &ambiguous,
+                                    &prepared.runtime_settings,
+                                );
                             tokio::pin!(provider);
                             let mut heartbeat =
                                 tokio::time::interval(self.config.heartbeat_interval);
@@ -3542,9 +3594,13 @@ where
             let operation_type = operation.operation_type().to_owned();
             let request_digest = operation.request_digest();
             let delay_seconds = operation.delay_before_execute_seconds();
+            let recovery_artifact = operation.recovery_artifact();
             if !valid_question_session_label(&prepared.context.provider_id, &operation_type)
                 || request_digest == [0; 32]
                 || delay_seconds > MAX_DURABLE_SUBMISSION_DELAY_SECONDS
+                || recovery_artifact
+                    .as_ref()
+                    .is_some_and(|artifact| artifact.provider_id() != &prepared.context.provider_id)
             {
                 return self
                     .begin_verification_recovery(
@@ -3563,8 +3619,10 @@ where
                     expected_continuation_revision: resolved.metadata.revision,
                     operation_type,
                     request_digest,
+                    recovery_artifact,
                     issued_at,
                     correlation_id: correlation_id.to_owned(),
+                    access,
                 })
                 .await?
             {
@@ -3614,11 +3672,15 @@ where
                 Err(error) => {
                     let finished = artifacts
                         .finish_question_session_operation(
-                            &issued,
-                            QuestionSessionOperationState::Ambiguous,
-                            None,
-                            Utc::now().max(issued.issued_at),
-                            correlation_id,
+                            QuestionSessionOperationTerminalRequest {
+                                operation: &issued,
+                                terminal_state: QuestionSessionOperationState::Ambiguous,
+                                result_digest: None,
+                                receipt: None,
+                                result_artifact: None,
+                                completed_at: Utc::now().max(issued.issued_at),
+                                access,
+                            },
                         )
                         .await?;
                     if !matches!(
@@ -4276,30 +4338,35 @@ async fn accept_durable_submission_outcome(
             response_digest,
             received_at,
         } => {
-            if response_digest == [0; 32]
-                || received_at < operation.issued_at
-                || receipt.validate().is_err()
-            {
-                return Err(ScheduledExecutionRunError::StateConflict);
-            }
-            let accepted = artifacts
-                .finish_question_session_operation(
-                    operation,
-                    QuestionSessionOperationState::Accepted,
-                    Some(response_digest),
-                    received_at,
-                    &access.correlation_id,
-                )
-                .await?;
-            return match accepted {
-                QuestionSessionOperationFinishOutcome::Finished(accepted)
-                | QuestionSessionOperationFinishOutcome::Duplicate(accepted)
-                    if accepted.state == QuestionSessionOperationState::Accepted =>
-                {
-                    Ok(AcceptedDurableSubmissionOutcome::Submitted(receipt))
-                }
-                _ => Err(ScheduledExecutionRunError::StateConflict),
-            };
+            return accept_durable_terminal_submission(
+                artifacts,
+                operation,
+                receipt,
+                response_digest,
+                received_at,
+                None,
+                access,
+                prepared,
+            )
+            .await;
+        }
+        ProviderSubmissionStepOutcome::SubmittedWithArtifact {
+            receipt,
+            response_digest,
+            received_at,
+            result_artifact,
+        } => {
+            return accept_durable_terminal_submission(
+                artifacts,
+                operation,
+                receipt,
+                response_digest,
+                received_at,
+                Some(&result_artifact),
+                access,
+                prepared,
+            )
+            .await;
         }
         ProviderSubmissionStepOutcome::NextQuestion(materialization) => {
             return accept_durable_next_question(
@@ -4342,6 +4409,48 @@ async fn accept_durable_submission_outcome(
         | QuestionSessionOperationFinishOutcome::Unavailable => {
             Err(ScheduledExecutionRunError::StateConflict)
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn accept_durable_terminal_submission(
+    artifacts: &dyn QuestionSessionArtifactRepository,
+    operation: &QuestionSessionOperation,
+    receipt: asterism_domain::SubmissionReceipt,
+    response_digest: [u8; 32],
+    received_at: Timestamp,
+    result_artifact: Option<&asterism_provider_api::ProviderQuestionOperationArtifact>,
+    access: &SecretAccess,
+    prepared: &PreparedSubmissionCall,
+) -> Result<AcceptedDurableSubmissionOutcome, ScheduledExecutionRunError> {
+    if response_digest == [0; 32]
+        || received_at < operation.issued_at
+        || receipt.received_at != received_at
+        || receipt.validate().is_err()
+        || result_artifact
+            .is_some_and(|artifact| artifact.provider_id() != &prepared.context.provider_id)
+    {
+        return Err(ScheduledExecutionRunError::StateConflict);
+    }
+    let accepted = artifacts
+        .finish_question_session_operation(QuestionSessionOperationTerminalRequest {
+            operation,
+            terminal_state: QuestionSessionOperationState::Accepted,
+            result_digest: Some(response_digest),
+            receipt: Some(&receipt),
+            result_artifact,
+            completed_at: received_at,
+            access,
+        })
+        .await?;
+    match accepted {
+        QuestionSessionOperationFinishOutcome::Finished(accepted)
+        | QuestionSessionOperationFinishOutcome::Duplicate(accepted)
+            if accepted.state == QuestionSessionOperationState::Accepted =>
+        {
+            Ok(AcceptedDurableSubmissionOutcome::Submitted(receipt))
+        }
+        _ => Err(ScheduledExecutionRunError::StateConflict),
     }
 }
 
@@ -7012,6 +7121,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(continuation, ("provider-alpha.answers-saved".to_owned(), 2));
+        let terminal_results: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT operation_sequence, provider_id \
+             FROM question_session_operation_results ORDER BY operation_sequence",
+        )
+        .fetch_all(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(terminal_results, vec![(2, "provider-alpha".to_owned())]);
         let session: (String, i64, Option<String>) = sqlx::query_as(
             "SELECT state, revision, closed_at FROM question_sessions WHERE execution_id = ?",
         )

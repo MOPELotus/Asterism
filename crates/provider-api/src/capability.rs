@@ -35,6 +35,7 @@ const MAX_CAPTURE_JSON_FIELDS: usize = 16;
 const MAX_QUESTION_READ_LABEL_BYTES: usize = 96;
 const MAX_QUESTION_READ_ITEMS: usize = 5_000;
 const MAX_QUESTION_READ_TTL_SECONDS: u64 = 24 * 60 * 60;
+const MAX_QUESTION_OPERATION_ARTIFACT_BYTES: usize = 1024 * 1024;
 const MAX_INTERACTIVE_AUTH_CONTINUATION_BYTES: usize = 1024 * 1024;
 const MAX_INTERACTIVE_AUTH_TTL_SECONDS: u64 = 60 * 60;
 const MAX_INTERACTIVE_AUTH_POLLS: u32 = 10_000;
@@ -871,6 +872,100 @@ pub struct AmbiguousProviderQuestionReadOperation {
     pub ambiguous_at: Timestamp,
 }
 
+/// Bounded Provider-private evidence bound to one exact Question operation.
+/// Core encrypts a prepared artifact in the same transaction as issue and an
+/// accepted-result artifact in the same transaction as the terminal receipt.
+/// Neither value grants replay authority by itself.
+pub struct ProviderQuestionOperationArtifact {
+    provider_id: ProviderId,
+    artifact_type: String,
+    artifact_digest: [u8; 32],
+    value: Arc<SecretValue>,
+}
+
+impl ProviderQuestionOperationArtifact {
+    /// # Errors
+    ///
+    /// Rejects foreign namespaces, empty/oversized values, or an expected
+    /// digest that differs from the exact plaintext.
+    pub fn try_new(
+        provider_id: ProviderId,
+        artifact_type: impl Into<String>,
+        expected_digest: [u8; 32],
+        value: SecretValue,
+    ) -> ProviderResult<Self> {
+        let artifact_type = artifact_type.into();
+        let bytes = value.expose_secret();
+        let actual_digest: [u8; 32] = Sha256::digest(bytes).into();
+        if !valid_provider_label(&provider_id, &artifact_type)
+            || bytes.is_empty()
+            || bytes.len() > MAX_QUESTION_OPERATION_ARTIFACT_BYTES
+            || expected_digest == [0; 32]
+            || actual_digest != expected_digest
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider Question operation artifact is invalid",
+            ));
+        }
+        Ok(Self {
+            provider_id,
+            artifact_type,
+            artifact_digest: actual_digest,
+            value: Arc::new(value),
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn artifact_type(&self) -> &str {
+        &self.artifact_type
+    }
+
+    pub const fn artifact_digest(&self) -> [u8; 32] {
+        self.artifact_digest
+    }
+
+    pub fn value(&self) -> &SecretValue {
+        &self.value
+    }
+}
+
+impl Clone for ProviderQuestionOperationArtifact {
+    fn clone(&self) -> Self {
+        Self {
+            provider_id: self.provider_id.clone(),
+            artifact_type: self.artifact_type.clone(),
+            artifact_digest: self.artifact_digest,
+            value: Arc::clone(&self.value),
+        }
+    }
+}
+
+impl PartialEq for ProviderQuestionOperationArtifact {
+    fn eq(&self, other: &Self) -> bool {
+        self.provider_id == other.provider_id
+            && self.artifact_type == other.artifact_type
+            && self.artifact_digest == other.artifact_digest
+    }
+}
+
+impl Eq for ProviderQuestionOperationArtifact {}
+
+impl fmt::Debug for ProviderQuestionOperationArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderQuestionOperationArtifact")
+            .field("provider_id", &self.provider_id)
+            .field("artifact_type", &self.artifact_type)
+            .field("artifact_digest", &"[HASHED]")
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// One real immutable Question set and the encrypted Provider material needed
 /// to continue or submit it. Core persists the snapshot, `QuestionSession`, and
 /// artifact atomically with the accepted pre-Question operation.
@@ -976,6 +1071,11 @@ pub enum ProviderQuestionReadStepOutcome {
         receipt: SubmissionReceipt,
         response_digest: [u8; 32],
     },
+    CompletedWithArtifact {
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+        result_artifact: ProviderQuestionOperationArtifact,
+    },
 }
 
 impl ProviderQuestionReadStepOutcome {
@@ -1021,6 +1121,31 @@ impl ProviderQuestionReadStepOutcome {
             response_digest,
         })
     }
+
+    /// Creates a definite terminal result whose private response projection
+    /// must be encrypted atomically with the accepted receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid receipts, missing response digests, or a foreign
+    /// result-artifact Provider binding.
+    pub fn completed_with_artifact(
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+        result_artifact: ProviderQuestionOperationArtifact,
+    ) -> ProviderResult<Self> {
+        if response_digest == [0; 32] || receipt.validate().is_err() {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider pre-Question completion result is invalid",
+            ));
+        }
+        Ok(Self::CompletedWithArtifact {
+            receipt,
+            response_digest,
+            result_artifact,
+        })
+    }
 }
 
 /// One opaque, in-memory Provider command whose exact identity is exposed to
@@ -1031,6 +1156,12 @@ pub trait PreparedProviderQuestionReadOperation: fmt::Debug + Send {
     fn operation_type(&self) -> &str;
     fn request_digest(&self) -> [u8; 32];
     fn delay_before_execute_seconds(&self) -> u64;
+
+    /// Returns optional encrypted recovery evidence frozen before issue. Core
+    /// persists it atomically with the exact request identity.
+    fn recovery_artifact(&self) -> Option<ProviderQuestionOperationArtifact> {
+        None
+    }
 
     async fn execute(
         self: Box<Self>,
@@ -1087,6 +1218,30 @@ pub trait QuestionInventoryCapability: ProviderIdentity {
         _runtime_settings: &ResolvedProviderRuntimeSettings,
     ) -> ProviderResult<Option<ProviderQuestionReadStepOutcome>> {
         Ok(None)
+    }
+
+    /// Artifact-aware ambiguity recovery. Existing Providers inherit their
+    /// readback-only implementation until they opt into prepared evidence.
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_ambiguous_question_read_operation_with_artifact(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        _recovery_artifact: Option<&ProviderQuestionOperationArtifact>,
+        operation: &AmbiguousProviderQuestionReadOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderQuestionReadStepOutcome>> {
+        self.recover_ambiguous_question_read_operation(
+            context,
+            task_id,
+            remote_task_id,
+            continuation,
+            operation,
+            runtime_settings,
+        )
+        .await
     }
 }
 
@@ -1376,6 +1531,12 @@ pub enum ProviderSubmissionStepOutcome {
         response_digest: [u8; 32],
         received_at: Timestamp,
     },
+    SubmittedWithArtifact {
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+        result_artifact: ProviderQuestionOperationArtifact,
+    },
 }
 
 impl ProviderSubmissionStepOutcome {
@@ -1420,6 +1581,32 @@ impl ProviderSubmissionStepOutcome {
             received_at,
         })
     }
+
+    /// Creates a terminal submission whose Provider-private result projection
+    /// must be encrypted atomically with the accepted receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid Receipt or missing response digest.
+    pub fn submitted_with_artifact(
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+        result_artifact: ProviderQuestionOperationArtifact,
+    ) -> ProviderResult<Self> {
+        if response_digest == [0; 32] || receipt.validate().is_err() {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider Question-session submission result is invalid",
+            ));
+        }
+        Ok(Self::SubmittedWithArtifact {
+            receipt,
+            response_digest,
+            received_at,
+            result_artifact,
+        })
+    }
 }
 
 /// One in-memory Provider command whose exact identity is persisted before a
@@ -1429,6 +1616,12 @@ pub trait PreparedProviderSubmissionOperation: fmt::Debug + Send {
     fn operation_type(&self) -> &str;
     fn request_digest(&self) -> [u8; 32];
     fn delay_before_execute_seconds(&self) -> u64;
+
+    /// Returns optional encrypted recovery evidence frozen before issue. Core
+    /// persists it atomically with the exact request identity.
+    fn recovery_artifact(&self) -> Option<ProviderQuestionOperationArtifact> {
+        None
+    }
 
     async fn execute(
         self: Box<Self>,
@@ -1477,6 +1670,30 @@ pub trait SubmissionExecuteCapability: ProviderIdentity {
         _runtime_settings: &ResolvedProviderRuntimeSettings,
     ) -> ProviderResult<Option<ProviderSubmissionStepOutcome>> {
         Ok(None)
+    }
+
+    /// Artifact-aware ambiguity recovery. Existing Providers inherit their
+    /// readback-only implementation until they opt into prepared evidence.
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_ambiguous_submission_operation_with_artifact(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        _recovery_artifact: Option<&ProviderQuestionOperationArtifact>,
+        operation: &AmbiguousProviderQuestionSessionOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderSubmissionStepOutcome>> {
+        self.recover_ambiguous_submission_operation(
+            context,
+            remote_task_id,
+            draft,
+            continuation,
+            operation,
+            runtime_settings,
+        )
+        .await
     }
 }
 
@@ -6664,5 +6881,57 @@ mod browser_session_spec_tests {
             .read_sources
             .push(authorized.read_sources[0].clone());
         assert_eq!(authorized.validate(), Err(BrowserSessionSpecError::Invalid));
+    }
+}
+
+#[cfg(test)]
+mod question_operation_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_is_provider_scoped_digest_bound_bounded_and_redacted() {
+        let provider_id = ProviderId::new("cidaren").unwrap();
+        let value = b"private recovery projection";
+        let artifact = ProviderQuestionOperationArtifact::try_new(
+            provider_id.clone(),
+            "cidaren.question-operation.v1",
+            Sha256::digest(value).into(),
+            SecretValue::new(value.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(artifact.provider_id(), &provider_id);
+        assert_eq!(artifact.value().expose_secret(), value);
+        let debug = format!("{artifact:?}");
+        assert!(!debug.contains("private recovery projection"));
+        assert!(debug.contains("[REDACTED]"));
+
+        assert!(
+            ProviderQuestionOperationArtifact::try_new(
+                provider_id.clone(),
+                "uai.question-operation.v1",
+                Sha256::digest(value).into(),
+                SecretValue::new(value.to_vec()),
+            )
+            .is_err()
+        );
+        assert!(
+            ProviderQuestionOperationArtifact::try_new(
+                provider_id.clone(),
+                "cidaren.question-operation.v1",
+                [7; 32],
+                SecretValue::new(value.to_vec()),
+            )
+            .is_err()
+        );
+        let oversized = vec![1; MAX_QUESTION_OPERATION_ARTIFACT_BYTES + 1];
+        assert!(
+            ProviderQuestionOperationArtifact::try_new(
+                provider_id,
+                "cidaren.question-operation.v1",
+                Sha256::digest(&oversized).into(),
+                SecretValue::new(oversized),
+            )
+            .is_err()
+        );
     }
 }

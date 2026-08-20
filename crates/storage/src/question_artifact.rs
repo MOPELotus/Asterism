@@ -18,9 +18,15 @@ use crate::{
     QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
     QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
     QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
-    QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionTransition,
+    QuestionSessionOperationIssueRequest, QuestionSessionOperationState,
+    QuestionSessionOperationTerminalRequest, QuestionSessionTransition,
     ResolvedQuestionSessionContinuation, SecretKeyring,
     question::save_question_snapshot_in_transaction,
+    question_operation_artifact::{
+        QuestionOperationArtifactBinding, QuestionOperationArtifactScope, accepted_result_matches,
+        insert_accepted_result, insert_recovery_artifact, recovery_artifact_matches,
+        resolve_operation_artifacts,
+    },
     question_session::{
         consume_claimed_question_session_in_transaction, fetch_by_id,
         insert_question_session_in_transaction,
@@ -331,6 +337,25 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         } else {
             None
         };
+        let (recovery_artifact, accepted_result) =
+            if let Some(operation) = latest_operation.as_ref() {
+                let scope_id = operation.session_id.to_string();
+                resolve_operation_artifacts(
+                    &mut transaction,
+                    &self.keyring,
+                    &QuestionOperationArtifactBinding {
+                        scope: QuestionOperationArtifactScope::Session,
+                        scope_id: &scope_id,
+                        sequence: operation.sequence,
+                        owner_user_id,
+                        provider_id: &self.provider_id,
+                    },
+                    access,
+                )
+                .await?
+            } else {
+                (None, None)
+            };
         insert_secret_audit(
             &mut transaction,
             access,
@@ -344,6 +369,8 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
             metadata,
             latest_operation,
             latest_transition,
+            recovery_artifact,
+            accepted_result,
             value: SecretValue::new(plaintext),
         }))
     }
@@ -422,13 +449,15 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
             metadata,
             latest_operation: None,
             latest_transition: None,
+            recovery_artifact: None,
+            accepted_result: None,
             value: SecretValue::new(plaintext),
         }))
     }
 
     async fn issue_question_session_operation(
         &self,
-        request: QuestionSessionOperationIssueRequest,
+        request: QuestionSessionOperationIssueRequest<'_>,
     ) -> Result<QuestionSessionOperationIssueOutcome, SecretStoreError> {
         validate_issue_request(&request)?;
         if !label_belongs_to_provider(&self.provider_id, &request.operation_type) {
@@ -445,6 +474,12 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(QuestionSessionOperationIssueOutcome::Unavailable);
         };
+        authorize_scoped(
+            binding.owner_user_id,
+            &binding.provider_id,
+            &self.provider_id,
+            request.access,
+        )?;
         if binding.provider_id != self.provider_id
             || binding.session_state != QuestionSessionState::Claimed
             || binding.continuation_revision != request.expected_continuation_revision
@@ -468,12 +503,27 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         )
         .await?
         {
+            let scope_id = existing.session_id.to_string();
+            let artifact_matches = recovery_artifact_matches(
+                &mut transaction,
+                &QuestionOperationArtifactBinding {
+                    scope: QuestionOperationArtifactScope::Session,
+                    scope_id: &scope_id,
+                    sequence: existing.sequence,
+                    owner_user_id: binding.owner_user_id,
+                    provider_id: &self.provider_id,
+                },
+                request.recovery_artifact.as_ref(),
+            )
+            .await?;
             transaction.rollback().await.map_err(storage_error)?;
-            return Ok(if operation_matches_issue(&existing, &request) {
-                QuestionSessionOperationIssueOutcome::Duplicate(existing)
-            } else {
-                QuestionSessionOperationIssueOutcome::Conflict
-            });
+            return Ok(
+                if operation_matches_issue(&existing, &request) && artifact_matches {
+                    QuestionSessionOperationIssueOutcome::Duplicate(existing)
+                } else {
+                    QuestionSessionOperationIssueOutcome::Conflict
+                },
+            );
         }
         let last_sequence: Option<i64> = sqlx::query_scalar(
             "SELECT MAX(sequence) FROM question_session_operations WHERE session_id = ?",
@@ -498,6 +548,22 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
             completed_at: None,
         };
         insert_operation(&mut transaction, &operation).await?;
+        let scope_id = operation.session_id.to_string();
+        insert_recovery_artifact(
+            &mut transaction,
+            &self.keyring,
+            &QuestionOperationArtifactBinding {
+                scope: QuestionOperationArtifactScope::Session,
+                scope_id: &scope_id,
+                sequence: operation.sequence,
+                owner_user_id: binding.owner_user_id,
+                provider_id: &self.provider_id,
+            },
+            request.recovery_artifact.as_ref(),
+            operation.issued_at,
+            request.access,
+        )
+        .await?;
         insert_operation_audit(
             &mut transaction,
             &request.correlation_id,
@@ -896,14 +962,26 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
 
     async fn finish_question_session_operation(
         &self,
-        operation: &QuestionSessionOperation,
-        terminal_state: QuestionSessionOperationState,
-        result_digest: Option<[u8; 32]>,
-        completed_at: Timestamp,
-        correlation_id: &str,
+        request: QuestionSessionOperationTerminalRequest<'_>,
     ) -> Result<QuestionSessionOperationFinishOutcome, SecretStoreError> {
-        validate_terminal_finish(terminal_state, result_digest, completed_at, operation)?;
-        validate_correlation_id(correlation_id)?;
+        let QuestionSessionOperationTerminalRequest {
+            operation,
+            terminal_state,
+            result_digest,
+            receipt,
+            result_artifact,
+            completed_at,
+            access,
+        } = request;
+        validate_terminal_finish(
+            terminal_state,
+            result_digest,
+            receipt,
+            result_artifact,
+            completed_at,
+            operation,
+        )?;
+        validate_correlation_id(&access.correlation_id)?;
         let mut transaction = self
             .database
             .pool()
@@ -916,13 +994,50 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(QuestionSessionOperationFinishOutcome::Unavailable);
         };
+        let Some(binding) =
+            fetch_operation_binding(&mut transaction, existing.execution_id).await?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionSessionOperationFinishOutcome::Unavailable);
+        };
+        authorize_scoped(
+            binding.owner_user_id,
+            &binding.provider_id,
+            &self.provider_id,
+            access,
+        )?;
+        if binding.session_id != existing.session_id {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionSessionOperationFinishOutcome::Conflict);
+        }
         let can_finish = existing.state == QuestionSessionOperationState::Issued
             || (terminal_state == QuestionSessionOperationState::Accepted
                 && existing.state == QuestionSessionOperationState::Ambiguous);
         if !can_finish {
+            let duplicate_result = if terminal_state == QuestionSessionOperationState::Accepted {
+                let scope_id = existing.session_id.to_string();
+                accepted_result_matches(
+                    &mut transaction,
+                    &QuestionOperationArtifactBinding {
+                        scope: QuestionOperationArtifactScope::Session,
+                        scope_id: &scope_id,
+                        sequence: existing.sequence,
+                        owner_user_id: binding.owner_user_id,
+                        provider_id: &self.provider_id,
+                    },
+                    receipt,
+                    result_artifact,
+                )
+                .await?
+            } else {
+                receipt.is_none() && result_artifact.is_none()
+            };
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(
-                if existing.state == terminal_state && existing.result_digest == result_digest {
+                if existing.state == terminal_state
+                    && existing.result_digest == result_digest
+                    && duplicate_result
+                {
                     QuestionSessionOperationFinishOutcome::Duplicate(existing)
                 } else {
                     QuestionSessionOperationFinishOutcome::Conflict
@@ -939,9 +1054,28 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         finished.result_digest = result_digest;
         finished.completed_at = Some(completed_at);
         persist_operation_finish(&mut transaction, &finished, expected_state).await?;
+        if terminal_state == QuestionSessionOperationState::Accepted {
+            let scope_id = finished.session_id.to_string();
+            insert_accepted_result(
+                &mut transaction,
+                &self.keyring,
+                &QuestionOperationArtifactBinding {
+                    scope: QuestionOperationArtifactScope::Session,
+                    scope_id: &scope_id,
+                    sequence: finished.sequence,
+                    owner_user_id: binding.owner_user_id,
+                    provider_id: &self.provider_id,
+                },
+                receipt.ok_or(SecretStoreError::InvalidValue)?,
+                result_artifact,
+                completed_at,
+                access,
+            )
+            .await?;
+        }
         insert_operation_audit(
             &mut transaction,
-            correlation_id,
+            &access.correlation_id,
             match terminal_state {
                 QuestionSessionOperationState::Accepted => {
                     "question_session_operation_accepted_terminal"
@@ -1501,12 +1635,17 @@ fn validate_next_materialization(
 fn validate_terminal_finish(
     state: QuestionSessionOperationState,
     result_digest: Option<[u8; 32]>,
+    receipt: Option<&asterism_domain::SubmissionReceipt>,
+    result_artifact: Option<&asterism_provider_api::ProviderQuestionOperationArtifact>,
     completed_at: Timestamp,
     operation: &QuestionSessionOperation,
 ) -> Result<(), SecretStoreError> {
     let shape_valid = match state {
         QuestionSessionOperationState::Accepted => {
             result_digest.is_some_and(|value| value != [0; 32])
+                && receipt.is_some_and(|value| {
+                    value.received_at == completed_at && value.validate().is_ok()
+                })
                 && matches!(
                     operation.state,
                     QuestionSessionOperationState::Issued
@@ -1515,10 +1654,15 @@ fn validate_terminal_finish(
         }
         QuestionSessionOperationState::Rejected => {
             result_digest.is_some_and(|value| value != [0; 32])
+                && receipt.is_none()
+                && result_artifact.is_none()
                 && operation.state == QuestionSessionOperationState::Issued
         }
         QuestionSessionOperationState::Ambiguous => {
-            result_digest.is_none() && operation.state == QuestionSessionOperationState::Issued
+            result_digest.is_none()
+                && receipt.is_none()
+                && result_artifact.is_none()
+                && operation.state == QuestionSessionOperationState::Issued
         }
         QuestionSessionOperationState::Issued => false,
     };
@@ -1668,8 +1812,9 @@ mod tests {
 
     use asterism_domain::{
         AuditActor, ProviderAccountId, Question, QuestionKind, QuestionSession, QuestionSnapshotId,
-        TaskId,
+        SubmissionReceipt, TaskId,
     };
+    use asterism_provider_api::ProviderQuestionOperationArtifact;
     use asterism_secrets::{SecretKey, SecretStoreError};
     use chrono::{Duration, Utc};
 
@@ -1773,6 +1918,7 @@ mod tests {
         let fixture = Fixture::new().await;
         let (previous, execution_id, attempt_id) = fixture.claimed(b"question-one-state").await;
         let issued_at = fixture.now + Duration::seconds(2);
+        let issue_access = fixture.access("next-question-issue");
         let QuestionSessionOperationIssueOutcome::Issued(operation) = fixture
             .artifacts
             .issue_question_session_operation(QuestionSessionOperationIssueRequest {
@@ -1781,8 +1927,10 @@ mod tests {
                 expected_continuation_revision: 1,
                 operation_type: "chaoxing.exam.advance".to_owned(),
                 request_digest: [21; 32],
+                recovery_artifact: None,
                 issued_at,
                 correlation_id: "next-question-issue".to_owned(),
+                access: &issue_access,
             })
             .await
             .unwrap()
@@ -1924,14 +2072,17 @@ mod tests {
         assert_eq!(resolved.metadata.revision, 1);
         assert!(resolved.latest_operation.is_none());
 
+        let issue_access = fixture.access("exam-save-1");
         let issue = QuestionSessionOperationIssueRequest {
             execution_id,
             execution_attempt_id: attempt_id,
             expected_continuation_revision: 1,
             operation_type: "chaoxing.exam.temp-save".to_owned(),
             request_digest: [8; 32],
+            recovery_artifact: None,
             issued_at: fixture.now + Duration::seconds(2),
             correlation_id: "exam-save-1".to_owned(),
+            access: &issue_access,
         };
         let QuestionSessionOperationIssueOutcome::Issued(operation) = fixture
             .artifacts
@@ -2028,19 +2179,140 @@ mod tests {
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
+        reason = "the regression covers issue projection, terminal receipt, private result, idempotency and recovery together"
+    )]
+    async fn terminal_receipt_and_private_artifacts_are_atomic_and_recoverable() {
+        let fixture = Fixture::new().await;
+        let (_, execution_id, attempt_id) = fixture.claimed(b"cidaren-topic-v1").await;
+        let issued_at = fixture.now + Duration::seconds(2);
+        let issue_access = fixture.access("cidaren-result-issue");
+        let recovery_value = b"cidaren-frozen-command";
+        let recovery_artifact = ProviderQuestionOperationArtifact::try_new(
+            fixture.provider.clone(),
+            "chaoxing.session-recovery.v1",
+            digest(recovery_value),
+            SecretValue::new(recovery_value.to_vec()),
+        )
+        .unwrap();
+        let QuestionSessionOperationIssueOutcome::Issued(operation) = fixture
+            .artifacts
+            .issue_question_session_operation(QuestionSessionOperationIssueRequest {
+                execution_id,
+                execution_attempt_id: attempt_id,
+                expected_continuation_revision: 1,
+                operation_type: "chaoxing.exam.submit".to_owned(),
+                request_digest: [31; 32],
+                recovery_artifact: Some(recovery_artifact),
+                issued_at,
+                correlation_id: "cidaren-result-issue".to_owned(),
+                access: &issue_access,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected issued operation");
+        };
+        let issued = fixture
+            .artifacts
+            .resolve_question_session_continuation(
+                execution_id,
+                &fixture.access("cidaren-result-resolve-issued"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            issued.recovery_artifact.unwrap().value().expose_secret(),
+            recovery_value
+        );
+        assert!(issued.accepted_result.is_none());
+
+        let received_at = issued_at + Duration::seconds(1);
+        let receipt = SubmissionReceipt {
+            remote_status: "accepted".to_owned(),
+            message_sanitized: Some("saved".to_owned()),
+            provider_trace_id: Some("trace-31".to_owned()),
+            received_at,
+        };
+        let result_value = b"cidaren-result-and-successor";
+        let result_artifact = ProviderQuestionOperationArtifact::try_new(
+            fixture.provider.clone(),
+            "chaoxing.session-result.v1",
+            digest(result_value),
+            SecretValue::new(result_value.to_vec()),
+        )
+        .unwrap();
+        let accepted = fixture
+            .artifacts
+            .finish_question_session_operation(QuestionSessionOperationTerminalRequest {
+                operation: &operation,
+                terminal_state: QuestionSessionOperationState::Accepted,
+                result_digest: Some([32; 32]),
+                receipt: Some(&receipt),
+                result_artifact: Some(&result_artifact),
+                completed_at: received_at,
+                access: &fixture.access("cidaren-result-accept"),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            accepted,
+            QuestionSessionOperationFinishOutcome::Finished(ref operation)
+                if operation.state == QuestionSessionOperationState::Accepted
+        ));
+        assert!(matches!(
+            fixture
+                .artifacts
+                .finish_question_session_operation(QuestionSessionOperationTerminalRequest {
+                    operation: &operation,
+                    terminal_state: QuestionSessionOperationState::Accepted,
+                    result_digest: Some([32; 32]),
+                    receipt: Some(&receipt),
+                    result_artifact: Some(&result_artifact),
+                    completed_at: received_at,
+                    access: &fixture.access("cidaren-result-accept-duplicate"),
+                })
+                .await
+                .unwrap(),
+            QuestionSessionOperationFinishOutcome::Duplicate(_)
+        ));
+
+        let resolved = fixture
+            .artifacts
+            .resolve_question_session_continuation(
+                execution_id,
+                &fixture.access("cidaren-result-resolve-accepted"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let accepted_result = resolved.accepted_result.unwrap();
+        assert_eq!(accepted_result.receipt, receipt);
+        assert_eq!(
+            accepted_result.artifact.unwrap().value().expose_secret(),
+            result_value
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
         reason = "the regression keeps issue, ambiguity, replay rejection, verified rotation and provider scoping in one lifecycle"
     )]
     async fn ambiguity_blocks_replay_but_verified_recovery_can_rotate_state() {
         let fixture = Fixture::new().await;
         let (_, execution_id, attempt_id) = fixture.claimed(b"cidaren-topic-v1").await;
+        let issue_access = fixture.access("cidaren-verify-1");
         let issue = QuestionSessionOperationIssueRequest {
             execution_id,
             execution_attempt_id: attempt_id,
             expected_continuation_revision: 1,
             operation_type: "chaoxing.exam.submit".to_owned(),
             request_digest: [4; 32],
+            recovery_artifact: None,
             issued_at: fixture.now + Duration::seconds(2),
             correlation_id: "cidaren-verify-1".to_owned(),
+            access: &issue_access,
         };
         let QuestionSessionOperationIssueOutcome::Issued(operation) = fixture
             .artifacts
@@ -2052,13 +2324,15 @@ mod tests {
         };
         let finished = fixture
             .artifacts
-            .finish_question_session_operation(
-                &operation,
-                QuestionSessionOperationState::Ambiguous,
-                None,
-                fixture.now + Duration::seconds(3),
-                "cidaren-ambiguous",
-            )
+            .finish_question_session_operation(QuestionSessionOperationTerminalRequest {
+                operation: &operation,
+                terminal_state: QuestionSessionOperationState::Ambiguous,
+                result_digest: None,
+                receipt: None,
+                result_artifact: None,
+                completed_at: fixture.now + Duration::seconds(3),
+                access: &fixture.access("cidaren-ambiguous"),
+            })
             .await
             .unwrap();
         let QuestionSessionOperationFinishOutcome::Finished(ambiguous) = finished else {
@@ -2074,8 +2348,10 @@ mod tests {
                     expected_continuation_revision: 1,
                     operation_type: "chaoxing.exam.submit".to_owned(),
                     request_digest: [5; 32],
+                    recovery_artifact: None,
                     issued_at: fixture.now + Duration::seconds(4),
                     correlation_id: "cidaren-replay".to_owned(),
+                    access: &fixture.access("cidaren-replay"),
                 })
                 .await
                 .unwrap(),

@@ -107,6 +107,24 @@ impl QuestionReadAttempt {
         self.finish_active(QuestionReadAttemptState::Ambiguous, None, at)
     }
 
+    /// Reopens an ambiguity that fresh Provider readback resolved to a
+    /// definite continuing state. The revision advances again so the resumed
+    /// continuation cannot be confused with either the issued or locked
+    /// boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-ambiguous attempts or timestamp regression.
+    pub fn recover_active(&mut self, at: Timestamp) -> Result<(), QuestionReadAttemptError> {
+        self.require_timestamp(at)?;
+        if self.state != QuestionReadAttemptState::Ambiguous {
+            return Err(QuestionReadAttemptError::InvalidTransition);
+        }
+        self.advance(QuestionReadAttemptState::Active, at)?;
+        self.completed_at = None;
+        Ok(())
+    }
+
     /// Records an unambiguous Provider rejection without fabricating Question
     /// entities.
     ///
@@ -405,6 +423,18 @@ mod tests {
                 now + Duration::seconds(3),
             )
             .unwrap();
+        attempt.validate().unwrap();
+    }
+
+    #[test]
+    fn ambiguous_operation_can_reopen_with_a_fresh_revision() {
+        let now = Utc::now();
+        let mut attempt = attempt(now);
+        attempt.mark_ambiguous(now + Duration::seconds(1)).unwrap();
+        attempt.recover_active(now + Duration::seconds(2)).unwrap();
+        assert_eq!(attempt.state, QuestionReadAttemptState::Active);
+        assert_eq!(attempt.revision, 3);
+        assert!(attempt.completed_at.is_none());
         attempt.validate().unwrap();
     }
 

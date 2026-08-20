@@ -16,8 +16,13 @@ use crate::{
     QuestionReadMaterializeRequest, QuestionReadOperation, QuestionReadOperationAcceptRequest,
     QuestionReadOperationFinishOutcome, QuestionReadOperationIssueOutcome,
     QuestionReadOperationIssueRequest, QuestionReadOperationState,
-    ResolvedQuestionReadContinuation, SecretKeyring,
+    QuestionReadOperationTerminalRequest, ResolvedQuestionReadContinuation, SecretKeyring,
     question::save_question_snapshot_in_transaction,
+    question_operation_artifact::{
+        QuestionOperationArtifactBinding, QuestionOperationArtifactScope, accepted_result_matches,
+        insert_accepted_result, insert_recovery_artifact, recovery_artifact_matches,
+        resolve_operation_artifacts,
+    },
     question_session::insert_question_session_in_transaction,
     secret::{
         authorize, decrypt, encrypt, fetch_secret, insert_secret_audit, insert_secret_blob,
@@ -48,6 +53,10 @@ impl SqliteQuestionReadContinuationRepository {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the repository keeps each encrypted continuation and operation transition in one auditable transaction"
+)]
 #[async_trait]
 impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationRepository {
     async fn attach_question_read_continuation(
@@ -186,6 +195,25 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             return Err(SecretStoreError::AuthenticationFailed);
         }
         let latest_operation = fetch_latest_operation(&mut transaction, attempt_id).await?;
+        let (recovery_artifact, accepted_result) =
+            if let Some(operation) = latest_operation.as_ref() {
+                let scope_id = attempt_id.to_string();
+                resolve_operation_artifacts(
+                    &mut transaction,
+                    &self.keyring,
+                    &QuestionOperationArtifactBinding {
+                        scope: QuestionOperationArtifactScope::Read,
+                        scope_id: &scope_id,
+                        sequence: operation.sequence,
+                        owner_user_id: attempt.owner_user_id,
+                        provider_id: &self.provider_id,
+                    },
+                    access,
+                )
+                .await?
+            } else {
+                (None, None)
+            };
         insert_secret_audit(
             &mut transaction,
             access,
@@ -198,10 +226,16 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
         Ok(Some(ResolvedQuestionReadContinuation {
             metadata,
             latest_operation,
+            recovery_artifact,
+            accepted_result,
             value: SecretValue::new(plaintext),
         }))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "issue validates and atomically persists the command and optional encrypted recovery evidence"
+    )]
     async fn issue_question_read_operation(
         &self,
         request: QuestionReadOperationIssueRequest<'_>,
@@ -233,10 +267,24 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
         )
         .await?
         {
+            let scope_id = request.attempt_id.to_string();
+            let artifact_matches = recovery_artifact_matches(
+                &mut transaction,
+                &QuestionOperationArtifactBinding {
+                    scope: QuestionOperationArtifactScope::Read,
+                    scope_id: &scope_id,
+                    sequence: existing.sequence,
+                    owner_user_id: binding.attempt.owner_user_id,
+                    provider_id: &self.provider_id,
+                },
+                request.recovery_artifact.as_ref(),
+            )
+            .await?;
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(
                 if existing.state == QuestionReadOperationState::Issued
                     && operation_matches_issue(&existing, &request)
+                    && artifact_matches
                 {
                     QuestionReadOperationIssueOutcome::Duplicate(existing)
                 } else {
@@ -265,6 +313,22 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             completed_at: None,
         };
         insert_operation(&mut transaction, &operation).await?;
+        let scope_id = operation.attempt_id.to_string();
+        insert_recovery_artifact(
+            &mut transaction,
+            &self.keyring,
+            &QuestionOperationArtifactBinding {
+                scope: QuestionOperationArtifactScope::Read,
+                scope_id: &scope_id,
+                sequence: operation.sequence,
+                owner_user_id: binding.attempt.owner_user_id,
+                provider_id: &self.provider_id,
+            },
+            request.recovery_artifact.as_ref(),
+            operation.issued_at,
+            request.access,
+        )
+        .await?;
         insert_operation_audit(
             &mut transaction,
             request.access,
@@ -299,7 +363,10 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(QuestionReadOperationFinishOutcome::Unavailable);
         };
-        if existing.state != QuestionReadOperationState::Issued {
+        if !matches!(
+            existing.state,
+            QuestionReadOperationState::Issued | QuestionReadOperationState::Ambiguous
+        ) {
             let duplicate = existing.state == QuestionReadOperationState::Accepted
                 && existing.result_digest == Some(request.result_digest)
                 && fetch_continuation(&mut transaction, existing.attempt_id)
@@ -326,15 +393,12 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             return Ok(QuestionReadOperationFinishOutcome::Unavailable);
         };
         authorize_scoped(&binding.attempt, &self.provider_id, request.access)?;
-        if binding.attempt.state != QuestionReadAttemptState::Active
-            || binding.attempt.revision != existing.continuation_revision
-            || binding.continuation.revision != existing.continuation_revision
-            || binding.secret_version != existing.continuation_revision
-        {
+        if !attempt_can_accept_operation(&binding, &existing) {
             return Ok(QuestionReadOperationFinishOutcome::Conflict);
         }
-        let next_revision = existing
-            .continuation_revision
+        let next_revision = binding
+            .attempt
+            .revision
             .checked_add(1)
             .ok_or(SecretStoreError::VersionConflict)?;
         let stored = fetch_secret(&mut transaction, binding.secret_id).await?;
@@ -384,16 +448,21 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
         if continuation_updated.rows_affected() != 1 {
             return Err(SecretStoreError::VersionConflict);
         }
+        let expected_attempt_revision = binding.attempt.revision;
         let mut attempt = binding.attempt;
-        attempt
-            .advance_active(request.accepted_at)
-            .map_err(|_| SecretStoreError::VersionConflict)?;
-        update_attempt(&mut transaction, &attempt, existing.continuation_revision).await?;
+        match attempt.state {
+            QuestionReadAttemptState::Active => attempt.advance_active(request.accepted_at),
+            QuestionReadAttemptState::Ambiguous => attempt.recover_active(request.accepted_at),
+            _ => unreachable!(),
+        }
+        .map_err(|_| SecretStoreError::VersionConflict)?;
+        update_attempt(&mut transaction, &attempt, expected_attempt_revision).await?;
+        let expected_operation_state = existing.state;
         let mut accepted = existing;
         accepted.state = QuestionReadOperationState::Accepted;
         accepted.result_digest = Some(request.result_digest);
         accepted.completed_at = Some(request.accepted_at);
-        persist_operation_finish(&mut transaction, &accepted).await?;
+        persist_operation_finish(&mut transaction, &accepted, expected_operation_state).await?;
         insert_secret_audit(
             &mut transaction,
             request.access,
@@ -461,7 +530,10 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             return Ok(QuestionReadMaterializeOutcome::Unavailable);
         };
         authorize_scoped(&binding.attempt, &self.provider_id, request.access)?;
-        if existing.state != QuestionReadOperationState::Issued {
+        if !matches!(
+            existing.state,
+            QuestionReadOperationState::Issued | QuestionReadOperationState::Ambiguous
+        ) {
             let duplicate = existing.state == QuestionReadOperationState::Accepted
                 && existing.result_digest == Some(request.result_digest)
                 && exact_materialization_exists(&mut transaction, &binding.attempt, &request)
@@ -478,10 +550,7 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             });
         }
         if &existing != request.operation
-            || binding.attempt.state != QuestionReadAttemptState::Active
-            || binding.attempt.revision != existing.continuation_revision
-            || binding.continuation.revision != existing.continuation_revision
-            || binding.secret_version != existing.continuation_revision
+            || !attempt_can_accept_operation(&binding, &existing)
             || !materialization_input_matches(&binding.attempt, &request)
         {
             transaction.rollback().await.map_err(storage_error)?;
@@ -528,6 +597,7 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
         .await
         .map_err(storage_error)?;
 
+        let expected_attempt_revision = binding.attempt.revision;
         let mut attempt = binding.attempt;
         attempt
             .materialize(
@@ -537,12 +607,13 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
                 request.materialized_at,
             )
             .map_err(|_| SecretStoreError::VersionConflict)?;
-        update_attempt(&mut transaction, &attempt, existing.continuation_revision).await?;
+        update_attempt(&mut transaction, &attempt, expected_attempt_revision).await?;
+        let expected_operation_state = existing.state;
         let mut accepted = existing;
         accepted.state = QuestionReadOperationState::Accepted;
         accepted.result_digest = Some(request.result_digest);
         accepted.completed_at = Some(request.materialized_at);
-        persist_operation_finish(&mut transaction, &accepted).await?;
+        persist_operation_finish(&mut transaction, &accepted, expected_operation_state).await?;
         insert_secret_audit(
             &mut transaction,
             request.access,
@@ -568,12 +639,17 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
 
     async fn finish_question_read_operation(
         &self,
-        operation: &QuestionReadOperation,
-        terminal_state: QuestionReadOperationState,
-        result_digest: Option<[u8; 32]>,
-        completed_at: Timestamp,
-        access: &SecretAccess,
+        request: QuestionReadOperationTerminalRequest<'_>,
     ) -> Result<QuestionReadOperationFinishOutcome, SecretStoreError> {
+        let QuestionReadOperationTerminalRequest {
+            operation,
+            terminal_state,
+            result_digest,
+            receipt,
+            result_artifact,
+            completed_at,
+            access,
+        } = request;
         if !matches!(
             terminal_state,
             QuestionReadOperationState::Accepted
@@ -585,6 +661,9 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
                 QuestionReadOperationState::Accepted | QuestionReadOperationState::Rejected
             ) && result_digest.is_none_or(|digest| digest == [0; 32]))
             || (terminal_state == QuestionReadOperationState::Ambiguous && result_digest.is_some())
+            || (terminal_state == QuestionReadOperationState::Accepted && receipt.is_none())
+            || (terminal_state != QuestionReadOperationState::Accepted
+                && (receipt.is_some() || result_artifact.is_some()))
         {
             return Err(SecretStoreError::InvalidValue);
         }
@@ -594,10 +673,38 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
         else {
             return Ok(QuestionReadOperationFinishOutcome::Unavailable);
         };
-        if existing.state != QuestionReadOperationState::Issued {
+        let can_finish = existing.state == QuestionReadOperationState::Issued
+            || (terminal_state == QuestionReadOperationState::Accepted
+                && existing.state == QuestionReadOperationState::Ambiguous);
+        if !can_finish {
+            let duplicate_result = if terminal_state == QuestionReadOperationState::Accepted {
+                let scope_id = existing.attempt_id.to_string();
+                let owner_user_id = fetch_attempt(&mut transaction, existing.attempt_id)
+                    .await?
+                    .ok_or(SecretStoreError::NotFound)?
+                    .owner_user_id;
+                accepted_result_matches(
+                    &mut transaction,
+                    &QuestionOperationArtifactBinding {
+                        scope: QuestionOperationArtifactScope::Read,
+                        scope_id: &scope_id,
+                        sequence: existing.sequence,
+                        owner_user_id,
+                        provider_id: &self.provider_id,
+                    },
+                    receipt,
+                    result_artifact,
+                )
+                .await?
+            } else {
+                receipt.is_none() && result_artifact.is_none()
+            };
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(
-                if existing.state == terminal_state && existing.result_digest == result_digest {
+                if existing.state == terminal_state
+                    && existing.result_digest == result_digest
+                    && duplicate_result
+                {
                     QuestionReadOperationFinishOutcome::Duplicate(existing)
                 } else {
                     QuestionReadOperationFinishOutcome::Conflict
@@ -611,12 +718,10 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             return Ok(QuestionReadOperationFinishOutcome::Unavailable);
         };
         authorize_scoped(&binding.attempt, &self.provider_id, access)?;
-        if binding.attempt.state != QuestionReadAttemptState::Active
-            || binding.attempt.revision != operation.continuation_revision
-            || binding.continuation.revision != operation.continuation_revision
-        {
+        if !attempt_can_accept_operation(&binding, &existing) {
             return Ok(QuestionReadOperationFinishOutcome::Conflict);
         }
+        let expected_attempt_revision = binding.attempt.revision;
         let mut attempt = binding.attempt;
         match terminal_state {
             QuestionReadOperationState::Accepted => attempt.complete(
@@ -631,12 +736,32 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             QuestionReadOperationState::Issued => unreachable!(),
         }
         .map_err(|_| SecretStoreError::VersionConflict)?;
-        update_attempt(&mut transaction, &attempt, operation.continuation_revision).await?;
+        update_attempt(&mut transaction, &attempt, expected_attempt_revision).await?;
+        let expected_operation_state = existing.state;
         let mut finished = existing;
         finished.state = terminal_state;
         finished.result_digest = result_digest;
         finished.completed_at = Some(completed_at);
-        persist_operation_finish(&mut transaction, &finished).await?;
+        persist_operation_finish(&mut transaction, &finished, expected_operation_state).await?;
+        if terminal_state == QuestionReadOperationState::Accepted {
+            let scope_id = finished.attempt_id.to_string();
+            insert_accepted_result(
+                &mut transaction,
+                &self.keyring,
+                &QuestionOperationArtifactBinding {
+                    scope: QuestionOperationArtifactScope::Read,
+                    scope_id: &scope_id,
+                    sequence: finished.sequence,
+                    owner_user_id: attempt.owner_user_id,
+                    provider_id: &self.provider_id,
+                },
+                receipt.ok_or(SecretStoreError::InvalidValue)?,
+                result_artifact,
+                completed_at,
+                access,
+            )
+            .await?;
+        }
         insert_operation_audit(
             &mut transaction,
             access,
@@ -663,6 +788,28 @@ struct AttemptBinding {
     continuation: QuestionReadContinuation,
     secret_id: SecretId,
     secret_version: u32,
+}
+
+fn attempt_can_accept_operation(
+    binding: &AttemptBinding,
+    operation: &QuestionReadOperation,
+) -> bool {
+    binding.continuation.revision == operation.continuation_revision
+        && binding.secret_version == operation.continuation_revision
+        && match binding.attempt.state {
+            QuestionReadAttemptState::Active => {
+                binding.attempt.revision == operation.continuation_revision
+            }
+            QuestionReadAttemptState::Ambiguous => operation
+                .continuation_revision
+                .checked_add(1)
+                .is_some_and(|revision| binding.attempt.revision == revision),
+            QuestionReadAttemptState::Completed
+            | QuestionReadAttemptState::Materialized
+            | QuestionReadAttemptState::Rejected
+            | QuestionReadAttemptState::Cancelled
+            | QuestionReadAttemptState::Expired => false,
+        }
 }
 
 fn materialization_input_matches(
@@ -1080,16 +1227,18 @@ fn decode_operation(row: &SqliteRow) -> Result<QuestionReadOperation, SecretStor
 async fn persist_operation_finish(
     transaction: &mut Transaction<'_, Sqlite>,
     operation: &QuestionReadOperation,
+    expected_state: QuestionReadOperationState,
 ) -> Result<(), SecretStoreError> {
     let result = sqlx::query(
         "UPDATE question_read_attempt_operations SET state = ?, result_digest = ?, completed_at = ? \
-         WHERE attempt_id = ? AND sequence = ? AND state = 'issued'",
+         WHERE attempt_id = ? AND sequence = ? AND state = ?",
     )
     .bind(operation_state_name(operation.state))
     .bind(operation.result_digest.map(|digest| digest.to_vec()))
     .bind(operation.completed_at.map(encode_timestamp))
     .bind(operation.attempt_id.to_string())
     .bind(i64::try_from(operation.sequence).map_err(|_| SecretStoreError::InvalidValue)?)
+    .bind(operation_state_name(expected_state))
     .execute(&mut **transaction)
     .await
     .map_err(storage_error)?;
@@ -1338,7 +1487,7 @@ mod tests {
 
     use asterism_domain::{
         AuditActor, ProviderAccountId, Question, QuestionId, QuestionKind, QuestionReadAttempt,
-        QuestionSession, QuestionSnapshotId, TaskId, UserId,
+        QuestionSession, QuestionSnapshotId, SubmissionReceipt, TaskId, UserId,
     };
     use asterism_secrets::{SecretActor, SecretKey};
     use chrono::{Duration, Utc};
@@ -1367,13 +1516,15 @@ mod tests {
         assert_eq!(resolved.metadata.revision, 1);
         assert!(resolved.latest_operation.is_none());
 
+        let issue_access = fixture.access("pre-question-issue");
         let issue = QuestionReadOperationIssueRequest {
             attempt_id: attempt.id,
             expected_continuation_revision: 1,
             operation_type: "cidaren.submit-chose-word.v1".to_owned(),
             request_digest: [7; 32],
+            recovery_artifact: None,
             issued_at: fixture.now + Duration::seconds(1),
-            access: &fixture.access("pre-question-issue"),
+            access: &issue_access,
         };
         let QuestionReadOperationIssueOutcome::Issued(operation) = fixture
             .continuations
@@ -1478,6 +1629,7 @@ mod tests {
                 expected_continuation_revision: 1,
                 operation_type: "cidaren.start-answer.v1".to_owned(),
                 request_digest: [4; 32],
+                recovery_artifact: None,
                 issued_at: fixture.now + Duration::seconds(1),
                 access: &fixture.access("start-answer-issue"),
             })
@@ -1488,13 +1640,15 @@ mod tests {
         };
         let finished = fixture
             .continuations
-            .finish_question_read_operation(
-                &operation,
-                QuestionReadOperationState::Ambiguous,
-                None,
-                fixture.now + Duration::seconds(2),
-                &fixture.access("start-answer-ambiguous"),
-            )
+            .finish_question_read_operation(QuestionReadOperationTerminalRequest {
+                operation: &operation,
+                terminal_state: QuestionReadOperationState::Ambiguous,
+                result_digest: None,
+                receipt: None,
+                result_artifact: None,
+                completed_at: fixture.now + Duration::seconds(2),
+                access: &fixture.access("start-answer-ambiguous"),
+            })
             .await
             .unwrap();
         assert!(matches!(
@@ -1511,6 +1665,7 @@ mod tests {
                     expected_continuation_revision: 1,
                     operation_type: "cidaren.start-answer.v1".to_owned(),
                     request_digest: [4; 32],
+                    recovery_artifact: None,
                     issued_at: fixture.now + Duration::seconds(3),
                     access: &fixture.access("start-answer-replay"),
                 })
@@ -1559,6 +1714,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambiguity_recovery_reopens_with_bound_artifact_and_fresh_revision() {
+        let fixture = Fixture::new().await;
+        let attempt = fixture.attempt(b"cidaren-pre-question-v1").await;
+        let recovery_value = b"cidaren-frozen-start-command";
+        let recovery_artifact = asterism_provider_api::ProviderQuestionOperationArtifact::try_new(
+            fixture.provider.clone(),
+            "cidaren.start-recovery.v1",
+            digest(recovery_value),
+            SecretValue::new(recovery_value.to_vec()),
+        )
+        .unwrap();
+        let QuestionReadOperationIssueOutcome::Issued(operation) = fixture
+            .continuations
+            .issue_question_read_operation(QuestionReadOperationIssueRequest {
+                attempt_id: attempt.id,
+                expected_continuation_revision: 1,
+                operation_type: "cidaren.start-answer.v1".to_owned(),
+                request_digest: [41; 32],
+                recovery_artifact: Some(recovery_artifact),
+                issued_at: fixture.now + Duration::seconds(1),
+                access: &fixture.access("recoverable-start-issue"),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected issued operation");
+        };
+        let QuestionReadOperationFinishOutcome::Finished {
+            operation: ambiguous,
+            ..
+        } = fixture
+            .continuations
+            .finish_question_read_operation(QuestionReadOperationTerminalRequest {
+                operation: &operation,
+                terminal_state: QuestionReadOperationState::Ambiguous,
+                result_digest: None,
+                receipt: None,
+                result_artifact: None,
+                completed_at: fixture.now + Duration::seconds(2),
+                access: &fixture.access("recoverable-start-ambiguous"),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected ambiguous operation");
+        };
+        let resolved = fixture
+            .continuations
+            .resolve_question_read_continuation(
+                attempt.id,
+                &fixture.access("recoverable-start-resolve"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.metadata.revision, 1);
+        assert_eq!(
+            resolved.recovery_artifact.unwrap().value().expose_secret(),
+            recovery_value
+        );
+
+        let recovered_at = fixture.now + Duration::seconds(3);
+        let recovered = fixture
+            .continuations
+            .accept_question_read_operation(QuestionReadOperationAcceptRequest {
+                operation: &ambiguous,
+                next_continuation_type: "cidaren.pre-question.v1",
+                next_phase: "cidaren.recovered",
+                replacement: SecretValue::new(b"cidaren-recovered-state".to_vec()),
+                result_digest: [42; 32],
+                accepted_at: recovered_at,
+                access: &fixture.access("recoverable-start-accept"),
+            })
+            .await
+            .unwrap();
+        let QuestionReadOperationFinishOutcome::Accepted {
+            continuation,
+            attempt: recovered_attempt,
+            ..
+        } = recovered
+        else {
+            panic!("expected recovered continuation");
+        };
+        assert_eq!(continuation.revision, 3);
+        assert_eq!(recovered_attempt.revision, 3);
+        assert_eq!(recovered_attempt.state, QuestionReadAttemptState::Active);
+        assert!(recovered_attempt.completed_at.is_none());
+    }
+
+    #[tokio::test]
     async fn definite_completion_accepts_operation_without_creating_a_question() {
         let fixture = Fixture::new().await;
         let attempt = fixture.attempt(b"cidaren-ready-to-start").await;
@@ -1569,6 +1814,7 @@ mod tests {
                 expected_continuation_revision: 1,
                 operation_type: "cidaren.start-answer.v1".to_owned(),
                 request_digest: [6; 32],
+                recovery_artifact: None,
                 issued_at: fixture.now + Duration::seconds(1),
                 access: &fixture.access("complete-issue"),
             })
@@ -1577,15 +1823,24 @@ mod tests {
         else {
             panic!("expected an issued operation");
         };
+        let completed_at = fixture.now + Duration::seconds(2);
+        let receipt = SubmissionReceipt {
+            remote_status: "completed".to_owned(),
+            message_sanitized: None,
+            provider_trace_id: None,
+            received_at: completed_at,
+        };
         let result = fixture
             .continuations
-            .finish_question_read_operation(
-                &operation,
-                QuestionReadOperationState::Accepted,
-                Some([7; 32]),
-                fixture.now + Duration::seconds(2),
-                &fixture.access("complete-accept"),
-            )
+            .finish_question_read_operation(QuestionReadOperationTerminalRequest {
+                operation: &operation,
+                terminal_state: QuestionReadOperationState::Accepted,
+                result_digest: Some([7; 32]),
+                receipt: Some(&receipt),
+                result_artifact: None,
+                completed_at,
+                access: &fixture.access("complete-accept"),
+            })
             .await
             .unwrap();
         assert!(matches!(
@@ -1620,6 +1875,7 @@ mod tests {
                 expected_continuation_revision: 1,
                 operation_type: "cidaren.start-answer.v1".to_owned(),
                 request_digest: [11; 32],
+                recovery_artifact: None,
                 issued_at: fixture.now + Duration::seconds(1),
                 access: &fixture.access("materialize-issue"),
             })

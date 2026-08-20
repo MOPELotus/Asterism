@@ -22,9 +22,9 @@ use asterism_domain::{
     ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
     QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId, QuestionSession,
     QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, SubmissionScore,
-    Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User,
-    UserId, UserProfile, UserStatus, WebSession, WebSessionId,
+    SubmissionDraft, SubmissionDraftId, SubmissionReceipt, SubmissionResult, SubmissionResultId,
+    SubmissionScore, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
+    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
@@ -32,8 +32,8 @@ use asterism_provider_api::{
     ExecutionParentBatchSnapshot, ProviderBatchExecutionMaterializationBinding,
     ProviderBatchExecutionPlanningInput, ProviderBatchExecutionPublicInput,
     ProviderCourseEnrollmentDraft, ProviderExecutionBatchPlan, ProviderExecutionPlanArtifact,
-    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
-    ProviderSettingScope, ResolvedProviderRuntimeSettings,
+    ProviderQuestionOperationArtifact, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
+    ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -734,7 +734,15 @@ pub struct QuestionReadContinuation {
 pub struct ResolvedQuestionReadContinuation {
     pub metadata: QuestionReadContinuation,
     pub latest_operation: Option<QuestionReadOperation>,
+    pub recovery_artifact: Option<ProviderQuestionOperationArtifact>,
+    pub accepted_result: Option<QuestionOperationAcceptedResult>,
     pub value: SecretValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuestionOperationAcceptedResult {
+    pub receipt: SubmissionReceipt,
+    pub artifact: Option<ProviderQuestionOperationArtifact>,
 }
 
 #[derive(Debug)]
@@ -774,6 +782,7 @@ pub struct QuestionReadOperationIssueRequest<'a> {
     pub expected_continuation_revision: u32,
     pub operation_type: String,
     pub request_digest: [u8; 32],
+    pub recovery_artifact: Option<ProviderQuestionOperationArtifact>,
     pub issued_at: Timestamp,
     pub access: &'a SecretAccess,
 }
@@ -841,6 +850,17 @@ pub enum QuestionReadMaterializeOutcome {
     Unavailable,
 }
 
+#[derive(Clone, Debug)]
+pub struct QuestionReadOperationTerminalRequest<'a> {
+    pub operation: &'a QuestionReadOperation,
+    pub terminal_state: QuestionReadOperationState,
+    pub result_digest: Option<[u8; 32]>,
+    pub receipt: Option<&'a SubmissionReceipt>,
+    pub result_artifact: Option<&'a ProviderQuestionOperationArtifact>,
+    pub completed_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
 /// Provider-scoped encrypted state and ambiguity ledger for operations that
 /// occur before the first immutable Question snapshot exists.
 #[async_trait]
@@ -875,11 +895,7 @@ pub trait QuestionReadContinuationRepository: Send + Sync {
     /// response; continuing responses use `accept_question_read_operation`.
     async fn finish_question_read_operation(
         &self,
-        operation: &QuestionReadOperation,
-        terminal_state: QuestionReadOperationState,
-        result_digest: Option<[u8; 32]>,
-        completed_at: Timestamp,
-        access: &SecretAccess,
+        request: QuestionReadOperationTerminalRequest<'_>,
     ) -> Result<QuestionReadOperationFinishOutcome, SecretStoreError>;
 }
 
@@ -957,6 +973,8 @@ pub struct ResolvedQuestionSessionContinuation {
     pub metadata: QuestionSessionContinuation,
     pub latest_operation: Option<QuestionSessionOperation>,
     pub latest_transition: Option<QuestionSessionTransition>,
+    pub recovery_artifact: Option<ProviderQuestionOperationArtifact>,
+    pub accepted_result: Option<QuestionOperationAcceptedResult>,
     pub value: SecretValue,
 }
 
@@ -1049,14 +1067,16 @@ pub enum QuestionSessionOperationIssueOutcome {
 }
 
 #[derive(Clone, Debug)]
-pub struct QuestionSessionOperationIssueRequest {
+pub struct QuestionSessionOperationIssueRequest<'a> {
     pub execution_id: ExecutionId,
     pub execution_attempt_id: ExecutionAttemptId,
     pub expected_continuation_revision: u32,
     pub operation_type: String,
     pub request_digest: [u8; 32],
+    pub recovery_artifact: Option<ProviderQuestionOperationArtifact>,
     pub issued_at: Timestamp,
     pub correlation_id: String,
+    pub access: &'a SecretAccess,
 }
 
 #[derive(Debug)]
@@ -1080,6 +1100,17 @@ pub enum QuestionSessionOperationFinishOutcome {
     Duplicate(QuestionSessionOperation),
     Conflict,
     Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuestionSessionOperationTerminalRequest<'a> {
+    pub operation: &'a QuestionSessionOperation,
+    pub terminal_state: QuestionSessionOperationState,
+    pub result_digest: Option<[u8; 32]>,
+    pub receipt: Option<&'a SubmissionReceipt>,
+    pub result_artifact: Option<&'a ProviderQuestionOperationArtifact>,
+    pub completed_at: Timestamp,
+    pub access: &'a SecretAccess,
 }
 
 /// Encrypted provider continuation and per-mutation ambiguity ledger. The
@@ -1116,7 +1147,7 @@ pub trait QuestionSessionArtifactRepository: Send + Sync {
 
     async fn issue_question_session_operation(
         &self,
-        request: QuestionSessionOperationIssueRequest,
+        request: QuestionSessionOperationIssueRequest<'_>,
     ) -> Result<QuestionSessionOperationIssueOutcome, SecretStoreError>;
 
     async fn accept_question_session_operation(
@@ -1135,11 +1166,7 @@ pub trait QuestionSessionArtifactRepository: Send + Sync {
     /// definite terminal submission without inventing another continuation.
     async fn finish_question_session_operation(
         &self,
-        operation: &QuestionSessionOperation,
-        terminal_state: QuestionSessionOperationState,
-        result_digest: Option<[u8; 32]>,
-        completed_at: Timestamp,
-        correlation_id: &str,
+        request: QuestionSessionOperationTerminalRequest<'_>,
     ) -> Result<QuestionSessionOperationFinishOutcome, SecretStoreError>;
 }
 

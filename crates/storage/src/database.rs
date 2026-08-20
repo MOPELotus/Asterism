@@ -154,7 +154,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 85);
+        assert_eq!(migration_count, 86);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -268,6 +268,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(checkpoint_tables, 5);
+
+        let question_operation_artifact_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ( \
+                'question_read_operation_recovery_artifacts', \
+                'question_read_operation_results', \
+                'question_session_operation_recovery_artifacts', \
+                'question_session_operation_results' \
+             )",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(question_operation_artifact_tables, 4);
     }
 
     #[tokio::test]

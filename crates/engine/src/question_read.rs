@@ -7,9 +7,9 @@ use asterism_domain::{
     TaskCapability, TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::{
-    ProviderContext, ProviderEntry, ProviderError, ProviderQuestionReadStepOutcome,
-    ProviderRegistry, QuestionInventoryCapability, RemoteQuestionRef,
-    ResolvedProviderQuestionReadContinuation, ResolvedProviderRuntimeSettings,
+    AmbiguousProviderQuestionReadOperation, ProviderContext, ProviderEntry, ProviderError,
+    ProviderQuestionReadStepOutcome, ProviderRegistry, QuestionInventoryCapability,
+    RemoteQuestionRef, ResolvedProviderQuestionReadContinuation, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
@@ -20,8 +20,9 @@ use asterism_storage::{
     QuestionReadMaterializeRequest, QuestionReadOperationAcceptRequest,
     QuestionReadOperationFinishOutcome, QuestionReadOperationIssueOutcome,
     QuestionReadOperationIssueRequest, QuestionReadOperationState,
-    QuestionSessionArtifactRepositoryFactory, QuestionSessionMaterializeRequest, QuestionSnapshot,
-    QuestionSnapshotRepository, StorageError, TaskQueryRepository,
+    QuestionReadOperationTerminalRequest, QuestionSessionArtifactRepositoryFactory,
+    QuestionSessionMaterializeRequest, QuestionSnapshot, QuestionSnapshotRepository, StorageError,
+    TaskQueryRepository,
 };
 use chrono::{Duration, Utc};
 
@@ -263,7 +264,7 @@ where
                 })
         {
             match existing.state {
-                QuestionReadAttemptState::Active => {
+                QuestionReadAttemptState::Active | QuestionReadAttemptState::Ambiguous => {
                     return self
                         .run_durable_flow(
                             durable,
@@ -276,9 +277,6 @@ where
                             existing,
                         )
                         .await;
-                }
-                QuestionReadAttemptState::Ambiguous => {
-                    return Err(ProviderQuestionReadError::AmbiguousAttempt(existing.id));
                 }
                 QuestionReadAttemptState::Materialized => {
                     let snapshot_id = existing
@@ -605,17 +603,21 @@ where
                 .resolve_question_read_continuation(attempt.id, &access)
                 .await?
                 .ok_or(ProviderQuestionReadError::DurableStateUnavailable)?;
-            if let Some(latest) = &resolved.latest_operation {
+            let recovered = if let Some(latest) = &resolved.latest_operation {
                 match latest.state {
                     QuestionReadOperationState::Issued => {
                         if attempt.is_expired_at(Utc::now()) {
                             let outcome = scoped
                                 .finish_question_read_operation(
-                                    latest,
-                                    QuestionReadOperationState::Ambiguous,
-                                    None,
-                                    Utc::now(),
-                                    &access,
+                                    QuestionReadOperationTerminalRequest {
+                                        operation: latest,
+                                        terminal_state: QuestionReadOperationState::Ambiguous,
+                                        result_digest: None,
+                                        receipt: None,
+                                        result_artifact: None,
+                                        completed_at: Utc::now(),
+                                        access: &access,
+                                    },
                                 )
                                 .await?;
                             if !matches!(
@@ -630,108 +632,166 @@ where
                         return Err(ProviderQuestionReadError::ConcurrentAttempt(attempt.id));
                     }
                     QuestionReadOperationState::Ambiguous => {
-                        return Err(ProviderQuestionReadError::AmbiguousAttempt(attempt.id));
+                        let continuation = ResolvedProviderQuestionReadContinuation {
+                            continuation_type: &resolved.metadata.continuation_type,
+                            continuation_digest: resolved.metadata.continuation_digest,
+                            phase: &resolved.metadata.phase,
+                            revision: resolved.metadata.revision,
+                            value: &resolved.value,
+                        };
+                        let operation = AmbiguousProviderQuestionReadOperation {
+                            continuation_revision: latest.continuation_revision,
+                            operation_type: latest.operation_type.clone(),
+                            request_digest: latest.request_digest,
+                            issued_at: latest.issued_at,
+                            ambiguous_at: latest.completed_at.unwrap_or(latest.issued_at),
+                        };
+                        let outcome = match inventory
+                            .recover_ambiguous_question_read_operation_with_artifact(
+                                context,
+                                task.id,
+                                &task.remote_id,
+                                continuation,
+                                resolved.recovery_artifact.as_ref(),
+                                &operation,
+                                runtime_settings,
+                            )
+                            .await
+                        {
+                            Ok(Some(outcome)) => outcome,
+                            Ok(None) => {
+                                return Err(ProviderQuestionReadError::AmbiguousAttempt(
+                                    attempt.id,
+                                ));
+                            }
+                            Err(error) => {
+                                self.record_protocol_observation(
+                                    provider_id,
+                                    task.id,
+                                    &context.correlation_id,
+                                    "recover-operation",
+                                    &error,
+                                )
+                                .await?;
+                                return Err(error.into());
+                            }
+                        };
+                        Some((latest.clone(), outcome))
                     }
                     QuestionReadOperationState::Rejected => {
                         return Err(ProviderQuestionReadError::StateConflict);
                     }
-                    QuestionReadOperationState::Accepted => {}
+                    QuestionReadOperationState::Accepted => None,
                 }
-            }
-            let continuation = ResolvedProviderQuestionReadContinuation {
-                continuation_type: &resolved.metadata.continuation_type,
-                continuation_digest: resolved.metadata.continuation_digest,
-                phase: &resolved.metadata.phase,
-                revision: resolved.metadata.revision,
-                value: &resolved.value,
+            } else {
+                None
             };
-            let prepared = match inventory
-                .prepare_question_read_operation(
-                    context,
-                    task.id,
-                    &task.remote_id,
-                    continuation,
-                    runtime_settings,
-                )
-                .await
-            {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    self.record_protocol_observation(
-                        provider_id,
+            let (operation, outcome) = if let Some(recovered) = recovered {
+                recovered
+            } else {
+                let continuation = ResolvedProviderQuestionReadContinuation {
+                    continuation_type: &resolved.metadata.continuation_type,
+                    continuation_digest: resolved.metadata.continuation_digest,
+                    phase: &resolved.metadata.phase,
+                    revision: resolved.metadata.revision,
+                    value: &resolved.value,
+                };
+                let prepared = match inventory
+                    .prepare_question_read_operation(
+                        context,
                         task.id,
-                        &context.correlation_id,
-                        "prepare-operation",
-                        &error,
+                        &task.remote_id,
+                        continuation,
+                        runtime_settings,
                     )
-                    .await?;
-                    return Err(error.into());
-                }
-            };
-            let operation_type = prepared.operation_type().to_owned();
-            let request_digest = prepared.request_digest();
-            let delay_seconds = prepared.delay_before_execute_seconds();
-            if !valid_provider_label(provider_id, &operation_type)
-                || request_digest == [0; 32]
-                || delay_seconds > MAX_PRE_QUESTION_DELAY_SECONDS
-            {
-                return Err(ProviderQuestionReadError::ProviderResponseInvalid);
-            }
-            let issued_at = Utc::now();
-            let operation = match scoped
-                .issue_question_read_operation(QuestionReadOperationIssueRequest {
-                    attempt_id: attempt.id,
-                    expected_continuation_revision: resolved.metadata.revision,
-                    operation_type,
-                    request_digest,
-                    issued_at,
-                    access: &access,
-                })
-                .await?
-            {
-                QuestionReadOperationIssueOutcome::Issued(operation) => operation,
-                QuestionReadOperationIssueOutcome::Duplicate(operation) => {
-                    return Err(ProviderQuestionReadError::ConcurrentAttempt(
-                        operation.attempt_id,
-                    ));
-                }
-                QuestionReadOperationIssueOutcome::Conflict
-                | QuestionReadOperationIssueOutcome::Unavailable => {
-                    return Err(ProviderQuestionReadError::StateConflict);
-                }
-            };
-            if delay_seconds > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
-            }
-            let outcome = match prepared.execute(context).await {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let finished = scoped
-                        .finish_question_read_operation(
-                            &operation,
-                            QuestionReadOperationState::Ambiguous,
-                            None,
-                            Utc::now(),
-                            &access,
+                    .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.record_protocol_observation(
+                            provider_id,
+                            task.id,
+                            &context.correlation_id,
+                            "prepare-operation",
+                            &error,
                         )
                         .await?;
-                    if !matches!(
-                        finished,
-                        QuestionReadOperationFinishOutcome::Finished { .. }
-                            | QuestionReadOperationFinishOutcome::Duplicate(_)
-                    ) {
+                        return Err(error.into());
+                    }
+                };
+                let operation_type = prepared.operation_type().to_owned();
+                let request_digest = prepared.request_digest();
+                let delay_seconds = prepared.delay_before_execute_seconds();
+                let recovery_artifact = prepared.recovery_artifact();
+                if !valid_provider_label(provider_id, &operation_type)
+                    || request_digest == [0; 32]
+                    || delay_seconds > MAX_PRE_QUESTION_DELAY_SECONDS
+                    || recovery_artifact
+                        .as_ref()
+                        .is_some_and(|artifact| artifact.provider_id() != provider_id)
+                {
+                    return Err(ProviderQuestionReadError::ProviderResponseInvalid);
+                }
+                let issued_at = Utc::now();
+                let operation = match scoped
+                    .issue_question_read_operation(QuestionReadOperationIssueRequest {
+                        attempt_id: attempt.id,
+                        expected_continuation_revision: resolved.metadata.revision,
+                        operation_type,
+                        request_digest,
+                        recovery_artifact,
+                        issued_at,
+                        access: &access,
+                    })
+                    .await?
+                {
+                    QuestionReadOperationIssueOutcome::Issued(operation) => operation,
+                    QuestionReadOperationIssueOutcome::Duplicate(operation) => {
+                        return Err(ProviderQuestionReadError::ConcurrentAttempt(
+                            operation.attempt_id,
+                        ));
+                    }
+                    QuestionReadOperationIssueOutcome::Conflict
+                    | QuestionReadOperationIssueOutcome::Unavailable => {
                         return Err(ProviderQuestionReadError::StateConflict);
                     }
-                    self.record_protocol_observation(
-                        provider_id,
-                        task.id,
-                        &context.correlation_id,
-                        "execute-operation",
-                        &error,
-                    )
-                    .await?;
-                    return Err(ProviderQuestionReadError::Provider(error));
+                };
+                if delay_seconds > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
                 }
+                let outcome = match prepared.execute(context).await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let finished = scoped
+                            .finish_question_read_operation(QuestionReadOperationTerminalRequest {
+                                operation: &operation,
+                                terminal_state: QuestionReadOperationState::Ambiguous,
+                                result_digest: None,
+                                receipt: None,
+                                result_artifact: None,
+                                completed_at: Utc::now(),
+                                access: &access,
+                            })
+                            .await?;
+                        if !matches!(
+                            finished,
+                            QuestionReadOperationFinishOutcome::Finished { .. }
+                                | QuestionReadOperationFinishOutcome::Duplicate(_)
+                        ) {
+                            return Err(ProviderQuestionReadError::StateConflict);
+                        }
+                        self.record_protocol_observation(
+                            provider_id,
+                            task.id,
+                            &context.correlation_id,
+                            "execute-operation",
+                            &error,
+                        )
+                        .await?;
+                        return Err(ProviderQuestionReadError::Provider(error));
+                    }
+                };
+                (operation, outcome)
             };
             match outcome {
                 ProviderQuestionReadStepOutcome::Continue {
@@ -816,13 +876,47 @@ where
                     response_digest,
                 } => {
                     let finished = scoped
-                        .finish_question_read_operation(
-                            &operation,
-                            QuestionReadOperationState::Accepted,
-                            Some(response_digest),
-                            receipt.received_at,
-                            &access,
-                        )
+                        .finish_question_read_operation(QuestionReadOperationTerminalRequest {
+                            operation: &operation,
+                            terminal_state: QuestionReadOperationState::Accepted,
+                            result_digest: Some(response_digest),
+                            receipt: Some(&receipt),
+                            result_artifact: None,
+                            completed_at: receipt.received_at,
+                            access: &access,
+                        })
+                        .await?;
+                    if !matches!(
+                        finished,
+                        QuestionReadOperationFinishOutcome::Finished { .. }
+                            | QuestionReadOperationFinishOutcome::Duplicate(_)
+                    ) {
+                        return Err(ProviderQuestionReadError::StateConflict);
+                    }
+                    return Ok(ProviderQuestionReadResult::Completed {
+                        task_id: task.id,
+                        provider_id: provider_id.clone(),
+                        provider_version: provider_version.to_owned(),
+                    });
+                }
+                ProviderQuestionReadStepOutcome::CompletedWithArtifact {
+                    receipt,
+                    response_digest,
+                    result_artifact,
+                } => {
+                    if result_artifact.provider_id() != provider_id {
+                        return Err(ProviderQuestionReadError::ProviderResponseInvalid);
+                    }
+                    let finished = scoped
+                        .finish_question_read_operation(QuestionReadOperationTerminalRequest {
+                            operation: &operation,
+                            terminal_state: QuestionReadOperationState::Accepted,
+                            result_digest: Some(response_digest),
+                            receipt: Some(&receipt),
+                            result_artifact: Some(&result_artifact),
+                            completed_at: receipt.received_at,
+                            access: &access,
+                        })
                         .await?;
                     if !matches!(
                         finished,
