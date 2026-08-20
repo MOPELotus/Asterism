@@ -396,6 +396,16 @@ mod tests {
         ) -> ProviderResult<WellearnDurationReportDocuments> {
             Err(unused())
         }
+
+        async fn verify_duration(
+            &self,
+            _context: &ProviderContext,
+            _course_id: &str,
+            _sco_id: &str,
+            _binding: &crate::WellearnDurationReportBinding,
+        ) -> ProviderResult<WellearnCmiDocument> {
+            Err(unused())
+        }
     }
 
     #[async_trait]

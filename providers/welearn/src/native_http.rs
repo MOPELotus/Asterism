@@ -1678,6 +1678,33 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             },
         ))
     }
+
+    async fn verify_duration(
+        &self,
+        context: &ProviderContext,
+        course_id: &str,
+        sco_id: &str,
+        binding: &WellearnDurationReportBinding,
+    ) -> ProviderResult<WellearnCmiDocument> {
+        binding.validate_remote_identity(course_id, sco_id)?;
+        let endpoint = duration_endpoint(binding.plan().protocol_mode);
+        let (mut session, renewed) = self.session_for_operation(context).await?;
+        let first = async {
+            let route = self.resolve_course_route(&session, course_id).await?;
+            self.fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
+                .await
+        }
+        .await;
+        match first {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                session = self.sessions.renew_session(context).await?;
+                let route = self.resolve_course_route(&session, course_id).await?;
+                self.fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
+                    .await
+            }
+            result => result,
+        }
+    }
 }
 
 const fn duration_heartbeat_plan(

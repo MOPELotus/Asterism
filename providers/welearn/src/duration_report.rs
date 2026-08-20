@@ -5,8 +5,9 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
-    ExecutionMutationSequencePlan, ExecutionMutationVerification, ExecutionOutcome,
-    ExecutionRequest, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
+    ExecutionMutationSequencePlan, ExecutionMutationSequenceRecoverySnapshot,
+    ExecutionMutationVerification, ExecutionOutcome, ExecutionRecoveryOutcome, ExecutionRequest,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
     ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderProgress,
     ProviderResult, TaskDetailCapability, TaskExecutionCapability,
 };
@@ -588,6 +589,7 @@ impl fmt::Debug for WellearnDurationReportBinding {
                 &self.runtime_settings_schema_version,
             )
             .field("plan", &self.plan)
+            .field("execution_plan_artifact", &"[HASHED]")
             .finish()
     }
 }
@@ -630,6 +632,17 @@ pub trait WellearnDurationReportTransport: Send + Sync {
         binding: &WellearnDurationReportBinding,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnDurationReportDocuments>;
+
+    /// Reads one fresh CMI document without starting, keeping, setting or
+    /// saving. Recovery uses it only after the same Attempt's final accepted
+    /// mutation already carries a durable verification.
+    async fn verify_duration(
+        &self,
+        context: &ProviderContext,
+        course_id: &str,
+        sco_id: &str,
+        binding: &WellearnDurationReportBinding,
+    ) -> ProviderResult<WellearnCmiDocument>;
 }
 
 /// `WELearn` duration reporting kept separate from completion/progress writes.
@@ -802,6 +815,94 @@ impl TaskExecutionCapability for WellearnDurationReport {
             }),
         })
     }
+
+    async fn verify_execution_recovery(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        validate_context(context, &self.metadata)?;
+        if !request.has_valid_capability_step()
+            || request.requested_capabilities != [TaskCapability::DurationReport]
+        {
+            return Err(invalid_duration_report_binding());
+        }
+        let plan = derive_duration_report_plan(request)?;
+        let binding = WellearnDurationReportBinding::try_new(context, request, plan)?;
+        let snapshot = mutation_sequence.ok_or_else(duration_recovery_requires_review)?;
+        let expected_artifact = binding.to_provider_execution_plan_artifact()?;
+        let started = binding.mutation_sequence_plan(true)?;
+        let unstarted = if plan.protocol_mode == WellearnDurationProtocolMode::PreserveFresh {
+            Some(binding.mutation_sequence_plan(false)?)
+        } else {
+            None
+        };
+        if snapshot.artifact() != &expected_artifact
+            || snapshot.plan() != &started
+                && unstarted
+                    .as_ref()
+                    .is_none_or(|candidate| snapshot.plan() != candidate)
+        {
+            return Err(invalid_duration_report_binding());
+        }
+        let final_ordinal = snapshot
+            .final_accepted_mutation_ordinal()
+            .ok_or_else(duration_recovery_requires_review)?;
+        let verification = snapshot
+            .records()
+            .last()
+            .and_then(asterism_provider_api::ExecutionMutationRecoveryRecord::verification)
+            .filter(|verification| {
+                verification.ordinal() == final_ordinal && verification.verified()
+            })
+            .ok_or_else(duration_recovery_requires_review)?;
+
+        let (course_id, sco_id) = parse_sco_identity(&request.remote_task_id)?;
+        let detail = self
+            .details
+            .task_detail(context, &request.remote_task_id)
+            .await?;
+        validate_fresh_execution_detail(
+            &detail,
+            &request.remote_task_id,
+            &course_id,
+            &sco_id,
+            &[
+                TaskCapability::ProgressRead,
+                TaskCapability::DurationRead,
+                TaskCapability::DurationReport,
+            ],
+        )?;
+        let document = self
+            .transport
+            .verify_duration(context, &course_id, &sco_id, &binding)
+            .await?;
+        let fresh = parse_cmi_snapshot(document.as_str())?;
+        require_duration_snapshot(&fresh, "recovery verification")?;
+        Ok(ExecutionRecoveryOutcome::with_mutation_verification(
+            ExecutionOutcome {
+                remote_state: fresh.remote_state(),
+                verified: true,
+                result_sanitized: serde_json::json!({
+                    "schema": "welearn.duration-report-recovery.v1",
+                    "duration_report_seconds": plan.duration_seconds,
+                    "duration_protocol_mode": plan.protocol_mode.as_str(),
+                    "fresh_cmi_read": true,
+                    "same_attempt_final_verification": true,
+                    "mutation_replayed": false,
+                }),
+            },
+            verification,
+        ))
+    }
+}
+
+fn duration_recovery_requires_review() -> ProviderError {
+    ProviderError::human_required(
+        "WELearn duration recovery lacks a verified final mutation and cannot replay the session",
+        asterism_domain::HumanRequiredReason::ManualIntervention,
+    )
 }
 
 async fn persist_duration_report_verification(
@@ -959,6 +1060,7 @@ mod tests {
         AssessmentClass, ProviderAccountId, ProviderId, RemoteState, SecretId, SourceType, TaskId,
     };
     use asterism_provider_api::{
+        ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
         ProviderRuntimeSettingsPatch, ProviderSettingValue, RemoteTask, RemoteTaskDetail,
     };
 
@@ -1068,6 +1170,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FixtureTransport {
         calls: AtomicUsize,
+        recovery_reads: AtomicUsize,
         settings: Mutex<Option<(u64, u64, WellearnDurationProtocolMode)>>,
         behavior: FixtureBehavior,
     }
@@ -1137,6 +1240,18 @@ mod tests {
                         .then_some(accepted),
                 },
             ))
+        }
+
+        async fn verify_duration(
+            &self,
+            _context: &ProviderContext,
+            course_id: &str,
+            sco_id: &str,
+            binding: &WellearnDurationReportBinding,
+        ) -> ProviderResult<WellearnCmiDocument> {
+            binding.validate_remote_identity(course_id, sco_id)?;
+            self.recovery_reads.fetch_add(1, Ordering::Relaxed);
+            Ok(WellearnCmiDocument::try_new(AFTER).unwrap())
         }
     }
 
@@ -1259,6 +1374,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn singleton_duration_binding_round_trips_and_rejects_identity_or_codec_drift() {
         let context = context();
@@ -1449,6 +1565,94 @@ mod tests {
             implicit_sequence.phases()[2].operation_type(),
             WellearnDurationMutationKind::Finalize.as_str()
         );
+    }
+
+    #[tokio::test]
+    async fn singleton_duration_recovery_requires_persisted_final_verification_and_never_replays() {
+        let context = context();
+        let request = request();
+        let plan = derive_duration_report_plan(&request).unwrap();
+        let binding = WellearnDurationReportBinding::try_new(&context, &request, plan).unwrap();
+        let sequence = binding.mutation_sequence_plan(false).unwrap();
+        let final_ordinal = sequence
+            .phases()
+            .iter()
+            .map(ExecutionMutationSequencePhase::maximum_occurrences)
+            .sum::<u32>();
+        let verification =
+            ExecutionMutationVerification::new(final_ordinal, [9; 32], true).unwrap();
+        let snapshot = completed_recovery_snapshot(
+            binding.to_provider_execution_plan_artifact().unwrap(),
+            sequence.clone(),
+            Some(verification),
+        );
+        let details = Arc::new(FixtureDetail::present());
+        let transport = Arc::new(FixtureTransport::default());
+        let execution =
+            WellearnDurationReport::try_new(details.clone(), transport.clone()).unwrap();
+
+        let recovered = execution
+            .verify_execution_recovery(&context, &request, Some(&snapshot))
+            .await
+            .unwrap();
+        assert!(recovered.outcome().verified);
+        assert_eq!(recovered.mutation_verification(), Some(verification));
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.recovery_reads.load(Ordering::Relaxed), 1);
+
+        let unverified = completed_recovery_snapshot(
+            binding.to_provider_execution_plan_artifact().unwrap(),
+            sequence,
+            None,
+        );
+        let error = execution
+            .verify_execution_recovery(&context, &request, Some(&unverified))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::HumanRequired);
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.recovery_reads.load(Ordering::Relaxed), 1);
+    }
+
+    fn completed_recovery_snapshot(
+        artifact: ProviderExecutionPlanArtifact,
+        plan: ExecutionMutationSequencePlan,
+        verification: Option<ExecutionMutationVerification>,
+    ) -> ExecutionMutationSequenceRecoverySnapshot {
+        let final_ordinal = plan
+            .phases()
+            .iter()
+            .map(ExecutionMutationSequencePhase::maximum_occurrences)
+            .sum::<u32>();
+        let mut ordinal = 1_u32;
+        let mut records = Vec::new();
+        for phase in plan.phases() {
+            for _ in 0..phase.maximum_occurrences() {
+                let issue = ExecutionMutationIssue::new(
+                    ordinal,
+                    phase.operation_type(),
+                    [u8::try_from(ordinal).unwrap_or(255); 32],
+                )
+                .unwrap();
+                let receipt = ExecutionMutationReceipt::new(
+                    ordinal,
+                    [u8::try_from(ordinal + 1).unwrap_or(254); 32],
+                    true,
+                )
+                .unwrap();
+                records.push(
+                    ExecutionMutationRecoveryRecord::try_new(
+                        issue,
+                        Some(receipt),
+                        (ordinal == final_ordinal).then_some(verification).flatten(),
+                    )
+                    .unwrap(),
+                );
+                ordinal += 1;
+            }
+        }
+        ExecutionMutationSequenceRecoverySnapshot::try_new(artifact, plan, records, Vec::new())
+            .unwrap()
     }
 
     #[test]

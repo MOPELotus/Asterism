@@ -68,8 +68,7 @@ pub(crate) fn singleton_execution_plan_artifact(
         || crate::cmi::parse_sco_identity(remote_task_id).is_err()
         || !matches!(
             capability_plan,
-            [TaskCapability::ResourceExecution]
-                | [TaskCapability::DurationReport]
+            [TaskCapability::ResourceExecution | TaskCapability::DurationReport]
                 | [
                     TaskCapability::DurationReport,
                     TaskCapability::ResourceExecution
@@ -575,6 +574,35 @@ impl TaskExecutionCapability for WellearnTaskExecution {
         }
     }
 
+    async fn verify_execution_recovery(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        if !request.has_valid_capability_step() {
+            return Err(invalid_singleton_execution_plan());
+        }
+        match request.requested_capabilities.as_slice() {
+            [TaskCapability::ResourceExecution] => {
+                validate_singleton_execution_plan_artifact(context, request)?;
+                self.resource
+                    .verify_execution_recovery(context, request, mutation_sequence)
+                    .await
+            }
+            [TaskCapability::DurationReport] => {
+                validate_singleton_execution_plan_artifact(context, request)?;
+                self.duration
+                    .verify_execution_recovery(context, request, mutation_sequence)
+                    .await
+            }
+            _ => Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "WELearn has no singleton recovery for this capability combination",
+            )),
+        }
+    }
+
     async fn verify_batch_child_recovery(
         &self,
         context: &ProviderContext,
@@ -715,6 +743,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn singleton_planning_freezes_one_artifact_for_every_ordered_call() {
         let calls = Arc::new(Mutex::new(Vec::new()));

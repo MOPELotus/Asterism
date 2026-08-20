@@ -5,8 +5,9 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
-    ExecutionMutationSequencePlan, ExecutionMutationVerification, ExecutionOutcome,
-    ExecutionRequest, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
+    ExecutionMutationSequencePlan, ExecutionMutationSequenceRecoverySnapshot,
+    ExecutionMutationVerification, ExecutionOutcome, ExecutionRecoveryOutcome, ExecutionRequest,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
     ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderProgress,
     ProviderResult, TaskDetailCapability, TaskExecutionCapability,
 };
@@ -593,6 +594,7 @@ impl fmt::Debug for WellearnResourceExecutionBinding {
                 &self.runtime_settings_schema_version,
             )
             .field("plan", &self.plan)
+            .field("execution_plan_artifact", &"[HASHED]")
             .finish()
     }
 }
@@ -670,6 +672,65 @@ impl WellearnResourceExecution {
             details,
             transport,
         })
+    }
+
+    async fn verify_resource_goal(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+    ) -> ProviderResult<(WellearnCmiDocument, ExecutionOutcome)> {
+        validate_context(context, &self.metadata)?;
+        validate_capability_step(request)?;
+        if request.requested_capabilities != [TaskCapability::ResourceExecution] {
+            return Err(unsupported(
+                "WELearn resource verification accepts only ResourceExecution",
+            ));
+        }
+        let (course_id, sco_id) = parse_sco_identity(&request.remote_task_id)?;
+        let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
+        let plan = derive_resource_execution_plan(request)?;
+        let verified_score_percent = plan.sequence.final_score(plan.score_percent);
+        let detail = self
+            .details
+            .task_detail(context, &request.remote_task_id)
+            .await?;
+        validate_fresh_execution_detail(
+            &detail,
+            &request.remote_task_id,
+            &course_id,
+            &sco_id,
+            &[
+                TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ],
+        )?;
+        let document = self
+            .transport
+            .verify_resource(context, &course_id, &sco_id, plan.mutation_profile)
+            .await?;
+        let snapshot = parse_cmi_snapshot(document.as_str())?;
+        verify_completed_preset(&snapshot, verified_score_percent)?;
+        let outcome = ExecutionOutcome {
+            remote_state: RemoteState::Completed,
+            verified: true,
+            result_sanitized: serde_json::json!({
+                "schema": "welearn.resource-completion-verification.v1",
+                "preset": "completed_progress_score",
+                "score_percent": verified_score_percent,
+                "selected_score_percent": plan.score_percent,
+                "verified_score_percent": verified_score_percent,
+                "score_mode": score_mode(settings.resource_score),
+                "completion_sequence": plan.sequence.as_str(),
+                "configured_completion_time_mode": settings.resource_completion_time_mode.as_str(),
+                "completion_time_mode": plan.time_mode.as_str(),
+                "completion_cmi_format": plan.cmi_format.as_str(),
+                "completion_write_mode": plan.write_mode.as_str(),
+                "goal_matched": true,
+                "verification": "fresh_cmi_no_mutation",
+            }),
+        };
+        Ok((document, outcome))
     }
 }
 
@@ -853,75 +914,48 @@ impl TaskExecutionCapability for WellearnResourceExecution {
         context: &ProviderContext,
         request: &ExecutionRequest,
     ) -> ProviderResult<ExecutionOutcome> {
-        validate_context(context, &self.metadata)?;
-        validate_capability_step(request)?;
-        if request.requested_capabilities != [TaskCapability::ResourceExecution] {
-            return Err(unsupported(
-                "WELearn resource verification accepts only ResourceExecution",
-            ));
+        self.verify_resource_goal(context, request)
+            .await
+            .map(|(_, outcome)| outcome)
+    }
+
+    async fn verify_execution_recovery(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        let plan = derive_resource_execution_plan(request)?;
+        let expected_binding = WellearnResourceExecutionBinding::try_new(context, request, plan)?;
+        if let Some(snapshot) = mutation_sequence
+            && (snapshot.artifact() != &expected_binding.to_provider_execution_plan_artifact()?
+                || snapshot.plan() != &expected_binding.mutation_sequence_plan()?)
+        {
+            return Err(invalid_resource_execution_binding());
         }
-        let (course_id, sco_id) = parse_sco_identity(&request.remote_task_id)?;
-        let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
-        let selected_score_percent = select_score(settings.resource_score, request);
-        let verified_score_percent = settings
-            .resource_completion_sequence
-            .final_score(selected_score_percent);
-        let completion_time_mode =
-            effective_completion_time_mode(settings.resource_completion_time_mode, request);
-        WellearnResourceExecutionPlan {
-            score_percent: selected_score_percent,
-            sequence: settings.resource_completion_sequence,
-            time_mode: completion_time_mode,
-            cmi_format: settings.resource_completion_cmi_format,
-            write_mode: settings.resource_completion_write_mode,
-            mutation_profile: settings.resource_mutation_profile,
+        let (document, outcome) = self.verify_resource_goal(context, request).await?;
+        let Some(snapshot) = mutation_sequence else {
+            return Ok(ExecutionRecoveryOutcome::new(outcome));
+        };
+        let Some(final_ordinal) = snapshot.final_accepted_mutation_ordinal() else {
+            return Ok(ExecutionRecoveryOutcome::new(outcome));
+        };
+        let persisted = snapshot
+            .records()
+            .last()
+            .and_then(asterism_provider_api::ExecutionMutationRecoveryRecord::verification);
+        let verification = persisted.unwrap_or(resource_execution_verification(
+            &expected_binding,
+            final_ordinal,
+            &document,
+        )?);
+        if verification.ordinal() != final_ordinal || !verification.verified() {
+            return Err(invalid_resource_execution_binding());
         }
-        .validate()?;
-        let detail = self
-            .details
-            .task_detail(context, &request.remote_task_id)
-            .await?;
-        validate_fresh_execution_detail(
-            &detail,
-            &request.remote_task_id,
-            &course_id,
-            &sco_id,
-            &[
-                TaskCapability::ProgressRead,
-                TaskCapability::ResourceExecution,
-                TaskCapability::ExecutionVerify,
-            ],
-        )?;
-        let document = self
-            .transport
-            .verify_resource(
-                context,
-                &course_id,
-                &sco_id,
-                settings.resource_mutation_profile,
-            )
-            .await?;
-        let snapshot = parse_cmi_snapshot(document.as_str())?;
-        verify_completed_preset(&snapshot, verified_score_percent)?;
-        Ok(ExecutionOutcome {
-            remote_state: RemoteState::Completed,
-            verified: true,
-            result_sanitized: serde_json::json!({
-                "schema": "welearn.resource-completion-verification.v1",
-                "preset": "completed_progress_score",
-                "score_percent": verified_score_percent,
-                "selected_score_percent": selected_score_percent,
-                "verified_score_percent": verified_score_percent,
-                "score_mode": score_mode(settings.resource_score),
-                "completion_sequence": settings.resource_completion_sequence.as_str(),
-                "configured_completion_time_mode": settings.resource_completion_time_mode.as_str(),
-                "completion_time_mode": completion_time_mode.as_str(),
-                "completion_cmi_format": settings.resource_completion_cmi_format.as_str(),
-                "completion_write_mode": settings.resource_completion_write_mode.as_str(),
-                "goal_matched": true,
-                "verification": "fresh_cmi_no_mutation",
-            }),
-        })
+        Ok(ExecutionRecoveryOutcome::with_mutation_verification(
+            outcome,
+            verification,
+        ))
     }
 }
 
@@ -941,14 +975,7 @@ async fn persist_resource_execution_verification(
         WellearnResourceCompletionSequence::SelectedScore => 3,
         WellearnResourceCompletionSequence::CurrentDonorDualSave100 => 4,
     };
-    let mut digest = Sha256::new();
-    digest.update(RESOURCE_EXECUTION_VERIFICATION_DIGEST_DOMAIN);
-    digest.update(binding.binding_digest()?);
-    digest.update(final_save_ordinal.to_be_bytes());
-    digest.update(after.as_str().as_bytes());
-    let verification =
-        ExecutionMutationVerification::new(final_save_ordinal, digest.finalize().into(), true)
-            .map_err(|_| invalid_resource_execution_binding())?;
+    let verification = resource_execution_verification(binding, final_save_ordinal, after)?;
     let sink = events.mutation_sink().ok_or_else(|| {
         ProviderError::human_required(
             "WELearn resource verification cannot be durably attached to its final mutation",
@@ -962,6 +989,20 @@ async fn persist_resource_execution_verification(
         )
     })?;
     Ok(true)
+}
+
+fn resource_execution_verification(
+    binding: &WellearnResourceExecutionBinding,
+    ordinal: u32,
+    after: &WellearnCmiDocument,
+) -> ProviderResult<ExecutionMutationVerification> {
+    let mut digest = Sha256::new();
+    digest.update(RESOURCE_EXECUTION_VERIFICATION_DIGEST_DOMAIN);
+    digest.update(binding.binding_digest()?);
+    digest.update(ordinal.to_be_bytes());
+    digest.update(after.as_str().as_bytes());
+    ExecutionMutationVerification::new(ordinal, digest.finalize().into(), true)
+        .map_err(|_| invalid_resource_execution_binding())
 }
 
 fn select_score(configured: WellearnResourceScore, request: &ExecutionRequest) -> u8 {
@@ -1112,8 +1153,9 @@ mod tests {
         AssessmentClass, ProviderAccountId, ProviderId, SecretId, SourceType, TaskId,
     };
     use asterism_provider_api::{
-        ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSink,
-        ProviderRuntimeSettingsPatch, ProviderSettingValue, RemoteTask, RemoteTaskDetail,
+        ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
+        ExecutionMutationSink, ProviderRuntimeSettingsPatch, ProviderSettingValue, RemoteTask,
+        RemoteTaskDetail,
     };
 
     const BEFORE: &str = r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"20\"},\"success_status\":\"unknown\"}}"}"#;
@@ -1693,6 +1735,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn singleton_resource_recovery_consumes_the_same_attempt_sequence_without_replay() {
+        let context = context();
+        let request = request();
+        let binding = WellearnResourceExecutionBinding::try_new(
+            &context,
+            &request,
+            derive_resource_execution_plan(&request).unwrap(),
+        )
+        .unwrap();
+        let plan = binding.mutation_sequence_plan().unwrap();
+        let snapshot = completed_recovery_snapshot(
+            binding.to_provider_execution_plan_artifact().unwrap(),
+            plan,
+            None,
+        );
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        let recovered = execution
+            .verify_execution_recovery(&context, &request, Some(&snapshot))
+            .await
+            .unwrap();
+
+        assert!(recovered.outcome().verified);
+        let verification = recovered.mutation_verification().unwrap();
+        assert_eq!(
+            Some(verification.ordinal()),
+            snapshot.final_accepted_mutation_ordinal()
+        );
+        assert!(verification.verified());
+        assert!(transport.calls.lock().unwrap().is_empty());
+        assert_eq!(transport.verifications.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn completed_preflight_skips_mutation_and_returns_verified_state() {
         let execution = WellearnResourceExecution::try_new(
             Arc::new(FixtureDetail { visible: true }),
@@ -2115,6 +2196,47 @@ mod tests {
             write_mode: crate::WellearnResourceCompletionWriteMode::SetThenSave,
             mutation_profile: crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
         }
+    }
+
+    fn completed_recovery_snapshot(
+        artifact: ProviderExecutionPlanArtifact,
+        plan: ExecutionMutationSequencePlan,
+        verification: Option<ExecutionMutationVerification>,
+    ) -> ExecutionMutationSequenceRecoverySnapshot {
+        let final_ordinal = plan
+            .phases()
+            .iter()
+            .map(ExecutionMutationSequencePhase::maximum_occurrences)
+            .sum::<u32>();
+        let mut ordinal = 1_u32;
+        let mut records = Vec::new();
+        for phase in plan.phases() {
+            for _ in 0..phase.maximum_occurrences() {
+                let issue = ExecutionMutationIssue::new(
+                    ordinal,
+                    phase.operation_type(),
+                    [u8::try_from(ordinal).unwrap_or(255); 32],
+                )
+                .unwrap();
+                let receipt = ExecutionMutationReceipt::new(
+                    ordinal,
+                    [u8::try_from(ordinal + 1).unwrap_or(254); 32],
+                    true,
+                )
+                .unwrap();
+                records.push(
+                    ExecutionMutationRecoveryRecord::try_new(
+                        issue,
+                        Some(receipt),
+                        (ordinal == final_ordinal).then_some(verification).flatten(),
+                    )
+                    .unwrap(),
+                );
+                ordinal += 1;
+            }
+        }
+        ExecutionMutationSequenceRecoverySnapshot::try_new(artifact, plan, records, Vec::new())
+            .unwrap()
     }
 
     fn request() -> ExecutionRequest {
