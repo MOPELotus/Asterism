@@ -5,10 +5,16 @@ use sha2::{Digest, Sha256};
 use crate::{
     WellearnAtomicCompletionProfile, WellearnAtomicDurationCompletionDocuments,
     WellearnAtomicDurationCompletionPlan, WellearnAtomicMutationKind, WellearnInventoryDocument,
+    duration_report::WellearnDurationMutationKind,
+    resource_execution::WellearnResourceMutationKind,
 };
 
 const REQUEST_DOMAIN: &[u8] = b"asterism.welearn.atomic-mutation-request.v1\0";
 const RESPONSE_DOMAIN: &[u8] = b"asterism.welearn.atomic-mutation-response.v1\0";
+const RESOURCE_REQUEST_DOMAIN: &[u8] = b"asterism.welearn.resource-mutation-request.v1\0";
+const RESOURCE_RESPONSE_DOMAIN: &[u8] = b"asterism.welearn.resource-mutation-response.v1\0";
+const DURATION_REQUEST_DOMAIN: &[u8] = b"asterism.welearn.duration-mutation-request.v1\0";
+const DURATION_RESPONSE_DOMAIN: &[u8] = b"asterism.welearn.duration-mutation-response.v1\0";
 const COMPLETION_OBSERVATION_DOMAIN: &[u8] = b"asterism.welearn.atomic-completion-observation.v1\0";
 const MAX_MUTATION_ORDINAL: u32 = 100_000;
 const MAX_MUTATION_FIELDS: usize = 16;
@@ -25,11 +31,67 @@ pub(crate) fn atomic_mutation_request_digest(
     referer: &Url,
     fields: &[(&str, &str)],
 ) -> ProviderResult<[u8; 32]> {
+    mutation_request_digest(
+        REQUEST_DOMAIN,
+        kind.as_str(),
+        ordinal,
+        endpoint,
+        referer,
+        fields,
+    )
+}
+
+/// Hashes one exact singleton resource mutation request without accepting a
+/// Cookie input.
+pub(crate) fn resource_mutation_request_digest(
+    kind: WellearnResourceMutationKind,
+    ordinal: u32,
+    endpoint: &Url,
+    referer: &Url,
+    fields: &[(&str, &str)],
+) -> ProviderResult<[u8; 32]> {
+    mutation_request_digest(
+        RESOURCE_REQUEST_DOMAIN,
+        kind.as_str(),
+        ordinal,
+        endpoint,
+        referer,
+        fields,
+    )
+}
+
+/// Hashes one exact singleton duration mutation request in a domain distinct
+/// from atomic duration-completion and singleton `ResourceExecution`.
+pub(crate) fn duration_mutation_request_digest(
+    kind: WellearnDurationMutationKind,
+    ordinal: u32,
+    endpoint: &Url,
+    referer: &Url,
+    fields: &[(&str, &str)],
+) -> ProviderResult<[u8; 32]> {
+    mutation_request_digest(
+        DURATION_REQUEST_DOMAIN,
+        kind.as_str(),
+        ordinal,
+        endpoint,
+        referer,
+        fields,
+    )
+}
+
+fn mutation_request_digest(
+    domain: &[u8],
+    operation_type: &str,
+    ordinal: u32,
+    endpoint: &Url,
+    referer: &Url,
+    fields: &[(&str, &str)],
+) -> ProviderResult<[u8; 32]> {
     validate_request_identity(ordinal, endpoint, referer, fields)?;
     let mut hash = Sha256::new();
-    hash.update(REQUEST_DOMAIN);
+    hash.update(domain);
     hash.update(ordinal.to_be_bytes());
-    hash_component(&mut hash, kind.as_str().as_bytes())?;
+    hash_component(&mut hash, operation_type.as_bytes())?;
     hash_component(&mut hash, endpoint.as_str().as_bytes())?;
     hash_component(&mut hash, referer.as_str().as_bytes())?;
     hash.update(
@@ -48,10 +110,31 @@ pub(crate) fn atomic_mutation_request_digest(
 pub(crate) fn atomic_mutation_response_digest(
     document: &WellearnInventoryDocument,
 ) -> ProviderResult<[u8; 32]> {
+    mutation_response_digest(RESPONSE_DOMAIN, document)
+}
+
+fn mutation_response_digest(
+    domain: &[u8],
+    document: &WellearnInventoryDocument,
+) -> ProviderResult<[u8; 32]> {
     let mut hash = Sha256::new();
-    hash.update(RESPONSE_DOMAIN);
+    hash.update(domain);
     hash_component(&mut hash, document.as_str().as_bytes())?;
     Ok(hash.finalize().into())
+}
+
+/// Hashes the exact bounded singleton resource mutation response text.
+pub(crate) fn resource_mutation_response_digest(
+    document: &WellearnInventoryDocument,
+) -> ProviderResult<[u8; 32]> {
+    mutation_response_digest(RESOURCE_RESPONSE_DOMAIN, document)
+}
+
+/// Hashes the exact bounded singleton duration response text.
+pub(crate) fn duration_mutation_response_digest(
+    document: &WellearnInventoryDocument,
+) -> ProviderResult<[u8; 32]> {
+    mutation_response_digest(DURATION_RESPONSE_DOMAIN, document)
 }
 
 /// Hashes only the fresh CMI evidence used by the exact compound verifier and
@@ -309,6 +392,84 @@ mod tests {
         assert_eq!(
             format!("{first:?}"),
             "WellearnInventoryDocument([REDACTED])"
+        );
+    }
+
+    #[test]
+    fn resource_digests_are_domain_separated_and_bind_the_exact_exchange() {
+        let endpoint = url("https://welearn.sflep.com/Ajax/SCO.aspx?uid=7001");
+        let referer = url("https://welearn.sflep.com/student/StudyCourse.aspx");
+        let fields = [("action", "startsco160928"), ("cid", "1001")];
+        let resource = resource_mutation_request_digest(
+            WellearnResourceMutationKind::Start,
+            1,
+            &endpoint,
+            &referer,
+            &fields,
+        )
+        .unwrap();
+        let atomic = atomic_mutation_request_digest(
+            WellearnAtomicMutationKind::Start,
+            1,
+            &endpoint,
+            &referer,
+            &fields,
+        )
+        .unwrap();
+        assert_ne!(resource, atomic);
+        assert_ne!(
+            resource,
+            resource_mutation_request_digest(
+                WellearnResourceMutationKind::Set,
+                1,
+                &endpoint,
+                &referer,
+                &fields,
+            )
+            .unwrap()
+        );
+
+        let document = WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned()).unwrap();
+        assert_ne!(
+            resource_mutation_response_digest(&document).unwrap(),
+            atomic_mutation_response_digest(&document).unwrap()
+        );
+    }
+
+    #[test]
+    fn duration_digests_are_separate_from_atomic_and_resource_domains() {
+        let endpoint = url("https://welearn.sflep.com/Ajax/SCO.aspx?uid=7001");
+        let referer = url("https://welearn.sflep.com/student/StudyCourse.aspx");
+        let fields = [
+            ("action", "keepsco_with_getticket_with_updatecmitime"),
+            ("cid", "1001"),
+        ];
+        let duration = duration_mutation_request_digest(
+            WellearnDurationMutationKind::CounterKeep,
+            2,
+            &endpoint,
+            &referer,
+            &fields,
+        )
+        .unwrap();
+        let atomic = atomic_mutation_request_digest(
+            WellearnAtomicMutationKind::CounterKeep,
+            2,
+            &endpoint,
+            &referer,
+            &fields,
+        )
+        .unwrap();
+        assert_ne!(duration, atomic);
+
+        let document = WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned()).unwrap();
+        assert_ne!(
+            duration_mutation_response_digest(&document).unwrap(),
+            atomic_mutation_response_digest(&document).unwrap()
+        );
+        assert_ne!(
+            duration_mutation_response_digest(&document).unwrap(),
+            resource_mutation_response_digest(&document).unwrap()
         );
     }
 

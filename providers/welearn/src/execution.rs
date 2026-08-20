@@ -2,16 +2,28 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{
-    BatchExecutionPlanningRequest, ExecutionEventSink, ExecutionOutcome,
-    ExecutionParentBatchSnapshot, ExecutionRequest, PreparedProviderBatchExecutionPlan,
+    BatchExecutionPlanningRequest, ExecutionEventSink, ExecutionMutationSequenceRecoverySnapshot,
+    ExecutionOutcome, ExecutionParentBatchSnapshot, ExecutionRecoveryOutcome, ExecutionRequest,
+    PreparedProviderBatchExecutionPlan, ProviderBatchExecutionMaterializationBinding,
     ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionBatchPlan,
     ProviderIdentity, ProviderMetadata, ProviderResult, TaskExecutionCapability,
 };
+use asterism_secrets::SecretValue;
 use async_trait::async_trait;
 
 use crate::{
-    WellearnBatchExecutionPlanner, metadata::development_metadata, restore_batch_execution_plan,
+    WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE, WELLEARN_PUBLIC_BATCH_MATERIALIZATION_BINDING_TYPE,
+    WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionRecovery,
+    WellearnBatchExecutionPlanner, WellearnBatchMaterializationScope,
+    WellearnBatchRuntimeSettingsRevision, WellearnPublicBatchExecutionInput,
+    WellearnPublicBatchMaterializationBinding, metadata::development_metadata,
+    restore_batch_execution_plan,
 };
+
+const ATOMIC_BATCH_CHILD_CAPABILITIES: [TaskCapability; 2] = [
+    TaskCapability::DurationReport,
+    TaskCapability::ResourceExecution,
+];
 
 /// Dispatches `WELearn`'s independent `ResourceExecution` and `DurationReport`
 /// capabilities through the single shared `TaskExecution` registry slot. Core
@@ -22,6 +34,8 @@ pub struct WellearnTaskExecution {
     resource: Arc<dyn TaskExecutionCapability>,
     duration: Arc<dyn TaskExecutionCapability>,
     batch_planner: Option<Arc<WellearnBatchExecutionPlanner>>,
+    atomic_execution: Option<Arc<WellearnAtomicDurationCompletion>>,
+    atomic_recovery: Option<Arc<WellearnAtomicDurationCompletionRecovery>>,
 }
 
 impl WellearnTaskExecution {
@@ -35,7 +49,7 @@ impl WellearnTaskExecution {
         resource: Arc<dyn TaskExecutionCapability>,
         duration: Arc<dyn TaskExecutionCapability>,
     ) -> ProviderResult<Self> {
-        Self::try_new_inner(resource, duration, None)
+        Self::try_new_inner(resource, duration, None, None)
     }
 
     /// Builds the registered dispatcher with fresh Course batch planning.
@@ -49,27 +63,130 @@ impl WellearnTaskExecution {
         duration: Arc<dyn TaskExecutionCapability>,
         batch_planner: Arc<WellearnBatchExecutionPlanner>,
     ) -> ProviderResult<Self> {
-        Self::try_new_inner(resource, duration, Some(batch_planner))
+        Self::try_new_inner(resource, duration, Some(batch_planner), None)
+    }
+
+    /// Builds the registered dispatcher with Course-batch planning plus the
+    /// parent-bound atomic child execution and read-only recovery paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when any implementation belongs to a
+    /// different Provider contract.
+    pub fn try_new_with_batch_runtime(
+        resource: Arc<dyn TaskExecutionCapability>,
+        duration: Arc<dyn TaskExecutionCapability>,
+        batch_planner: Arc<WellearnBatchExecutionPlanner>,
+        atomic_execution: Arc<WellearnAtomicDurationCompletion>,
+        atomic_recovery: Arc<WellearnAtomicDurationCompletionRecovery>,
+    ) -> ProviderResult<Self> {
+        Self::try_new_inner(
+            resource,
+            duration,
+            Some(batch_planner),
+            Some((atomic_execution, atomic_recovery)),
+        )
     }
 
     fn try_new_inner(
         resource: Arc<dyn TaskExecutionCapability>,
         duration: Arc<dyn TaskExecutionCapability>,
         batch_planner: Option<Arc<WellearnBatchExecutionPlanner>>,
+        atomic_runtime: Option<(
+            Arc<WellearnAtomicDurationCompletion>,
+            Arc<WellearnAtomicDurationCompletionRecovery>,
+        )>,
     ) -> ProviderResult<Self> {
         let metadata = development_metadata()?;
-        if resource.metadata() != &metadata || duration.metadata() != &metadata {
+        if resource.metadata() != &metadata
+            || duration.metadata() != &metadata
+            || atomic_runtime
+                .as_ref()
+                .is_some_and(|(execution, recovery)| {
+                    execution.metadata() != &metadata || recovery.metadata() != &metadata
+                })
+        {
             return Err(ProviderError::new(
                 ProviderErrorKind::Internal,
                 "WELearn execution implementations have mismatched metadata",
             ));
         }
+        let (atomic_execution, atomic_recovery) = atomic_runtime.unzip();
         Ok(Self {
             metadata,
             resource,
             duration,
             batch_planner,
+            atomic_execution,
+            atomic_recovery,
         })
+    }
+
+    /// Executes the existing parent-bound child path only after the exact
+    /// public materialization binding has been revalidated.
+    ///
+    /// # Errors
+    ///
+    /// Rejects grouped-call, scope, parent, position, Unit/SCO, remote Task,
+    /// settings or artifact drift before any atomic runtime I/O.
+    pub async fn execute_bound_batch_child(
+        &self,
+        context: &ProviderContext,
+        binding: &WellearnPublicBatchMaterializationBinding,
+        parent: &ExecutionParentBatchSnapshot,
+        position: u32,
+        request: &ExecutionRequest,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        if !self.requires_batch_execution_parent(request) {
+            return Err(invalid_atomic_batch_child_dispatch());
+        }
+        binding.validate_child_dispatch(context, parent, position, request)?;
+        let execution = self
+            .atomic_execution
+            .as_ref()
+            .ok_or_else(atomic_batch_runtime_unavailable)?;
+        execution
+            .execute_bound_materialized_core_child(
+                context, binding, parent, position, request, events,
+            )
+            .await
+    }
+
+    /// Runs the existing read-only parent-bound recovery path only after the
+    /// exact public materialization binding has been revalidated.
+    ///
+    /// # Errors
+    ///
+    /// Rejects grouped-call, scope, parent, position, Unit/SCO, remote Task,
+    /// settings, artifact or recovery-snapshot drift before any final HTTP read.
+    pub async fn verify_bound_batch_child_recovery(
+        &self,
+        context: &ProviderContext,
+        binding: &WellearnPublicBatchMaterializationBinding,
+        parent: &ExecutionParentBatchSnapshot,
+        position: u32,
+        request: &ExecutionRequest,
+        mutation_sequence: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        if !self.requires_batch_execution_parent(request) {
+            return Err(invalid_atomic_batch_child_dispatch());
+        }
+        binding.validate_child_dispatch(context, parent, position, request)?;
+        let recovery = self
+            .atomic_recovery
+            .as_ref()
+            .ok_or_else(atomic_batch_runtime_unavailable)?;
+        recovery
+            .verify_bound_materialized_core_child_snapshot(
+                context,
+                binding,
+                parent,
+                position,
+                request,
+                mutation_sequence,
+            )
+            .await
     }
 }
 
@@ -83,6 +200,14 @@ impl fmt::Debug for WellearnTaskExecution {
             .field(
                 "batch_planner",
                 &self.batch_planner.as_ref().map(|_| "configured"),
+            )
+            .field(
+                "atomic_execution",
+                &self.atomic_execution.as_ref().map(|_| "configured"),
+            )
+            .field(
+                "atomic_recovery",
+                &self.atomic_recovery.as_ref().map(|_| "configured"),
             )
             .finish()
     }
@@ -110,11 +235,73 @@ impl TaskExecutionCapability for WellearnTaskExecution {
         planner.prepare(context, request).await
     }
 
+    fn build_batch_execution_materialization_binding(
+        &self,
+        context: &ProviderContext,
+        request: &BatchExecutionPlanningRequest<'_>,
+        prepared: &PreparedProviderBatchExecutionPlan,
+    ) -> ProviderResult<Option<ProviderBatchExecutionMaterializationBinding>> {
+        if context.provider_id != self.metadata.id
+            || request.public_input.provider_id() != &self.metadata.id
+            || request.planning_input.provider_id() != &self.metadata.id
+        {
+            return Err(invalid_atomic_batch_child_dispatch());
+        }
+        let public = WellearnPublicBatchExecutionInput::decode(
+            request.public_input.input_type(),
+            request.public_input.payload().expose_secret(),
+        )?;
+        let revision = WellearnBatchRuntimeSettingsRevision::try_new(
+            request.runtime_settings_revision.schema_version(),
+            request.runtime_settings_revision.provider_revision(),
+            request
+                .runtime_settings_revision
+                .provider_account_revision(),
+        )?;
+        let scope = WellearnBatchMaterializationScope::try_new(
+            self.metadata.id.clone(),
+            context.account_id,
+            request.course_id,
+            revision,
+            request.expected_child_count,
+        )?;
+        let binding = WellearnPublicBatchMaterializationBinding::try_new(
+            &public,
+            &scope,
+            request.planning_input,
+            prepared,
+        )?;
+        ProviderBatchExecutionMaterializationBinding::try_new(
+            self.metadata.id.clone(),
+            WELLEARN_PUBLIC_BATCH_MATERIALIZATION_BINDING_TYPE,
+            SecretValue::new(binding.encode()?),
+        )
+        .map(Some)
+    }
+
     fn restore_batch_execution_plan(
         &self,
         parent: &ExecutionParentBatchSnapshot,
     ) -> ProviderResult<ProviderExecutionBatchPlan> {
         restore_batch_execution_plan(parent)
+    }
+
+    fn requires_batch_execution_parent(&self, request: &ExecutionRequest) -> bool {
+        request.has_valid_capability_step()
+            && request.requested_capabilities.as_slice() == ATOMIC_BATCH_CHILD_CAPABILITIES
+            && request.capability_plan.as_slice() == ATOMIC_BATCH_CHILD_CAPABILITIES
+            && request.capability_step_position == 1
+            && request
+                .provider_plan_artifact
+                .as_ref()
+                .is_some_and(|artifact| {
+                    artifact.provider_id() == &self.metadata.id
+                        && artifact.artifact_type() == WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE
+                })
+    }
+
+    fn requires_batch_execution_materialization_binding(&self, request: &ExecutionRequest) -> bool {
+        self.requires_batch_execution_parent(request)
     }
 
     fn allows_execution_from_remote_state(
@@ -195,6 +382,33 @@ impl TaskExecutionCapability for WellearnTaskExecution {
         }
     }
 
+    async fn execute_batch_child(
+        &self,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        materialization_binding: Option<&ProviderBatchExecutionMaterializationBinding>,
+        position: u32,
+        request: &ExecutionRequest,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        if !self.requires_batch_execution_parent(request) {
+            return Err(invalid_atomic_batch_child_dispatch());
+        }
+        let persisted = materialization_binding
+            .filter(|binding| binding.provider_id() == &self.metadata.id)
+            .ok_or_else(invalid_atomic_batch_child_dispatch)?;
+        let binding = WellearnPublicBatchMaterializationBinding::decode_for_child_dispatch(
+            persisted.binding_type(),
+            persisted.payload().expose_secret(),
+            context,
+            parent,
+            position,
+            request,
+        )?;
+        self.execute_bound_batch_child(context, &binding, parent, position, request, events)
+            .await
+    }
+
     async fn verify_execution(
         &self,
         context: &ProviderContext,
@@ -216,6 +430,54 @@ impl TaskExecutionCapability for WellearnTaskExecution {
             )),
         }
     }
+
+    async fn verify_batch_child_recovery(
+        &self,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        materialization_binding: Option<&ProviderBatchExecutionMaterializationBinding>,
+        position: u32,
+        request: &ExecutionRequest,
+        mutation_sequence: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        if !self.requires_batch_execution_parent(request) {
+            return Err(invalid_atomic_batch_child_dispatch());
+        }
+        let persisted = materialization_binding
+            .filter(|binding| binding.provider_id() == &self.metadata.id)
+            .ok_or_else(invalid_atomic_batch_child_dispatch)?;
+        let binding = WellearnPublicBatchMaterializationBinding::decode_for_child_dispatch(
+            persisted.binding_type(),
+            persisted.payload().expose_secret(),
+            context,
+            parent,
+            position,
+            request,
+        )?;
+        self.verify_bound_batch_child_recovery(
+            context,
+            &binding,
+            parent,
+            position,
+            request,
+            mutation_sequence,
+        )
+        .await
+    }
+}
+
+fn invalid_atomic_batch_child_dispatch() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn atomic child dispatch is detached from its grouped parent authority",
+    )
+}
+
+fn atomic_batch_runtime_unavailable() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn atomic child runtime is not configured",
+    )
 }
 
 #[cfg(test)]
@@ -223,7 +485,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use asterism_domain::{ProviderAccountId, ProviderId, RemoteState, SecretId, TaskId};
-    use asterism_provider_api::{ProviderProgress, ProviderRuntimeSettingsSchema};
+    use asterism_provider_api::{
+        ProviderExecutionPlanArtifact, ProviderProgress, ProviderRuntimeSettingsSchema,
+    };
+    use asterism_secrets::SecretValue;
 
     use super::*;
 
@@ -347,6 +612,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn atomic_child_requires_parent_and_never_falls_back_to_singleton_dispatch() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let metadata = development_metadata().unwrap();
+        let execution = WellearnTaskExecution::try_new(
+            Arc::new(FixtureCapability {
+                metadata: metadata.clone(),
+                expected: TaskCapability::ResourceExecution,
+                calls: calls.clone(),
+            }),
+            Arc::new(FixtureCapability {
+                metadata,
+                expected: TaskCapability::DurationReport,
+                calls: calls.clone(),
+            }),
+        )
+        .unwrap();
+        let request = atomic_request();
+        assert!(execution.requires_batch_execution_parent(&request));
+
+        let mut missing_artifact = request.clone();
+        missing_artifact.provider_plan_artifact = None;
+        assert!(!execution.requires_batch_execution_parent(&missing_artifact));
+        let mut split_step = request.clone();
+        split_step.requested_capabilities = vec![TaskCapability::DurationReport];
+        assert!(!execution.requires_batch_execution_parent(&split_step));
+
+        let singleton_error = execution
+            .execute(&context(), &request, &FixtureEvents)
+            .await
+            .unwrap_err();
+        assert_eq!(singleton_error.kind, ProviderErrorKind::UnsupportedTask);
+        assert!(calls.lock().unwrap().is_empty());
+
+        let parent = ExecutionParentBatchSnapshot::try_new(
+            ProviderId::new("welearn").unwrap(),
+            "welearn.fixture-authority.v1",
+            SecretValue::new(vec![1]),
+            "welearn.fixture-batch.v1",
+            SecretValue::new(vec![2]),
+        )
+        .unwrap();
+        let batch_error = execution
+            .execute_batch_child(&context(), &parent, None, 1, &request, &FixtureEvents)
+            .await
+            .unwrap_err();
+        assert_eq!(batch_error.kind, ProviderErrorKind::Internal);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn current_donor_allows_only_exact_not_open_welearn_action_sets() {
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -443,6 +758,29 @@ mod tests {
                 .resolve(None, None, None)
                 .unwrap(),
             provider_plan_artifact: None,
+        }
+    }
+
+    fn atomic_request() -> ExecutionRequest {
+        ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
+            task_id: TaskId::new(),
+            remote_task_id: "sco:1001:301".to_owned(),
+            course_id: Some(asterism_domain::CourseId::new()),
+            requested_capabilities: ATOMIC_BATCH_CHILD_CAPABILITIES.to_vec(),
+            capability_plan: ATOMIC_BATCH_CHILD_CAPABILITIES.to_vec(),
+            capability_step_position: 1,
+            runtime_settings: ProviderRuntimeSettingsSchema::empty()
+                .resolve(None, None, None)
+                .unwrap(),
+            provider_plan_artifact: Some(
+                ProviderExecutionPlanArtifact::try_new(
+                    ProviderId::new("welearn").unwrap(),
+                    WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE,
+                    serde_json::json!({"fixture": true}),
+                )
+                .unwrap(),
+            ),
         }
     }
 }

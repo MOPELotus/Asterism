@@ -1,12 +1,18 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{RemoteState, TaskCapability};
+use asterism_domain::{
+    CourseId, ExecutionId, ProviderAccountId, ProviderId, RemoteState, TaskCapability, TaskId,
+};
 use asterism_provider_api::{
-    ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
-    ProviderErrorKind, ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, TaskDetailCapability, TaskExecutionCapability,
+    ExecutionEventSink, ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
+    ExecutionMutationSequencePlan, ExecutionMutationVerification, ExecutionOutcome,
+    ExecutionRequest, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
+    ProviderIdentity, ProviderMetadata, ProviderProgress, ProviderResult, TaskDetailCapability,
+    TaskExecutionCapability,
 };
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     WellearnCmiDocument, WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
@@ -17,6 +23,37 @@ use crate::{
     runtime_settings::{WellearnResourceScore, WellearnRuntimeSettings},
     task_detail::validate_fresh_execution_detail,
 };
+
+/// Namespaced credential-free persistence type for one exact singleton
+/// `ResourceExecution` mutation authority.
+pub const WELLEARN_RESOURCE_EXECUTION_BINDING_TYPE: &str = "welearn.resource-execution-binding.v1";
+/// Stable receipt-conditional sequence type derived from that authority.
+pub const WELLEARN_RESOURCE_EXECUTION_SEQUENCE_TYPE: &str =
+    "welearn.resource-execution-sequence.v1";
+
+const WELLEARN_RESOURCE_EXECUTION_BINDING_VERSION: u16 = 1;
+const MAX_RESOURCE_EXECUTION_BINDING_BYTES: usize = 16 * 1_024;
+const RESOURCE_EXECUTION_BINDING_DIGEST_DOMAIN: &[u8] =
+    b"asterism.welearn.resource-execution-binding.v1\0";
+const RESOURCE_EXECUTION_VERIFICATION_DIGEST_DOMAIN: &[u8] =
+    b"asterism.welearn.resource-execution-verification.v1\0";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WellearnResourceMutationKind {
+    Start,
+    Set,
+    Save,
+}
+
+impl WellearnResourceMutationKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "welearn.resource.start",
+            Self::Set => "welearn.resource.set",
+            Self::Save => "welearn.resource.save",
+        }
+    }
+}
 
 /// Bounded documents returned by one SCO preset-completion attempt.
 ///
@@ -208,6 +245,329 @@ impl WellearnResourceExecutionPlan {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnResourceExecutionPlanWire {
+    score_percent: u8,
+    sequence: String,
+    time_mode: String,
+    cmi_format: String,
+    write_mode: String,
+    mutation_profile: String,
+}
+
+impl From<WellearnResourceExecutionPlan> for WellearnResourceExecutionPlanWire {
+    fn from(plan: WellearnResourceExecutionPlan) -> Self {
+        Self {
+            score_percent: plan.score_percent,
+            sequence: plan.sequence.as_str().to_owned(),
+            time_mode: plan.time_mode.as_str().to_owned(),
+            cmi_format: plan.cmi_format.as_str().to_owned(),
+            write_mode: plan.write_mode.as_str().to_owned(),
+            mutation_profile: plan.mutation_profile.as_str().to_owned(),
+        }
+    }
+}
+
+impl TryFrom<WellearnResourceExecutionPlanWire> for WellearnResourceExecutionPlan {
+    type Error = ProviderError;
+
+    fn try_from(wire: WellearnResourceExecutionPlanWire) -> Result<Self, Self::Error> {
+        use crate::{
+            WellearnResourceCompletionCmiFormat::{InteractionInfoSuffix, Json},
+            WellearnResourceCompletionSequence::{CurrentDonorDualSave100, SelectedScore},
+            WellearnResourceCompletionTimeMode::{PreserveFreshTime, ZeroTime},
+            WellearnResourceCompletionWriteMode::{SaveOnly, SetThenSave},
+            WellearnResourceMutationProfile::{CurrentFullSimpleReferer, LegacyMinimalTaskReferer},
+        };
+
+        let plan = Self {
+            score_percent: wire.score_percent,
+            sequence: match wire.sequence.as_str() {
+                "selected_score" => SelectedScore,
+                "current_donor_dual_save_100" => CurrentDonorDualSave100,
+                _ => return Err(invalid_resource_execution_binding()),
+            },
+            time_mode: match wire.time_mode.as_str() {
+                "zero_time" => ZeroTime,
+                "preserve_fresh_time" => PreserveFreshTime,
+                _ => return Err(invalid_resource_execution_binding()),
+            },
+            cmi_format: match wire.cmi_format.as_str() {
+                "json" => Json,
+                "interaction_info_suffix" => InteractionInfoSuffix,
+                _ => return Err(invalid_resource_execution_binding()),
+            },
+            write_mode: match wire.write_mode.as_str() {
+                "set_then_save" => SetThenSave,
+                "save_only" => SaveOnly,
+                _ => return Err(invalid_resource_execution_binding()),
+            },
+            mutation_profile: match wire.mutation_profile.as_str() {
+                "current_full_simple_referer" => CurrentFullSimpleReferer,
+                "legacy_minimal_task_referer" => LegacyMinimalTaskReferer,
+                _ => return Err(invalid_resource_execution_binding()),
+            },
+        };
+        plan.validate()
+            .map_err(|_| invalid_resource_execution_binding())?;
+        Ok(plan)
+    }
+}
+
+/// Immutable, credential-free binding between one Core singleton Execution
+/// request and the exact donor completion plan derived from its frozen
+/// settings.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WellearnResourceExecutionBinding {
+    provider_id: ProviderId,
+    provider_account_id: ProviderAccountId,
+    execution_id: ExecutionId,
+    task_id: TaskId,
+    course_id: Option<CourseId>,
+    remote_task_id: String,
+    runtime_settings_schema_version: u32,
+    plan: WellearnResourceExecutionPlan,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnResourceExecutionBindingWire {
+    version: u16,
+    provider_id: String,
+    provider_account_id: ProviderAccountId,
+    execution_id: ExecutionId,
+    task_id: TaskId,
+    course_id: Option<CourseId>,
+    remote_task_id: String,
+    runtime_settings_schema_version: u32,
+    plan: WellearnResourceExecutionPlanWire,
+}
+
+impl WellearnResourceExecutionBinding {
+    /// Freezes the exact local Execution/Task/account identity and already
+    /// resolved donor mutation plan without retaining credentials.
+    ///
+    /// # Errors
+    ///
+    /// Rejects Provider/request/capability/settings/plan drift, atomic-only
+    /// completion profiles or malformed remote SCO identity.
+    pub fn try_new(
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        plan: WellearnResourceExecutionPlan,
+    ) -> ProviderResult<Self> {
+        if context.provider_id.as_str() != crate::metadata::PROVIDER_ID
+            || !request.has_valid_capability_step()
+            || request.requested_capabilities != [TaskCapability::ResourceExecution]
+            || request.provider_plan_artifact.is_some()
+            || plan != derive_resource_execution_plan(request)?
+        {
+            return Err(invalid_resource_execution_binding());
+        }
+        let binding = Self {
+            provider_id: context.provider_id.clone(),
+            provider_account_id: context.account_id,
+            execution_id: request.execution_id,
+            task_id: request.task_id,
+            course_id: request.course_id,
+            remote_task_id: request.remote_task_id.clone(),
+            runtime_settings_schema_version: request.runtime_settings.schema_version,
+            plan,
+        };
+        binding.validate_shape()?;
+        Ok(binding)
+    }
+
+    pub const fn plan(&self) -> WellearnResourceExecutionPlan {
+        self.plan
+    }
+
+    /// Encodes one bounded, deny-unknown v1 authority. The output contains no
+    /// credentials, CMI, route material or mutation receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid binding, serialization failure or local size overflow.
+    pub fn encode(&self) -> ProviderResult<Vec<u8>> {
+        self.validate_shape()?;
+        let encoded = serde_json::to_vec(&WellearnResourceExecutionBindingWire {
+            version: WELLEARN_RESOURCE_EXECUTION_BINDING_VERSION,
+            provider_id: self.provider_id.as_str().to_owned(),
+            provider_account_id: self.provider_account_id,
+            execution_id: self.execution_id,
+            task_id: self.task_id,
+            course_id: self.course_id,
+            remote_task_id: self.remote_task_id.clone(),
+            runtime_settings_schema_version: self.runtime_settings_schema_version,
+            plan: self.plan.into(),
+        })
+        .map_err(|_| invalid_resource_execution_binding())?;
+        if encoded.is_empty() || encoded.len() > MAX_RESOURCE_EXECUTION_BINDING_BYTES {
+            return Err(invalid_resource_execution_binding());
+        }
+        Ok(encoded)
+    }
+
+    /// Decodes only the exact namespaced type and fully recomputes the binding
+    /// from an independently loaded context, request and frozen donor plan.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign type, malformed/unknown/oversized/version-drifted bytes
+    /// and every identity, settings or plan substitution.
+    pub fn decode(
+        binding_type: &str,
+        encoded: &[u8],
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        plan: WellearnResourceExecutionPlan,
+    ) -> ProviderResult<Self> {
+        if binding_type != WELLEARN_RESOURCE_EXECUTION_BINDING_TYPE
+            || encoded.is_empty()
+            || encoded.len() > MAX_RESOURCE_EXECUTION_BINDING_BYTES
+        {
+            return Err(invalid_resource_execution_binding());
+        }
+        let wire: WellearnResourceExecutionBindingWire =
+            serde_json::from_slice(encoded).map_err(|_| invalid_resource_execution_binding())?;
+        if wire.version != WELLEARN_RESOURCE_EXECUTION_BINDING_VERSION {
+            return Err(invalid_resource_execution_binding());
+        }
+        let decoded = Self {
+            provider_id: ProviderId::new(wire.provider_id)
+                .map_err(|_| invalid_resource_execution_binding())?,
+            provider_account_id: wire.provider_account_id,
+            execution_id: wire.execution_id,
+            task_id: wire.task_id,
+            course_id: wire.course_id,
+            remote_task_id: wire.remote_task_id,
+            runtime_settings_schema_version: wire.runtime_settings_schema_version,
+            plan: WellearnResourceExecutionPlan::try_from(wire.plan)?,
+        };
+        decoded.validate(context, request, plan)?;
+        Ok(decoded)
+    }
+
+    /// Recomputes the complete binding from independently frozen values.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any field substitution or invalid binding shape.
+    pub fn validate(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        plan: WellearnResourceExecutionPlan,
+    ) -> ProviderResult<()> {
+        self.validate_shape()?;
+        if *self != Self::try_new(context, request, plan)? {
+            return Err(invalid_resource_execution_binding());
+        }
+        Ok(())
+    }
+
+    /// Builds the exact receipt-conditional sequence to freeze in Core before
+    /// the first remote mutation is issued.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid binding or generic sequence projection.
+    pub fn mutation_sequence_plan(&self) -> ProviderResult<ExecutionMutationSequencePlan> {
+        self.validate_shape()?;
+        let mut phases = vec![resource_sequence_phase(
+            WellearnResourceMutationKind::Start,
+            1,
+        )?];
+        if self.plan.write_mode == crate::WellearnResourceCompletionWriteMode::SetThenSave {
+            phases.push(resource_sequence_phase(
+                WellearnResourceMutationKind::Set,
+                1,
+            )?);
+        }
+        phases.push(resource_sequence_phase(
+            WellearnResourceMutationKind::Save,
+            match self.plan.sequence {
+                WellearnResourceCompletionSequence::SelectedScore => 1,
+                WellearnResourceCompletionSequence::CurrentDonorDualSave100 => 2,
+            },
+        )?);
+        ExecutionMutationSequencePlan::try_new(
+            self.binding_digest()?,
+            WELLEARN_RESOURCE_EXECUTION_SEQUENCE_TYPE,
+            phases,
+        )
+        .map_err(|_| invalid_resource_execution_binding())
+    }
+
+    fn binding_digest(&self) -> ProviderResult<[u8; 32]> {
+        let encoded = self.encode()?;
+        let mut digest = Sha256::new();
+        digest.update(RESOURCE_EXECUTION_BINDING_DIGEST_DOMAIN);
+        digest.update(encoded);
+        Ok(digest.finalize().into())
+    }
+
+    fn validate_shape(&self) -> ProviderResult<()> {
+        self.plan
+            .validate()
+            .map_err(|_| invalid_resource_execution_binding())?;
+        if self.provider_id.as_str() != crate::metadata::PROVIDER_ID
+            || self.runtime_settings_schema_version == 0
+            || self.plan.requires_atomic_authority()
+            || self.remote_task_id.is_empty()
+            || self.remote_task_id.len() > 512
+            || self.remote_task_id.trim() != self.remote_task_id
+            || self.remote_task_id.chars().any(char::is_control)
+            || parse_sco_identity(&self.remote_task_id).is_err()
+        {
+            return Err(invalid_resource_execution_binding());
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for WellearnResourceExecutionBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WellearnResourceExecutionBinding")
+            .field("provider_id", &self.provider_id)
+            .field("provider_account_id", &"[REDACTED]")
+            .field("execution_id", &"[REDACTED]")
+            .field("task_id", &"[REDACTED]")
+            .field("course_id", &"[REDACTED]")
+            .field("remote_task_id", &"[REDACTED]")
+            .field(
+                "runtime_settings_schema_version",
+                &self.runtime_settings_schema_version,
+            )
+            .field("plan", &self.plan)
+            .finish()
+    }
+}
+
+fn resource_sequence_phase(
+    kind: WellearnResourceMutationKind,
+    occurrences: u32,
+) -> ProviderResult<ExecutionMutationSequencePhase> {
+    ExecutionMutationSequencePhase::try_new(
+        kind.as_str(),
+        occurrences,
+        occurrences,
+        false,
+        ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+        None,
+    )
+    .map_err(|_| invalid_resource_execution_binding())
+}
+
+fn invalid_resource_execution_binding() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn resource execution binding is invalid or drifted",
+    )
+}
+
 /// Native boundary for the donor-audited SCO completion preset.
 ///
 /// Implementations may renew only before the first mutation and must never
@@ -219,7 +579,8 @@ pub trait WellearnResourceExecutionTransport: Send + Sync {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
-        plan: WellearnResourceExecutionPlan,
+        binding: &WellearnResourceExecutionBinding,
+        events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnResourceExecutionDocuments>;
 
     /// Reads one fresh CMI document without starting, setting or saving the
@@ -319,6 +680,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
                 "WELearn atomic duration-completion final requires shared atomic authority",
             ));
         }
+        let binding = WellearnResourceExecutionBinding::try_new(context, request, plan)?;
         let detail = self
             .details
             .task_detail(context, &request.remote_task_id)
@@ -354,7 +716,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
 
         let documents = self
             .transport
-            .complete_resource(context, &course_id, &sco_id, plan)
+            .complete_resource(context, &course_id, &sco_id, &binding, events)
             .await?;
         documents.validate_for_plan(plan)?;
         let before = parse_mutation_cmi_baseline(documents.before.as_str())?;
@@ -380,6 +742,8 @@ impl TaskExecutionCapability for WellearnResourceExecution {
         } else {
             None
         };
+        let final_save_verification_recorded =
+            persist_resource_execution_verification(events, &binding, &documents).await?;
 
         events
             .report(ProviderProgress {
@@ -426,6 +790,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
                 "save_acceptances": documents.save_acceptances,
                 "already_completed": already_completed,
                 "immediate_cmi_verified": true,
+                "final_save_verification_recorded": final_save_verification_recorded,
                 "time_preservation_verified": time_preservation_verified,
                 "verification": "provider_fresh_cmi",
             }),
@@ -509,6 +874,45 @@ impl TaskExecutionCapability for WellearnResourceExecution {
     }
 }
 
+async fn persist_resource_execution_verification(
+    events: &(dyn ExecutionEventSink + Send + Sync),
+    binding: &WellearnResourceExecutionBinding,
+    documents: &WellearnResourceExecutionDocuments,
+) -> ProviderResult<bool> {
+    if !documents.mutation_submitted || documents.save_acceptances.last() != Some(&true) {
+        return Ok(false);
+    }
+    let after = documents
+        .after
+        .as_ref()
+        .ok_or_else(invalid_resource_execution_binding)?;
+    let final_save_ordinal: u32 = match binding.plan.sequence {
+        WellearnResourceCompletionSequence::SelectedScore => 3,
+        WellearnResourceCompletionSequence::CurrentDonorDualSave100 => 4,
+    };
+    let mut digest = Sha256::new();
+    digest.update(RESOURCE_EXECUTION_VERIFICATION_DIGEST_DOMAIN);
+    digest.update(binding.binding_digest()?);
+    digest.update(final_save_ordinal.to_be_bytes());
+    digest.update(after.as_str().as_bytes());
+    let verification =
+        ExecutionMutationVerification::new(final_save_ordinal, digest.finalize().into(), true)
+            .map_err(|_| invalid_resource_execution_binding())?;
+    let sink = events.mutation_sink().ok_or_else(|| {
+        ProviderError::human_required(
+            "WELearn resource verification cannot be durably attached to its final mutation",
+            asterism_domain::HumanRequiredReason::ManualIntervention,
+        )
+    })?;
+    sink.record_verification(verification).await.map_err(|_| {
+        ProviderError::human_required(
+            "WELearn resource verification persistence failed after mutation",
+            asterism_domain::HumanRequiredReason::ManualIntervention,
+        )
+    })?;
+    Ok(true)
+}
+
 fn select_score(configured: WellearnResourceScore, request: &ExecutionRequest) -> u8 {
     match configured {
         WellearnResourceScore::Fixed(score) => score,
@@ -525,6 +929,22 @@ fn select_score(configured: WellearnResourceScore, request: &ExecutionRequest) -
             maximum,
         ),
     }
+}
+
+fn derive_resource_execution_plan(
+    request: &ExecutionRequest,
+) -> ProviderResult<WellearnResourceExecutionPlan> {
+    let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
+    let plan = WellearnResourceExecutionPlan {
+        score_percent: select_score(settings.resource_score, request),
+        sequence: settings.resource_completion_sequence,
+        time_mode: effective_completion_time_mode(settings.resource_completion_time_mode, request),
+        cmi_format: settings.resource_completion_cmi_format,
+        write_mode: settings.resource_completion_write_mode,
+        mutation_profile: settings.resource_mutation_profile,
+    };
+    plan.validate()?;
+    Ok(plan)
 }
 
 fn effective_completion_time_mode(
@@ -641,6 +1061,7 @@ mod tests {
         AssessmentClass, ProviderAccountId, ProviderId, SecretId, SourceType, TaskId,
     };
     use asterism_provider_api::{
+        ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSink,
         ProviderRuntimeSettingsPatch, ProviderSettingValue, RemoteTask, RemoteTaskDetail,
     };
 
@@ -757,8 +1178,10 @@ mod tests {
             _context: &ProviderContext,
             course_id: &str,
             sco_id: &str,
-            plan: WellearnResourceExecutionPlan,
+            binding: &WellearnResourceExecutionBinding,
+            _events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<WellearnResourceExecutionDocuments> {
+            let plan = binding.plan();
             self.calls.lock().unwrap().push((
                 course_id.to_owned(),
                 sco_id.to_owned(),
@@ -843,6 +1266,24 @@ mod tests {
     struct FixtureEvents;
 
     #[async_trait]
+    impl ExecutionMutationSink for FixtureEvents {
+        async fn issue(&self, _issue: &ExecutionMutationIssue) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn record_receipt(&self, _receipt: ExecutionMutationReceipt) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn record_verification(
+            &self,
+            _verification: ExecutionMutationVerification,
+        ) -> ProviderResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
     impl ExecutionEventSink for FixtureEvents {
         async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
             Ok(())
@@ -850,6 +1291,56 @@ mod tests {
 
         async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
             Ok(())
+        }
+
+        fn mutation_sink(&self) -> Option<&(dyn ExecutionMutationSink + Send + Sync)> {
+            Some(self)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingFixtureEvents {
+        verifications: Mutex<Vec<ExecutionMutationVerification>>,
+        fail_verification: bool,
+    }
+
+    #[async_trait]
+    impl ExecutionMutationSink for RecordingFixtureEvents {
+        async fn issue(&self, _issue: &ExecutionMutationIssue) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn record_receipt(&self, _receipt: ExecutionMutationReceipt) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn record_verification(
+            &self,
+            verification: ExecutionMutationVerification,
+        ) -> ProviderResult<()> {
+            if self.fail_verification {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "fixture verification persistence failure",
+                ));
+            }
+            self.verifications.lock().unwrap().push(verification);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionEventSink for RecordingFixtureEvents {
+        async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        fn mutation_sink(&self) -> Option<&(dyn ExecutionMutationSink + Send + Sync)> {
+            Some(self)
         }
     }
 
@@ -923,6 +1414,133 @@ mod tests {
         assert!(legacy_without_suffix.validate().is_err());
     }
 
+    #[test]
+    fn singleton_resource_binding_round_trips_and_freezes_exact_sequence() {
+        let context = context();
+        let request = request();
+        let plan = legacy_resource_plan();
+        let binding = WellearnResourceExecutionBinding::try_new(&context, &request, plan).unwrap();
+        let encoded = binding.encode().unwrap();
+        let decoded = WellearnResourceExecutionBinding::decode(
+            WELLEARN_RESOURCE_EXECUTION_BINDING_TYPE,
+            &encoded,
+            &context,
+            &request,
+            plan,
+        )
+        .unwrap();
+        assert_eq!(decoded, binding);
+        assert!(!String::from_utf8(encoded).unwrap().contains("credential"));
+
+        let sequence = binding.mutation_sequence_plan().unwrap();
+        assert_eq!(
+            sequence.sequence_type(),
+            WELLEARN_RESOURCE_EXECUTION_SEQUENCE_TYPE
+        );
+        assert_ne!(sequence.artifact_digest(), [0; 32]);
+        assert_eq!(sequence.phases().len(), 3);
+        assert_eq!(
+            sequence.phases()[0].operation_type(),
+            WellearnResourceMutationKind::Start.as_str()
+        );
+        assert_eq!(
+            sequence.phases()[1].operation_type(),
+            WellearnResourceMutationKind::Set.as_str()
+        );
+        assert_eq!(
+            sequence.phases()[2].operation_type(),
+            WellearnResourceMutationKind::Save.as_str()
+        );
+        assert_eq!(sequence.phases()[2].maximum_occurrences(), 1);
+
+        let debug = format!("{binding:?}");
+        for identity in [
+            context.account_id.to_string(),
+            request.execution_id.to_string(),
+            request.task_id.to_string(),
+            request.remote_task_id,
+        ] {
+            assert!(!debug.contains(&identity));
+        }
+    }
+
+    #[test]
+    fn singleton_resource_binding_rejects_codec_and_identity_drift() {
+        let context = context();
+        let request = request();
+        let plan = legacy_resource_plan();
+        let binding = WellearnResourceExecutionBinding::try_new(&context, &request, plan).unwrap();
+        let encoded = binding.encode().unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let rejects = |value: &serde_json::Value| {
+            WellearnResourceExecutionBinding::decode(
+                WELLEARN_RESOURCE_EXECUTION_BINDING_TYPE,
+                &serde_json::to_vec(value).unwrap(),
+                &context,
+                &request,
+                plan,
+            )
+            .is_err()
+        };
+
+        let mut unknown = original.clone();
+        unknown["credential_refs"] = serde_json::json!(["forbidden"]);
+        assert!(rejects(&unknown));
+        let mut nested_unknown = original.clone();
+        nested_unknown["plan"]["cookie"] = serde_json::json!("forbidden");
+        assert!(rejects(&nested_unknown));
+        let mut version = original.clone();
+        version["version"] = serde_json::json!(2);
+        assert!(rejects(&version));
+        let mut execution = original.clone();
+        execution["execution_id"] = serde_json::json!(ExecutionId::new());
+        assert!(rejects(&execution));
+        let mut score = original;
+        score["plan"]["score_percent"] = serde_json::json!(81);
+        assert!(rejects(&score));
+
+        assert!(
+            WellearnResourceExecutionBinding::decode(
+                "welearn.foreign.v1",
+                &encoded,
+                &context,
+                &request,
+                plan,
+            )
+            .is_err()
+        );
+        assert!(
+            WellearnResourceExecutionBinding::decode(
+                WELLEARN_RESOURCE_EXECUTION_BINDING_TYPE,
+                &vec![b'x'; MAX_RESOURCE_EXECUTION_BINDING_BYTES + 1],
+                &context,
+                &request,
+                plan,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn singleton_resource_sequence_preserves_dual_save_and_rejects_atomic_final() {
+        let context = context();
+        let request = current_donor_request();
+        let current = current_resource_plan();
+        let binding =
+            WellearnResourceExecutionBinding::try_new(&context, &request, current).unwrap();
+        let sequence = binding.mutation_sequence_plan().unwrap();
+        assert_eq!(sequence.phases().len(), 3);
+        assert_eq!(sequence.phases()[2].minimum_occurrences(), 2);
+        assert_eq!(sequence.phases()[2].maximum_occurrences(), 2);
+
+        let mut atomic = current;
+        atomic.sequence = WellearnResourceCompletionSequence::SelectedScore;
+        atomic.score_percent = 100;
+        atomic.time_mode = WellearnResourceCompletionTimeMode::PreserveFreshTime;
+        assert!(atomic.validate().is_ok());
+        assert!(WellearnResourceExecutionBinding::try_new(&context, &request, atomic).is_err());
+    }
+
     #[tokio::test]
     async fn resource_execution_binds_fresh_detail_and_verifies_exact_cmi_goal() {
         let transport = Arc::new(FixtureTransport::default());
@@ -931,14 +1549,24 @@ mod tests {
             transport.clone(),
         )
         .unwrap();
+        let events = RecordingFixtureEvents::default();
         let outcome = execution
-            .execute(&context(), &request(), &FixtureEvents)
+            .execute(&context(), &request(), &events)
             .await
             .unwrap();
 
         assert_eq!(outcome.remote_state, RemoteState::Completed);
         assert!(outcome.verified);
         assert_eq!(outcome.result_sanitized["score_percent"], 82);
+        assert_eq!(
+            outcome.result_sanitized["final_save_verification_recorded"],
+            true
+        );
+        let verifications = events.verifications.lock().unwrap();
+        assert_eq!(verifications.len(), 1);
+        assert_eq!(verifications[0].ordinal(), 3);
+        assert!(verifications[0].verified());
+        assert_ne!(verifications[0].observation_digest(), [0; 32]);
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
             &[(
@@ -964,13 +1592,19 @@ mod tests {
             }),
         )
         .unwrap();
+        let events = RecordingFixtureEvents::default();
         let outcome = execution
-            .execute(&context(), &request(), &FixtureEvents)
+            .execute(&context(), &request(), &events)
             .await
             .unwrap();
 
         assert_eq!(outcome.result_sanitized["already_completed"], true);
         assert_eq!(outcome.result_sanitized["mutation_submitted"], false);
+        assert_eq!(
+            outcome.result_sanitized["final_save_verification_recorded"],
+            false
+        );
+        assert!(events.verifications.lock().unwrap().is_empty());
         assert!(outcome.verified);
     }
 
@@ -1007,8 +1641,9 @@ mod tests {
             }),
         )
         .unwrap();
+        let events = RecordingFixtureEvents::default();
         let outcome = execution
-            .execute(&context(), &request(), &FixtureEvents)
+            .execute(&context(), &request(), &events)
             .await
             .unwrap();
 
@@ -1023,6 +1658,32 @@ mod tests {
             outcome.result_sanitized["verification"],
             "provider_fresh_cmi"
         );
+        assert_eq!(
+            outcome.result_sanitized["final_save_verification_recorded"],
+            false
+        );
+        assert!(events.verifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_mutation_verification_persistence_failure_requires_human_review() {
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            Arc::new(FixtureTransport::default()),
+        )
+        .unwrap();
+        let events = RecordingFixtureEvents {
+            verifications: Mutex::new(Vec::new()),
+            fail_verification: true,
+        };
+
+        let error = execution
+            .execute(&context(), &request(), &events)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ProviderErrorKind::HumanRequired);
+        assert!(events.verifications.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1321,6 +1982,28 @@ mod tests {
             account_id: ProviderAccountId::new(),
             credential_refs: vec![SecretId::new()],
             correlation_id: "welearn-resource-execution".to_owned(),
+        }
+    }
+
+    fn legacy_resource_plan() -> WellearnResourceExecutionPlan {
+        WellearnResourceExecutionPlan {
+            score_percent: 82,
+            sequence: WellearnResourceCompletionSequence::SelectedScore,
+            time_mode: WellearnResourceCompletionTimeMode::ZeroTime,
+            cmi_format: WellearnResourceCompletionCmiFormat::InteractionInfoSuffix,
+            write_mode: crate::WellearnResourceCompletionWriteMode::SetThenSave,
+            mutation_profile: crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer,
+        }
+    }
+
+    fn current_resource_plan() -> WellearnResourceExecutionPlan {
+        WellearnResourceExecutionPlan {
+            score_percent: 82,
+            sequence: WellearnResourceCompletionSequence::CurrentDonorDualSave100,
+            time_mode: WellearnResourceCompletionTimeMode::ZeroTime,
+            cmi_format: WellearnResourceCompletionCmiFormat::Json,
+            write_mode: crate::WellearnResourceCompletionWriteMode::SetThenSave,
+            mutation_profile: crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
         }
     }
 

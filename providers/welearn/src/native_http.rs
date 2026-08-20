@@ -19,11 +19,16 @@ use crate::{
     WellearnAtomicDurationCompletionPlan, WellearnAtomicDurationCompletionReceipts,
     WellearnAtomicDurationCompletionTransport, WellearnAtomicPreFinalObservation,
     WellearnCmiDocument, WellearnCmiTransport, WellearnCourseInventoryTransport,
-    WellearnDurationReportDocuments, WellearnDurationReportTransport, WellearnInventoryDocument,
+    WellearnDurationReportBinding, WellearnDurationReportDocuments,
+    WellearnDurationReportTransport, WellearnInventoryDocument, WellearnResourceExecutionBinding,
     WellearnResourceExecutionDocuments, WellearnResourceExecutionTransport,
     WellearnScoLeavesDocument, WellearnSessionResolver, WellearnTaskInventoryDocuments,
     WellearnTaskInventoryTransport,
-    atomic_mutation_digest::{atomic_mutation_request_digest, atomic_mutation_response_digest},
+    atomic_mutation_digest::{
+        atomic_mutation_request_digest, atomic_mutation_response_digest,
+        duration_mutation_request_digest, duration_mutation_response_digest,
+        resource_mutation_request_digest, resource_mutation_response_digest,
+    },
     build_atomic_mutation_sequence_plan,
     cmi::{
         UNINITIALIZED_CMI_MARKER, WellearnCmiSnapshot, parse_cmi_snapshot,
@@ -34,6 +39,9 @@ use crate::{
     protocol_observation::{json_value_kind, protocol_drift_with_observation},
     runtime_settings::LEGACY_DURATION_REQUEST_INTERVAL_SECONDS,
     task_inventory::unit_count,
+};
+use crate::{
+    duration_report::WellearnDurationMutationKind, resource_execution::WellearnResourceMutationKind,
 };
 
 const COURSE_LIST_URL: &str = "https://welearn.sflep.com/ajax/authCourse.aspx?action=gmc";
@@ -765,8 +773,10 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
-        plan: crate::WellearnResourceExecutionPlan,
+        binding: &WellearnResourceExecutionBinding,
+        events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnResourceExecutionDocuments> {
+        let plan = binding.plan();
         plan.validate()?;
         let crate::WellearnResourceExecutionPlan {
             score_percent,
@@ -808,7 +818,18 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
             ));
         }
 
+        let sink = required_resource_mutation_sink(events)?;
+        let sequence_plan = binding.mutation_sequence_plan()?;
+        sink.prepare_sequence_plan(&sequence_plan).await?;
+
         let referer = study_course_url(&route, sco_id)?;
+        let mutation_url = sco_endpoint_url(&route, endpoint)?;
+        let mutation_referer = match mutation_profile {
+            crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer => {
+                static_url(STUDY_COURSE_REFERER)?
+            }
+            crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer => referer.clone(),
+        };
         let cmi = if resource_requires_set(write_mode) {
             Some(resource_completion_cmi(
                 score_percent,
@@ -831,41 +852,62 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
                 }
             },
         );
-        let start = self
-            .send_resource_mutation_form(
-                &session,
-                &route,
-                &referer,
-                mutation_profile,
-                &start_fields,
-            )
-            .await
-            .map_err(resource_mutation_error)?;
-        let start_accepted = mutation_accepted(start.as_str(), MutationResponseKind::StrictSuccess)
-            .map_err(resource_mutation_error)?;
-
-        let set_accepted = if let Some(cmi) = cmi.as_ref() {
-            let set = self
-                .send_resource_mutation_form(
+        let mut ordinal = 1_u32;
+        let start_accepted = execute_durable_resource_mutation(
+            sink,
+            DurableResourceMutationRequest {
+                kind: WellearnResourceMutationKind::Start,
+                ordinal,
+                endpoint: &mutation_url,
+                referer: &mutation_referer,
+                fields: &start_fields,
+            },
+            false,
+            || {
+                self.send_resource_mutation_form(
                     &session,
                     &route,
                     &referer,
                     mutation_profile,
-                    &[
-                        ("action", "setscoinfo"),
-                        ("cid", route.course_id()),
-                        ("scoid", sco_id),
-                        ("uid", route.user_id()),
-                        ("data", cmi.as_str()),
-                        ("isend", "False"),
-                    ],
+                    &start_fields,
                 )
-                .await
-                .map_err(resource_mutation_error)?;
-            Some(
-                mutation_accepted(set.as_str(), MutationResponseKind::StrictSuccess)
-                    .map_err(resource_mutation_error)?,
+            },
+        )
+        .await?;
+        ordinal += 1;
+
+        let set_accepted = if let Some(cmi) = cmi.as_ref() {
+            let set_fields = [
+                ("action", "setscoinfo"),
+                ("cid", route.course_id()),
+                ("scoid", sco_id),
+                ("uid", route.user_id()),
+                ("data", cmi.as_str()),
+                ("isend", "False"),
+            ];
+            let accepted = execute_durable_resource_mutation(
+                sink,
+                DurableResourceMutationRequest {
+                    kind: WellearnResourceMutationKind::Set,
+                    ordinal,
+                    endpoint: &mutation_url,
+                    referer: &mutation_referer,
+                    fields: &set_fields,
+                },
+                true,
+                || {
+                    self.send_resource_mutation_form(
+                        &session,
+                        &route,
+                        &referer,
+                        mutation_profile,
+                        &set_fields,
+                    )
+                },
             )
+            .await?;
+            ordinal += 1;
+            Some(accepted)
         } else {
             None
         };
@@ -873,18 +915,41 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         let mut save_acceptances = Vec::new();
         for save_score in resource_save_scores(sequence, score_percent) {
             let save_score = save_score.to_string();
+            let save_fields = [
+                ("action", "savescoinfo160928"),
+                ("cid", route.course_id()),
+                ("scoid", sco_id),
+                ("uid", route.user_id()),
+                ("progress", "100"),
+                ("crate", save_score.as_str()),
+                ("status", "unknown"),
+                ("cstatus", "completed"),
+                ("trycount", "0"),
+            ];
             save_acceptances.push(
-                self.save_resource_completion(
-                    &session,
-                    &route,
-                    &referer,
-                    mutation_profile,
-                    sco_id,
-                    &save_score,
+                execute_durable_resource_mutation(
+                    sink,
+                    DurableResourceMutationRequest {
+                        kind: WellearnResourceMutationKind::Save,
+                        ordinal,
+                        endpoint: &mutation_url,
+                        referer: &mutation_referer,
+                        fields: &save_fields,
+                    },
+                    true,
+                    || {
+                        self.send_resource_mutation_form(
+                            &session,
+                            &route,
+                            &referer,
+                            mutation_profile,
+                            &save_fields,
+                        )
+                    },
                 )
-                .await
-                .map_err(resource_mutation_error)?,
+                .await?,
             );
+            ordinal += 1;
         }
 
         let after = match self
@@ -1026,6 +1091,186 @@ fn required_atomic_mutation_sink(
     })
 }
 
+fn required_resource_mutation_sink(
+    events: &(dyn ExecutionEventSink + Send + Sync),
+) -> ProviderResult<&(dyn ExecutionMutationSink + Send + Sync)> {
+    events.mutation_sink().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn resource execution requires a durable Core mutation sink",
+        )
+    })
+}
+
+fn required_duration_mutation_sink(
+    events: &(dyn ExecutionEventSink + Send + Sync),
+) -> ProviderResult<&(dyn ExecutionMutationSink + Send + Sync)> {
+    events.mutation_sink().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn duration report requires a durable Core mutation sink",
+        )
+    })
+}
+
+fn duration_post_mutation_error(error: ProviderError) -> ProviderError {
+    if error.kind == ProviderErrorKind::HumanRequired {
+        return error;
+    }
+    let reason = if error.kind == ProviderErrorKind::Authentication {
+        HumanRequiredReason::SessionExpired
+    } else {
+        HumanRequiredReason::ManualIntervention
+    };
+    mutation_human_required(
+        error,
+        "WELearn duration mutation began and was not replayed; fresh review is required",
+        reason,
+    )
+}
+
+async fn execute_durable_duration_mutation<F, Fut>(
+    sink: &(dyn ExecutionMutationSink + Send + Sync),
+    request: DurableDurationMutationRequest<'_>,
+    mutation_started: bool,
+    send: F,
+) -> ProviderResult<bool>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ProviderResult<WellearnInventoryDocument>>,
+{
+    let request_digest = duration_mutation_request_digest(
+        request.kind,
+        request.ordinal,
+        request.endpoint,
+        request.referer,
+        request.fields,
+    )?;
+    let issue = ExecutionMutationIssue::new(request.ordinal, request.kind.as_str(), request_digest)
+        .map_err(|_| invalid_duration_mutation_ledger())?;
+    sink.issue(&issue).await.map_err(|error| {
+        if mutation_started {
+            duration_post_mutation_error(error)
+        } else {
+            error
+        }
+    })?;
+    let response = send().await.map_err(duration_post_mutation_error)?;
+    let response_digest =
+        duration_mutation_response_digest(&response).map_err(duration_post_mutation_error)?;
+    let accepted = mutation_accepted(response.as_str(), request.response_kind)
+        .map_err(duration_post_mutation_error)?;
+    let receipt = ExecutionMutationReceipt::new(request.ordinal, response_digest, accepted)
+        .map_err(duration_post_mutation_error)?;
+    sink.record_receipt(receipt)
+        .await
+        .map_err(duration_post_mutation_error)?;
+    Ok(accepted)
+}
+
+#[derive(Clone, Copy)]
+struct DurableDurationExchange<'a> {
+    sink: &'a (dyn ExecutionMutationSink + Send + Sync),
+    ordinal: u32,
+    endpoint: &'a Url,
+    referer: &'a Url,
+}
+
+#[derive(Clone, Copy)]
+struct DurableDurationMutationRequest<'a> {
+    kind: WellearnDurationMutationKind,
+    ordinal: u32,
+    endpoint: &'a Url,
+    referer: &'a Url,
+    fields: &'a [(&'a str, &'a str)],
+    response_kind: MutationResponseKind,
+}
+
+fn invalid_duration_mutation_ledger() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn duration mutation ledger binding is invalid",
+    )
+}
+
+fn next_duration_ordinal(ordinal: u32) -> ProviderResult<u32> {
+    ordinal
+        .checked_add(1)
+        .filter(|next| *next <= 100_000)
+        .ok_or_else(invalid_duration_mutation_ledger)
+}
+
+fn resource_post_mutation_error(error: ProviderError) -> ProviderError {
+    if error.kind == ProviderErrorKind::HumanRequired {
+        return error;
+    }
+    let reason = if error.kind == ProviderErrorKind::Authentication {
+        HumanRequiredReason::SessionExpired
+    } else {
+        HumanRequiredReason::ManualIntervention
+    };
+    mutation_human_required(
+        error,
+        "WELearn resource mutation began and was not replayed; fresh review is required",
+        reason,
+    )
+}
+
+async fn execute_durable_resource_mutation<F, Fut>(
+    sink: &(dyn ExecutionMutationSink + Send + Sync),
+    request: DurableResourceMutationRequest<'_>,
+    mutation_started: bool,
+    send: F,
+) -> ProviderResult<bool>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ProviderResult<WellearnInventoryDocument>>,
+{
+    let request_digest = resource_mutation_request_digest(
+        request.kind,
+        request.ordinal,
+        request.endpoint,
+        request.referer,
+        request.fields,
+    )?;
+    let issue = ExecutionMutationIssue::new(request.ordinal, request.kind.as_str(), request_digest)
+        .map_err(|_| invalid_resource_mutation_ledger())?;
+    sink.issue(&issue).await.map_err(|error| {
+        if mutation_started {
+            resource_post_mutation_error(error)
+        } else {
+            error
+        }
+    })?;
+    let response = send().await.map_err(resource_post_mutation_error)?;
+    let response_digest =
+        resource_mutation_response_digest(&response).map_err(resource_post_mutation_error)?;
+    let accepted = mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
+        .map_err(resource_post_mutation_error)?;
+    let receipt = ExecutionMutationReceipt::new(request.ordinal, response_digest, accepted)
+        .map_err(resource_post_mutation_error)?;
+    sink.record_receipt(receipt)
+        .await
+        .map_err(resource_post_mutation_error)?;
+    Ok(accepted)
+}
+
+#[derive(Clone, Copy)]
+struct DurableResourceMutationRequest<'a> {
+    kind: WellearnResourceMutationKind,
+    ordinal: u32,
+    endpoint: &'a Url,
+    referer: &'a Url,
+    fields: &'a [(&'a str, &'a str)],
+}
+
+fn invalid_resource_mutation_ledger() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn resource mutation ledger binding is invalid",
+    )
+}
+
 async fn execute_durable_atomic_mutation<F, Fut>(
     sink: &(dyn ExecutionMutationSink + Send + Sync),
     issue: ExecutionMutationIssue,
@@ -1084,9 +1329,10 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
-        plan: crate::WellearnDurationReportPlan,
+        binding: &WellearnDurationReportBinding,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnDurationReportDocuments> {
+        let plan = binding.plan();
         plan.validate()?;
         let crate::WellearnDurationReportPlan {
             duration_seconds,
@@ -1117,6 +1363,12 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         let mut started = false;
         let mut start_accepted = None;
         let must_start = duration_requires_start(protocol_mode, snapshot.is_none());
+        let sink = required_duration_mutation_sink(events)?;
+        sink.prepare_sequence_plan(&binding.mutation_sequence_plan(must_start)?)
+            .await?;
+        let mutation_url = sco_endpoint_url(&route, endpoint)?;
+        let mutation_referer = static_url(STUDY_COURSE_REFERER)?;
+        let mut ordinal = 1_u32;
         if must_start {
             events
                 .log(duration_log(
@@ -1140,10 +1392,21 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     ScoStartPayload::MinimalIdentity
                 },
             );
-            let start = self
-                .send_sco_form_at_endpoint(&session, &route, endpoint, &start_fields)
-                .await?;
-            let accepted = mutation_accepted(start.as_str(), MutationResponseKind::StrictSuccess)?;
+            let accepted = execute_durable_duration_mutation(
+                sink,
+                DurableDurationMutationRequest {
+                    kind: WellearnDurationMutationKind::Start,
+                    ordinal,
+                    endpoint: &mutation_url,
+                    referer: &mutation_referer,
+                    fields: &start_fields,
+                    response_kind: MutationResponseKind::StrictSuccess,
+                },
+                false,
+                || self.send_sco_form_at_endpoint(&session, &route, endpoint, &start_fields),
+            )
+            .await?;
+            ordinal = next_duration_ordinal(ordinal)?;
             if protocol_mode == crate::WellearnDurationProtocolMode::ClientCounter && !accepted {
                 return Err(ProviderError::new(
                     ProviderErrorKind::RemoteChanged,
@@ -1154,8 +1417,10 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             started = true;
             before = self
                 .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
-                .await?;
-            snapshot = Some(parse_cmi_snapshot(before.as_str())?);
+                .await
+                .map_err(duration_post_mutation_error)?;
+            snapshot =
+                Some(parse_cmi_snapshot(before.as_str()).map_err(duration_post_mutation_error)?);
         }
 
         let snapshot = snapshot.ok_or_else(|| {
@@ -1207,8 +1472,21 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 ))
                 .await;
                 let accepted = self
-                    .keep_duration_preserved(&session, &route, endpoint, sco_id, &state)
+                    .keep_duration_preserved(
+                        &session,
+                        &route,
+                        endpoint,
+                        sco_id,
+                        &state,
+                        DurableDurationExchange {
+                            sink,
+                            ordinal,
+                            endpoint: &mutation_url,
+                            referer: &mutation_referer,
+                        },
+                    )
                     .await?;
+                ordinal = next_duration_ordinal(ordinal)?;
                 record_duration_receipt(accepted, &mut heartbeat_accepted, &mut heartbeat_rejected);
                 heartbeat_count = heartbeat_count.saturating_add(1);
                 let (complete_intervals, trailing_seconds) =
@@ -1216,8 +1494,21 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 for completed in 1..=complete_intervals {
                     tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
                     let accepted = self
-                        .keep_duration_preserved(&session, &route, endpoint, sco_id, &state)
+                        .keep_duration_preserved(
+                            &session,
+                            &route,
+                            endpoint,
+                            sco_id,
+                            &state,
+                            DurableDurationExchange {
+                                sink,
+                                ordinal,
+                                endpoint: &mutation_url,
+                                referer: &mutation_referer,
+                            },
+                        )
                         .await?;
+                    ordinal = next_duration_ordinal(ordinal)?;
                     record_duration_receipt(
                         accepted,
                         &mut heartbeat_accepted,
@@ -1240,15 +1531,40 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 ))
                 .await;
                 final_accepted = Some(
-                    self.finalize_duration_preserved(&session, &route, endpoint, sco_id, &state)
-                        .await?,
+                    self.finalize_duration_preserved(
+                        &session,
+                        &route,
+                        endpoint,
+                        sco_id,
+                        &state,
+                        DurableDurationExchange {
+                            sink,
+                            ordinal,
+                            endpoint: &mutation_url,
+                            referer: &mutation_referer,
+                        },
+                    )
+                    .await?,
                 );
             }
             crate::WellearnDurationProtocolMode::ClientCounter => {
                 for elapsed in 0..duration_seconds {
                     let accepted = self
-                        .keep_duration_counter(&session, &route, endpoint, sco_id, elapsed)
+                        .keep_duration_counter(
+                            &session,
+                            &route,
+                            endpoint,
+                            sco_id,
+                            elapsed,
+                            DurableDurationExchange {
+                                sink,
+                                ordinal,
+                                endpoint: &mutation_url,
+                                referer: &mutation_referer,
+                            },
+                        )
                         .await?;
+                    ordinal = next_duration_ordinal(ordinal)?;
                     record_duration_receipt(
                         accepted,
                         &mut heartbeat_accepted,
@@ -1269,8 +1585,20 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 for completed in 1..=complete_intervals {
                     tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
                     let accepted = self
-                        .keep_duration_implicit(&session, &route, endpoint, sco_id)
+                        .keep_duration_implicit(
+                            &session,
+                            &route,
+                            endpoint,
+                            sco_id,
+                            DurableDurationExchange {
+                                sink,
+                                ordinal,
+                                endpoint: &mutation_url,
+                                referer: &mutation_referer,
+                            },
+                        )
                         .await?;
+                    ordinal = next_duration_ordinal(ordinal)?;
                     record_duration_receipt(
                         accepted,
                         &mut heartbeat_accepted,
@@ -1289,8 +1617,19 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     report_duration_tail(events).await?;
                 }
                 final_accepted = Some(
-                    self.finalize_duration_implicit(&session, &route, endpoint, sco_id)
-                        .await?,
+                    self.finalize_duration_implicit(
+                        &session,
+                        &route,
+                        endpoint,
+                        sco_id,
+                        DurableDurationExchange {
+                            sink,
+                            ordinal,
+                            endpoint: &mutation_url,
+                            referer: &mutation_referer,
+                        },
+                    )
+                    .await?,
                 );
             }
         }
@@ -1309,12 +1648,20 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             .await
         {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
-                session = self.sessions.renew_session(context).await?;
-                route = self.resolve_course_route(&session, course_id).await?;
+                session = self
+                    .sessions
+                    .renew_session(context)
+                    .await
+                    .map_err(duration_post_mutation_error)?;
+                route = self
+                    .resolve_course_route(&session, course_id)
+                    .await
+                    .map_err(duration_post_mutation_error)?;
                 self.fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
-                    .await?
+                    .await
+                    .map_err(duration_post_mutation_error)?
             }
-            result => result?,
+            result => result.map_err(duration_post_mutation_error)?,
         };
         Ok(WellearnDurationReportDocuments::with_receipts(
             before,
@@ -1399,37 +1746,6 @@ async fn report_duration_tail(
 }
 
 impl NativeWellearnInventoryTransport {
-    async fn save_resource_completion(
-        &self,
-        session: &crate::WellearnCookieSession,
-        route: &crate::WellearnCourseContext,
-        referer: &Url,
-        mutation_profile: crate::WellearnResourceMutationProfile,
-        sco_id: &str,
-        score: &str,
-    ) -> ProviderResult<bool> {
-        let response = self
-            .send_resource_mutation_form(
-                session,
-                route,
-                referer,
-                mutation_profile,
-                &[
-                    ("action", "savescoinfo160928"),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("uid", route.user_id()),
-                    ("progress", "100"),
-                    ("crate", score),
-                    ("status", "unknown"),
-                    ("cstatus", "completed"),
-                    ("trycount", "0"),
-                ],
-            )
-            .await?;
-        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
-    }
-
     async fn read_duration_baseline(
         &self,
         session: &crate::WellearnCookieSession,
@@ -1451,23 +1767,30 @@ impl NativeWellearnInventoryTransport {
         endpoint: ScoEndpoint,
         sco_id: &str,
         state: &PreservedCmiState,
+        durable: DurableDurationExchange<'_>,
     ) -> ProviderResult<bool> {
-        let response = self
-            .send_sco_form_at_endpoint(
-                session,
-                route,
-                endpoint,
-                &[
-                    ("action", "keepsco_with_getticket_with_updatecmitime"),
-                    ("uid", route.user_id()),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("session_time", &state.session_time),
-                    ("total_time", &state.total_time),
-                ],
-            )
-            .await?;
-        mutation_accepted(response.as_str(), MutationResponseKind::Heartbeat)
+        let fields = [
+            ("action", "keepsco_with_getticket_with_updatecmitime"),
+            ("uid", route.user_id()),
+            ("cid", route.course_id()),
+            ("scoid", sco_id),
+            ("session_time", state.session_time.as_str()),
+            ("total_time", state.total_time.as_str()),
+        ];
+        execute_durable_duration_mutation(
+            durable.sink,
+            DurableDurationMutationRequest {
+                kind: WellearnDurationMutationKind::PreserveKeep,
+                ordinal: durable.ordinal,
+                endpoint: durable.endpoint,
+                referer: durable.referer,
+                fields: &fields,
+                response_kind: MutationResponseKind::Heartbeat,
+            },
+            true,
+            || self.send_sco_form_at_endpoint(session, route, endpoint, &fields),
+        )
+        .await
     }
 
     async fn keep_duration_counter(
@@ -1477,26 +1800,33 @@ impl NativeWellearnInventoryTransport {
         endpoint: ScoEndpoint,
         sco_id: &str,
         elapsed_seconds: u64,
+        durable: DurableDurationExchange<'_>,
     ) -> ProviderResult<bool> {
         let (session_time, total_time) = duration_counter_fields(elapsed_seconds);
-        let response = self
-            .send_sco_form_at_endpoint(
-                session,
-                route,
-                endpoint,
-                &[
-                    ("action", "keepsco_with_getticket_with_updatecmitime"),
-                    ("uid", route.user_id()),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("session_time", session_time.as_str()),
-                    ("total_time", total_time.as_str()),
-                    ("timelimitsec", "0"),
-                    ("endcaltime", "false"),
-                ],
-            )
-            .await?;
-        mutation_accepted(response.as_str(), MutationResponseKind::Heartbeat)
+        let fields = [
+            ("action", "keepsco_with_getticket_with_updatecmitime"),
+            ("uid", route.user_id()),
+            ("cid", route.course_id()),
+            ("scoid", sco_id),
+            ("session_time", session_time.as_str()),
+            ("total_time", total_time.as_str()),
+            ("timelimitsec", "0"),
+            ("endcaltime", "false"),
+        ];
+        execute_durable_duration_mutation(
+            durable.sink,
+            DurableDurationMutationRequest {
+                kind: WellearnDurationMutationKind::CounterKeep,
+                ordinal: durable.ordinal,
+                endpoint: durable.endpoint,
+                referer: durable.referer,
+                fields: &fields,
+                response_kind: MutationResponseKind::Heartbeat,
+            },
+            true,
+            || self.send_sco_form_at_endpoint(session, route, endpoint, &fields),
+        )
+        .await
     }
 
     async fn keep_duration_implicit(
@@ -1505,21 +1835,28 @@ impl NativeWellearnInventoryTransport {
         route: &crate::WellearnCourseContext,
         endpoint: ScoEndpoint,
         sco_id: &str,
+        durable: DurableDurationExchange<'_>,
     ) -> ProviderResult<bool> {
-        let response = self
-            .send_sco_form_at_endpoint(
-                session,
-                route,
-                endpoint,
-                &[
-                    ("action", "keepsco_with_getticket_with_updatecmitime"),
-                    ("uid", route.user_id()),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                ],
-            )
-            .await?;
-        mutation_accepted(response.as_str(), MutationResponseKind::Heartbeat)
+        let fields = [
+            ("action", "keepsco_with_getticket_with_updatecmitime"),
+            ("uid", route.user_id()),
+            ("cid", route.course_id()),
+            ("scoid", sco_id),
+        ];
+        execute_durable_duration_mutation(
+            durable.sink,
+            DurableDurationMutationRequest {
+                kind: WellearnDurationMutationKind::ImplicitKeep,
+                ordinal: durable.ordinal,
+                endpoint: durable.endpoint,
+                referer: durable.referer,
+                fields: &fields,
+                response_kind: MutationResponseKind::Heartbeat,
+            },
+            true,
+            || self.send_sco_form_at_endpoint(session, route, endpoint, &fields),
+        )
+        .await
     }
 
     async fn finalize_duration_preserved(
@@ -1529,26 +1866,33 @@ impl NativeWellearnInventoryTransport {
         endpoint: ScoEndpoint,
         sco_id: &str,
         state: &PreservedCmiState,
+        durable: DurableDurationExchange<'_>,
     ) -> ProviderResult<bool> {
-        let response = self
-            .send_sco_form_at_endpoint(
-                session,
-                route,
-                endpoint,
-                &[
-                    ("action", "savescoinfo160928"),
-                    ("uid", route.user_id()),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("progress", &state.progress),
-                    ("crate", &state.score_scaled),
-                    ("status", "unknown"),
-                    ("cstatus", &state.completion_status),
-                    ("trycount", "0"),
-                ],
-            )
-            .await?;
-        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
+        let fields = [
+            ("action", "savescoinfo160928"),
+            ("uid", route.user_id()),
+            ("cid", route.course_id()),
+            ("scoid", sco_id),
+            ("progress", state.progress.as_str()),
+            ("crate", state.score_scaled.as_str()),
+            ("status", "unknown"),
+            ("cstatus", state.completion_status.as_str()),
+            ("trycount", "0"),
+        ];
+        execute_durable_duration_mutation(
+            durable.sink,
+            DurableDurationMutationRequest {
+                kind: WellearnDurationMutationKind::Finalize,
+                ordinal: durable.ordinal,
+                endpoint: durable.endpoint,
+                referer: durable.referer,
+                fields: &fields,
+                response_kind: MutationResponseKind::StrictSuccess,
+            },
+            true,
+            || self.send_sco_form_at_endpoint(session, route, endpoint, &fields),
+        )
+        .await
     }
 
     async fn finalize_duration_implicit(
@@ -1557,21 +1901,28 @@ impl NativeWellearnInventoryTransport {
         route: &crate::WellearnCourseContext,
         endpoint: ScoEndpoint,
         sco_id: &str,
+        durable: DurableDurationExchange<'_>,
     ) -> ProviderResult<bool> {
-        let response = self
-            .send_sco_form_at_endpoint(
-                session,
-                route,
-                endpoint,
-                &[
-                    ("action", "savescoinfo160928"),
-                    ("uid", route.user_id()),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                ],
-            )
-            .await?;
-        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
+        let fields = [
+            ("action", "savescoinfo160928"),
+            ("uid", route.user_id()),
+            ("cid", route.course_id()),
+            ("scoid", sco_id),
+        ];
+        execute_durable_duration_mutation(
+            durable.sink,
+            DurableDurationMutationRequest {
+                kind: WellearnDurationMutationKind::Finalize,
+                ordinal: durable.ordinal,
+                endpoint: durable.endpoint,
+                referer: durable.referer,
+                fields: &fields,
+                response_kind: MutationResponseKind::StrictSuccess,
+            },
+            true,
+            || self.send_sco_form_at_endpoint(session, route, endpoint, &fields),
+        )
+        .await
     }
 }
 
@@ -2500,6 +2851,160 @@ mod tests {
                 "receipt:2:false",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn resource_mutation_issues_before_send_and_persists_definite_receipt() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = FixtureMutationSink {
+            events: Arc::clone(&events),
+            fail_issue: false,
+            fail_receipt: false,
+        };
+        let send_events = Arc::clone(&events);
+        let endpoint = static_url(SCO_URL).unwrap();
+        let referer = static_url(STUDY_COURSE_REFERER).unwrap();
+        let fields = [("action", "startsco160928"), ("cid", "1001")];
+        assert!(
+            execute_durable_resource_mutation(
+                &sink,
+                DurableResourceMutationRequest {
+                    kind: WellearnResourceMutationKind::Start,
+                    ordinal: 1,
+                    endpoint: &endpoint,
+                    referer: &referer,
+                    fields: &fields,
+                },
+                false,
+                move || async move {
+                    send_events.lock().unwrap().push("send:1".to_owned());
+                    WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned())
+                },
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["issue:1", "send:1", "receipt:1:true"]
+        );
+    }
+
+    #[test]
+    fn resource_mutation_requires_a_core_sink_before_transport_dispatch() {
+        let Err(error) = required_resource_mutation_sink(&NoMutationEvents) else {
+            panic!("resource mutation unexpectedly accepted a missing Core sink");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+    }
+
+    #[test]
+    fn duration_mutation_requires_a_core_sink_before_transport_dispatch() {
+        let Err(error) = required_duration_mutation_sink(&NoMutationEvents) else {
+            panic!("duration mutation unexpectedly accepted a missing Core sink");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+    }
+
+    #[tokio::test]
+    async fn duration_mutation_issues_before_send_and_persists_definite_receipt() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = FixtureMutationSink {
+            events: Arc::clone(&events),
+            fail_issue: false,
+            fail_receipt: false,
+        };
+        let send_events = Arc::clone(&events);
+        let endpoint = static_url(SCO_URL).unwrap();
+        let referer = static_url(STUDY_COURSE_REFERER).unwrap();
+        let fields = [
+            ("action", "keepsco_with_getticket_with_updatecmitime"),
+            ("cid", "1001"),
+        ];
+        assert!(
+            execute_durable_duration_mutation(
+                &sink,
+                DurableDurationMutationRequest {
+                    kind: WellearnDurationMutationKind::PreserveKeep,
+                    ordinal: 1,
+                    endpoint: &endpoint,
+                    referer: &referer,
+                    fields: &fields,
+                    response_kind: MutationResponseKind::Heartbeat,
+                },
+                false,
+                move || async move {
+                    send_events.lock().unwrap().push("send:1".to_owned());
+                    WellearnInventoryDocument::try_new(r#"{"ret":1}"#.to_owned())
+                },
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["issue:1", "send:1", "receipt:1:true"]
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_ledger_failure_never_sends_or_replays_uncertain_mutation() {
+        let issue_events = Arc::new(Mutex::new(Vec::new()));
+        let issue_sink = FixtureMutationSink {
+            events: issue_events,
+            fail_issue: true,
+            fail_receipt: false,
+        };
+        let sends = Arc::new(AtomicUsize::new(0));
+        let endpoint = static_url(SCO_URL).unwrap();
+        let referer = static_url(STUDY_COURSE_REFERER).unwrap();
+        let fields = [("action", "startsco160928"), ("cid", "1001")];
+        let blocked_sends = Arc::clone(&sends);
+        let issue_error = execute_durable_resource_mutation(
+            &issue_sink,
+            DurableResourceMutationRequest {
+                kind: WellearnResourceMutationKind::Start,
+                ordinal: 1,
+                endpoint: &endpoint,
+                referer: &referer,
+                fields: &fields,
+            },
+            false,
+            move || async move {
+                blocked_sends.fetch_add(1, Ordering::Relaxed);
+                WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(issue_error.kind, ProviderErrorKind::Internal);
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+
+        let receipt_sink = FixtureMutationSink {
+            events: Arc::new(Mutex::new(Vec::new())),
+            fail_issue: false,
+            fail_receipt: true,
+        };
+        let sent_once = Arc::clone(&sends);
+        let receipt_error = execute_durable_resource_mutation(
+            &receipt_sink,
+            DurableResourceMutationRequest {
+                kind: WellearnResourceMutationKind::Start,
+                ordinal: 1,
+                endpoint: &endpoint,
+                referer: &referer,
+                fields: &fields,
+            },
+            false,
+            move || async move {
+                sent_once.fetch_add(1, Ordering::Relaxed);
+                WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(receipt_error.kind, ProviderErrorKind::HumanRequired);
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

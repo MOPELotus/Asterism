@@ -63,8 +63,13 @@ pub use authentication::{
     classify_password_login_response, encode_password_at,
 };
 pub use batch_execution::{
-    WELLEARN_BATCH_EXECUTION_PLANNING_INPUT_TYPE, WellearnBatchExecutionPlanner,
-    WellearnBatchExecutionPlanningInput, restore_batch_execution_plan,
+    WELLEARN_BATCH_EXECUTION_PLANNING_INPUT_TYPE, WELLEARN_PUBLIC_BATCH_EXECUTION_INPUT_TYPE,
+    WELLEARN_PUBLIC_BATCH_MATERIALIZATION_BINDING_TYPE, WellearnBatchExecutionPlanner,
+    WellearnBatchExecutionPlanningInput, WellearnBatchMaterializationScope,
+    WellearnBatchMaterializedChildBinding, WellearnBatchRuntimeSettingsRevision,
+    WellearnPublicBatchDurationPolicy, WellearnPublicBatchExecutionInput,
+    WellearnPublicBatchMaterializationBinding, WellearnPublicBatchScorePolicy,
+    restore_batch_execution_plan,
 };
 pub use batch_plan::{
     WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_TYPE, WELLEARN_ATOMIC_BATCH_SNAPSHOT_TYPE,
@@ -85,8 +90,9 @@ pub use course_context::{WellearnCourseContext, parse_course_context};
 pub use course_inventory::parse_course_inventory;
 pub use duration_read::WellearnDurationRead;
 pub use duration_report::{
-    WellearnDurationReport, WellearnDurationReportDocuments, WellearnDurationReportPlan,
-    WellearnDurationReportTransport,
+    WELLEARN_DURATION_REPORT_BINDING_TYPE, WELLEARN_DURATION_REPORT_SEQUENCE_TYPE,
+    WellearnDurationReport, WellearnDurationReportBinding, WellearnDurationReportDocuments,
+    WellearnDurationReportPlan, WellearnDurationReportTransport,
 };
 pub use execution::WellearnTaskExecution;
 pub use inventory_capabilities::{
@@ -103,7 +109,9 @@ pub use provider::{
     build_native_atomic_duration_completion_runtime,
 };
 pub use resource_execution::{
-    WellearnResourceExecution, WellearnResourceExecutionDocuments, WellearnResourceExecutionPlan,
+    WELLEARN_RESOURCE_EXECUTION_BINDING_TYPE, WELLEARN_RESOURCE_EXECUTION_SEQUENCE_TYPE,
+    WellearnResourceExecution, WellearnResourceExecutionBinding,
+    WellearnResourceExecutionDocuments, WellearnResourceExecutionPlan,
     WellearnResourceExecutionTransport,
 };
 pub use runtime_settings::{

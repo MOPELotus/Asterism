@@ -1,12 +1,18 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{LogLevel, TaskCapability};
+use asterism_domain::{
+    CourseId, ExecutionId, LogLevel, ProviderAccountId, ProviderId, TaskCapability, TaskId,
+};
 use asterism_provider_api::{
-    ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
-    ProviderErrorKind, ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, TaskDetailCapability, TaskExecutionCapability,
+    ExecutionEventSink, ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
+    ExecutionMutationSequencePlan, ExecutionMutationVerification, ExecutionOutcome,
+    ExecutionRequest, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
+    ProviderIdentity, ProviderMetadata, ProviderProgress, ProviderResult, TaskDetailCapability,
+    TaskExecutionCapability,
 };
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     WellearnCmiDocument, WellearnCmiSnapshot,
@@ -19,6 +25,41 @@ use crate::{
     },
     task_detail::validate_fresh_execution_detail,
 };
+
+/// Namespaced credential-free persistence type for one exact singleton
+/// `DurationReport` authority.
+pub const WELLEARN_DURATION_REPORT_BINDING_TYPE: &str = "welearn.duration-report-binding.v1";
+/// Receipt-conditional sequence type derived from one duration binding and
+/// its fresh initialized/uninitialized baseline decision.
+pub const WELLEARN_DURATION_REPORT_SEQUENCE_TYPE: &str = "welearn.duration-report-sequence.v1";
+
+const WELLEARN_DURATION_REPORT_BINDING_VERSION: u16 = 1;
+const MAX_DURATION_REPORT_BINDING_BYTES: usize = 16 * 1_024;
+const DURATION_REPORT_BINDING_DIGEST_DOMAIN: &[u8] =
+    b"asterism.welearn.duration-report-binding.v1\0";
+const DURATION_REPORT_VERIFICATION_DIGEST_DOMAIN: &[u8] =
+    b"asterism.welearn.duration-report-verification.v1\0";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WellearnDurationMutationKind {
+    Start,
+    PreserveKeep,
+    CounterKeep,
+    ImplicitKeep,
+    Finalize,
+}
+
+impl WellearnDurationMutationKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "welearn.duration.start",
+            Self::PreserveKeep => "welearn.duration.preserve-keep",
+            Self::CounterKeep => "welearn.duration.counter-keep",
+            Self::ImplicitKeep => "welearn.duration.implicit-keep",
+            Self::Finalize => "welearn.duration.finalize",
+        }
+    }
+}
 
 /// Complete before/after evidence returned by one bounded `WELearn` duration
 /// lifecycle. Response bodies remain redacted and zeroized by their wrappers.
@@ -173,6 +214,358 @@ impl WellearnDurationReportPlan {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnDurationReportPlanWire {
+    duration_seconds: u64,
+    heartbeat_interval_seconds: u64,
+    protocol_mode: String,
+}
+
+impl From<WellearnDurationReportPlan> for WellearnDurationReportPlanWire {
+    fn from(plan: WellearnDurationReportPlan) -> Self {
+        Self {
+            duration_seconds: plan.duration_seconds,
+            heartbeat_interval_seconds: plan.heartbeat_interval_seconds,
+            protocol_mode: plan.protocol_mode.as_str().to_owned(),
+        }
+    }
+}
+
+impl TryFrom<WellearnDurationReportPlanWire> for WellearnDurationReportPlan {
+    type Error = ProviderError;
+
+    fn try_from(wire: WellearnDurationReportPlanWire) -> Result<Self, Self::Error> {
+        let protocol_mode = match wire.protocol_mode.as_str() {
+            "preserve_fresh" => WellearnDurationProtocolMode::PreserveFresh,
+            "client_counter" => WellearnDurationProtocolMode::ClientCounter,
+            "implicit_server" => WellearnDurationProtocolMode::ImplicitServer,
+            _ => return Err(invalid_duration_report_binding()),
+        };
+        let plan = Self {
+            duration_seconds: wire.duration_seconds,
+            heartbeat_interval_seconds: wire.heartbeat_interval_seconds,
+            protocol_mode,
+        };
+        plan.validate()
+            .map_err(|_| invalid_duration_report_binding())?;
+        Ok(plan)
+    }
+}
+
+/// Immutable credential-free binding between one singleton Core Execution and
+/// the exact donor duration plan selected from its frozen runtime settings.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WellearnDurationReportBinding {
+    provider_id: ProviderId,
+    provider_account_id: ProviderAccountId,
+    execution_id: ExecutionId,
+    task_id: TaskId,
+    course_id: Option<CourseId>,
+    remote_task_id: String,
+    runtime_settings_schema_version: u32,
+    plan: WellearnDurationReportPlan,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnDurationReportBindingWire {
+    version: u16,
+    provider_id: String,
+    provider_account_id: ProviderAccountId,
+    execution_id: ExecutionId,
+    task_id: TaskId,
+    course_id: Option<CourseId>,
+    remote_task_id: String,
+    runtime_settings_schema_version: u32,
+    plan: WellearnDurationReportPlanWire,
+}
+
+impl WellearnDurationReportBinding {
+    /// Freezes local identity and the resolved duration target without
+    /// retaining a Cookie, CMI body, route or receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects Provider/request/settings/plan drift and malformed SCO identity.
+    pub fn try_new(
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        plan: WellearnDurationReportPlan,
+    ) -> ProviderResult<Self> {
+        if context.provider_id.as_str() != crate::metadata::PROVIDER_ID
+            || !request.has_valid_capability_step()
+            || request.requested_capabilities != [TaskCapability::DurationReport]
+            || request.provider_plan_artifact.is_some()
+            || plan != derive_duration_report_plan(request)?
+        {
+            return Err(invalid_duration_report_binding());
+        }
+        let binding = Self {
+            provider_id: context.provider_id.clone(),
+            provider_account_id: context.account_id,
+            execution_id: request.execution_id,
+            task_id: request.task_id,
+            course_id: request.course_id,
+            remote_task_id: request.remote_task_id.clone(),
+            runtime_settings_schema_version: request.runtime_settings.schema_version,
+            plan,
+        };
+        binding.validate_shape()?;
+        Ok(binding)
+    }
+
+    pub const fn plan(&self) -> WellearnDurationReportPlan {
+        self.plan
+    }
+
+    /// Encodes one bounded deny-unknown v1 binding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid binding, serialization failure or size overflow.
+    pub fn encode(&self) -> ProviderResult<Vec<u8>> {
+        self.validate_shape()?;
+        let encoded = serde_json::to_vec(&WellearnDurationReportBindingWire {
+            version: WELLEARN_DURATION_REPORT_BINDING_VERSION,
+            provider_id: self.provider_id.as_str().to_owned(),
+            provider_account_id: self.provider_account_id,
+            execution_id: self.execution_id,
+            task_id: self.task_id,
+            course_id: self.course_id,
+            remote_task_id: self.remote_task_id.clone(),
+            runtime_settings_schema_version: self.runtime_settings_schema_version,
+            plan: self.plan.into(),
+        })
+        .map_err(|_| invalid_duration_report_binding())?;
+        if encoded.is_empty() || encoded.len() > MAX_DURATION_REPORT_BINDING_BYTES {
+            return Err(invalid_duration_report_binding());
+        }
+        Ok(encoded)
+    }
+
+    /// Decodes only this Provider's exact namespaced binding and recomputes it
+    /// from independently loaded immutable execution values.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign types, malformed/unknown/oversized bytes and all
+    /// identity, settings or plan substitution.
+    pub fn decode(
+        binding_type: &str,
+        encoded: &[u8],
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        plan: WellearnDurationReportPlan,
+    ) -> ProviderResult<Self> {
+        if binding_type != WELLEARN_DURATION_REPORT_BINDING_TYPE
+            || encoded.is_empty()
+            || encoded.len() > MAX_DURATION_REPORT_BINDING_BYTES
+        {
+            return Err(invalid_duration_report_binding());
+        }
+        let wire: WellearnDurationReportBindingWire =
+            serde_json::from_slice(encoded).map_err(|_| invalid_duration_report_binding())?;
+        if wire.version != WELLEARN_DURATION_REPORT_BINDING_VERSION {
+            return Err(invalid_duration_report_binding());
+        }
+        let decoded = Self {
+            provider_id: ProviderId::new(wire.provider_id)
+                .map_err(|_| invalid_duration_report_binding())?,
+            provider_account_id: wire.provider_account_id,
+            execution_id: wire.execution_id,
+            task_id: wire.task_id,
+            course_id: wire.course_id,
+            remote_task_id: wire.remote_task_id,
+            runtime_settings_schema_version: wire.runtime_settings_schema_version,
+            plan: WellearnDurationReportPlan::try_from(wire.plan)?,
+        };
+        decoded.validate(context, request, plan)?;
+        Ok(decoded)
+    }
+
+    /// Recomputes the complete binding from independent values.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every field substitution or invalid shape.
+    pub fn validate(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        plan: WellearnDurationReportPlan,
+    ) -> ProviderResult<()> {
+        self.validate_shape()?;
+        if *self != Self::try_new(context, request, plan)? {
+            return Err(invalid_duration_report_binding());
+        }
+        Ok(())
+    }
+
+    /// Projects the exact donor mutation phases after the fresh baseline has
+    /// determined whether the historical preservation profile needs `start`.
+    /// The complete sequence is persisted before its first issue.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an impossible start decision or phase/count overflow.
+    pub fn mutation_sequence_plan(
+        &self,
+        started: bool,
+    ) -> ProviderResult<ExecutionMutationSequencePlan> {
+        self.validate_shape()?;
+        if !started
+            && !matches!(
+                self.plan.protocol_mode,
+                WellearnDurationProtocolMode::PreserveFresh
+            )
+        {
+            return Err(invalid_duration_report_binding());
+        }
+        let mut phases = Vec::with_capacity(3);
+        if started {
+            phases.push(duration_sequence_phase(
+                WellearnDurationMutationKind::Start,
+                1,
+                1,
+                false,
+                if self.plan.protocol_mode == WellearnDurationProtocolMode::ClientCounter {
+                    ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached
+                } else {
+                    ExecutionMutationSequenceAdvanceCondition::MaximumReached
+                },
+            )?);
+        }
+        match self.plan.protocol_mode {
+            WellearnDurationProtocolMode::PreserveFresh => {
+                let keeps = u32::try_from(
+                    self.plan.duration_seconds / self.plan.heartbeat_interval_seconds + 1,
+                )
+                .map_err(|_| invalid_duration_report_binding())?;
+                phases.push(duration_sequence_phase(
+                    WellearnDurationMutationKind::PreserveKeep,
+                    keeps,
+                    keeps,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                )?);
+                phases.push(duration_sequence_phase(
+                    WellearnDurationMutationKind::Finalize,
+                    1,
+                    1,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                )?);
+            }
+            WellearnDurationProtocolMode::ClientCounter => {
+                let maximum = u32::try_from(self.plan.duration_seconds)
+                    .map_err(|_| invalid_duration_report_binding())?;
+                phases.push(duration_sequence_phase(
+                    WellearnDurationMutationKind::CounterKeep,
+                    1,
+                    maximum,
+                    true,
+                    ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached,
+                )?);
+            }
+            WellearnDurationProtocolMode::ImplicitServer => {
+                let keeps = u32::try_from(
+                    self.plan.duration_seconds / self.plan.heartbeat_interval_seconds,
+                )
+                .map_err(|_| invalid_duration_report_binding())?;
+                phases.push(duration_sequence_phase(
+                    WellearnDurationMutationKind::ImplicitKeep,
+                    keeps,
+                    keeps,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                )?);
+                phases.push(duration_sequence_phase(
+                    WellearnDurationMutationKind::Finalize,
+                    1,
+                    1,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                )?);
+            }
+        }
+        ExecutionMutationSequencePlan::try_new(
+            self.binding_digest()?,
+            WELLEARN_DURATION_REPORT_SEQUENCE_TYPE,
+            phases,
+        )
+        .map_err(|_| invalid_duration_report_binding())
+    }
+
+    fn binding_digest(&self) -> ProviderResult<[u8; 32]> {
+        let mut digest = Sha256::new();
+        digest.update(DURATION_REPORT_BINDING_DIGEST_DOMAIN);
+        digest.update(self.encode()?);
+        Ok(digest.finalize().into())
+    }
+
+    fn validate_shape(&self) -> ProviderResult<()> {
+        self.plan
+            .validate()
+            .map_err(|_| invalid_duration_report_binding())?;
+        if self.provider_id.as_str() != crate::metadata::PROVIDER_ID
+            || self.runtime_settings_schema_version == 0
+            || self.remote_task_id.is_empty()
+            || self.remote_task_id.len() > 512
+            || self.remote_task_id.trim() != self.remote_task_id
+            || self.remote_task_id.chars().any(char::is_control)
+            || parse_sco_identity(&self.remote_task_id).is_err()
+        {
+            return Err(invalid_duration_report_binding());
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for WellearnDurationReportBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WellearnDurationReportBinding")
+            .field("provider_id", &self.provider_id)
+            .field("provider_account_id", &"[REDACTED]")
+            .field("execution_id", &"[REDACTED]")
+            .field("task_id", &"[REDACTED]")
+            .field("course_id", &"[REDACTED]")
+            .field("remote_task_id", &"[REDACTED]")
+            .field(
+                "runtime_settings_schema_version",
+                &self.runtime_settings_schema_version,
+            )
+            .field("plan", &self.plan)
+            .finish()
+    }
+}
+
+fn duration_sequence_phase(
+    kind: WellearnDurationMutationKind,
+    minimum: u32,
+    maximum: u32,
+    stop_repeating_after_rejection: bool,
+    advance_condition: ExecutionMutationSequenceAdvanceCondition,
+) -> ProviderResult<ExecutionMutationSequencePhase> {
+    ExecutionMutationSequencePhase::try_new(
+        kind.as_str(),
+        minimum,
+        maximum,
+        stop_repeating_after_rejection,
+        advance_condition,
+        None,
+    )
+    .map_err(|_| invalid_duration_report_binding())
+}
+
+fn invalid_duration_report_binding() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn duration report binding is invalid or drifted",
+    )
+}
+
 /// High-level transport boundary for an atomic read → optional start → keep →
 /// finalize → fresh-read lifecycle. Implementations must not replay mutations
 /// after an authentication failure.
@@ -183,7 +576,7 @@ pub trait WellearnDurationReportTransport: Send + Sync {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
-        plan: WellearnDurationReportPlan,
+        binding: &WellearnDurationReportBinding,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnDurationReportDocuments>;
 }
@@ -264,6 +657,7 @@ impl TaskExecutionCapability for WellearnDurationReport {
             protocol_mode: settings.duration_protocol_mode,
         };
         plan.validate()?;
+        let binding = WellearnDurationReportBinding::try_new(context, request, plan)?;
         let detail = self
             .details
             .task_detail(context, &request.remote_task_id)
@@ -281,7 +675,7 @@ impl TaskExecutionCapability for WellearnDurationReport {
         )?;
         let documents = self
             .transport
-            .report_duration(context, &course_id, &sco_id, plan, events)
+            .report_duration(context, &course_id, &sco_id, &binding, events)
             .await?;
         documents.validate_for_plan(plan)?;
         let before = parse_cmi_snapshot(documents.before.as_str())?;
@@ -295,6 +689,8 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 "WELearn duration did not change after the reported session",
             ));
         }
+        let final_mutation_verification_recorded =
+            persist_duration_report_verification(events, &binding, &documents).await?;
         events
             .report(ProviderProgress {
                 percent: Some(100),
@@ -325,6 +721,7 @@ impl TaskExecutionCapability for WellearnDurationReport {
                     "duration_report_mode": duration_mode(settings.duration_report),
                     "duration_protocol_mode": settings.duration_protocol_mode.as_str(),
                     "duration_observation_changed": true,
+                    "final_mutation_verification_recorded": final_mutation_verification_recorded,
                 })),
             })
             .await?;
@@ -350,9 +747,55 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 "progress_preserved": true,
                 "score_preserved": true,
                 "duration_observation_changed": true,
+                "final_mutation_verification_recorded": final_mutation_verification_recorded,
             }),
         })
     }
+}
+
+async fn persist_duration_report_verification(
+    events: &(dyn ExecutionEventSink + Send + Sync),
+    binding: &WellearnDurationReportBinding,
+    documents: &WellearnDurationReportDocuments,
+) -> ProviderResult<bool> {
+    let final_accepted = match binding.plan.protocol_mode {
+        WellearnDurationProtocolMode::ClientCounter => documents.heartbeat_rejected == 0,
+        WellearnDurationProtocolMode::PreserveFresh
+        | WellearnDurationProtocolMode::ImplicitServer => documents.final_accepted == Some(true),
+    };
+    if !final_accepted {
+        return Ok(false);
+    }
+    let ordinal = u32::from(documents.started)
+        .checked_add(documents.heartbeat_count)
+        .and_then(|value| {
+            value.checked_add(u32::from(!matches!(
+                binding.plan.protocol_mode,
+                WellearnDurationProtocolMode::ClientCounter
+            )))
+        })
+        .ok_or_else(invalid_duration_report_binding)?;
+    let mut digest = Sha256::new();
+    digest.update(DURATION_REPORT_VERIFICATION_DIGEST_DOMAIN);
+    digest.update(binding.binding_digest()?);
+    digest.update(ordinal.to_be_bytes());
+    digest.update(documents.before.as_str().as_bytes());
+    digest.update(documents.after.as_str().as_bytes());
+    let verification = ExecutionMutationVerification::new(ordinal, digest.finalize().into(), true)
+        .map_err(|_| invalid_duration_report_binding())?;
+    let sink = events.mutation_sink().ok_or_else(|| {
+        ProviderError::human_required(
+            "WELearn duration verification cannot be durably attached to its final mutation",
+            asterism_domain::HumanRequiredReason::ManualIntervention,
+        )
+    })?;
+    sink.record_verification(verification).await.map_err(|_| {
+        ProviderError::human_required(
+            "WELearn duration verification persistence failed after mutation",
+            asterism_domain::HumanRequiredReason::ManualIntervention,
+        )
+    })?;
+    Ok(true)
 }
 
 const fn donor_request_delay_seconds(mode: WellearnDurationProtocolMode, started: bool) -> u64 {
@@ -374,6 +817,19 @@ fn select_duration(configured: WellearnDurationTarget, request: &ExecutionReques
             maximum,
         ),
     }
+}
+
+fn derive_duration_report_plan(
+    request: &ExecutionRequest,
+) -> ProviderResult<WellearnDurationReportPlan> {
+    let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
+    let plan = WellearnDurationReportPlan {
+        duration_seconds: select_duration(settings.duration_report, request),
+        heartbeat_interval_seconds: settings.duration_heartbeat_interval_seconds,
+        protocol_mode: settings.duration_protocol_mode,
+    };
+    plan.validate()?;
+    Ok(plan)
 }
 
 const fn duration_mode(configured: WellearnDurationTarget) -> &'static str {
@@ -457,9 +913,9 @@ mod tests {
 
     use super::*;
     use crate::runtime_settings::{
-        DURATION_HEARTBEAT_INTERVAL_KEY, DURATION_REPORT_MAX_SECONDS_KEY,
-        DURATION_REPORT_MIN_SECONDS_KEY, DURATION_REPORT_MODE_KEY, DURATION_REPORT_SECONDS_KEY,
-        runtime_settings_schema,
+        DURATION_HEARTBEAT_INTERVAL_KEY, DURATION_PROTOCOL_MODE_KEY,
+        DURATION_REPORT_MAX_SECONDS_KEY, DURATION_REPORT_MIN_SECONDS_KEY, DURATION_REPORT_MODE_KEY,
+        DURATION_REPORT_SECONDS_KEY, runtime_settings_schema,
     };
 
     const BEFORE: &str =
@@ -572,9 +1028,10 @@ mod tests {
             _context: &ProviderContext,
             course_id: &str,
             sco_id: &str,
-            plan: WellearnDurationReportPlan,
-            _events: &(dyn ExecutionEventSink + Send + Sync),
+            binding: &WellearnDurationReportBinding,
+            events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<WellearnDurationReportDocuments> {
+            let plan = binding.plan();
             assert_eq!(course_id, "1001");
             assert_eq!(sco_id, "301");
             self.calls.fetch_add(1, Ordering::Relaxed);
@@ -594,6 +1051,28 @@ mod tests {
             let accepted = self.behavior != FixtureBehavior::ExplicitRejections;
             let heartbeat_count =
                 u32::try_from(1 + plan.duration_seconds / plan.heartbeat_interval_seconds).unwrap();
+            let sink = events.mutation_sink().unwrap();
+            sink.prepare_sequence_plan(&binding.mutation_sequence_plan(false)?)
+                .await?;
+            for ordinal in 1..=heartbeat_count + 1 {
+                let kind = if ordinal <= heartbeat_count {
+                    WellearnDurationMutationKind::PreserveKeep
+                } else {
+                    WellearnDurationMutationKind::Finalize
+                };
+                let issue = asterism_provider_api::ExecutionMutationIssue::new(
+                    ordinal,
+                    kind.as_str(),
+                    [u8::try_from(ordinal).unwrap_or(255); 32],
+                )?;
+                sink.issue(&issue).await?;
+                sink.record_receipt(asterism_provider_api::ExecutionMutationReceipt::new(
+                    ordinal,
+                    [u8::try_from(ordinal + 1).unwrap_or(254); 32],
+                    accepted,
+                )?)
+                .await?;
+            }
             Ok(WellearnDurationReportDocuments::with_receipts(
                 WellearnCmiDocument::try_new(BEFORE).unwrap(),
                 WellearnCmiDocument::try_new(after).unwrap(),
@@ -614,6 +1093,11 @@ mod tests {
     struct FixtureEvents {
         progress: AtomicUsize,
         logs: AtomicUsize,
+        prepared: AtomicUsize,
+        issues: AtomicUsize,
+        receipts: AtomicUsize,
+        verifications: AtomicUsize,
+        fail_verification: bool,
     }
 
     #[async_trait]
@@ -626,6 +1110,54 @@ mod tests {
         async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
             self.logs.fetch_add(1, Ordering::Relaxed);
             Ok(())
+        }
+
+        fn mutation_sink(
+            &self,
+        ) -> Option<&(dyn asterism_provider_api::ExecutionMutationSink + Send + Sync)> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl asterism_provider_api::ExecutionMutationSink for FixtureEvents {
+        async fn prepare_sequence_plan(
+            &self,
+            _plan: &ExecutionMutationSequencePlan,
+        ) -> ProviderResult<()> {
+            self.prepared.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn issue(
+            &self,
+            _issue: &asterism_provider_api::ExecutionMutationIssue,
+        ) -> ProviderResult<()> {
+            self.issues.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn record_receipt(
+            &self,
+            _receipt: asterism_provider_api::ExecutionMutationReceipt,
+        ) -> ProviderResult<()> {
+            self.receipts.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn record_verification(
+            &self,
+            _verification: ExecutionMutationVerification,
+        ) -> ProviderResult<()> {
+            self.verifications.fetch_add(1, Ordering::Relaxed);
+            if self.fail_verification {
+                Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "fixture verification persistence failed",
+                ))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -673,6 +1205,131 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn singleton_duration_binding_round_trips_and_rejects_identity_or_codec_drift() {
+        let context = context();
+        let request = request();
+        let plan = derive_duration_report_plan(&request).unwrap();
+        let binding = WellearnDurationReportBinding::try_new(&context, &request, plan).unwrap();
+        let encoded = binding.encode().unwrap();
+        let decoded = WellearnDurationReportBinding::decode(
+            WELLEARN_DURATION_REPORT_BINDING_TYPE,
+            &encoded,
+            &context,
+            &request,
+            plan,
+        )
+        .unwrap();
+        assert_eq!(decoded, binding);
+        assert_eq!(decoded.plan(), plan);
+
+        let debug = format!("{binding:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&request.execution_id.to_string()));
+        assert!(!debug.contains(&request.remote_task_id));
+        assert!(
+            WellearnDurationReportBinding::decode(
+                "welearn.foreign.v1",
+                &encoded,
+                &context,
+                &request,
+                plan,
+            )
+            .is_err()
+        );
+
+        let mut unknown: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        unknown["unexpected"] = serde_json::json!(true);
+        assert!(
+            WellearnDurationReportBinding::decode(
+                WELLEARN_DURATION_REPORT_BINDING_TYPE,
+                &serde_json::to_vec(&unknown).unwrap(),
+                &context,
+                &request,
+                plan,
+            )
+            .is_err()
+        );
+
+        let mut substituted = request.clone();
+        substituted.task_id = TaskId::new();
+        assert!(
+            WellearnDurationReportBinding::decode(
+                WELLEARN_DURATION_REPORT_BINDING_TYPE,
+                &encoded,
+                &context,
+                &substituted,
+                plan,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn singleton_duration_sequence_preserves_each_donor_lifecycle() {
+        let context = context();
+        let preserve_request = request_for_protocol("preserve_fresh", 120, 60);
+        let preserve_plan = derive_duration_report_plan(&preserve_request).unwrap();
+        let preserve =
+            WellearnDurationReportBinding::try_new(&context, &preserve_request, preserve_plan)
+                .unwrap();
+        let initialized = preserve.mutation_sequence_plan(false).unwrap();
+        assert_eq!(
+            initialized.sequence_type(),
+            WELLEARN_DURATION_REPORT_SEQUENCE_TYPE
+        );
+        assert_eq!(initialized.phases().len(), 2);
+        assert_eq!(
+            initialized.phases()[0].operation_type(),
+            WellearnDurationMutationKind::PreserveKeep.as_str()
+        );
+        assert_eq!(initialized.phases()[0].minimum_occurrences(), 3);
+        assert_eq!(initialized.phases()[0].maximum_occurrences(), 3);
+        assert_eq!(
+            initialized.phases()[1].operation_type(),
+            WellearnDurationMutationKind::Finalize.as_str()
+        );
+        let uninitialized = preserve.mutation_sequence_plan(true).unwrap();
+        assert_eq!(uninitialized.phases().len(), 3);
+        assert_eq!(
+            uninitialized.phases()[0].operation_type(),
+            WellearnDurationMutationKind::Start.as_str()
+        );
+
+        let client_request = request_for_protocol("client_counter", 3, 1);
+        let client_plan = derive_duration_report_plan(&client_request).unwrap();
+        let client =
+            WellearnDurationReportBinding::try_new(&context, &client_request, client_plan).unwrap();
+        assert!(client.mutation_sequence_plan(false).is_err());
+        let client_sequence = client.mutation_sequence_plan(true).unwrap();
+        assert_eq!(client_sequence.phases().len(), 2);
+        assert_eq!(
+            client_sequence.phases()[0].advance_condition(),
+            ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached
+        );
+        assert_eq!(client_sequence.phases()[1].minimum_occurrences(), 1);
+        assert_eq!(client_sequence.phases()[1].maximum_occurrences(), 3);
+        assert!(client_sequence.phases()[1].stop_repeating_after_rejection());
+        assert_eq!(
+            client_sequence.phases()[1].advance_condition(),
+            ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached
+        );
+
+        let implicit_request = request_for_protocol("implicit_server", 61, 60);
+        let implicit_plan = derive_duration_report_plan(&implicit_request).unwrap();
+        let implicit =
+            WellearnDurationReportBinding::try_new(&context, &implicit_request, implicit_plan)
+                .unwrap();
+        let implicit_sequence = implicit.mutation_sequence_plan(true).unwrap();
+        assert_eq!(implicit_sequence.phases().len(), 3);
+        assert_eq!(implicit_sequence.phases()[1].minimum_occurrences(), 1);
+        assert_eq!(implicit_sequence.phases()[1].maximum_occurrences(), 1);
+        assert_eq!(
+            implicit_sequence.phases()[2].operation_type(),
+            WellearnDurationMutationKind::Finalize.as_str()
         );
     }
 
@@ -801,6 +1458,10 @@ mod tests {
         assert_eq!(outcome.result_sanitized["donor_request_delay_seconds"], 6);
         assert_eq!(events.progress.load(Ordering::Relaxed), 1);
         assert_eq!(events.logs.load(Ordering::Relaxed), 1);
+        assert_eq!(events.prepared.load(Ordering::Relaxed), 1);
+        assert_eq!(events.issues.load(Ordering::Relaxed), 4);
+        assert_eq!(events.receipts.load(Ordering::Relaxed), 4);
+        assert_eq!(events.verifications.load(Ordering::Relaxed), 1);
         assert_eq!(details.calls.load(Ordering::Relaxed), 1);
     }
 
@@ -823,6 +1484,28 @@ mod tests {
         assert_eq!(outcome.result_sanitized["heartbeat_accepted"], 0);
         assert_eq!(outcome.result_sanitized["heartbeat_rejected"], 3);
         assert_eq!(outcome.result_sanitized["final_accepted"], false);
+    }
+
+    #[tokio::test]
+    async fn post_mutation_verification_persistence_failure_requires_human_review() {
+        let capability = WellearnDurationReport::try_new(
+            Arc::new(FixtureDetail::present()),
+            Arc::new(FixtureTransport::default()),
+        )
+        .unwrap();
+        let events = FixtureEvents {
+            fail_verification: true,
+            ..FixtureEvents::default()
+        };
+        let error = capability
+            .execute(&context(), &request(), &events)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ProviderErrorKind::HumanRequired);
+        assert_eq!(events.issues.load(Ordering::Relaxed), 4);
+        assert_eq!(events.receipts.load(Ordering::Relaxed), 4);
+        assert_eq!(events.verifications.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -972,17 +1655,29 @@ mod tests {
     }
 
     fn request() -> ExecutionRequest {
+        request_for_protocol("preserve_fresh", 120, 60)
+    }
+
+    fn request_for_protocol(
+        protocol_mode: &str,
+        duration_seconds: u64,
+        heartbeat_interval_seconds: u64,
+    ) -> ExecutionRequest {
         let schema = runtime_settings_schema();
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
             values: std::collections::BTreeMap::from([
                 (
                     DURATION_REPORT_SECONDS_KEY.to_owned(),
-                    ProviderSettingValue::DurationSeconds(120),
+                    ProviderSettingValue::DurationSeconds(duration_seconds),
                 ),
                 (
                     DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
-                    ProviderSettingValue::DurationSeconds(60),
+                    ProviderSettingValue::DurationSeconds(heartbeat_interval_seconds),
+                ),
+                (
+                    DURATION_PROTOCOL_MODE_KEY.to_owned(),
+                    ProviderSettingValue::Choice(protocol_mode.to_owned()),
                 ),
             ]),
         };

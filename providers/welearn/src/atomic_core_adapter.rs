@@ -2,11 +2,14 @@ use std::fmt;
 
 use asterism_domain::{CourseId, ExecutionId, TaskCapability, TaskId};
 use asterism_provider_api::{
-    ExecutionParentBatchSnapshot, ExecutionRequest, ProviderError, ProviderErrorKind,
-    ProviderExecutionChildPlan, ProviderResult, ResolvedProviderRuntimeSettings,
+    ExecutionParentBatchSnapshot, ExecutionRequest, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderExecutionChildPlan, ProviderResult, ResolvedProviderRuntimeSettings,
 };
 
-use crate::{WellearnPreparedAtomicChildPlan, runtime_settings::WellearnRuntimeSettings};
+use crate::{
+    WellearnPreparedAtomicChildPlan, WellearnPublicBatchMaterializationBinding,
+    runtime_settings::WellearnRuntimeSettings,
+};
 
 const ATOMIC_CAPABILITIES: [TaskCapability; 2] = [
     TaskCapability::DurationReport,
@@ -64,6 +67,25 @@ impl WellearnResolvedAtomicChildExecution {
             .filter(|child| child.position() == position)
             .ok_or_else(invalid_resolved_atomic_child)?;
         Self::try_new(parent, child, request)
+    }
+
+    /// Applies the public-batch materialization binding before restoring the
+    /// same exact durable child position and request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects local Provider/account/Course, parent digest, Unit/SCO
+    /// coordinate, remote Task, grouped capability, artifact or settings-schema
+    /// drift before native execution or read-only recovery can perform I/O.
+    pub fn try_from_materialization_binding(
+        binding: &WellearnPublicBatchMaterializationBinding,
+        context: &ProviderContext,
+        parent: &ExecutionParentBatchSnapshot,
+        position: u32,
+        request: &ExecutionRequest,
+    ) -> ProviderResult<Self> {
+        binding.validate_child_dispatch(context, parent, position, request)?;
+        Self::try_from_parent_position(parent, position, request)
     }
 
     /// Jointly restores the Provider parent/child facts and binds them to the

@@ -6,6 +6,7 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionRecovery,
+    WellearnAtomicDurationCompletionRecoveryTransport, WellearnAtomicDurationCompletionTransport,
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnBatchExecutionPlanner,
     WellearnCmiTransport, WellearnCourseInventory, WellearnCourseInventoryTransport,
     WellearnDurationRead, WellearnDurationReport, WellearnDurationReportTransport,
@@ -60,6 +61,35 @@ pub fn build_development_provider(
     resource_transport: Arc<dyn WellearnResourceExecutionTransport>,
     duration_transport: Arc<dyn WellearnDurationReportTransport>,
 ) -> ProviderResult<ProviderEntry> {
+    build_development_provider_inner(
+        authentication_transport,
+        sessions,
+        course_transport,
+        task_transport,
+        cmi_transport,
+        resource_transport,
+        duration_transport,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the development composition keeps each audited WELearn boundary injectable"
+)]
+fn build_development_provider_inner(
+    authentication_transport: Arc<dyn WellearnAuthenticationTransport>,
+    sessions: Arc<dyn WellearnSessionResolver>,
+    course_transport: Arc<dyn WellearnCourseInventoryTransport>,
+    task_transport: Arc<dyn WellearnTaskInventoryTransport>,
+    cmi_transport: Arc<dyn WellearnCmiTransport>,
+    resource_transport: Arc<dyn WellearnResourceExecutionTransport>,
+    duration_transport: Arc<dyn WellearnDurationReportTransport>,
+    atomic_transports: Option<(
+        Arc<dyn WellearnAtomicDurationCompletionTransport>,
+        Arc<dyn WellearnAtomicDurationCompletionRecoveryTransport>,
+    )>,
+) -> ProviderResult<ProviderEntry> {
     let authentication = Arc::new(WellearnAuthentication::try_new(
         authentication_transport,
         sessions,
@@ -84,16 +114,36 @@ pub fn build_development_provider(
         course_inventory.clone(),
         task_inventory.clone(),
     )?);
-    let task_execution = Arc::new(WellearnTaskExecution::try_new_with_batch_planner(
-        resource_execution,
-        duration_report,
-        batch_planner,
-    )?);
+    let task_execution = Arc::new(match atomic_transports {
+        Some((atomic_transport, atomic_recovery_transport)) => {
+            let atomic_execution = Arc::new(WellearnAtomicDurationCompletion::try_new(
+                task_detail.clone(),
+                atomic_transport,
+            )?);
+            let atomic_recovery = Arc::new(WellearnAtomicDurationCompletionRecovery::try_new(
+                task_detail.clone(),
+                atomic_recovery_transport,
+            )?);
+            WellearnTaskExecution::try_new_with_batch_runtime(
+                resource_execution,
+                duration_report,
+                batch_planner,
+                atomic_execution,
+                atomic_recovery,
+            )?
+        }
+        None => WellearnTaskExecution::try_new_with_batch_planner(
+            resource_execution,
+            duration_report,
+            batch_planner,
+        )?,
+    });
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: runtime_settings_schema(),
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
+        course_enrollment: None,
         task_inventory: Some(task_inventory),
         task_detail: Some(task_detail),
         task_progress: Some(task_progress),
@@ -126,14 +176,15 @@ pub fn build_development_provider_with_native_inventory(
         network,
         sessions.clone(),
     )?);
-    build_development_provider(
+    build_development_provider_inner(
         authentication_transport,
         sessions,
         inventory.clone(),
         inventory.clone(),
         inventory.clone(),
         inventory.clone(),
-        inventory,
+        inventory.clone(),
+        Some((inventory.clone(), inventory)),
     )
 }
 
@@ -340,7 +391,7 @@ mod tests {
             _context: &ProviderContext,
             _course_id: &str,
             _sco_id: &str,
-            _plan: crate::WellearnDurationReportPlan,
+            _binding: &crate::WellearnDurationReportBinding,
             _events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<WellearnDurationReportDocuments> {
             Err(unused())
@@ -354,7 +405,8 @@ mod tests {
             _context: &ProviderContext,
             _course_id: &str,
             _sco_id: &str,
-            _plan: crate::WellearnResourceExecutionPlan,
+            _binding: &crate::WellearnResourceExecutionBinding,
+            _events: &(dyn asterism_provider_api::ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<WellearnResourceExecutionDocuments> {
             Err(unused())
         }

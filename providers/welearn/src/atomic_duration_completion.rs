@@ -12,10 +12,11 @@ use async_trait::async_trait;
 use crate::{
     WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnCmiDocument,
     WellearnDurationProtocolMode, WellearnPreparedAtomicChildPlan,
-    WellearnResolvedAtomicChildExecution, WellearnResourceCompletionCmiFormat,
-    WellearnResourceCompletionSequence, WellearnResourceCompletionTimeMode,
-    WellearnResourceCompletionWriteMode, WellearnResourceExecutionPlan,
-    WellearnResourceMutationProfile, atomic_mutation_digest::atomic_completion_observation_digest,
+    WellearnPublicBatchMaterializationBinding, WellearnResolvedAtomicChildExecution,
+    WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
+    WellearnResourceCompletionTimeMode, WellearnResourceCompletionWriteMode,
+    WellearnResourceExecutionPlan, WellearnResourceMutationProfile,
+    atomic_mutation_digest::atomic_completion_observation_digest,
     build_atomic_mutation_sequence_plan, cmi::parse_mutation_cmi_baseline,
     metadata::development_metadata, parse_cmi_snapshot,
     runtime_settings::MAX_DURATION_REPORT_SECONDS,
@@ -446,6 +447,29 @@ impl WellearnAtomicDurationCompletion {
     ) -> ProviderResult<ExecutionOutcome> {
         let resolved = WellearnResolvedAtomicChildExecution::try_from_parent_position(
             parent, position, request,
+        )?;
+        self.execute_resolved_core_child(context, &resolved, events)
+            .await
+    }
+
+    /// Executes one materialized Core child only after rebinding the exact
+    /// public-batch materialization record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects binding, parent, position, Unit/SCO, request or settings drift
+    /// before Task detail discovery, HTTP or mutation-ledger access.
+    pub async fn execute_bound_materialized_core_child(
+        &self,
+        context: &ProviderContext,
+        binding: &WellearnPublicBatchMaterializationBinding,
+        parent: &ExecutionParentBatchSnapshot,
+        position: u32,
+        request: &ExecutionRequest,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        let resolved = WellearnResolvedAtomicChildExecution::try_from_materialization_binding(
+            binding, context, parent, position, request,
         )?;
         self.execute_resolved_core_child(context, &resolved, events)
             .await

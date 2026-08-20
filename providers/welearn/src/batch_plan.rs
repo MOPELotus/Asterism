@@ -2540,9 +2540,9 @@ mod tests {
         ExecutionEventSink, ExecutionMutationIssue, ExecutionMutationReceipt,
         ExecutionMutationRecoveryRecord, ExecutionMutationSequenceObservation,
         ExecutionMutationSequencePlan, ExecutionMutationSequenceRecoverySnapshot,
-        ExecutionMutationSink, ExecutionMutationVerification, ExecutionRequest, ProviderContext,
-        ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
-        TaskDetailCapability,
+        ExecutionMutationSink, ExecutionMutationVerification, ExecutionRequest,
+        PreparedProviderBatchExecutionPlan, ProviderContext, ProviderExecutionLog,
+        ProviderIdentity, ProviderMetadata, ProviderProgress, TaskDetailCapability,
     };
     use async_trait::async_trait;
 
@@ -2557,9 +2557,13 @@ mod tests {
         WellearnAtomicDurationCompletionRecovery,
         WellearnAtomicDurationCompletionRecoveryTransport,
         WellearnAtomicDurationCompletionTransport, WellearnAtomicMutationKind,
-        WellearnAtomicPreFinalObservation, WellearnCmiDocument, WellearnScoLeavesDocument,
-        build_atomic_mutation_sequence_plan, development_metadata, parse_course_inventory,
-        parse_task_inventory, parse_unit_inventory, runtime_settings::runtime_settings_schema,
+        WellearnAtomicPreFinalObservation, WellearnBatchMaterializationScope,
+        WellearnBatchRuntimeSettingsRevision, WellearnCmiDocument,
+        WellearnPublicBatchDurationPolicy, WellearnPublicBatchExecutionInput,
+        WellearnPublicBatchMaterializationBinding, WellearnPublicBatchScorePolicy,
+        WellearnScoLeavesDocument, build_atomic_mutation_sequence_plan, development_metadata,
+        parse_course_inventory, parse_task_inventory, parse_unit_inventory,
+        runtime_settings::runtime_settings_schema,
     };
 
     const COURSES: &str =
@@ -2870,6 +2874,99 @@ mod tests {
             capability_step_position: 1,
             runtime_settings: runtime_settings_schema().resolve(None, None, None).unwrap(),
             provider_plan_artifact: child.execution_plan().artifact().cloned(),
+        }
+    }
+
+    struct BoundMaterializedBatchFixture {
+        context: ProviderContext,
+        binding: WellearnPublicBatchMaterializationBinding,
+        prepared: PreparedProviderBatchExecutionPlan,
+        request: ExecutionRequest,
+        cross_child_request: ExecutionRequest,
+        substituted_parent: crate::WellearnPreparedAtomicBatchPlan,
+    }
+
+    fn bound_fanyuchang_batch_fixture(
+        batch: &WellearnBatchPlan,
+        targets: &[u64],
+    ) -> BoundMaterializedBatchFixture {
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            Some(targets[0]),
+            None,
+        )
+        .unwrap();
+        let core_batch =
+            crate::prepare_atomic_execution_batch_plan(&authority, batch, Some(targets)).unwrap();
+        let (parent, plan) = core_batch.into_parts();
+        let expected_child_count = u32::try_from(plan.children().len()).unwrap();
+        let prepared =
+            PreparedProviderBatchExecutionPlan::try_new(parent, plan, expected_child_count)
+                .unwrap();
+        let first_child = &prepared.execution_batch_plan().children()[0];
+        let mut request = core_atomic_execution_request(first_child);
+        let context = atomic_context();
+        let course_id = request.course_id.unwrap();
+        let public = WellearnPublicBatchExecutionInput::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            WellearnPublicBatchDurationPolicy::FrozenPerChildSeconds(targets.to_vec()),
+            WellearnPublicBatchScorePolicy::Fixed(100),
+        )
+        .unwrap();
+        let private = public.to_provider_planning_input().unwrap();
+        let revision = WellearnBatchRuntimeSettingsRevision::try_new(
+            request.runtime_settings.schema_version,
+            None,
+            None,
+        )
+        .unwrap();
+        let scope = WellearnBatchMaterializationScope::try_new(
+            ProviderId::new(PROVIDER_ID).unwrap(),
+            context.account_id,
+            course_id,
+            revision,
+            expected_child_count,
+        )
+        .unwrap();
+        let binding = WellearnPublicBatchMaterializationBinding::try_new(
+            &public, &scope, &private, &prepared,
+        )
+        .unwrap();
+        let mut cross_child_request =
+            core_atomic_execution_request(&prepared.execution_batch_plan().children()[1]);
+        cross_child_request.course_id = request.course_id;
+        cross_child_request.runtime_settings = request.runtime_settings.clone();
+
+        let substituted_authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:302",
+            Some(targets[1]),
+            None,
+        )
+        .unwrap();
+        let substituted_parent = crate::prepare_atomic_execution_batch_plan(
+            &substituted_authority,
+            batch,
+            Some(targets),
+        )
+        .unwrap();
+        request.course_id = Some(course_id);
+
+        BoundMaterializedBatchFixture {
+            context,
+            binding,
+            prepared,
+            request,
+            cross_child_request,
+            substituted_parent,
         }
     }
 
@@ -3811,6 +3908,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bound_execute_rejects_position_child_and_parent_substitution_before_io() {
+        let fresh_tasks = tasks();
+        let batch =
+            build_batch_plan(&fresh_tasks, WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let fixture = bound_fanyuchang_batch_fixture(&batch, &[1, 2, 3]);
+        let detail_calls = Arc::new(Mutex::new(Vec::new()));
+        let transport = Arc::new(AtomicFixtureTransport::default());
+        let executor = WellearnAtomicDurationCompletion::try_new(
+            Arc::new(AtomicFixtureDetail {
+                metadata: development_metadata().unwrap(),
+                detail: detail(fresh_tasks[0].clone()),
+                calls: Arc::clone(&detail_calls),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+        let events = AtomicFixtureEvents::default();
+
+        for (parent, position, request) in [
+            (fixture.prepared.parent_snapshot(), 2, &fixture.request),
+            (
+                fixture.prepared.parent_snapshot(),
+                1,
+                &fixture.cross_child_request,
+            ),
+            (
+                fixture.substituted_parent.parent_snapshot(),
+                1,
+                &fixture.request,
+            ),
+        ] {
+            let error = executor
+                .execute_bound_materialized_core_child(
+                    &fixture.context,
+                    &fixture.binding,
+                    parent,
+                    position,
+                    request,
+                    &events,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::Internal);
+        }
+
+        assert!(detail_calls.lock().unwrap().is_empty());
+        assert!(transport.calls.lock().unwrap().is_empty());
+        assert!(events.sequence_plans.lock().unwrap().is_empty());
+        assert!(events.verifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn prepared_atomic_executor_verifies_fanyuchang_fresh_time_profile() {
         let fresh_tasks = tasks();
         let authority = WellearnAtomicBatchPlanningAuthority::try_new(
@@ -4048,6 +4197,94 @@ mod tests {
                 .is_err()
         );
         assert_eq!(detail_calls.lock().unwrap().len(), 1);
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bound_recovery_rejects_position_child_and_parent_substitution_before_io() {
+        let fresh_tasks = tasks();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&fresh_tasks, &units(), &authority)
+                .unwrap();
+        let fixture = bound_fanyuchang_batch_fixture(prepared.batch_plan(), &[1, 2, 3]);
+        let plan = build_atomic_mutation_sequence_plan(
+            prepared.child_plan(),
+            &prepared.provider_plan_artifact().unwrap(),
+        )
+        .unwrap();
+        let (issues, receipts) = atomic_sequence_records(&[
+            (WellearnAtomicMutationKind::Start, true),
+            (WellearnAtomicMutationKind::CounterKeep, false),
+            (WellearnAtomicMutationKind::Set, true),
+            (WellearnAtomicMutationKind::Save, true),
+        ]);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            prepared.child_plan(),
+            &completed_atomic_cmi("100"),
+        )
+        .unwrap()
+        .to_sequence_observation()
+        .unwrap();
+        let snapshot = atomic_recovery_snapshot(
+            prepared.provider_plan_artifact().unwrap(),
+            plan,
+            &issues,
+            &receipts,
+            Some(observation),
+            None,
+        );
+        let detail_calls = Arc::new(Mutex::new(Vec::new()));
+        let transport = Arc::new(AtomicRecoveryFixtureTransport {
+            score: "100",
+            calls: Mutex::new(Vec::new()),
+        });
+        let recovery = WellearnAtomicDurationCompletionRecovery::try_new(
+            Arc::new(AtomicFixtureDetail {
+                metadata: development_metadata().unwrap(),
+                detail: detail(fresh_tasks[0].clone()),
+                calls: Arc::clone(&detail_calls),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        for (parent, position, request) in [
+            (fixture.prepared.parent_snapshot(), 2, &fixture.request),
+            (
+                fixture.prepared.parent_snapshot(),
+                1,
+                &fixture.cross_child_request,
+            ),
+            (
+                fixture.substituted_parent.parent_snapshot(),
+                1,
+                &fixture.request,
+            ),
+        ] {
+            let error = recovery
+                .verify_bound_materialized_core_child_snapshot(
+                    &fixture.context,
+                    &fixture.binding,
+                    parent,
+                    position,
+                    request,
+                    &snapshot,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::Internal);
+        }
+
+        assert!(detail_calls.lock().unwrap().is_empty());
         assert!(transport.calls.lock().unwrap().is_empty());
     }
 

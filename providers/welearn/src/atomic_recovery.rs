@@ -16,7 +16,8 @@ use crate::{
     WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnAtomicDurationCompletionPlan,
     WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionVerification,
     WellearnAtomicMutationKind, WellearnCmiDocument, WellearnPreparedAtomicChildPlan,
-    WellearnResolvedAtomicChildExecution, WellearnResourceExecutionTransport,
+    WellearnPublicBatchMaterializationBinding, WellearnResolvedAtomicChildExecution,
+    WellearnResourceExecutionTransport,
     atomic_duration_completion::{atomic_goal_changed, verify_atomic_final_snapshot},
     build_atomic_mutation_sequence_plan,
     cmi::parse_sco_identity,
@@ -319,6 +320,29 @@ impl WellearnAtomicDurationCompletionRecovery {
     ) -> ProviderResult<ExecutionRecoveryOutcome> {
         let resolved = WellearnResolvedAtomicChildExecution::try_from_parent_position(
             parent, position, request,
+        )?;
+        self.verify_resolved_core_child_snapshot(context, &resolved, snapshot)
+            .await
+    }
+
+    /// Verifies one materialized Core child only after rebinding the exact
+    /// public-batch materialization record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects binding, parent, position, Unit/SCO, request, settings or
+    /// recovery-snapshot drift before Task detail discovery or final HTTP read.
+    pub async fn verify_bound_materialized_core_child_snapshot(
+        &self,
+        context: &ProviderContext,
+        binding: &WellearnPublicBatchMaterializationBinding,
+        parent: &ExecutionParentBatchSnapshot,
+        position: u32,
+        request: &ExecutionRequest,
+        snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        let resolved = WellearnResolvedAtomicChildExecution::try_from_materialization_binding(
+            binding, context, parent, position, request,
         )?;
         self.verify_resolved_core_child_snapshot(context, &resolved, snapshot)
             .await
@@ -979,7 +1003,8 @@ mod tests {
             _context: &ProviderContext,
             _course_id: &str,
             _sco_id: &str,
-            _plan: crate::WellearnResourceExecutionPlan,
+            _binding: &crate::WellearnResourceExecutionBinding,
+            _events: &(dyn asterism_provider_api::ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<crate::WellearnResourceExecutionDocuments> {
             Err(ProviderError::new(
                 ProviderErrorKind::Internal,
