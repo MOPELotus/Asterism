@@ -102,9 +102,9 @@ pub use assessment_response::{
 };
 pub use assessment_transport::{CidarenAssessmentTransport, CidarenAssessmentTransportOutcome};
 pub use attempt_flow::{
-    CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE, CidarenAssessmentMutationProjection,
-    CidarenAttemptFlow, CidarenAttemptFlowStatus, CidarenAttemptOperation,
-    CidarenDurableStepOutcome, CidarenIssuedCommand, CidarenIssuedOutcome,
+    CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE, CIDAREN_ASSESSMENT_TERMINAL_RESULT_TYPE,
+    CidarenAssessmentMutationProjection, CidarenAttemptFlow, CidarenAttemptFlowStatus,
+    CidarenAttemptOperation, CidarenDurableStepOutcome, CidarenIssuedCommand, CidarenIssuedOutcome,
     CidarenPreQuestionContinuation, CidarenQuestionMaterialization, CidarenTerminalCompletion,
     EncodedCidarenAssessmentMutationProjection,
 };

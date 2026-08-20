@@ -6,13 +6,14 @@ use asterism_domain::{
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink,
     PreparedProviderSubmissionOperation, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderIdentity, ProviderMetadata, ProviderResult, ProviderSubmissionStepOutcome,
-    ResolvedProviderQuestionSessionContinuation, ResolvedProviderRuntimeSettings,
-    SubmissionBuildCapability, SubmissionExecuteCapability,
+    ProviderIdentity, ProviderMetadata, ProviderQuestionOperationArtifact, ProviderResult,
+    ProviderSubmissionStepOutcome, ResolvedProviderQuestionSessionContinuation,
+    ResolvedProviderRuntimeSettings, SubmissionBuildCapability, SubmissionExecuteCapability,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 
+use crate::attempt_flow::{terminal_result_artifact, validate_mutation_recovery_artifact};
 use crate::question_inventory::{map_pre_question_continuation, map_question_materialization};
 use crate::{
     CIDAREN_PRE_QUESTION_ARTIFACT_TYPE, CIDAREN_QUESTION_ARTIFACT_PHASE,
@@ -191,14 +192,56 @@ impl CidarenSubmissionExecute {
                 ));
             }
         };
+        let recovery_artifact = command.recovery_artifact(&self.metadata.id)?;
         Ok(PreparedCidarenSubmissionOperation {
             provider_id: self.metadata.id.clone(),
             previous_question_id: item.question.id,
             previous_position: item.question.position,
             flow,
             command,
+            recovery_artifact,
             assessments: self.questions.assessment_transport(),
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_ambiguous_submission_operation_at(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        recovery_artifact: Option<&ProviderQuestionOperationArtifact>,
+        operation: &AmbiguousProviderQuestionSessionOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderSubmissionStepOutcome>> {
+        validate_context(context, &self.metadata)?;
+        validate_ambiguous_operation_metadata(operation, continuation.revision)?;
+        let prepared = self
+            .prepare_submission_operation_at(
+                context,
+                remote_task_id,
+                draft,
+                continuation,
+                runtime_settings,
+                operation.issued_at,
+            )
+            .await?;
+        validate_rebuilt_ambiguous_operation(
+            operation,
+            prepared.command.operation_type(),
+            prepared.command.request_digest(),
+        )?;
+        validate_mutation_recovery_artifact(
+            &self.metadata.id,
+            recovery_artifact,
+            prepared.command.projection(),
+        )?;
+        // Freshly rebuilding the immutable Draft/Attempt request is only a
+        // recovery check. The prepared mutation is always discarded, so the
+        // encrypted projection cannot become replay authority.
+        drop(prepared);
+        Ok(None)
     }
 }
 
@@ -266,28 +309,38 @@ impl SubmissionExecuteCapability for CidarenSubmissionExecute {
         operation: &AmbiguousProviderQuestionSessionOperation,
         runtime_settings: &ResolvedProviderRuntimeSettings,
     ) -> ProviderResult<Option<ProviderSubmissionStepOutcome>> {
-        validate_context(context, &self.metadata)?;
-        validate_ambiguous_operation_metadata(operation, continuation.revision)?;
-        let prepared = self
-            .prepare_submission_operation_at(
-                context,
-                remote_task_id,
-                draft,
-                continuation,
-                runtime_settings,
-                operation.issued_at,
-            )
-            .await?;
-        validate_rebuilt_ambiguous_operation(
+        self.recover_ambiguous_submission_operation_at(
+            context,
+            remote_task_id,
+            draft,
+            continuation,
+            None,
             operation,
-            prepared.command.operation_type(),
-            prepared.command.request_digest(),
-        )?;
-        // Freshly rebuilding the immutable Draft/Attempt request is only a
-        // recovery check. The prepared mutation is deliberately discarded so
-        // the ambiguous operation cannot be replayed.
-        drop(prepared);
-        Ok(None)
+            runtime_settings,
+        )
+        .await
+    }
+
+    async fn recover_ambiguous_submission_operation_with_artifact(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        recovery_artifact: Option<&ProviderQuestionOperationArtifact>,
+        operation: &AmbiguousProviderQuestionSessionOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderSubmissionStepOutcome>> {
+        self.recover_ambiguous_submission_operation_at(
+            context,
+            remote_task_id,
+            draft,
+            continuation,
+            recovery_artifact,
+            operation,
+            runtime_settings,
+        )
+        .await
     }
 }
 
@@ -363,6 +416,7 @@ pub(crate) struct PreparedCidarenSubmissionOperation {
     previous_position: u32,
     flow: CidarenAttemptFlow,
     command: CidarenIssuedCommand,
+    recovery_artifact: ProviderQuestionOperationArtifact,
     assessments: Arc<dyn crate::CidarenAssessmentTransport>,
 }
 
@@ -375,6 +429,7 @@ impl fmt::Debug for PreparedCidarenSubmissionOperation {
             .field("previous_position", &self.previous_position)
             .field("flow", &self.flow)
             .field("command", &self.command)
+            .field("recovery_artifact", &self.recovery_artifact)
             .field("assessments", &"configured")
             .finish()
     }
@@ -394,6 +449,10 @@ impl PreparedProviderSubmissionOperation for PreparedCidarenSubmissionOperation 
         self.command.delay_before_execute_seconds()
     }
 
+    fn recovery_artifact(&self) -> Option<ProviderQuestionOperationArtifact> {
+        Some(self.recovery_artifact.clone())
+    }
+
     async fn execute(
         self: Box<Self>,
         context: &ProviderContext,
@@ -405,6 +464,7 @@ impl PreparedProviderSubmissionOperation for PreparedCidarenSubmissionOperation 
             previous_position,
             mut flow,
             command,
+            recovery_artifact: _,
             assessments,
         } = *self;
         let outcome = command.execute(assessments, context).await?;
@@ -453,7 +513,12 @@ impl PreparedProviderSubmissionOperation for PreparedCidarenSubmissionOperation 
                     ));
                 }
                 let received_at = receipt.received_at;
-                ProviderSubmissionStepOutcome::submitted(receipt, response_digest, received_at)
+                ProviderSubmissionStepOutcome::submitted_with_artifact(
+                    receipt,
+                    response_digest,
+                    received_at,
+                    terminal_result_artifact(&provider_id, receipt_digest)?,
+                )
             }
         }
     }

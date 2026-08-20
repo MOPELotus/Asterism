@@ -4,14 +4,16 @@ use asterism_domain::{ProviderId, TaskId, Timestamp};
 use asterism_provider_api::{
     AmbiguousProviderQuestionReadOperation, PreparedProviderQuestionReadOperation, ProviderContext,
     ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
-    ProviderQuestionMaterialization, ProviderQuestionReadContinuation,
-    ProviderQuestionReadStepOutcome, ProviderResult, QuestionInventoryCapability,
-    RemoteQuestionRef, RemoteTaskDetail, ResolvedProviderQuestionReadContinuation,
-    ResolvedProviderRuntimeSettings, TaskDetailCapability,
+    ProviderQuestionMaterialization, ProviderQuestionOperationArtifact,
+    ProviderQuestionReadContinuation, ProviderQuestionReadStepOutcome, ProviderResult,
+    QuestionInventoryCapability, RemoteQuestionRef, RemoteTaskDetail,
+    ResolvedProviderQuestionReadContinuation, ResolvedProviderRuntimeSettings,
+    TaskDetailCapability,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 
+use crate::attempt_flow::{terminal_result_artifact, validate_mutation_recovery_artifact};
 use crate::{
     CIDAREN_PRE_QUESTION_ARTIFACT_TYPE, CIDAREN_QUESTION_ARTIFACT_TYPE,
     CIDAREN_READY_TO_SELECT_WORDS_PHASE, CidarenAnswerEvidenceTransport,
@@ -140,12 +142,54 @@ impl CidarenQuestionInventory {
                 ));
             }
         };
+        let recovery_artifact = command.recovery_artifact(&self.metadata.id)?;
         Ok(PreparedCidarenQuestionReadOperation {
             provider_id: self.metadata.id.clone(),
             flow,
             command,
+            recovery_artifact,
             assessments: self.assessments.clone(),
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_ambiguous_question_read_operation_at(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        recovery_artifact: Option<&ProviderQuestionOperationArtifact>,
+        operation: &AmbiguousProviderQuestionReadOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderQuestionReadStepOutcome>> {
+        validate_context(context, &self.metadata)?;
+        validate_ambiguous_operation_metadata(operation, continuation.revision)?;
+        let prepared = self
+            .prepare_question_read_operation_at(
+                context,
+                task_id,
+                remote_task_id,
+                continuation,
+                runtime_settings,
+                operation.issued_at,
+            )
+            .await?;
+        validate_rebuilt_ambiguous_operation(
+            operation,
+            prepared.command.operation_type(),
+            prepared.command.request_digest(),
+        )?;
+        validate_mutation_recovery_artifact(
+            &self.metadata.id,
+            recovery_artifact,
+            prepared.command.projection(),
+        )?;
+        // Preparing performs only bounded fresh reads and reconstructs the
+        // exact immutable request. The command is always discarded: neither
+        // its encrypted projection nor a fresh Task row grants replay.
+        drop(prepared);
+        Ok(None)
     }
 }
 
@@ -238,28 +282,38 @@ impl QuestionInventoryCapability for CidarenQuestionInventory {
         operation: &AmbiguousProviderQuestionReadOperation,
         runtime_settings: &ResolvedProviderRuntimeSettings,
     ) -> ProviderResult<Option<ProviderQuestionReadStepOutcome>> {
-        validate_context(context, &self.metadata)?;
-        validate_ambiguous_operation_metadata(operation, continuation.revision)?;
-        let prepared = self
-            .prepare_question_read_operation_at(
-                context,
-                task_id,
-                remote_task_id,
-                continuation,
-                runtime_settings,
-                operation.issued_at,
-            )
-            .await?;
-        validate_rebuilt_ambiguous_operation(
+        self.recover_ambiguous_question_read_operation_at(
+            context,
+            task_id,
+            remote_task_id,
+            continuation,
+            None,
             operation,
-            prepared.command.operation_type(),
-            prepared.command.request_digest(),
-        )?;
-        // Preparing performs the bounded fresh reads and reconstructs the exact
-        // immutable request. Dropping it keeps the attempt locked and grants no
-        // replay of the ambiguous non-idempotent operation.
-        drop(prepared);
-        Ok(None)
+            runtime_settings,
+        )
+        .await
+    }
+
+    async fn recover_ambiguous_question_read_operation_with_artifact(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        recovery_artifact: Option<&ProviderQuestionOperationArtifact>,
+        operation: &AmbiguousProviderQuestionReadOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderQuestionReadStepOutcome>> {
+        self.recover_ambiguous_question_read_operation_at(
+            context,
+            task_id,
+            remote_task_id,
+            continuation,
+            recovery_artifact,
+            operation,
+            runtime_settings,
+        )
+        .await
     }
 }
 
@@ -307,6 +361,7 @@ struct PreparedCidarenQuestionReadOperation {
     provider_id: ProviderId,
     flow: CidarenAttemptFlow,
     command: CidarenIssuedCommand,
+    recovery_artifact: ProviderQuestionOperationArtifact,
     assessments: Arc<dyn CidarenAssessmentTransport>,
 }
 
@@ -317,6 +372,7 @@ impl fmt::Debug for PreparedCidarenQuestionReadOperation {
             .field("provider_id", &self.provider_id)
             .field("flow", &self.flow)
             .field("command", &self.command)
+            .field("recovery_artifact", &self.recovery_artifact)
             .field("assessments", &"configured")
             .finish()
     }
@@ -336,6 +392,10 @@ impl PreparedProviderQuestionReadOperation for PreparedCidarenQuestionReadOperat
         self.command.delay_before_execute_seconds()
     }
 
+    fn recovery_artifact(&self) -> Option<ProviderQuestionOperationArtifact> {
+        Some(self.recovery_artifact.clone())
+    }
+
     async fn execute(
         self: Box<Self>,
         context: &ProviderContext,
@@ -344,6 +404,7 @@ impl PreparedProviderQuestionReadOperation for PreparedCidarenQuestionReadOperat
             provider_id,
             mut flow,
             command,
+            recovery_artifact: _,
             assessments,
         } = *self;
         let outcome = command.execute(assessments, context).await?;
@@ -377,7 +438,11 @@ impl PreparedProviderQuestionReadOperation for PreparedCidarenQuestionReadOperat
                         "Cidaren completion receipt lost its binding digest",
                     ));
                 }
-                ProviderQuestionReadStepOutcome::completed(receipt, response_digest)
+                ProviderQuestionReadStepOutcome::completed_with_artifact(
+                    receipt,
+                    response_digest,
+                    terminal_result_artifact(&provider_id, receipt_digest)?,
+                )
             }
         }
     }
@@ -479,9 +544,11 @@ mod tests {
     use asterism_provider_api::{
         AmbiguousProviderQuestionSessionOperation, ExecutionEventSink,
         PreparedProviderSubmissionOperation, ProviderExecutionLog, ProviderProgress,
-        ProviderSubmissionStepOutcome, RemoteTask, ResolvedProviderQuestionSessionContinuation,
-        SubmissionBuildCapability, SubmissionExecuteCapability,
+        ProviderQuestionOperationArtifact, ProviderSubmissionStepOutcome, RemoteTask,
+        ResolvedProviderQuestionSessionContinuation, SubmissionBuildCapability,
+        SubmissionExecuteCapability,
     };
+    use asterism_secrets::SecretValue;
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
 
@@ -523,6 +590,30 @@ mod tests {
         async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
             Ok(())
         }
+    }
+
+    fn assert_terminal_result_artifact(
+        artifact: &ProviderQuestionOperationArtifact,
+        provider_id: &ProviderId,
+    ) {
+        assert_eq!(
+            artifact.artifact_type(),
+            crate::CIDAREN_ASSESSMENT_TERMINAL_RESULT_TYPE
+        );
+        assert_eq!(artifact.provider_id(), provider_id);
+        assert_eq!(artifact.value().expose_secret().len(), 32);
+        assert_ne!(artifact.artifact_digest(), [0; 32]);
+    }
+
+    fn assert_completed(
+        receipt: &asterism_domain::SubmissionReceipt,
+        response_digest: [u8; 32],
+        artifact: &ProviderQuestionOperationArtifact,
+        context: &ProviderContext,
+    ) {
+        assert_eq!(receipt.remote_status, "completed");
+        assert_ne!(response_digest, [0; 32]);
+        assert_terminal_result_artifact(artifact, &context.provider_id);
     }
 
     #[test]
@@ -626,10 +717,17 @@ mod tests {
             issued_at,
             ambiguous_at: issued_at + chrono::Duration::seconds(1),
         };
+        let recovery_artifact = prepared.recovery_artifact().unwrap();
+        assert_eq!(recovery_artifact.provider_id(), &context.provider_id);
+        assert_eq!(
+            recovery_artifact.artifact_type(),
+            crate::CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE
+        );
+        assert_ne!(recovery_artifact.artifact_digest(), [0; 32]);
         drop(prepared);
 
         let recovered = capability
-            .recover_ambiguous_question_read_operation(
+            .recover_ambiguous_question_read_operation_with_artifact(
                 &context,
                 task_id,
                 REMOTE_TASK_ID,
@@ -640,6 +738,7 @@ mod tests {
                     revision: 1,
                     value: &value,
                 },
+                Some(&recovery_artifact),
                 &operation,
                 &settings,
             )
@@ -671,6 +770,81 @@ mod tests {
                 .kind,
             ProviderErrorKind::RemoteChanged
         );
+        assert!(boundaries.operations.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_question_recovery_rejects_foreign_encrypted_projection() {
+        let boundaries = Arc::new(FixtureBoundaries::new(detail("test", -1), Vec::new()));
+        let capability = CidarenQuestionInventory::try_new(
+            boundaries.clone(),
+            boundaries.clone(),
+            boundaries.clone(),
+        )
+        .unwrap();
+        let context = context();
+        let task_id = TaskId::new();
+        let settings = settings();
+        let initial = capability
+            .prepare_question_read_attempt(&context, task_id, REMOTE_TASK_ID, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let (continuation_type, continuation_digest, phase, value, _) = initial.into_parts();
+        let issued_at = Utc::now();
+        let prepared = capability
+            .prepare_question_read_operation_at(
+                &context,
+                task_id,
+                REMOTE_TASK_ID,
+                ResolvedProviderQuestionReadContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest,
+                    phase: &phase,
+                    revision: 1,
+                    value: &value,
+                },
+                &settings,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let operation = AmbiguousProviderQuestionReadOperation {
+            continuation_revision: 1,
+            operation_type: prepared.command.operation_type().to_owned(),
+            request_digest: prepared.command.request_digest(),
+            issued_at,
+            ambiguous_at: issued_at + chrono::Duration::seconds(1),
+        };
+        let recovery_artifact = prepared.recovery_artifact().unwrap();
+        let foreign_type = ProviderQuestionOperationArtifact::try_new(
+            context.provider_id.clone(),
+            "cidaren.foreign-recovery.v1",
+            recovery_artifact.artifact_digest(),
+            SecretValue::new(recovery_artifact.value().expose_secret().to_vec()),
+        )
+        .unwrap();
+        drop(prepared);
+
+        let error = capability
+            .recover_ambiguous_question_read_operation_with_artifact(
+                &context,
+                task_id,
+                REMOTE_TASK_ID,
+                ResolvedProviderQuestionReadContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest,
+                    phase: &phase,
+                    revision: 1,
+                    value: &value,
+                },
+                Some(&foreign_type),
+                &operation,
+                &settings,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
         assert!(boundaries.operations.lock().unwrap().is_empty());
     }
 
@@ -999,9 +1173,10 @@ mod tests {
             .unwrap();
         let prepared = prepare_operation(&capability, &context, task_id, initial, &settings).await;
 
-        let ProviderQuestionReadStepOutcome::Completed {
+        let ProviderQuestionReadStepOutcome::CompletedWithArtifact {
             receipt,
             response_digest,
+            result_artifact,
         } = prepared.execute(&context).await.unwrap()
         else {
             panic!("completed receipt must not be represented as an empty Question");
@@ -1012,6 +1187,7 @@ mod tests {
             Some("synthetic completed")
         );
         assert_ne!(response_digest, [0; 32]);
+        assert_terminal_result_artifact(&result_artifact, &context.provider_id);
     }
 
     #[tokio::test]
@@ -1096,9 +1272,10 @@ mod tests {
             &settings,
         )
         .await;
-        let ProviderSubmissionStepOutcome::Submitted {
+        let ProviderSubmissionStepOutcome::SubmittedWithArtifact {
             receipt,
             response_digest,
+            result_artifact,
             ..
         } = Box::new(prepared)
             .execute(&context, &NoopEvents)
@@ -1107,8 +1284,7 @@ mod tests {
         else {
             panic!("definite Cidaren completion must close without a continuation");
         };
-        assert_eq!(receipt.remote_status, "completed");
-        assert_ne!(response_digest, [0; 32]);
+        assert_completed(&receipt, response_digest, &result_artifact, &context);
         assert_eq!(
             *boundaries.operations.lock().unwrap(),
             [
@@ -1334,12 +1510,16 @@ mod tests {
         let prepared =
             prepare_submission_operation(&execute, &context, &draft, continuation, 3, &settings)
                 .await;
-        let ProviderSubmissionStepOutcome::Submitted { receipt, .. } =
-            prepared.execute(&context, &NoopEvents).await.unwrap()
+        let ProviderSubmissionStepOutcome::SubmittedWithArtifact {
+            receipt,
+            result_artifact,
+            ..
+        } = prepared.execute(&context, &NoopEvents).await.unwrap()
         else {
             panic!("terminal matching advance must submit without a continuation");
         };
         assert_eq!(receipt.remote_status, "completed");
+        assert_terminal_result_artifact(&result_artifact, &context.provider_id);
         assert_eq!(
             *boundaries.operations.lock().unwrap(),
             [
@@ -1640,14 +1820,16 @@ mod tests {
             issued_at,
             ambiguous_at: issued_at + chrono::Duration::seconds(1),
         };
+        let recovery_artifact = prepared.recovery_artifact().unwrap();
         drop(prepared);
         assert!(
             capability
-                .recover_ambiguous_submission_operation(
+                .recover_ambiguous_submission_operation_with_artifact(
                     context,
                     REMOTE_TASK_ID,
                     draft,
                     resolved(),
+                    Some(&recovery_artifact),
                     &ambiguous,
                     settings,
                 )

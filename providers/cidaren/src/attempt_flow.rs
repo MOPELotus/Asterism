@@ -5,11 +5,14 @@ use std::{
 };
 
 use asterism_domain::{
-    NormalizedAnswer, Question, QuestionKind, SelectedAnswer, SubmissionReceipt, TaskId, Timestamp,
+    NormalizedAnswer, ProviderId, Question, QuestionKind, SelectedAnswer, SubmissionReceipt,
+    TaskId, Timestamp,
 };
 use asterism_provider_api::{
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteTaskDetail,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderQuestionOperationArtifact,
+    ProviderResult, RemoteTaskDetail,
 };
+use asterism_secrets::SecretValue;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,6 +38,7 @@ const MAX_MUTATION_PROJECTION_ARTIFACT_BYTES: usize = 2_048;
 
 pub const CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE: &str =
     "cidaren.assessment-mutation-projection.v1";
+pub const CIDAREN_ASSESSMENT_TERMINAL_RESULT_TYPE: &str = "cidaren.assessment-terminal-result.v1";
 
 /// One donor-observed remote mutation in the Cidaren answer lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1753,6 +1757,22 @@ impl CidarenIssuedCommand {
         &self.projection
     }
 
+    /// Freezes the credential-free command projection for Core's encrypted
+    /// issue transaction. The artifact binds the exact account, Course, Task,
+    /// attempt, operation and request without retaining an answer or topic.
+    pub(crate) fn recovery_artifact(
+        &self,
+        provider_id: &ProviderId,
+    ) -> ProviderResult<ProviderQuestionOperationArtifact> {
+        let encoded = self.projection.encode_persisted()?;
+        ProviderQuestionOperationArtifact::try_new(
+            provider_id.clone(),
+            CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE,
+            encoded.digest(),
+            SecretValue::new(encoded.into_bytes()),
+        )
+    }
+
     /// Returns the stable donor-observed residence time which Core must
     /// schedule after durably recording this issued command and before
     /// executing its one-shot mutation.
@@ -1809,6 +1829,54 @@ impl CidarenIssuedCommand {
             received_at,
         })
     }
+}
+
+/// Rebinds an encrypted issue-time command projection to the freshly rebuilt
+/// Cidaren operation. Artifact absence remains compatible with operations
+/// issued before the shared contract existed; either path grants no replay.
+pub(crate) fn validate_mutation_recovery_artifact(
+    provider_id: &ProviderId,
+    artifact: Option<&ProviderQuestionOperationArtifact>,
+    rebuilt: &CidarenAssessmentMutationProjection,
+) -> ProviderResult<()> {
+    let Some(artifact) = artifact else {
+        return Ok(());
+    };
+    if artifact.provider_id() != provider_id
+        || artifact.artifact_type() != CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE
+    {
+        return Err(protocol_drift(
+            "Cidaren mutation recovery artifact is stale or foreign",
+        ));
+    }
+    CidarenAssessmentMutationProjection::decode_persisted_bound(
+        artifact.value().expose_secret(),
+        artifact.artifact_digest(),
+        rebuilt,
+    )?;
+    Ok(())
+}
+
+/// Converts the terminal receipt binding into the smallest encrypted result
+/// artifact. The value itself is already a one-way digest over the attempt,
+/// request, fresh raw response and sanitized receipt; Core exposes only a
+/// second digest outside encrypted storage.
+pub(crate) fn terminal_result_artifact(
+    provider_id: &ProviderId,
+    receipt_digest: [u8; 32],
+) -> ProviderResult<ProviderQuestionOperationArtifact> {
+    if receipt_digest == [0; 32] {
+        return Err(internal(
+            "Cidaren terminal result artifact has no receipt binding",
+        ));
+    }
+    let artifact_digest = Sha256::digest(receipt_digest).into();
+    ProviderQuestionOperationArtifact::try_new(
+        provider_id.clone(),
+        CIDAREN_ASSESSMENT_TERMINAL_RESULT_TYPE,
+        artifact_digest,
+        SecretValue::new(receipt_digest.to_vec()),
+    )
 }
 
 impl fmt::Debug for CidarenIssuedCommand {
@@ -2668,6 +2736,46 @@ mod tests {
             .unwrap(),
             projection
         );
+    }
+
+    #[test]
+    fn question_operation_artifacts_bind_issue_projection_and_terminal_receipt() {
+        let context = context();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail(),
+            None,
+        )
+        .unwrap();
+        let command = flow.issue_start(request_at()).unwrap();
+        let recovery = command.recovery_artifact(&context.provider_id).unwrap();
+        assert_eq!(recovery.provider_id(), &context.provider_id);
+        assert_eq!(
+            recovery.artifact_type(),
+            CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE
+        );
+        validate_mutation_recovery_artifact(
+            &context.provider_id,
+            Some(&recovery),
+            command.projection(),
+        )
+        .unwrap();
+
+        let receipt_digest = [9; 32];
+        let terminal = terminal_result_artifact(&context.provider_id, receipt_digest).unwrap();
+        assert_eq!(terminal.provider_id(), &context.provider_id);
+        assert_eq!(
+            terminal.artifact_type(),
+            CIDAREN_ASSESSMENT_TERMINAL_RESULT_TYPE
+        );
+        assert_eq!(terminal.value().expose_secret(), receipt_digest);
+        let expected_artifact_digest: [u8; 32] = Sha256::digest(receipt_digest).into();
+        assert_eq!(terminal.artifact_digest(), expected_artifact_digest);
+        let debug = format!("{terminal:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&URL_SAFE_NO_PAD.encode(receipt_digest)));
     }
 
     #[test]
