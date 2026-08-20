@@ -58,6 +58,8 @@ pub enum ProviderCapability {
     DurationRead,
     DurationReport,
     Discussion,
+    ArtifactUpload,
+    OralSubmission,
     Practice,
     BrowserBridge,
 }

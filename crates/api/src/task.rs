@@ -2,11 +2,11 @@ use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, Execution,
-    ExecutionAttempt, NormalizedAnswer, ProviderAccountId, ProviderId, Question, QuestionId,
-    QuestionSnapshotId, RemoteState, ScoreImprovementWorkflow, StrictCompletionWorkflow,
-    StrictCompletionWorkflowId, SubmissionDraftId, SubmissionQuestionVerificationStatus,
-    SubmissionResultId, SubmissionResultStatus, SubmissionScore, Task, TaskCapability, TaskId,
-    TaskLifecycleAction, Timestamp,
+    ExecutionAttempt, ExecutionInvocationDraftId, NormalizedAnswer, ProviderAccountId, ProviderId,
+    Question, QuestionId, QuestionSnapshotId, RemoteState, ScoreImprovementWorkflow,
+    StrictCompletionWorkflow, StrictCompletionWorkflowId, SubmissionDraftId,
+    SubmissionQuestionVerificationStatus, SubmissionResultId, SubmissionResultStatus,
+    SubmissionScore, Task, TaskCapability, TaskId, TaskLifecycleAction, Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
@@ -14,19 +14,21 @@ use asterism_engine::{
     ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
     ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
     ManualAnswerCandidateError, ManualAnswerCandidateService, OptInScoreImprovementCommand,
-    ProviderAnswerResolveError, ProviderAnswerResolveService, ProviderQuestionReadError,
-    ProviderQuestionReadResult, ProviderQuestionReadService, ProviderTaskBrowserSessionError,
-    ProviderTaskBrowserSessionService, ProviderTaskDetailError, ProviderTaskDetailService,
-    ProviderTaskDurationError, ProviderTaskDurationService, ProviderTaskProgressError,
-    ProviderTaskProgressService, ReadTaskBrowserSessionCommand, ReadTaskDetailCommand,
-    ReadTaskDurationCommand, ReadTaskProgressCommand, ReadTaskQuestionsCommand,
-    ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand, ScoreImprovementOptInError,
-    ScoreImprovementOptInService, SubmissionDraftBuildError, SubmissionDraftBuildService,
-    TaskLifecycleCommand, TaskLifecycleError, TaskLifecycleService,
+    PrepareExecutionInvocationCommand, ProviderAnswerResolveError, ProviderAnswerResolveService,
+    ProviderQuestionReadError, ProviderQuestionReadResult, ProviderQuestionReadService,
+    ProviderTaskBrowserSessionError, ProviderTaskBrowserSessionService, ProviderTaskDetailError,
+    ProviderTaskDetailService, ProviderTaskDurationError, ProviderTaskDurationService,
+    ProviderTaskProgressError, ProviderTaskProgressService, ReadTaskBrowserSessionCommand,
+    ReadTaskDetailCommand, ReadTaskDurationCommand, ReadTaskProgressCommand,
+    ReadTaskQuestionsCommand, ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand,
+    ScoreImprovementOptInError, ScoreImprovementOptInService, SubmissionDraftBuildError,
+    SubmissionDraftBuildService, TaskLifecycleCommand, TaskLifecycleError, TaskLifecycleService,
 };
 use asterism_provider_api::{
-    BrowserSessionSpec, ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail,
+    BrowserSessionSpec, MAX_PROVIDER_EXECUTION_PRIVATE_INPUT_BYTES, ProviderErrorKind,
+    RemoteDuration, RemoteProgress, RemoteTaskDetail,
 };
+use asterism_secrets::SecretValue;
 use asterism_storage::{
     AnswerCandidateRepository, AnswerEvidenceClassCounts, AnswerEvidenceRepository,
     CompletionWorkflowRepository, ExecutionQueryRepository, ExecutionStrictCompletionRetryRequest,
@@ -41,11 +43,13 @@ use asterism_storage::{
 use axum::{
     Extension, Json,
     extract::{Path, Query, State, rejection::JsonRejection, rejection::QueryRejection},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::{ApiError, ApiState, auth::AuthContext};
 
@@ -53,6 +57,11 @@ const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_OFFSET: u64 = 1_000_000;
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
+const INVOCATION_INPUT_TYPE: &str = "x-asterism-invocation-input-type";
+const INVOCATION_CAPABILITIES: &str = "x-asterism-requested-capabilities";
+const INVOCATION_SUBMISSION_DRAFT: &str = "x-asterism-submission-draft-id";
+pub(super) const MAX_EXECUTION_INVOCATION_INPUT_BYTES: usize =
+    MAX_PROVIDER_EXECUTION_PRIVATE_INPUT_BYTES;
 
 pub(super) async fn list_tasks(
     State(state): State<ApiState>,
@@ -849,6 +858,10 @@ pub(super) async fn get_submission_result(
     Ok(crate::auth::no_store(Json(result).into_response()))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the HTTP boundary keeps authentication, idempotency, immutable draft selection and response mapping visible"
+)]
 pub(super) async fn execute_task(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,
@@ -878,6 +891,17 @@ pub(super) async fn execute_task(
                 "SubmissionDraft ID is invalid",
             )
         })?;
+    let invocation_draft_id = request
+        .invocation_draft_id
+        .as_deref()
+        .map(ExecutionInvocationDraftId::from_str)
+        .transpose()
+        .map_err(|_| {
+            ApiError::bad_request(
+                "invalid_execution_invocation_draft_id",
+                "Execution invocation draft ID is invalid",
+            )
+        })?;
     let strict_completion_retry = request
         .strict_completion_retry_confirmation
         .map(|confirmation| {
@@ -900,7 +924,8 @@ pub(super) async fn execute_task(
             })
         })
         .transpose()?;
-    let service = ExecutionRequestService::new(
+    let invocation_store = state.secret_store.clone();
+    let mut service = ExecutionRequestService::new(
         SqliteTaskQueryRepository::new(state.database.clone()),
         SqliteExecutionRepository::new(state.database.clone()),
         SqliteProviderAccountRepository::new(state.database.clone()),
@@ -914,12 +939,16 @@ pub(super) async fn execute_task(
             }
         }),
     );
+    if let Some(store) = invocation_store {
+        service = service.with_execution_invocation_drafts(Arc::new(store));
+    }
     let result = service
         .execute(ExecuteTaskCommand {
             owner_id,
             task_id,
             requested_capabilities: request.requested_capabilities,
             submission_draft_id,
+            invocation_draft_id,
             strict_completion_retry,
             request_source,
             actor: auth.audit_actor(),
@@ -939,6 +968,101 @@ pub(super) async fn execute_task(
             status,
             Json(ExecuteTaskResponse {
                 execution: result.execution,
+                created: result.created,
+            }),
+        )
+            .into_response(),
+    ))
+}
+
+pub(super) async fn prepare_execution_invocation_draft(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let (owner_id, _) = auth.require_task_execute()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    require_octet_stream(&headers)?;
+    if body.is_empty() || body.len() > MAX_EXECUTION_INVOCATION_INPUT_BYTES {
+        return Err(ApiError::bad_request(
+            "invalid_execution_invocation_input",
+            "execution invocation input is empty or oversized",
+        ));
+    }
+    let idempotency_key = required_header(&headers, IDEMPOTENCY_KEY, 256)?;
+    let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let input_type = required_header(&headers, INVOCATION_INPUT_TYPE, 128)?.to_owned();
+    let requested_capabilities =
+        parse_invocation_capabilities(required_header(&headers, INVOCATION_CAPABILITIES, 256)?)?;
+    let submission_draft_id = headers
+        .get(INVOCATION_SUBMISSION_DRAFT)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| SubmissionDraftId::from_str(value).ok())
+                .ok_or_else(|| {
+                    ApiError::bad_request(
+                        "invalid_submission_draft_id",
+                        "SubmissionDraft ID is invalid",
+                    )
+                })
+        })
+        .transpose()?;
+    let secret_store = state.secret_store.clone().ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "encrypted execution invocation drafts are not configured",
+        )
+    })?;
+    let service = ExecutionRequestService::new(
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteExecutionRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
+        SqliteQuestionSnapshotRepository::new(state.database),
+        state.providers,
+        FormalAssessmentPolicy::default(),
+    )
+    .with_execution_invocation_drafts(Arc::new(secret_store));
+    let result = service
+        .prepare_invocation(PrepareExecutionInvocationCommand {
+            owner_id,
+            task_id,
+            requested_capabilities,
+            submission_draft_id,
+            input_type,
+            raw_input: secret_request_body(body),
+            idempotency_key: idempotency_key.to_owned(),
+            correlation_id: correlation_id.to_owned(),
+            created_at: Utc::now(),
+        })
+        .await
+        .map_err(map_execution_request_error)?;
+    let status = if result.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    let record = result.record;
+    Ok(crate::auth::no_store(
+        (
+            status,
+            Json(ExecutionInvocationDraftResponse {
+                draft_id: record.draft.id,
+                provider_id: record.draft.provider_id,
+                provider_version: record.draft.provider_version,
+                task_id: record.draft.task_id,
+                requested_capabilities: record.draft.requested_capabilities,
+                submission_draft_id: record.draft.submission_draft_id,
+                private_input_type: record.draft.private_input_type,
+                private_input_digest: encode_digest(record.draft.private_input_digest),
+                plan_artifact_type: record.provider_plan_artifact.artifact_type().to_owned(),
+                plan_artifact_digest: encode_digest(record.draft.plan_artifact_digest),
+                created_at: record.draft.created_at,
                 created: result.created,
             }),
         )
@@ -1141,6 +1265,25 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
             "submission_draft_version_conflict",
             "the SubmissionDraft must be rebuilt for the current Provider implementation",
         ),
+        ExecutionRequestError::InvocationDraftUnavailable => ApiError::conflict(
+            "execution_invocation_draft_unavailable",
+            "encrypted execution invocation drafts are unavailable",
+        ),
+        ExecutionRequestError::InvocationDraftNotFound => {
+            ApiError::not_found("execution_invocation_draft_not_found")
+        }
+        ExecutionRequestError::InvocationDraftConflict => ApiError::conflict(
+            "execution_invocation_draft_conflict",
+            "the execution invocation draft is foreign, stale, or already claimed",
+        ),
+        ExecutionRequestError::InvalidInvocationInput => ApiError::bad_request(
+            "invalid_execution_invocation_input",
+            "the Provider invocation input is invalid or oversized",
+        ),
+        ExecutionRequestError::InvocationPreparationFailed => ApiError::conflict(
+            "execution_invocation_preparation_failed",
+            "the Provider could not safely prepare this private invocation",
+        ),
         ExecutionRequestError::SubmissionVerificationUnavailable => ApiError::conflict(
             "submission_verification_unavailable",
             "submission execution is disabled without independent verification",
@@ -1165,9 +1308,9 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
             "formal_assessment_blocked",
             "formal assessment execution is disabled by Core policy",
         ),
-        ExecutionRequestError::Transition(_) | ExecutionRequestError::Storage(_) => {
-            ApiError::internal(error)
-        }
+        ExecutionRequestError::Transition(_)
+        | ExecutionRequestError::Storage(_)
+        | ExecutionRequestError::SecretStore(_) => ApiError::internal(error),
     }
 }
 
@@ -2011,6 +2154,22 @@ struct ExecuteTaskResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ExecutionInvocationDraftResponse {
+    draft_id: ExecutionInvocationDraftId,
+    provider_id: ProviderId,
+    provider_version: String,
+    task_id: TaskId,
+    requested_capabilities: Vec<TaskCapability>,
+    submission_draft_id: Option<SubmissionDraftId>,
+    private_input_type: String,
+    private_input_digest: String,
+    plan_artifact_type: String,
+    plan_artifact_digest: String,
+    created_at: Timestamp,
+    created: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct TaskLifecycleResponse {
     task_id: TaskId,
     action: TaskLifecycleAction,
@@ -2031,6 +2190,7 @@ pub(super) struct DelayTaskRequest {
 pub(super) struct ExecuteTaskRequest {
     requested_capabilities: Vec<TaskCapability>,
     submission_draft_id: Option<String>,
+    invocation_draft_id: Option<String>,
     strict_completion_retry_confirmation: Option<StrictCompletionRetryConfirmationRequest>,
 }
 
@@ -2143,4 +2303,64 @@ fn parse_provider_account_id(value: &str) -> Result<ProviderAccountId, ApiError>
             "provider account ID is invalid",
         )
     })
+}
+
+fn parse_invocation_capabilities(value: &str) -> Result<Vec<TaskCapability>, ApiError> {
+    let capabilities = value
+        .split(',')
+        .map(str::trim)
+        .map(|value| {
+            serde_json::from_value::<TaskCapability>(serde_json::Value::String(value.to_owned()))
+                .map_err(|_| {
+                    ApiError::bad_request(
+                        "invalid_execution_capability_selection",
+                        "x-asterism-requested-capabilities contains an invalid capability",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if capabilities.is_empty() || capabilities.len() > 5 {
+        return Err(ApiError::bad_request(
+            "invalid_execution_capability_selection",
+            "x-asterism-requested-capabilities must contain 1-5 capabilities",
+        ));
+    }
+    Ok(capabilities)
+}
+
+fn require_octet_stream(headers: &HeaderMap) -> Result<(), ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_type == Some("application/octet-stream") {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "invalid_execution_invocation_content_type",
+            "execution invocation input requires application/octet-stream",
+        ))
+    }
+}
+
+fn secret_request_body(body: Bytes) -> SecretValue {
+    match body.try_into_mut() {
+        Ok(mut body) => {
+            let secret = SecretValue::new(body.as_ref().to_vec());
+            body.as_mut().zeroize();
+            secret
+        }
+        Err(body) => SecretValue::new(body.to_vec()),
+    }
+}
+
+fn encode_digest(digest: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }

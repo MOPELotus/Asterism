@@ -381,6 +381,8 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 "duration_read",
                 "duration_report",
                 "discussion",
+                "artifact_upload",
+                "oral_submission",
                 "practice",
                 "browser_bridge",
             ]),
@@ -2597,6 +2599,8 @@ fn task_capability() -> Value {
         "duration_read",
         "duration_report",
         "discussion",
+        "artifact_upload",
+        "oral_submission",
         "practice",
         "browser_bridge",
     ])

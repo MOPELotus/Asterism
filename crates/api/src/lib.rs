@@ -402,6 +402,12 @@ fn task_routes() -> Router<ApiState> {
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}/results/{result_id}",
             get(task::get_submission_result),
         )
+        .route(
+            "/api/v1/tasks/{task_id}/execution-invocation-drafts",
+            post(task::prepare_execution_invocation_draft).layer(DefaultBodyLimit::max(
+                task::MAX_EXECUTION_INVOCATION_INPUT_BYTES,
+            )),
+        )
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
         .route("/api/v1/tasks/{task_id}/approve", post(task::approve_task))
         .route("/api/v1/tasks/{task_id}/cancel", post(task::cancel_task))
@@ -1300,6 +1306,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/execution-invocation-drafts".to_owned(),
+            execution_invocation_drafts_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -1541,9 +1554,10 @@ fn task_execute_path() -> Value {
                         "maxItems": 5,
                         "uniqueItems": true,
                         "description": "Exact executable Task capability subset frozen onto this Execution.",
-                        "items": {"type": "string", "enum": ["resource_execution", "submission_execute", "duration_report", "discussion", "practice"]}
+                        "items": {"type": "string", "enum": ["resource_execution", "submission_execute", "duration_report", "discussion", "artifact_upload", "oral_submission", "practice"]}
                     },
                     "submission_draft_id": {"type": "string", "format": "uuid", "description": "Required only for Tasks advertising submission_execute; binds this Execution to one immutable draft."},
+                    "invocation_draft_id": {"type": "string", "format": "uuid", "description": "Claims one immutable encrypted Provider invocation draft for this Execution."},
                     "strict_completion_retry_confirmation": {
                         "type": "object",
                         "required": ["workflow_id", "expected_revision"],
@@ -1567,6 +1581,65 @@ fn task_execute_path() -> Value {
             "409": {"description": "Task state, capability, assessment policy, or idempotency conflict"}
         }
     }})
+}
+
+fn execution_invocation_drafts_path() -> Value {
+    json!({"post": {
+        "operationId": "prepareExecutionInvocationDraft",
+        "description": "Freshly validates Provider-private input, encrypts it at rest, and creates an immutable owner/account/Course/Task/capability-bound draft before any Execution or remote mutation exists.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 256}},
+            {"name": "x-asterism-invocation-input-type", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 128}},
+            {"name": "x-asterism-requested-capabilities", "in": "header", "required": true, "description": "Comma-separated exact executable capabilities.", "schema": {"type": "string", "maxLength": 256}},
+            {"name": "x-asterism-submission-draft-id", "in": "header", "required": false, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "requestBody": {
+            "required": true,
+            "content": {"application/octet-stream": {"schema": {
+                "type": "string",
+                "format": "binary",
+                "minLength": 1,
+                "maxLength": 67_108_864
+            }}}
+        },
+        "responses": {
+            "200": {"description": "Idempotent replay of an existing invocation draft", "content": {"application/json": {"schema": execution_invocation_draft_response_schema()}}},
+            "201": {"description": "Encrypted immutable invocation draft created", "content": {"application/json": {"schema": execution_invocation_draft_response_schema()}}},
+            "400": {"description": "Invalid headers or private input"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Insufficient permission"},
+            "404": {"description": "Task or SubmissionDraft not found for this owner"},
+            "409": {"description": "Task, Provider, capability, Draft, preparation, or idempotency conflict"},
+            "503": {"description": "Encrypted secret store unavailable"}
+        }
+    }})
+}
+
+fn execution_invocation_draft_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "draft_id", "provider_id", "provider_version", "task_id",
+            "requested_capabilities", "private_input_type", "private_input_digest",
+            "plan_artifact_type", "plan_artifact_digest", "created_at", "created"
+        ],
+        "properties": {
+            "draft_id": {"type": "string", "format": "uuid"},
+            "provider_id": {"type": "string"},
+            "provider_version": {"type": "string"},
+            "task_id": {"type": "string", "format": "uuid"},
+            "requested_capabilities": {"type": "array", "items": {"type": "string"}},
+            "submission_draft_id": {"type": ["string", "null"], "format": "uuid"},
+            "private_input_type": {"type": "string"},
+            "private_input_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "plan_artifact_type": {"type": "string"},
+            "plan_artifact_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "created_at": {"type": "string", "format": "date-time"},
+            "created": {"type": "boolean"}
+        }
+    })
 }
 
 fn task_lifecycle_path(operation_id: &str, requires_body: bool) -> Value {

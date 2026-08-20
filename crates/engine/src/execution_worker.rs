@@ -4,7 +4,8 @@ use asterism_domain::Timestamp;
 use asterism_provider_api::ProviderRegistry;
 use asterism_storage::{
     BatchExecutionParentSnapshotRepositoryFactory, CompletionWorkflowRepository,
-    ExecutionAtomicMutationRepository, ExecutionCapabilityStepRepository, ExecutionLeaseRepository,
+    ExecutionAtomicMutationRepository, ExecutionCapabilityStepRepository,
+    ExecutionInvocationDraftRepositoryFactory, ExecutionLeaseRepository,
     ExecutionMutationStageOutputRepositoryFactory, ExecutionRepository,
     ExecutionVerificationRecoveryRepository, ProviderAccountRuntimeRepository,
     QuestionSessionArtifactRepositoryFactory, SchedulerRepository, StorageError,
@@ -110,6 +111,15 @@ where
         outputs: Arc<dyn ExecutionMutationStageOutputRepositoryFactory>,
     ) -> Self {
         self.runner = self.runner.with_execution_mutation_stage_outputs(outputs);
+        self
+    }
+
+    #[must_use]
+    pub fn with_execution_invocation_drafts(
+        mut self,
+        drafts: Arc<dyn ExecutionInvocationDraftRepositoryFactory>,
+    ) -> Self {
+        self.runner = self.runner.with_execution_invocation_drafts(drafts);
         self
     }
 
@@ -256,6 +266,7 @@ mod tests {
                 capability_plan: &execution.requested_capabilities,
                 capability_call_starts: &[1],
                 provider_plan_artifact: None,
+                invocation_draft_id: None,
                 billing: None,
                 runtime_settings: None,
                 strict_completion_retry: None,

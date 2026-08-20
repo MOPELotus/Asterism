@@ -14,6 +14,7 @@ pub mod completion;
 pub mod course_enrollment;
 pub mod credits;
 pub mod execution;
+pub mod execution_invocation;
 pub mod external_oauth;
 pub mod id;
 pub mod protocol_observation;
@@ -84,6 +85,7 @@ pub use execution::{
     ExecutionAttempt, ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
     ExecutionState, LogLevel, ProviderErrorClass, RequestSource,
 };
+pub use execution_invocation::{ExecutionInvocationDraft, ExecutionInvocationDraftValidationError};
 pub use external_oauth::{
     ExternalOauthPending, ExternalOauthPendingCreate, ExternalOauthPendingError,
     ExternalOauthState, MAX_EXTERNAL_OAUTH_TTL_SECONDS,

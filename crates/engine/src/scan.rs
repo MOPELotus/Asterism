@@ -231,6 +231,8 @@ pub(crate) const fn task_provider_capability(capability: TaskCapability) -> Prov
         TaskCapability::DurationRead => ProviderCapability::DurationRead,
         TaskCapability::DurationReport => ProviderCapability::DurationReport,
         TaskCapability::Discussion => ProviderCapability::Discussion,
+        TaskCapability::ArtifactUpload => ProviderCapability::ArtifactUpload,
+        TaskCapability::OralSubmission => ProviderCapability::OralSubmission,
         TaskCapability::Practice => ProviderCapability::Practice,
         TaskCapability::BrowserBridge => ProviderCapability::BrowserBridge,
     }

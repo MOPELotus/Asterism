@@ -227,6 +227,19 @@ impl SqliteSecretStore {
         )
     }
 
+    /// Builds the Provider-scoped encrypted repository for immutable private
+    /// invocation input claimed by one Execution and resolved by its Attempt.
+    pub fn execution_invocation_drafts(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteExecutionInvocationDraftRepository {
+        crate::SqliteExecutionInvocationDraftRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
     /// Builds the encrypted parent authority repository for a Course-scoped
     /// `BatchExecution` Attempt.
     pub fn batch_execution_parent_snapshots(
@@ -358,6 +371,15 @@ impl crate::ExecutionMutationStageOutputRepositoryFactory for SqliteSecretStore 
         provider_id: ProviderId,
     ) -> Arc<dyn crate::ExecutionMutationStageOutputRepository> {
         Arc::new(self.execution_mutation_stage_outputs(provider_id))
+    }
+}
+
+impl crate::ExecutionInvocationDraftRepositoryFactory for SqliteSecretStore {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn crate::ExecutionInvocationDraftRepository> {
+        Arc::new(self.execution_invocation_drafts(provider_id))
     }
 }
 

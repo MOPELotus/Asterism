@@ -213,6 +213,8 @@ impl ProviderEntry {
             ProviderCapability::ResourceExecution,
             ProviderCapability::DurationReport,
             ProviderCapability::Discussion,
+            ProviderCapability::ArtifactUpload,
+            ProviderCapability::OralSubmission,
             ProviderCapability::Practice,
         ];
         let advertises_execution = execution_capabilities

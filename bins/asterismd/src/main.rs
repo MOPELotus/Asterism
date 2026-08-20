@@ -578,7 +578,8 @@ fn start_execution_scheduler(
             worker
                 .with_question_session_artifacts(secret_store.clone())
                 .with_batch_execution_parent_snapshots(secret_store.clone())
-                .with_execution_mutation_stage_outputs(secret_store)
+                .with_execution_mutation_stage_outputs(secret_store.clone())
+                .with_execution_invocation_drafts(secret_store)
         } else {
             worker
         };

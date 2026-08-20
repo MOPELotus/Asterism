@@ -14,17 +14,18 @@ use asterism_domain::{
     CourseEnrollmentAttemptId, CourseEnrollmentDraft, CourseEnrollmentDraftId,
     CourseEnrollmentMutationReceipt, CourseEnrollmentVerification, CourseId, CreditAccount,
     CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId, Execution,
-    ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent,
-    ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
-    GlobalAnswerCorpusEntryId, GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel,
-    OrchestrationState, PriceQuote, PrivateAnswerEvidence, PrivateAnswerEvidenceId,
-    ProtocolObservation, ProtocolObservationKind, ProtocolSurface, ProviderAccount,
-    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
-    QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId, QuestionSession,
-    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionDraftId, SubmissionReceipt, SubmissionResult, SubmissionResultId,
-    SubmissionScore, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
-    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
+    ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionInvocationDraft,
+    ExecutionInvocationDraftId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
+    ExecutionStage, ExecutionState, ExternalOauthPending, GlobalAnswerCorpusEntryId,
+    GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel, OrchestrationState, PriceQuote,
+    PrivateAnswerEvidence, PrivateAnswerEvidenceId, ProtocolObservation, ProtocolObservationKind,
+    ProtocolSurface, ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId,
+    ProviderRuntimeSettingsId, Question, QuestionContentFingerprint, QuestionReadAttempt,
+    QuestionReadAttemptId, QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken,
+    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId,
+    SubmissionReceipt, SubmissionResult, SubmissionResultId, SubmissionScore, Task,
+    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
+    UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
@@ -32,8 +33,9 @@ use asterism_provider_api::{
     ExecutionParentBatchSnapshot, ProviderBatchExecutionMaterializationBinding,
     ProviderBatchExecutionPlanningInput, ProviderBatchExecutionPublicInput,
     ProviderCourseEnrollmentDraft, ProviderExecutionBatchPlan, ProviderExecutionPlanArtifact,
-    ProviderQuestionOperationArtifact, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
-    ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
+    ProviderExecutionPrivateInput, ProviderQuestionOperationArtifact, ProviderRuntimeSettingSource,
+    ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema, ProviderSettingScope,
+    ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -159,6 +161,82 @@ pub trait CourseEnrollmentDraftRepository: Send + Sync {
         &self,
         request: CourseEnrollmentDraftResolveRequest<'_>,
     ) -> Result<Option<ResolvedCourseEnrollmentDraft>, SecretStoreError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionInvocationDraftRecord {
+    pub draft: ExecutionInvocationDraft,
+    pub provider_plan_artifact: ProviderExecutionPlanArtifact,
+    pub claimed_execution_id: Option<ExecutionId>,
+    pub claimed_at: Option<Timestamp>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedExecutionInvocationDraft {
+    pub record: ExecutionInvocationDraftRecord,
+    pub private_input: ProviderExecutionPrivateInput,
+}
+
+#[derive(Debug)]
+pub struct ExecutionInvocationDraftCreateRequest<'a> {
+    pub draft_id: ExecutionInvocationDraftId,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub course_id: Option<CourseId>,
+    pub task_id: TaskId,
+    pub provider_version: &'a str,
+    pub requested_capabilities: &'a [TaskCapability],
+    pub submission_draft_id: Option<SubmissionDraftId>,
+    pub provider_plan_artifact: &'a ProviderExecutionPlanArtifact,
+    pub private_input: &'a ProviderExecutionPrivateInput,
+    pub created_at: Timestamp,
+    pub idempotency_scope: &'a str,
+    pub idempotency_key: &'a str,
+    pub correlation_id: &'a str,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionInvocationDraftCreateOutcome {
+    Created(ExecutionInvocationDraftRecord),
+    AlreadyExists(ExecutionInvocationDraftRecord),
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionInvocationDraftResolveRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+/// Encrypted immutable Provider invocation input. Creation is owner/account/
+/// Task scoped; resolution additionally requires the one claimed Execution,
+/// its active Attempt and live scheduler worker claim.
+#[async_trait]
+pub trait ExecutionInvocationDraftRepository: Send + Sync {
+    async fn create_execution_invocation_draft(
+        &self,
+        request: ExecutionInvocationDraftCreateRequest<'_>,
+    ) -> Result<ExecutionInvocationDraftCreateOutcome, SecretStoreError>;
+
+    async fn find_owned_execution_invocation_draft(
+        &self,
+        owner_user_id: UserId,
+        draft_id: ExecutionInvocationDraftId,
+    ) -> Result<Option<ExecutionInvocationDraftRecord>, StorageError>;
+
+    async fn resolve_execution_invocation_draft(
+        &self,
+        request: ExecutionInvocationDraftResolveRequest<'_>,
+    ) -> Result<Option<ResolvedExecutionInvocationDraft>, SecretStoreError>;
+}
+
+pub trait ExecutionInvocationDraftRepositoryFactory: Send + Sync {
+    fn for_provider(&self, provider_id: ProviderId) -> Arc<dyn ExecutionInvocationDraftRepository>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2731,6 +2809,10 @@ pub struct ExecutionScheduleRequest<'a> {
     /// value is always one and the sequence is strictly increasing.
     pub capability_call_starts: &'a [u8],
     pub provider_plan_artifact: Option<&'a ProviderExecutionPlanArtifact>,
+    /// Optional immutable Provider-private input prepared before scheduling.
+    /// Storage claims it for `execution` in the same transaction that inserts
+    /// the Execution and its capability plan.
+    pub invocation_draft_id: Option<ExecutionInvocationDraftId>,
     pub billing: Option<ExecutionBillingReservation<'a>>,
     pub runtime_settings: Option<ExecutionRuntimeSettingsResolution<'a>>,
     pub strict_completion_retry: Option<ExecutionStrictCompletionRetryRequest>,
@@ -3330,6 +3412,7 @@ pub enum ExecutionScheduleOutcome {
     Existing(Execution),
     IdempotencyConflict,
     SubmissionDraftConflict,
+    InvocationDraftConflict,
     TaskStateConflict,
     RuntimeSettingsConflict,
     StrictCompletionRetryConflict,
@@ -3498,6 +3581,13 @@ pub trait ExecutionRepository: Send + Sync {
         idempotency_scope: &str,
         idempotency_key: &str,
     ) -> Result<Option<Execution>, StorageError>;
+
+    async fn find_execution_invocation_draft_id(
+        &self,
+        _execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionInvocationDraftId>, StorageError> {
+        Ok(None)
+    }
 
     async fn schedule_execution(
         &self,

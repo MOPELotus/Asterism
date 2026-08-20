@@ -45,13 +45,14 @@ use asterism_storage::{
     ExecutionAtomicMutationVerificationRequest, ExecutionAttemptFinishRequest,
     ExecutionAttemptStartRequest, ExecutionCapabilityCallMutation, ExecutionCapabilityStep,
     ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
-    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
-    ExecutionLogAppendRequest, ExecutionMutationReceiptWithStageOutputOutcome,
-    ExecutionMutationReceiptWithStageOutputRequest, ExecutionMutationStageOutputRepositoryFactory,
-    ExecutionMutationStageOutputResolveRequest, ExecutionProgressUpdate,
-    ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest, ExecutionRepository,
-    ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome,
-    ProtocolObservationRepository, ProviderAccountRuntimeRepository,
+    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState,
+    ExecutionInvocationDraftRepositoryFactory, ExecutionInvocationDraftResolveRequest,
+    ExecutionLeaseRepository, ExecutionLogAppendRequest,
+    ExecutionMutationReceiptWithStageOutputOutcome, ExecutionMutationReceiptWithStageOutputRequest,
+    ExecutionMutationStageOutputRepositoryFactory, ExecutionMutationStageOutputResolveRequest,
+    ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
+    ExecutionRepository, ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository,
+    LeaseAcquireOutcome, ProtocolObservationRepository, ProviderAccountRuntimeRepository,
     QuestionSessionArtifactRepository, QuestionSessionArtifactRepositoryFactory,
     QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
     QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
@@ -214,6 +215,7 @@ pub struct ScheduledExecutionRunner<E, L, S, A, T> {
     question_sessions: Option<Arc<dyn QuestionSessionArtifactRepositoryFactory>>,
     batch_parent_snapshots: Option<Arc<dyn BatchExecutionParentSnapshotRepositoryFactory>>,
     mutation_stage_outputs: Option<Arc<dyn ExecutionMutationStageOutputRepositoryFactory>>,
+    invocation_drafts: Option<Arc<dyn ExecutionInvocationDraftRepositoryFactory>>,
     protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
     admission: Arc<ExecutionAdmissionController>,
     config: ExecutionRunnerConfig,
@@ -246,6 +248,7 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
             question_sessions: None,
             batch_parent_snapshots: None,
             mutation_stage_outputs: None,
+            invocation_drafts: None,
             protocol_observations: None,
             admission: Arc::new(ExecutionAdmissionController::new(
                 config.global_concurrency_limit,
@@ -282,6 +285,15 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
     }
 
     #[must_use]
+    pub fn with_execution_invocation_drafts(
+        mut self,
+        drafts: Arc<dyn ExecutionInvocationDraftRepositoryFactory>,
+    ) -> Self {
+        self.invocation_drafts = Some(drafts);
+        self
+    }
+
+    #[must_use]
     pub fn with_protocol_observations(
         mut self,
         observations: Arc<dyn ProtocolObservationRepository>,
@@ -314,6 +326,7 @@ impl<E, L, S, A, T> std::fmt::Debug for ScheduledExecutionRunner<E, L, S, A, T> 
                 "protocol_observations",
                 &self.protocol_observations.is_some(),
             )
+            .field("invocation_drafts", &self.invocation_drafts.is_some())
             .field("admission", &self.admission)
             .field("config", &self.config)
             .finish()
@@ -466,14 +479,36 @@ where
                 .recover_composite_execution(job, execution, task, now, correlation_id)
                 .await;
         }
+        let execution_id = claimed_execution_id(job)?;
+        let Some(attempt_id) = self
+            .executions
+            .find_active_execution_attempt_id(execution_id)
+            .await?
+        else {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::Internal),
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        };
         let prepared = match self
             .prepare_provider_call(
+                ProviderCallClaim {
+                    job,
+                    attempt_id,
+                    at: now,
+                    correlation_id,
+                },
                 execution.id,
                 task,
                 &execution.requested_capabilities,
                 &execution.requested_capabilities,
                 1,
-                correlation_id,
             )
             .await?
         {
@@ -511,23 +546,6 @@ where
                 .recover_execution_by_progress(job, task, now, correlation_id)
                 .await;
         }
-        let execution_id = claimed_execution_id(job)?;
-        let Some(attempt_id) = self
-            .executions
-            .find_active_execution_attempt_id(execution_id)
-            .await?
-        else {
-            return self
-                .finish_recovery(
-                    job,
-                    ExecutionState::HumanRequired,
-                    Some(ProviderErrorClass::Internal),
-                    None,
-                    now,
-                    correlation_id,
-                )
-                .await;
-        };
         let _admission = self
             .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
             .await?;
@@ -545,6 +563,12 @@ where
             .await?;
         let provider = async {
             if let Some(parent) = batch_parent.as_ref() {
+                if prepared.private_invocation_input.is_some() {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Internal,
+                        "private invocation cannot inherit batch-child authority",
+                    ));
+                }
                 let Some(mutation_sequence) = mutation_sequence.as_ref() else {
                     return Err(ProviderError::new(
                         ProviderErrorKind::Internal,
@@ -560,6 +584,16 @@ where
                         parent.position,
                         &prepared.request,
                         mutation_sequence,
+                    )
+                    .await
+            } else if let Some(private_input) = prepared.private_invocation_input.as_ref() {
+                prepared
+                    .capability
+                    .verify_private_invocation_recovery(
+                        &prepared.context,
+                        &prepared.request,
+                        private_input,
+                        mutation_sequence.as_ref(),
                     )
                     .await
             } else {
@@ -855,12 +889,17 @@ where
         };
         let prepared = match self
             .prepare_provider_call(
+                ProviderCallClaim {
+                    job,
+                    attempt_id,
+                    at: now,
+                    correlation_id,
+                },
                 execution.id,
                 task,
                 &call.capabilities,
                 &capability_plan,
                 call.first_step_position,
-                correlation_id,
             )
             .await?
         {
@@ -915,6 +954,12 @@ where
             .await?;
         let provider = async {
             if let Some(parent) = batch_parent.as_ref() {
+                if prepared.private_invocation_input.is_some() {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Internal,
+                        "private invocation cannot inherit batch-child authority",
+                    ));
+                }
                 let Some(mutation_sequence) = mutation_sequence.as_ref() else {
                     return Err(ProviderError::new(
                         ProviderErrorKind::Internal,
@@ -930,6 +975,16 @@ where
                         parent.position,
                         &prepared.request,
                         mutation_sequence,
+                    )
+                    .await
+            } else if let Some(private_input) = prepared.private_invocation_input.as_ref() {
+                prepared
+                    .capability
+                    .verify_private_invocation_recovery(
+                        &prepared.context,
+                        &prepared.request,
+                        private_input,
+                        mutation_sequence.as_ref(),
                     )
                     .await
             } else {
@@ -2104,6 +2159,10 @@ where
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "attempt dispatch keeps the immutable capability-call sequence and recovery transitions visible"
+    )]
     async fn execute_attempt(
         &self,
         job: &ScheduledJob,
@@ -2126,12 +2185,17 @@ where
         let duration_only = duration_report_only(&execution.requested_capabilities);
         let prepared = match self
             .prepare_provider_call(
+                ProviderCallClaim {
+                    job,
+                    attempt_id: attempt.id,
+                    at: now,
+                    correlation_id,
+                },
                 attempt.execution_id,
                 task,
                 &execution.requested_capabilities,
                 &execution.requested_capabilities,
                 1,
-                correlation_id,
             )
             .await?
         {
@@ -2271,12 +2335,17 @@ where
             }
             let prepared = match self
                 .prepare_provider_call(
+                    ProviderCallClaim {
+                        job,
+                        attempt_id: attempt.id,
+                        at: Utc::now().max(now),
+                        correlation_id,
+                    },
                     execution.id,
                     task,
                     &call.capabilities,
                     &capability_plan,
                     call.first_step_position,
-                    correlation_id,
                 )
                 .await?
             {
@@ -2723,13 +2792,14 @@ where
     )]
     async fn prepare_provider_call(
         &self,
+        claim: ProviderCallClaim<'_>,
         execution_id: ExecutionId,
         task: &Task,
         requested_capabilities: &[TaskCapability],
         capability_plan: &[TaskCapability],
         capability_step_position: u8,
-        correlation_id: &str,
     ) -> Result<Result<PreparedProviderCall, PreparedFailure>, ScheduledExecutionRunError> {
+        let correlation_id = claim.correlation_id;
         if authorize_execution(
             task,
             requested_capabilities,
@@ -2798,6 +2868,76 @@ where
         {
             return Ok(Err(internal_prepared_failure()));
         }
+        let invocation_draft_id = self
+            .executions
+            .find_execution_invocation_draft_id(execution_id)
+            .await?;
+        let private_invocation_input = if invocation_draft_id.is_some() {
+            let Some(factory) = self.invocation_drafts.as_ref() else {
+                return Ok(Err(PreparedFailure {
+                    error_class: ProviderErrorClass::Internal,
+                    disposition: FailureDisposition::HumanRequired,
+                }));
+            };
+            let access = SecretAccess {
+                actor: SecretActor::CoreService("execution-private-invocation"),
+                correlation_id: correlation_id.to_owned(),
+                reason: "resolve immutable private invocation for active Execution Attempt"
+                    .to_owned(),
+            };
+            let Some(resolved) = factory
+                .for_provider(account.provider_id.clone())
+                .resolve_execution_invocation_draft(ExecutionInvocationDraftResolveRequest {
+                    execution_id,
+                    attempt_id: claim.attempt_id,
+                    scheduler_job_id: claim.job.id,
+                    worker_id: claimed_worker(claim.job)?,
+                    correlation_id,
+                    at: claim.at,
+                    access: &access,
+                })
+                .await?
+            else {
+                return Ok(Err(PreparedFailure {
+                    error_class: ProviderErrorClass::Internal,
+                    disposition: FailureDisposition::HumanRequired,
+                }));
+            };
+            let record = &resolved.record;
+            if record.claimed_execution_id != Some(execution_id)
+                || record.draft.provider_account_id != account.id
+                || record.draft.course_id != task.course_id
+                || record.draft.task_id != task.id
+                || record.draft.provider_id != account.provider_id
+                || record.draft.provider_version != entry.metadata.implementation_version
+                || record.draft.requested_capabilities.len() != capability_plan.len()
+                || record
+                    .draft
+                    .requested_capabilities
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != capability_plan
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                || record.provider_plan_artifact
+                    != provider_plan_artifact
+                        .clone()
+                        .ok_or_else(|| ScheduledExecutionRunError::StateConflict)?
+                || resolved.private_input.provider_id() != &account.provider_id
+                || resolved.private_input.input_type() != record.draft.private_input_type
+                || resolved.private_input.input_digest() != record.draft.private_input_digest
+            {
+                return Ok(Err(PreparedFailure {
+                    error_class: ProviderErrorClass::Internal,
+                    disposition: FailureDisposition::HumanRequired,
+                }));
+            }
+            Some(resolved.private_input)
+        } else {
+            None
+        };
         let Ok(resolved_runtime_settings) = entry
             .runtime_settings
             .hydrate_frozen_core_defaults(&runtime_settings.resolved)
@@ -2834,6 +2974,7 @@ where
                 correlation_id: correlation_id.to_owned(),
             },
             request,
+            private_invocation_input,
             concurrency,
         }))
     }
@@ -3037,6 +3178,12 @@ where
         };
         let provider = async {
             if let Some(parent) = batch_parent.as_ref() {
+                if prepared.private_invocation_input.is_some() {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Internal,
+                        "private invocation cannot inherit batch-child authority",
+                    ));
+                }
                 prepared
                     .capability
                     .execute_batch_child(
@@ -3045,6 +3192,16 @@ where
                         parent.materialization_binding.as_ref(),
                         parent.position,
                         &prepared.request,
+                        &sink,
+                    )
+                    .await
+            } else if let Some(private_input) = prepared.private_invocation_input.as_ref() {
+                prepared
+                    .capability
+                    .execute_private_invocation(
+                        &prepared.context,
+                        &prepared.request,
+                        private_input,
                         &sink,
                     )
                     .await
@@ -3182,9 +3339,19 @@ where
         prepared: &PreparedProviderCall,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
-        let provider = prepared
-            .capability
-            .verify_execution(&prepared.context, &prepared.request);
+        let provider = async {
+            if let Some(private_input) = prepared.private_invocation_input.as_ref() {
+                prepared
+                    .capability
+                    .verify_private_invocation(&prepared.context, &prepared.request, private_input)
+                    .await
+            } else {
+                prepared
+                    .capability
+                    .verify_execution(&prepared.context, &prepared.request)
+                    .await
+            }
+        };
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4542,7 +4709,16 @@ struct PreparedProviderCall {
     verification: bool,
     context: ProviderContext,
     request: ProviderExecutionRequest,
+    private_invocation_input: Option<asterism_provider_api::ProviderExecutionPrivateInput>,
     concurrency: ProviderExecutionConcurrency,
+}
+
+#[derive(Clone, Copy)]
+struct ProviderCallClaim<'a> {
+    job: &'a ScheduledJob,
+    attempt_id: asterism_domain::ExecutionAttemptId,
+    at: Timestamp,
+    correlation_id: &'a str,
 }
 
 struct PreparedSubmissionCall {
@@ -5265,15 +5441,14 @@ fn validate_execution_binding(
                         | TaskCapability::SubmissionExecute
                         | TaskCapability::DurationReport
                         | TaskCapability::Discussion
+                        | TaskCapability::ArtifactUpload
+                        | TaskCapability::OralSubmission
                         | TaskCapability::Practice
                 )
-        })
-        && (!execution
-            .requested_capabilities
-            .contains(&TaskCapability::SubmissionExecute)
-            || execution.requested_capabilities == [TaskCapability::SubmissionExecute]);
-    let submission_selected =
-        execution.requested_capabilities == [TaskCapability::SubmissionExecute];
+        });
+    let submission_selected = execution
+        .requested_capabilities
+        .contains(&TaskCapability::SubmissionExecute);
     let submission_binding_matches = submission_selected == execution.submission_draft_id.is_some();
     if execution.task_id == task.id
         && synchronized
@@ -8501,6 +8676,7 @@ mod tests {
                 capability_plan: &execution.requested_capabilities,
                 capability_call_starts: &[1],
                 provider_plan_artifact: None,
+                invocation_draft_id: None,
                 billing: None,
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,

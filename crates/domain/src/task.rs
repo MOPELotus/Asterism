@@ -82,6 +82,13 @@ pub enum TaskCapability {
     DurationRead,
     DurationReport,
     Discussion,
+    /// Uploads one user-authorized artifact. A Provider may group this with
+    /// `SubmissionExecute` only through one explicitly prepared private
+    /// invocation when the donor protocol commits both atomically.
+    ArtifactUpload,
+    /// Submits oral evidence. Compound answer-plus-oral protocols pair this
+    /// with `SubmissionExecute` under one private invocation Draft.
+    OralSubmission,
     Practice,
     BrowserBridge,
 }

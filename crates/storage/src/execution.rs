@@ -2,10 +2,10 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, CreditReservationState, Execution, ExecutionAttempt,
-    ExecutionAttemptId, ExecutionId, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
-    ExecutionState, LogLevel, OrchestrationState, ProviderAccountId, ProviderId, ScheduleId,
-    StrictCompletionState, StrictCompletionWorkflow, SubmissionAttemptReceipt, SubmissionDraft,
-    TaskCapability, TaskId, Timestamp, UserId,
+    ExecutionAttemptId, ExecutionId, ExecutionInvocationDraftId, ExecutionLogEvent,
+    ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState,
+    ProviderAccountId, ProviderId, ScheduleId, StrictCompletionState, StrictCompletionWorkflow,
+    SubmissionAttemptReceipt, SubmissionDraft, TaskCapability, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
@@ -101,6 +101,26 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .transpose()
     }
 
+    async fn find_execution_invocation_draft_id(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionInvocationDraftId>, StorageError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM execution_invocation_drafts WHERE claimed_execution_id = ?",
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?
+        .map(|value| {
+            ExecutionInvocationDraftId::from_str(&value).map_err(|_| {
+                StorageError::InvalidData(
+                    "execution invocation draft identity is invalid".to_owned(),
+                )
+            })
+        })
+        .transpose()
+    }
+
     async fn schedule_execution(
         &self,
         request: ExecutionScheduleRequest<'_>,
@@ -121,8 +141,17 @@ impl ExecutionRepository for SqliteExecutionRepository {
                 request.strict_completion_retry,
             )
             .await?;
+            let same_invocation = persisted_invocation_draft_matches(
+                &mut transaction,
+                existing.id,
+                request.invocation_draft_id,
+            )
+            .await?;
             transaction.commit().await?;
-            return if same_request(&existing, request.execution) && same_confirmation {
+            return if same_request(&existing, request.execution)
+                && same_confirmation
+                && same_invocation
+            {
                 Ok(ExecutionScheduleOutcome::Existing(existing))
             } else {
                 Ok(ExecutionScheduleOutcome::IdempotencyConflict)
@@ -132,6 +161,11 @@ impl ExecutionRepository for SqliteExecutionRepository {
         if !submission_draft_is_available(&mut transaction, request.execution).await? {
             transaction.rollback().await?;
             return Ok(ExecutionScheduleOutcome::SubmissionDraftConflict);
+        }
+
+        if !invocation_draft_is_available(&mut transaction, &request).await? {
+            transaction.rollback().await?;
+            return Ok(ExecutionScheduleOutcome::InvocationDraftConflict);
         }
 
         if !strict_completion_retry_is_valid(&mut transaction, &request).await? {
@@ -184,6 +218,19 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .bind(request.idempotency_key)
         .execute(&mut *transaction)
         .await?;
+
+        if let Some(draft_id) = request.invocation_draft_id
+            && !claim_invocation_draft(
+                &mut transaction,
+                draft_id,
+                execution.id,
+                execution.created_at,
+            )
+            .await?
+        {
+            transaction.rollback().await?;
+            return Ok(ExecutionScheduleOutcome::InvocationDraftConflict);
+        }
 
         if let Some(confirmation) = request.strict_completion_retry {
             sqlx::query(
@@ -3436,6 +3483,109 @@ fn same_request(existing: &Execution, requested: &Execution) -> bool {
         && existing.quote_id == requested.quote_id
 }
 
+async fn persisted_invocation_draft_matches(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    requested: Option<ExecutionInvocationDraftId>,
+) -> Result<bool, StorageError> {
+    let persisted: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM execution_invocation_drafts WHERE claimed_execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(persisted.as_deref() == requested.map(|id| id.to_string()).as_deref())
+}
+
+async fn invocation_draft_is_available(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request: &ExecutionScheduleRequest<'_>,
+) -> Result<bool, StorageError> {
+    let Some(draft_id) = request.invocation_draft_id else {
+        return Ok(true);
+    };
+    let execution = request.execution;
+    if execution.requested_capabilities == [TaskCapability::SubmissionExecute] {
+        return Ok(false);
+    }
+    let Some(owner_user_id) = execution.requested_by else {
+        return Ok(false);
+    };
+    let Some(runtime_settings) = request.runtime_settings else {
+        return Ok(false);
+    };
+    let Some(plan_artifact) = request.provider_plan_artifact else {
+        return Ok(false);
+    };
+    let row = sqlx::query(
+        "SELECT draft.owner_user_id, draft.provider_account_id, draft.course_id, draft.task_id, \
+                draft.provider_id, draft.requested_capabilities_json, draft.submission_draft_id, \
+                draft.plan_artifact_type, draft.plan_artifact_digest, \
+                draft.plan_artifact_payload_json, draft.created_at, draft.claimed_execution_id, \
+                task.provider_account_id AS actual_provider_account_id, \
+                task.course_id AS actual_course_id, account.owner_user_id AS actual_owner_user_id, \
+                account.provider_id AS actual_provider_id \
+         FROM execution_invocation_drafts AS draft \
+         INNER JOIN tasks AS task ON task.id = draft.task_id \
+         INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         WHERE draft.id = ?",
+    )
+    .bind(draft_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let requested_capabilities: Vec<TaskCapability> =
+        serde_json::from_str(row.try_get("requested_capabilities_json")?)?;
+    let stored_payload: serde_json::Value =
+        serde_json::from_str(row.try_get("plan_artifact_payload_json")?)?;
+    let stored_digest: Vec<u8> = row.try_get("plan_artifact_digest")?;
+    let created_at = decode_timestamp(row.try_get("created_at")?)?;
+    Ok(
+        row.try_get::<String, _>("owner_user_id")? == owner_user_id.to_string()
+            && row.try_get::<String, _>("actual_owner_user_id")? == owner_user_id.to_string()
+            && row.try_get::<String, _>("provider_account_id")?
+                == row.try_get::<String, _>("actual_provider_account_id")?
+            && row.try_get::<Option<String>, _>("course_id")?
+                == row.try_get::<Option<String>, _>("actual_course_id")?
+            && row.try_get::<String, _>("task_id")? == execution.task_id.to_string()
+            && row.try_get::<String, _>("provider_id")?
+                == runtime_settings.snapshot.provider_id.as_str()
+            && row.try_get::<String, _>("actual_provider_id")?
+                == runtime_settings.snapshot.provider_id.as_str()
+            && requested_capabilities == execution.requested_capabilities
+            && row.try_get::<Option<String>, _>("submission_draft_id")?
+                == execution.submission_draft_id.map(|id| id.to_string())
+            && row.try_get::<String, _>("plan_artifact_type")? == plan_artifact.artifact_type()
+            && stored_digest.as_slice() == plan_artifact.artifact_digest()
+            && stored_payload == *plan_artifact.payload_sanitized()
+            && created_at <= execution.created_at
+            && row
+                .try_get::<Option<String>, _>("claimed_execution_id")?
+                .is_none(),
+    )
+}
+
+async fn claim_invocation_draft(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    draft_id: ExecutionInvocationDraftId,
+    execution_id: ExecutionId,
+    claimed_at: Timestamp,
+) -> Result<bool, StorageError> {
+    let changed = sqlx::query(
+        "UPDATE execution_invocation_drafts SET claimed_execution_id = ?, claimed_at = ? \
+         WHERE id = ? AND claimed_execution_id IS NULL AND claimed_at IS NULL",
+    )
+    .bind(execution_id.to_string())
+    .bind(encode_timestamp(claimed_at))
+    .bind(draft_id.to_string())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    Ok(changed == 1)
+}
+
 async fn submission_draft_is_available(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     execution: &Execution,
@@ -3508,7 +3658,9 @@ async fn strict_completion_retry_is_valid(
     let retry_required = workflow.state == StrictCompletionState::Active
         && workflow.attempts_started > 0
         && (assessment_class == "formal"
-            || execution.requested_capabilities == [TaskCapability::SubmissionExecute]);
+            || execution
+                .requested_capabilities
+                .contains(&TaskCapability::SubmissionExecute));
     let Some(confirmation) = request.strict_completion_retry else {
         return Ok(!retry_required);
     };
@@ -3519,7 +3671,10 @@ async fn strict_completion_retry_is_valid(
     {
         return Ok(false);
     }
-    if execution.requested_capabilities != [TaskCapability::SubmissionExecute] {
+    if !execution
+        .requested_capabilities
+        .contains(&TaskCapability::SubmissionExecute)
+    {
         return Ok(true);
     }
     let Some(draft_id) = execution.submission_draft_id else {
@@ -4828,11 +4983,11 @@ fn valid_requested_capabilities(capabilities: &[TaskCapability]) -> bool {
                     | TaskCapability::SubmissionExecute
                     | TaskCapability::DurationReport
                     | TaskCapability::Discussion
+                    | TaskCapability::ArtifactUpload
+                    | TaskCapability::OralSubmission
                     | TaskCapability::Practice
             )
         })
-        && (!capabilities.contains(&TaskCapability::SubmissionExecute)
-            || capabilities == [TaskCapability::SubmissionExecute])
 }
 
 fn decode_submission_receipt(
@@ -5022,6 +5177,7 @@ mod tests {
             capability_plan: &execution.requested_capabilities,
             capability_call_starts: &[1],
             provider_plan_artifact: None,
+            invocation_draft_id: None,
             billing: None,
             runtime_settings: None,
             strict_completion_retry: None,
@@ -7634,6 +7790,7 @@ mod tests {
             capability_plan: &execution.requested_capabilities,
             capability_call_starts: &[1],
             provider_plan_artifact: None,
+            invocation_draft_id: None,
             billing: None,
             runtime_settings: None,
             strict_completion_retry: None,
@@ -7657,6 +7814,7 @@ mod tests {
             capability_plan: &execution.requested_capabilities,
             capability_call_starts: &[1],
             provider_plan_artifact: None,
+            invocation_draft_id: None,
             billing: Some(ExecutionBillingReservation { quote, reservation }),
             runtime_settings: None,
             strict_completion_retry: None,

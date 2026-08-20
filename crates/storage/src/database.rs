@@ -154,7 +154,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 86);
+        assert_eq!(migration_count, 87);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -172,6 +172,18 @@ mod tests {
             .collect();
         assert!(names.contains(&"encrypted_data".to_owned()));
         assert!(!names.iter().any(|name| name == "plaintext"));
+
+        let invocation_columns = sqlx::query("PRAGMA table_info(execution_invocation_drafts)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        let invocation_names = invocation_columns
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        assert!(invocation_names.contains(&"private_input_secret_blob_id".to_owned()));
+        assert!(invocation_names.contains(&"claimed_execution_id".to_owned()));
+        assert!(!invocation_names.iter().any(|name| name == "private_input"));
 
         let exchange_columns = sqlx::query("PRAGMA table_info(browser_bridge_exchanges)")
             .fetch_all(database.pool())

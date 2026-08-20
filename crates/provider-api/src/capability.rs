@@ -1743,6 +1743,39 @@ pub struct ExecutionPlanningRequest<'a> {
     pub runtime_settings: &'a ResolvedProviderRuntimeSettings,
 }
 
+/// Owner-authorized raw input for one fresh Provider validation pass before an
+/// immutable private invocation Draft is persisted. Core never logs or
+/// serializes `raw_input` and does not infer Provider-specific semantics.
+pub struct ExecutionInvocationPreparationRequest<'a> {
+    pub task_id: TaskId,
+    pub remote_task_id: &'a str,
+    pub course_id: Option<CourseId>,
+    pub requested_capabilities: &'a [TaskCapability],
+    pub submission_draft: Option<&'a SubmissionDraft>,
+    pub input_type: &'a str,
+    pub raw_input: &'a SecretValue,
+    pub runtime_settings: &'a ResolvedProviderRuntimeSettings,
+}
+
+impl fmt::Debug for ExecutionInvocationPreparationRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionInvocationPreparationRequest")
+            .field("task_id", &self.task_id)
+            .field("remote_task_id", &"[REDACTED]")
+            .field("course_id", &self.course_id)
+            .field("requested_capabilities", &self.requested_capabilities)
+            .field(
+                "submission_draft_id",
+                &self.submission_draft.map(|draft| draft.id),
+            )
+            .field("input_type", &self.input_type)
+            .field("raw_input", &"[REDACTED]")
+            .field("runtime_settings", &"[REDACTED]")
+            .finish()
+    }
+}
+
 const MAX_BATCH_EXECUTION_PLANNING_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_BATCH_EXECUTION_PUBLIC_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_BATCH_EXECUTION_MATERIALIZATION_BINDING_BYTES: usize = 8 * 1024 * 1024;
@@ -2219,6 +2252,20 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         self.execution_plan_snapshot(request.requested_capabilities, request.runtime_settings)
     }
 
+    /// Freshly validates caller-supplied private input and freezes the exact
+    /// Provider plan/state pair before scheduling. This hook is read-only: it
+    /// may rediscover remote facts but must not issue a mutation.
+    async fn prepare_private_invocation(
+        &self,
+        _context: &ProviderContext,
+        _request: &ExecutionInvocationPreparationRequest<'_>,
+    ) -> ProviderResult<PreparedProviderExecutionInvocation> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement private execution invocation preparation",
+        ))
+    }
+
     /// Performs one fresh, read-only Course-scoped parent planning pass and
     /// returns the encrypted parent material together with the complete ordered
     /// child projection. Core owns persistence and child creation; this hook
@@ -2307,6 +2354,25 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome>;
 
+    /// Executes an explicitly prepared private invocation under the same
+    /// narrowed capability authority. Core resolves `private_input` only for
+    /// the draft's claimed Execution and current active Attempt.
+    ///
+    /// Providers opt into this boundary explicitly; ordinary task execution
+    /// cannot accidentally consume private invocation bytes.
+    async fn execute_private_invocation(
+        &self,
+        _context: &ProviderContext,
+        _request: &ExecutionRequest,
+        _private_input: &ProviderExecutionPrivateInput,
+        _events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement private execution invocation",
+        ))
+    }
+
     /// Executes one Core-materialized child of an encrypted Course batch.
     /// Core resolves the exact parent Attempt snapshot and durable one-based
     /// child position under the child's own live scheduler claim. Providers
@@ -2346,6 +2412,21 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         ))
     }
 
+    /// Fresh read-only verification for an Execution created from private
+    /// invocation input. The default refuses to reinterpret an ordinary
+    /// verification implementation as private-input support.
+    async fn verify_private_invocation(
+        &self,
+        _context: &ProviderContext,
+        _request: &ExecutionRequest,
+        _private_input: &ProviderExecutionPrivateInput,
+    ) -> ProviderResult<ExecutionOutcome> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement private execution invocation verification",
+        ))
+    }
+
     /// Rebinds a recovery attempt with the exact immutable mutation sequence
     /// records loaded by Core. The snapshot is read-only evidence and never
     /// authorizes issuing or replaying a remote mutation. A fresh independent
@@ -2358,6 +2439,21 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         _mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
     ) -> ProviderResult<ExecutionRecoveryOutcome> {
         self.verify_execution(context, request)
+            .await
+            .map(ExecutionRecoveryOutcome::new)
+    }
+
+    /// Same-Attempt read-only recovery for a private invocation. The private
+    /// bytes and mutation sequence are evidence only and never authorize a
+    /// replay.
+    async fn verify_private_invocation_recovery(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        private_input: &ProviderExecutionPrivateInput,
+        _mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        self.verify_private_invocation(context, request, private_input)
             .await
             .map(ExecutionRecoveryOutcome::new)
     }
@@ -2476,6 +2572,166 @@ impl fmt::Debug for ProviderExecutionPlanArtifact {
             .field("artifact_digest", &"[HASHED]")
             .field("payload_sanitized", &"[REDACTED]")
             .finish()
+    }
+}
+
+/// Maximum encoded Provider-private invocation input accepted by Core.
+///
+/// This dedicated boundary is intentionally larger than ordinary Provider
+/// state artifacts so audited media uploads do not weaken the global secret
+/// size limit used by credentials and continuations.
+pub const MAX_PROVIDER_EXECUTION_PRIVATE_INPUT_BYTES: usize = 64 * 1_024 * 1_024;
+
+/// Provider-scoped private bytes frozen before one Execution is scheduled.
+///
+/// The value is reference-counted so request and recovery plumbing can retain
+/// a single zeroizing owner. Serialization and Debug never expose it.
+#[derive(Clone)]
+pub struct ProviderExecutionPrivateInput {
+    provider_id: ProviderId,
+    input_type: String,
+    input_digest: [u8; 32],
+    value: Arc<SecretValue>,
+}
+
+impl ProviderExecutionPrivateInput {
+    /// Creates one bounded Provider-namespaced private invocation value.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid type or empty/oversized private bytes.
+    pub fn try_new(
+        provider_id: ProviderId,
+        input_type: impl Into<String>,
+        value: SecretValue,
+    ) -> ProviderResult<Self> {
+        let input_type = input_type.into();
+        let bytes = value.expose_secret();
+        if !valid_provider_execution_artifact_type(&provider_id, &input_type)
+            || bytes.is_empty()
+            || bytes.len() > MAX_PROVIDER_EXECUTION_PRIVATE_INPUT_BYTES
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution private input is invalid",
+            ));
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"asterism.provider-execution-private-input.v1\0");
+        digest.update(provider_id.as_str().as_bytes());
+        digest.update(b"\0");
+        digest.update(input_type.as_bytes());
+        digest.update(b"\0");
+        digest.update(bytes);
+        Ok(Self {
+            provider_id,
+            input_type,
+            input_digest: digest.finalize().into(),
+            value: Arc::new(value),
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn input_type(&self) -> &str {
+        &self.input_type
+    }
+
+    pub const fn input_digest(&self) -> [u8; 32] {
+        self.input_digest
+    }
+
+    pub fn value(&self) -> &SecretValue {
+        &self.value
+    }
+}
+
+impl fmt::Debug for ProviderExecutionPrivateInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderExecutionPrivateInput")
+            .field("provider_id", &self.provider_id)
+            .field("input_type", &self.input_type)
+            .field("input_digest", &"[HASHED]")
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Provider-validated pair persisted as one immutable invocation Draft: a
+/// compact credential-free plan artifact plus its encrypted executable input.
+#[derive(Clone, Debug)]
+pub struct PreparedProviderExecutionInvocation {
+    plan_artifact: ProviderExecutionPlanArtifact,
+    private_input: ProviderExecutionPrivateInput,
+}
+
+impl PreparedProviderExecutionInvocation {
+    /// # Errors
+    ///
+    /// Rejects a plan/private pair produced for different Providers.
+    pub fn try_new(
+        plan_artifact: ProviderExecutionPlanArtifact,
+        private_input: ProviderExecutionPrivateInput,
+    ) -> ProviderResult<Self> {
+        if plan_artifact.provider_id() != private_input.provider_id() {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution invocation artifacts are detached",
+            ));
+        }
+        Ok(Self {
+            plan_artifact,
+            private_input,
+        })
+    }
+
+    pub const fn plan_artifact(&self) -> &ProviderExecutionPlanArtifact {
+        &self.plan_artifact
+    }
+
+    pub const fn private_input(&self) -> &ProviderExecutionPrivateInput {
+        &self.private_input
+    }
+
+    pub fn into_parts(self) -> (ProviderExecutionPlanArtifact, ProviderExecutionPrivateInput) {
+        (self.plan_artifact, self.private_input)
+    }
+}
+
+#[cfg(test)]
+mod provider_execution_private_input_tests {
+    use super::*;
+
+    #[test]
+    fn private_input_is_provider_bound_bounded_and_redacted() {
+        let input = ProviderExecutionPrivateInput::try_new(
+            ProviderId::new("uai").unwrap(),
+            "uai.upload.input.v1",
+            SecretValue::new(b"PRIVATE_AUDIO".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(input.provider_id().as_str(), "uai");
+        assert_ne!(input.input_digest(), [0; 32]);
+        assert!(!format!("{input:?}").contains("PRIVATE_AUDIO"));
+        assert!(
+            ProviderExecutionPrivateInput::try_new(
+                ProviderId::new("uai").unwrap(),
+                "foreign.upload.input.v1",
+                SecretValue::new(vec![1]),
+            )
+            .is_err()
+        );
+        assert!(
+            ProviderExecutionPrivateInput::try_new(
+                ProviderId::new("uai").unwrap(),
+                "uai.upload.input.v1",
+                SecretValue::new(vec![1; MAX_PROVIDER_EXECUTION_PRIVATE_INPUT_BYTES + 1]),
+            )
+            .is_err()
+        );
     }
 }
 
