@@ -4034,6 +4034,7 @@ mod tests {
             provider_version: "score-opt-in-v1".to_owned(),
             captured_at: now - ChronoDuration::seconds(2),
             questions: vec![question],
+            groups: Vec::new(),
         };
         let retake = AnswerHistoryRetakeFacts {
             allowed: true,
@@ -6219,6 +6220,7 @@ mod tests {
                 metadata_sanitized: json!({}),
                 position: 1,
             }],
+            groups: Vec::new(),
         };
         let repository = SqliteQuestionSnapshotRepository::new(database.clone());
         let mut prior_question = snapshot.questions[0].clone();
@@ -6232,6 +6234,7 @@ mod tests {
             provider_version: "0.1.0-test".to_owned(),
             captured_at: now - ChronoDuration::seconds(1),
             questions: vec![prior_question],
+            groups: Vec::new(),
         };
         repository
             .save_question_snapshot(&prior_snapshot)

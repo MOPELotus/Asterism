@@ -3,7 +3,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use asterism_domain::{
     AnswerBootstrapHarvestState, AnswerCandidate, AnswerCandidateId, AnswerEvidenceClass,
     AnswerSource, AuthState, CorpusProjectionEligibility, NormalizedAnswer, PrivateAnswerEvidence,
-    PrivateAnswerEvidenceId, ProviderId, Question, QuestionSnapshotId, Timestamp,
+    PrivateAnswerEvidenceId, ProviderId, Question, QuestionGroup, QuestionGroupChild,
+    QuestionSnapshotId, Timestamp, UnmatchedEvidenceReason,
 };
 use asterism_provider_api::{
     AnswerHistoryCursor, AnswerHistoryTaskRef, AnswerHistoryTaskRequest, ProviderContext,
@@ -353,7 +354,10 @@ where
             course_id: task.course_id,
             reference,
         };
-        let provider_evidence = match capability.read_answer_history_task(context, &request).await {
+        let structured_evidence = match capability
+            .read_structured_answer_history_task(context, &request)
+            .await
+        {
             Ok(evidence) => evidence,
             Err(error) => {
                 let occurrence_scope =
@@ -368,6 +372,7 @@ where
                 return Err(PageError::Provider(error));
             }
         };
+        let (provider_evidence, groups) = structured_evidence.into_parts();
         provider_evidence
             .validate(&request)
             .map_err(|_| PageError::InvalidProviderEvidence)?;
@@ -380,6 +385,7 @@ where
             provider_version,
             &request.reference,
             &provider_evidence,
+            &groups,
             now,
         )?;
         self.imports
@@ -599,6 +605,7 @@ fn build_import_material(
     provider_version: &str,
     reference: &AnswerHistoryTaskRef,
     provider_evidence: &asterism_provider_api::ProviderAnswerHistoryTaskEvidence,
+    groups: &[QuestionGroup],
     verified_at: Timestamp,
 ) -> Result<ImportMaterial, PageError> {
     let snapshot_id = QuestionSnapshotId::new();
@@ -609,7 +616,16 @@ fn build_import_material(
         provider_version: provider_version.to_owned(),
         captured_at: provider_evidence.observed_at,
         questions: provider_evidence.questions.clone(),
+        groups: groups.to_vec(),
     };
+    let grouped_question_ids = groups
+        .iter()
+        .flat_map(|group| group.children.iter())
+        .filter_map(|child| match child {
+            QuestionGroupChild::Question(question_id) => Some(*question_id),
+            QuestionGroupChild::Group(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
     let mut candidates = Vec::new();
     let mut evidence = Vec::new();
     for question_evidence in &provider_evidence.question_evidence {
@@ -627,6 +643,7 @@ fn build_import_material(
                     task,
                     snapshot_id,
                     question,
+                    grouped: grouped_question_ids.contains(&question.id),
                     answer,
                     evidence_class: Some(AnswerEvidenceClass::Official),
                     kind: "official",
@@ -653,6 +670,7 @@ fn build_import_material(
                     task,
                     snapshot_id,
                     question,
+                    grouped: grouped_question_ids.contains(&question.id),
                     answer,
                     evidence_class,
                     kind: "submitted",
@@ -682,6 +700,7 @@ struct HistoryAnswerInput<'a> {
     task: &'a asterism_domain::Task,
     snapshot_id: QuestionSnapshotId,
     question: &'a Question,
+    grouped: bool,
     answer: &'a NormalizedAnswer,
     evidence_class: Option<AnswerEvidenceClass>,
     kind: &'static str,
@@ -762,7 +781,11 @@ fn push_history_answer(
             "score": input.provider_evidence.score,
             "retake": input.provider_evidence.retake,
         }),
-        projection: CorpusProjectionEligibility::for_question_answer(input.question, input.answer),
+        projection: if input.grouped {
+            CorpusProjectionEligibility::Unmatched(UnmatchedEvidenceReason::MissingSharedContext)
+        } else {
+            CorpusProjectionEligibility::for_question_answer(input.question, input.answer)
+        },
         observed_at: input.provider_evidence.observed_at,
         verified_at: input.verified_at,
     };

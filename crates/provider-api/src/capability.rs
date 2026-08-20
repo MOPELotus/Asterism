@@ -5,9 +5,10 @@ use asterism_domain::{
     BatchExecutionId, BrowserBridgeExchange, BrowserBridgeExchangeState,
     BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
     BrowserBridgeRuntimeStateMetadata, CourseId, ExecutionId, LogLevel, ProviderAccountId,
-    ProviderId, Question, QuestionKind, RemoteState, SecretId, SelectedAnswer, SessionKind,
-    SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
+    ProviderId, Question, QuestionGroup, QuestionKind, RemoteState, SecretId, SelectedAnswer,
+    SessionKind, SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
     SubmissionVerificationSnapshot, TaskCapability, TaskId, Timestamp, WaitingUserState,
+    validate_question_groups,
 };
 use asterism_secrets::{
     CredentialBundle, CredentialField, SecretPurpose, SecretString, SecretValue,
@@ -976,6 +977,83 @@ pub struct ProviderQuestionMaterialization {
     received_at: Timestamp,
 }
 
+/// Structured equivalent of [`ProviderQuestionMaterialization`] for a real
+/// Question set containing shared context, shared options, or nested groups.
+pub struct ProviderStructuredQuestionMaterialization {
+    questions: Vec<Question>,
+    groups: Vec<QuestionGroup>,
+    artifact: ProviderQuestionReadContinuation,
+    response_digest: [u8; 32],
+    received_at: Timestamp,
+}
+
+impl ProviderStructuredQuestionMaterialization {
+    /// # Errors
+    ///
+    /// Rejects invalid leaf Questions, hierarchy references, Provider state,
+    /// or response evidence before the materialization reaches Core.
+    pub fn try_new(
+        questions: Vec<Question>,
+        groups: Vec<QuestionGroup>,
+        artifact: ProviderQuestionReadContinuation,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+    ) -> ProviderResult<Self> {
+        let task_id = questions.first().map(|question| question.task_id);
+        if questions.is_empty()
+            || questions.len() > MAX_QUESTION_READ_ITEMS
+            || response_digest == [0; 32]
+            || task_id.is_none_or(|task_id| {
+                validate_provider_question_set(&questions)
+                    || validate_question_groups(task_id, &questions, &groups).is_err()
+            })
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider structured Question materialization is invalid",
+            ));
+        }
+        Ok(Self {
+            questions,
+            groups,
+            artifact,
+            response_digest,
+            received_at,
+        })
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<Question>,
+        Vec<QuestionGroup>,
+        ProviderQuestionReadContinuation,
+        [u8; 32],
+        Timestamp,
+    ) {
+        (
+            self.questions,
+            self.groups,
+            self.artifact,
+            self.response_digest,
+            self.received_at,
+        )
+    }
+}
+
+impl fmt::Debug for ProviderStructuredQuestionMaterialization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderStructuredQuestionMaterialization")
+            .field("question_count", &self.questions.len())
+            .field("group_count", &self.groups.len())
+            .field("artifact", &self.artifact)
+            .field("response_digest", &self.response_digest)
+            .field("received_at", &self.received_at)
+            .finish()
+    }
+}
+
 impl ProviderQuestionMaterialization {
     /// # Errors
     ///
@@ -1067,6 +1145,7 @@ pub enum ProviderQuestionReadStepOutcome {
         received_at: Timestamp,
     },
     Materialize(ProviderQuestionMaterialization),
+    MaterializeStructured(ProviderStructuredQuestionMaterialization),
     Completed {
         receipt: SubmissionReceipt,
         response_digest: [u8; 32],
@@ -1275,6 +1354,98 @@ pub trait QuestionParseCapability: ProviderIdentity {
         }
         ProviderQuestionParseSet::try_new(questions, None)
     }
+
+    /// Parses one complete structured Question set. Existing Providers inherit
+    /// an empty-group adapter; Providers opt in only when donor evidence proves
+    /// shared context/options or nested child semantics.
+    async fn parse_structured_question_set(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        references: &[RemoteQuestionRef],
+    ) -> ProviderResult<ProviderStructuredQuestionParseSet> {
+        let parsed = self
+            .parse_question_set(context, task_id, remote_task_id, references)
+            .await?;
+        let (questions, artifact) = parsed.into_parts();
+        ProviderStructuredQuestionParseSet::try_new(questions, Vec::new(), artifact)
+    }
+}
+
+/// Complete structured output of the ordinary read-only Question parser.
+/// Shared material is sanitized Domain data; Provider continuation state stays
+/// opaque and is encrypted independently by Core.
+pub struct ProviderStructuredQuestionParseSet {
+    questions: Vec<Question>,
+    groups: Vec<QuestionGroup>,
+    artifact: Option<ProviderQuestionReadContinuation>,
+}
+
+impl ProviderStructuredQuestionParseSet {
+    /// # Errors
+    ///
+    /// Rejects malformed, cross-Task, duplicated or cyclic Question trees.
+    pub fn try_new(
+        questions: Vec<Question>,
+        groups: Vec<QuestionGroup>,
+        artifact: Option<ProviderQuestionReadContinuation>,
+    ) -> ProviderResult<Self> {
+        let task_id = questions.first().map(|question| question.task_id);
+        if questions.is_empty()
+            || questions.len() > MAX_QUESTION_READ_ITEMS
+            || task_id.is_none_or(|task_id| {
+                validate_provider_question_set(&questions)
+                    || validate_question_groups(task_id, &questions, &groups).is_err()
+            })
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider structured Question parse set is invalid",
+            ));
+        }
+        Ok(Self {
+            questions,
+            groups,
+            artifact,
+        })
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<Question>,
+        Vec<QuestionGroup>,
+        Option<ProviderQuestionReadContinuation>,
+    ) {
+        (self.questions, self.groups, self.artifact)
+    }
+}
+
+impl fmt::Debug for ProviderStructuredQuestionParseSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderStructuredQuestionParseSet")
+            .field("question_count", &self.questions.len())
+            .field("group_count", &self.groups.len())
+            .field("artifact", &self.artifact.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+fn validate_provider_question_set(questions: &[Question]) -> bool {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut positions = std::collections::BTreeSet::new();
+    let mut remote_ids = std::collections::BTreeSet::new();
+    questions.iter().any(|question| {
+        question.validate().is_err()
+            || !ids.insert(question.id)
+            || !positions.insert(question.position)
+            || question
+                .remote_question_id
+                .as_ref()
+                .is_some_and(|remote_id| !remote_ids.insert(remote_id.as_str()))
+    })
 }
 
 /// Complete output of the ordinary read-only Question parser. The optional
@@ -1344,7 +1515,7 @@ impl fmt::Debug for ProviderQuestionParseSet {
 
 #[cfg(test)]
 mod question_read_flow_tests {
-    use asterism_domain::{QuestionId, QuestionKind};
+    use asterism_domain::{QuestionGroupChild, QuestionGroupId, QuestionId, QuestionKind};
 
     use super::*;
 
@@ -1418,6 +1589,39 @@ mod question_read_flow_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn structured_parse_set_binds_shared_context_to_exact_children() {
+        let task_id = TaskId::new();
+        let question = Question {
+            id: QuestionId::new(),
+            task_id,
+            remote_question_id: Some("child-1".to_owned()),
+            kind: QuestionKind::SingleChoice,
+            stem: "Child stem".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            position: 1,
+        };
+        let group = QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id,
+            remote_group_id: Some("passage-1".to_owned()),
+            stem: Some("Shared passage".to_owned()),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({"family": "reading"}),
+            children: vec![QuestionGroupChild::Question(question.id)],
+        };
+        let parsed =
+            ProviderStructuredQuestionParseSet::try_new(vec![question.clone()], vec![group], None)
+                .unwrap();
+        let (questions, groups, artifact) = parsed.into_parts();
+        assert_eq!(questions, [question]);
+        assert_eq!(groups.len(), 1);
+        assert!(artifact.is_none());
     }
 
     #[test]
@@ -1526,6 +1730,7 @@ pub enum ProviderSubmissionStepOutcome {
         received_at: Timestamp,
     },
     NextQuestion(ProviderQuestionMaterialization),
+    NextStructuredQuestion(ProviderStructuredQuestionMaterialization),
     Submitted {
         receipt: SubmissionReceipt,
         response_digest: [u8; 32],

@@ -1846,6 +1846,7 @@ mod tests {
             provider_version: "exam-v1".to_owned(),
             captured_at: fixture.now,
             questions: vec![question],
+            groups: Vec::new(),
         };
         let plaintext = b"bounded-media-route";
         let session = QuestionSession::active(
@@ -1956,6 +1957,7 @@ mod tests {
             provider_version: "exam-v1".to_owned(),
             captured_at: received_at,
             questions: vec![question],
+            groups: Vec::new(),
         };
         let next_plaintext = b"question-two-state";
         let outcome = fixture

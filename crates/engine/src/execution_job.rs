@@ -10,10 +10,10 @@ use std::{
 use asterism_domain::{
     AttemptResult, AuthState, Execution, ExecutionAttempt, ExecutionId, ExecutionLease,
     ExecutionProgress, ExecutionStage, ExecutionState, HumanRequiredReason, OrchestrationState,
-    ProviderAccountId, ProviderErrorClass, ProviderId, QuestionSnapshotId, RemoteState,
-    StrictCompletionState, SubmissionAttemptReceipt, SubmissionDraft, SubmissionResult,
-    SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot,
-    SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
+    ProviderAccountId, ProviderErrorClass, ProviderId, Question, QuestionGroup, QuestionSnapshotId,
+    RemoteState, StrictCompletionState, SubmissionAttemptReceipt, SubmissionDraft,
+    SubmissionResult, SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot,
+    SubmissionVerificationStatus, Task, TaskCapability, Timestamp, validate_question_groups,
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
@@ -23,7 +23,8 @@ use asterism_provider_api::{
     ExecutionMutationVerification, ExecutionRequest as ProviderExecutionRequest,
     ProviderCapability, ProviderContext, ProviderError, ProviderErrorKind,
     ProviderExecutionConcurrency, ProviderExecutionLog, ProviderProgress,
-    ProviderQuestionMaterialization, ProviderRegistry, ProviderSubmissionStepOutcome,
+    ProviderQuestionMaterialization, ProviderQuestionReadContinuation, ProviderRegistry,
+    ProviderStructuredQuestionMaterialization, ProviderSubmissionStepOutcome,
     ResolvedProviderQuestionSessionContinuation, ResolvedProviderRuntimeSettings,
     SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
     TaskProgressCapability,
@@ -4539,7 +4540,17 @@ async fn accept_durable_submission_outcome(
             return accept_durable_next_question(
                 artifacts,
                 operation,
-                materialization,
+                NextQuestionMaterialization::from(materialization),
+                access,
+                prepared,
+            )
+            .await;
+        }
+        ProviderSubmissionStepOutcome::NextStructuredQuestion(materialization) => {
+            return accept_durable_next_question(
+                artifacts,
+                operation,
+                NextQuestionMaterialization::from(materialization),
                 access,
                 prepared,
             )
@@ -4575,6 +4586,41 @@ async fn accept_durable_submission_outcome(
         | QuestionSessionOperationFinishOutcome::Conflict
         | QuestionSessionOperationFinishOutcome::Unavailable => {
             Err(ScheduledExecutionRunError::StateConflict)
+        }
+    }
+}
+
+struct NextQuestionMaterialization {
+    questions: Vec<Question>,
+    groups: Vec<QuestionGroup>,
+    artifact: ProviderQuestionReadContinuation,
+    response_digest: [u8; 32],
+    received_at: Timestamp,
+}
+
+impl From<ProviderQuestionMaterialization> for NextQuestionMaterialization {
+    fn from(materialization: ProviderQuestionMaterialization) -> Self {
+        let (questions, artifact, response_digest, received_at) = materialization.into_parts();
+        Self {
+            questions,
+            groups: Vec::new(),
+            artifact,
+            response_digest,
+            received_at,
+        }
+    }
+}
+
+impl From<ProviderStructuredQuestionMaterialization> for NextQuestionMaterialization {
+    fn from(materialization: ProviderStructuredQuestionMaterialization) -> Self {
+        let (questions, groups, artifact, response_digest, received_at) =
+            materialization.into_parts();
+        Self {
+            questions,
+            groups,
+            artifact,
+            response_digest,
+            received_at,
         }
     }
 }
@@ -4624,16 +4670,23 @@ async fn accept_durable_terminal_submission(
 async fn accept_durable_next_question(
     artifacts: &dyn QuestionSessionArtifactRepository,
     operation: &QuestionSessionOperation,
-    materialization: ProviderQuestionMaterialization,
+    materialization: NextQuestionMaterialization,
     access: &SecretAccess,
     prepared: &PreparedSubmissionCall,
 ) -> Result<AcceptedDurableSubmissionOutcome, ScheduledExecutionRunError> {
-    let (questions, artifact, response_digest, received_at) = materialization.into_parts();
+    let NextQuestionMaterialization {
+        questions,
+        groups,
+        artifact,
+        response_digest,
+        received_at,
+    } = materialization;
     if response_digest == [0; 32]
         || received_at < operation.issued_at
         || questions
             .iter()
             .any(|question| question.task_id != prepared.draft.task_id)
+        || validate_question_groups(prepared.draft.task_id, &questions, &groups).is_err()
     {
         return Err(ScheduledExecutionRunError::StateConflict);
     }
@@ -4646,6 +4699,7 @@ async fn accept_durable_next_question(
         provider_version: prepared.draft.provider_version.clone(),
         captured_at: received_at,
         questions,
+        groups,
     };
     let materialized = artifacts
         .materialize_next_question_session(QuestionSessionNextMaterializeRequest {
@@ -8582,6 +8636,7 @@ mod tests {
             provider_version: "test".to_owned(),
             captured_at: now,
             questions: vec![question.clone()],
+            groups: Vec::new(),
         };
         let repository = SqliteQuestionSnapshotRepository::new(database.clone());
         repository.save_question_snapshot(&snapshot).await.unwrap();

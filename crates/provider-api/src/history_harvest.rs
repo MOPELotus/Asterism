@@ -1,8 +1,9 @@
 use std::{collections::BTreeSet, fmt};
 
 use asterism_domain::{
-    CourseId, NormalizedAnswer, Question, QuestionId, QuestionKind, RetakeScorePolicy,
-    SubmissionScore, TaskId, Timestamp,
+    CourseId, NormalizedAnswer, Question, QuestionGroup, QuestionId, QuestionKind, QuestionOption,
+    QuestionSetView, RetakeScorePolicy, SubmissionScore, TaskId, Timestamp,
+    validate_question_groups,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -178,7 +179,14 @@ pub struct AnswerHistoryQuestionEvidence {
 }
 
 impl AnswerHistoryQuestionEvidence {
-    fn validate(&self, question: &Question) -> Result<(), AnswerHistoryContractError> {
+    fn validate<F>(
+        &self,
+        question: &Question,
+        answer_matches: &F,
+    ) -> Result<(), AnswerHistoryContractError>
+    where
+        F: Fn(&Question, &NormalizedAnswer) -> bool,
+    {
         if self.question_id != question.id
             || (self.submitted_answer.is_none()
                 && self.official_answer.is_none()
@@ -187,11 +195,11 @@ impl AnswerHistoryQuestionEvidence {
             || self
                 .submitted_answer
                 .as_ref()
-                .is_some_and(|answer| !answer_matches_question(question, answer))
+                .is_some_and(|answer| !answer_matches(question, answer))
             || self
                 .official_answer
                 .as_ref()
-                .is_some_and(|answer| !answer_matches_question(question, answer))
+                .is_some_and(|answer| !answer_matches(question, answer))
             || !valid_json(&self.provenance_sanitized, MAX_RESULT_PROVENANCE_BYTES)
         {
             return Err(AnswerHistoryContractError::InvalidQuestionEvidence);
@@ -266,6 +274,17 @@ impl ProviderAnswerHistoryTaskEvidence {
         &self,
         request: &AnswerHistoryTaskRequest,
     ) -> Result<(), AnswerHistoryContractError> {
+        self.validate_with_answer_matcher(request, answer_matches_question)
+    }
+
+    fn validate_with_answer_matcher<F>(
+        &self,
+        request: &AnswerHistoryTaskRequest,
+        answer_matches: F,
+    ) -> Result<(), AnswerHistoryContractError>
+    where
+        F: Fn(&Question, &NormalizedAnswer) -> bool,
+    {
         if self.task_id != request.task_id
             || self.provider_attempt_digest != request.reference.provider_attempt_digest
             || self.provider_attempt_digest == [0; 32]
@@ -299,7 +318,9 @@ impl ProviderAnswerHistoryTaskEvidence {
                 .iter()
                 .find(|question| question.id == evidence.question_id)
                 .ok_or(AnswerHistoryContractError::InvalidQuestionEvidence)?;
-            if !evidenced.insert(evidence.question_id) || evidence.validate(question).is_err() {
+            if !evidenced.insert(evidence.question_id)
+                || evidence.validate(question, &answer_matches).is_err()
+            {
                 return Err(AnswerHistoryContractError::InvalidQuestionEvidence);
             }
         }
@@ -324,6 +345,57 @@ impl fmt::Debug for ProviderAnswerHistoryTaskEvidence {
     }
 }
 
+/// Structured history evidence adapter. Legacy Providers inherit an empty
+/// group set; audited compound/history surfaces can opt in without changing
+/// the established flat evidence constructor.
+pub struct ProviderStructuredAnswerHistoryTaskEvidence {
+    evidence: ProviderAnswerHistoryTaskEvidence,
+    groups: Vec<QuestionGroup>,
+}
+
+impl ProviderStructuredAnswerHistoryTaskEvidence {
+    /// # Errors
+    ///
+    /// Rejects malformed legacy evidence or an invalid shared hierarchy.
+    pub fn try_new(
+        evidence: ProviderAnswerHistoryTaskEvidence,
+        groups: Vec<QuestionGroup>,
+        request: &AnswerHistoryTaskRequest,
+    ) -> Result<Self, AnswerHistoryContractError> {
+        validate_question_groups(evidence.task_id, &evidence.questions, &groups)
+            .map_err(|_| AnswerHistoryContractError::InvalidTaskEvidence)?;
+        let view = QuestionSetView::try_new(evidence.task_id, &evidence.questions, &groups)
+            .map_err(|_| AnswerHistoryContractError::InvalidTaskEvidence)?;
+        evidence.validate_with_answer_matcher(request, |question, answer| {
+            view.answer_options(question.id)
+                .is_ok_and(|options| answer_matches_question_options(question, options, answer))
+        })?;
+        Ok(Self { evidence, groups })
+    }
+
+    pub fn evidence(&self) -> &ProviderAnswerHistoryTaskEvidence {
+        &self.evidence
+    }
+
+    pub fn groups(&self) -> &[QuestionGroup] {
+        &self.groups
+    }
+
+    pub fn into_parts(self) -> (ProviderAnswerHistoryTaskEvidence, Vec<QuestionGroup>) {
+        (self.evidence, self.groups)
+    }
+}
+
+impl fmt::Debug for ProviderStructuredAnswerHistoryTaskEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderStructuredAnswerHistoryTaskEvidence")
+            .field("evidence", &self.evidence)
+            .field("group_count", &self.groups.len())
+            .finish()
+    }
+}
+
 #[async_trait]
 pub trait AnswerHistoryHarvestCapability: ProviderIdentity {
     async fn list_answer_history(
@@ -337,9 +409,35 @@ pub trait AnswerHistoryHarvestCapability: ProviderIdentity {
         context: &ProviderContext,
         request: &AnswerHistoryTaskRequest,
     ) -> ProviderResult<ProviderAnswerHistoryTaskEvidence>;
+
+    /// Reads structured historical evidence. Existing Providers inherit the
+    /// validated flat result until their donor surface proves group semantics.
+    async fn read_structured_answer_history_task(
+        &self,
+        context: &ProviderContext,
+        request: &AnswerHistoryTaskRequest,
+    ) -> ProviderResult<ProviderStructuredAnswerHistoryTaskEvidence> {
+        let evidence = self.read_answer_history_task(context, request).await?;
+        ProviderStructuredAnswerHistoryTaskEvidence::try_new(evidence, Vec::new(), request).map_err(
+            |_| {
+                crate::ProviderError::new(
+                    crate::ProviderErrorKind::InvalidResponse,
+                    "Provider structured answer history evidence is invalid",
+                )
+            },
+        )
+    }
 }
 
 fn answer_matches_question(question: &Question, answer: &NormalizedAnswer) -> bool {
+    answer_matches_question_options(question, &question.options, answer)
+}
+
+fn answer_matches_question_options(
+    question: &Question,
+    options: &[QuestionOption],
+    answer: &NormalizedAnswer,
+) -> bool {
     if answer.validate().is_err()
         || matches!(answer, NormalizedAnswer::Unknown | NormalizedAnswer::Skip)
     {
@@ -351,7 +449,7 @@ fn answer_matches_question(question: &Question, answer: &NormalizedAnswer) -> bo
             NormalizedAnswer::Selections(selected),
         ) => selected
             .iter()
-            .all(|id| question.options.iter().any(|option| option.id == *id)),
+            .all(|id| options.iter().any(|option| option.id == *id)),
         (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_))
         | (QuestionKind::FillBlank | QuestionKind::ShortAnswer, NormalizedAnswer::Texts(_))
         | (QuestionKind::Matching, NormalizedAnswer::Pairs(_))
@@ -420,7 +518,7 @@ pub enum AnswerHistoryContractError {
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::{ProviderId, QuestionOption};
+    use asterism_domain::{ProviderId, QuestionGroupChild, QuestionGroupId, QuestionOption};
     use chrono::Utc;
 
     use super::*;
@@ -487,6 +585,28 @@ mod tests {
             observed_at: Utc::now(),
         };
         (request, evidence)
+    }
+
+    #[test]
+    fn structured_history_evidence_preserves_shared_context_without_legacy_breakage() {
+        let (request, mut evidence) = task_evidence();
+        let shared_options = std::mem::take(&mut evidence.questions[0].options);
+        let group = QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: evidence.task_id,
+            remote_group_id: Some("history-passage".to_owned()),
+            stem: Some("Historical shared passage".to_owned()),
+            options: shared_options,
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            children: vec![QuestionGroupChild::Question(evidence.questions[0].id)],
+        };
+        let structured =
+            ProviderStructuredAnswerHistoryTaskEvidence::try_new(evidence, vec![group], &request)
+                .unwrap();
+        assert_eq!(structured.groups().len(), 1);
+        assert_eq!(structured.evidence().task_id, request.task_id);
+        assert!(structured.evidence().questions[0].options.is_empty());
     }
 
     #[test]

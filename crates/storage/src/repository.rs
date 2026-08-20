@@ -745,6 +745,7 @@ pub struct QuestionSnapshot {
     pub provider_version: String,
     pub captured_at: Timestamp,
     pub questions: Vec<Question>,
+    pub groups: Vec<asterism_domain::QuestionGroup>,
 }
 
 /// Transactional Question snapshot persistence and owner-scoped latest read.

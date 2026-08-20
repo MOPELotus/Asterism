@@ -97,7 +97,9 @@ pub use protocol_observation::{
 pub use question::{
     AnswerCandidate, AnswerConfidence, AnswerConfidenceError, AnswerPair, AnswerSource,
     NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind,
-    QuestionContentFingerprint, QuestionKind, QuestionOption, QuestionValidationError,
+    QuestionContentFingerprint, QuestionGroup, QuestionGroupChild, QuestionKind, QuestionOption,
+    QuestionSemanticFingerprint, QuestionSetView, QuestionValidationError,
+    SemanticAnswerRebindError, rebind_semantic_answer, validate_question_groups,
 };
 pub use question_read_attempt::{
     MAX_QUESTION_READ_ATTEMPT_TTL_SECONDS, QuestionReadAttempt, QuestionReadAttemptError,

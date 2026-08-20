@@ -642,6 +642,7 @@ mod tests {
                 provider_version: "history-v1".to_owned(),
                 captured_at: self.now,
                 questions: vec![question.clone()],
+                groups: Vec::new(),
             };
             let submitted = self.candidate(
                 snapshot.id,

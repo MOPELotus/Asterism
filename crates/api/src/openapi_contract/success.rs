@@ -952,6 +952,8 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         ("QuestionAttachment", question_attachment_schema()),
         ("QuestionOption", question_option_schema()),
         ("Question", question_schema()),
+        ("QuestionGroupChild", question_group_child_schema()),
+        ("QuestionGroup", question_group_schema()),
         ("TaskQuestionsResponse", task_questions_response_schema()),
         ("AnswerCandidate", answer_candidate_schema()),
         (
@@ -1638,6 +1640,46 @@ fn question_schema() -> Value {
     )
 }
 
+fn question_group_child_schema() -> Value {
+    json!({
+        "oneOf": [
+            object(
+                &["type", "id"],
+                json!({"type": string_enum(&["question"]), "id": string()}),
+            ),
+            object(
+                &["type", "id"],
+                json!({"type": string_enum(&["group"]), "id": string()}),
+            )
+        ]
+    })
+}
+
+fn question_group_schema() -> Value {
+    object(
+        &[
+            "id",
+            "task_id",
+            "remote_group_id",
+            "stem",
+            "options",
+            "attachments",
+            "metadata_sanitized",
+            "children",
+        ],
+        json!({
+            "id": string(),
+            "task_id": string(),
+            "remote_group_id": nullable_string(),
+            "stem": nullable_string(),
+            "options": {"type": "array", "items": schema_ref("QuestionOption")},
+            "attachments": {"type": "array", "items": schema_ref("QuestionAttachment")},
+            "metadata_sanitized": {},
+            "children": {"type": "array", "items": schema_ref("QuestionGroupChild"), "minItems": 1}
+        }),
+    )
+}
+
 fn task_questions_response_schema() -> Value {
     object(
         &[
@@ -1647,6 +1689,7 @@ fn task_questions_response_schema() -> Value {
             "provider_version",
             "captured_at",
             "questions",
+            "groups",
         ],
         json!({
             "snapshot_id": uuid(),
@@ -1654,7 +1697,8 @@ fn task_questions_response_schema() -> Value {
             "provider_id": provider_id(),
             "provider_version": string(),
             "captured_at": timestamp(),
-            "questions": {"type": "array", "items": schema_ref("Question")}
+            "questions": {"type": "array", "items": schema_ref("Question")},
+            "groups": {"type": "array", "items": schema_ref("QuestionGroup")}
         }),
     )
 }

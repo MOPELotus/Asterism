@@ -692,6 +692,7 @@ mod tests {
                 provider_version: "1.0-test".to_owned(),
                 captured_at: now,
                 questions: vec![question.clone()],
+                groups: Vec::new(),
             };
             let candidate = AnswerCandidateRecord {
                 id: AnswerCandidateId::new(),

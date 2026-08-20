@@ -1903,6 +1903,7 @@ mod tests {
                 metadata_sanitized: serde_json::json!({}),
                 position: 1,
             }],
+            groups: Vec::new(),
         };
         let session = QuestionSession::active(
             fixture.owner,

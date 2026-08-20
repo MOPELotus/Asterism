@@ -1,10 +1,14 @@
-use std::{collections::BTreeSet, fmt::Write, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write,
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{QuestionId, TaskId};
+use crate::{QuestionGroupId, QuestionId, TaskId};
 
 const MAX_REMOTE_ID_BYTES: usize = 512;
 const MAX_STEM_BYTES: usize = 64 * 1024;
@@ -12,11 +16,14 @@ const MAX_OPTION_CONTENT_BYTES: usize = 32 * 1024;
 const MAX_EXPLANATION_BYTES: usize = 64 * 1024;
 const MAX_OPTIONS: usize = 256;
 const MAX_ATTACHMENTS: usize = 64;
+const MAX_QUESTION_GROUPS: usize = 1_024;
+const MAX_GROUP_CHILDREN: usize = 5_000;
 const MAX_ANSWER_ITEMS: usize = 256;
 const MAX_COMPOSITE_DEPTH: usize = 8;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_POSITION: u32 = 100_000;
 const QUESTION_CONTENT_FINGERPRINT_PREFIX: &str = "v1:";
+const QUESTION_SEMANTIC_FINGERPRINT_PREFIX: &str = "semantic-v1:";
 
 /// Stable hash of the exact sanitized Question content used for conservative
 /// cache matching. Snapshot-local identities and position are excluded.
@@ -51,6 +58,44 @@ impl FromStr for QuestionContentFingerprint {
             .ok_or(QuestionValidationError::InvalidFingerprint)?;
         Ok(Self(format!(
             "{QUESTION_CONTENT_FINGERPRINT_PREFIX}{digest}"
+        )))
+    }
+}
+
+/// Conservative semantic identity for one leaf Question plus its complete
+/// shared-context ancestry. Snapshot IDs, remote IDs, positions and option
+/// labels are excluded; exact content remains required.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct QuestionSemanticFingerprint(String);
+
+impl QuestionSemanticFingerprint {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for QuestionSemanticFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for QuestionSemanticFingerprint {
+    type Err = QuestionValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let digest = value
+            .strip_prefix(QUESTION_SEMANTIC_FINGERPRINT_PREFIX)
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or(QuestionValidationError::InvalidFingerprint)?;
+        Ok(Self(format!(
+            "{QUESTION_SEMANTIC_FINGERPRINT_PREFIX}{digest}"
         )))
     }
 }
@@ -112,6 +157,481 @@ pub struct Question {
     pub position: u32,
 }
 
+/// One ordered child reference inside a shared-context or compound Question
+/// group. Leaf Questions retain independent kinds and grading identities.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "type", content = "id", rename_all = "snake_case")]
+pub enum QuestionGroupChild {
+    Question(QuestionId),
+    Group(QuestionGroupId),
+}
+
+/// Sanitized shared material for an ordered set of leaf Questions or nested
+/// groups. Route data, signed attachment URLs and Provider mutation state are
+/// intentionally excluded.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct QuestionGroup {
+    pub id: QuestionGroupId,
+    pub task_id: TaskId,
+    pub remote_group_id: Option<String>,
+    pub stem: Option<String>,
+    pub options: Vec<QuestionOption>,
+    pub attachments: Vec<QuestionAttachment>,
+    pub metadata_sanitized: Value,
+    pub children: Vec<QuestionGroupChild>,
+}
+
+impl QuestionGroup {
+    /// Validates one bounded, credential-safe shared Question node. Exact
+    /// child existence, ownership and acyclicity are checked by
+    /// [`validate_question_groups`].
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed shared content, duplicated children, unsafe metadata
+    /// or exceeded collection bounds.
+    pub fn validate(&self) -> Result<(), QuestionValidationError> {
+        if self
+            .remote_group_id
+            .as_deref()
+            .is_some_and(|value| !valid_text(value, MAX_REMOTE_ID_BYTES))
+            || self
+                .stem
+                .as_deref()
+                .is_some_and(|value| !valid_optional_content(value, MAX_STEM_BYTES))
+            || self.options.len() > MAX_OPTIONS
+            || self.attachments.len() > MAX_ATTACHMENTS
+            || self.children.is_empty()
+            || self.children.len() > MAX_GROUP_CHILDREN
+            || !valid_sanitized_json(&self.metadata_sanitized)
+        {
+            return Err(QuestionValidationError::InvalidGroup);
+        }
+        validate_options(&self.options)?;
+        validate_attachments(&self.attachments)?;
+        let mut children = BTreeSet::new();
+        if self.children.iter().any(|child| !children.insert(*child)) {
+            return Err(QuestionValidationError::InvalidGroup);
+        }
+        Ok(())
+    }
+}
+
+/// Validates one complete snapshot hierarchy. A Question or nested group may
+/// have at most one parent, references must remain Task-local, and cycles fail
+/// closed. Questions not belonging to a group remain valid ordinary leaves.
+///
+/// # Errors
+///
+/// Rejects malformed groups, missing or cross-Task children, multiple parents,
+/// duplicate identities and cycles.
+pub fn validate_question_groups(
+    task_id: TaskId,
+    questions: &[Question],
+    groups: &[QuestionGroup],
+) -> Result<(), QuestionValidationError> {
+    if groups.len() > MAX_QUESTION_GROUPS {
+        return Err(QuestionValidationError::TooManyItems);
+    }
+    let question_ids = questions
+        .iter()
+        .map(|question| question.id)
+        .collect::<BTreeSet<_>>();
+    if question_ids.len() != questions.len()
+        || questions.iter().any(|question| question.task_id != task_id)
+    {
+        return Err(QuestionValidationError::InvalidGroup);
+    }
+    let mut group_by_id = BTreeMap::new();
+    let mut remote_ids = BTreeSet::new();
+    for group in groups {
+        if group.task_id != task_id
+            || group.validate().is_err()
+            || group_by_id.insert(group.id, group).is_some()
+            || group
+                .remote_group_id
+                .as_deref()
+                .is_some_and(|remote_id| !remote_ids.insert(remote_id))
+        {
+            return Err(QuestionValidationError::InvalidGroup);
+        }
+    }
+    let mut parented_questions = BTreeSet::new();
+    let mut parented_groups = BTreeSet::new();
+    for group in groups {
+        for child in &group.children {
+            match child {
+                QuestionGroupChild::Question(question_id) => {
+                    if !question_ids.contains(question_id)
+                        || !parented_questions.insert(*question_id)
+                    {
+                        return Err(QuestionValidationError::InvalidGroup);
+                    }
+                }
+                QuestionGroupChild::Group(group_id) => {
+                    if *group_id == group.id
+                        || !group_by_id.contains_key(group_id)
+                        || !parented_groups.insert(*group_id)
+                    {
+                        return Err(QuestionValidationError::InvalidGroup);
+                    }
+                }
+            }
+        }
+    }
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for group_id in group_by_id.keys().copied() {
+        visit_question_group(group_id, &group_by_id, &mut visiting, &mut visited)?;
+    }
+    Ok(())
+}
+
+fn visit_question_group(
+    group_id: QuestionGroupId,
+    groups: &BTreeMap<QuestionGroupId, &QuestionGroup>,
+    visiting: &mut BTreeSet<QuestionGroupId>,
+    visited: &mut BTreeSet<QuestionGroupId>,
+) -> Result<(), QuestionValidationError> {
+    if visited.contains(&group_id) {
+        return Ok(());
+    }
+    if !visiting.insert(group_id) {
+        return Err(QuestionValidationError::InvalidGroup);
+    }
+    let group = groups
+        .get(&group_id)
+        .ok_or(QuestionValidationError::InvalidGroup)?;
+    for child in &group.children {
+        if let QuestionGroupChild::Group(child_id) = child {
+            visit_question_group(*child_id, groups, visiting, visited)?;
+        }
+    }
+    visiting.remove(&group_id);
+    visited.insert(group_id);
+    Ok(())
+}
+
+/// Borrowed complete Question set used for conservative semantic matching.
+/// Construction validates the full hierarchy once before any fingerprint or
+/// answer rebinding is attempted.
+#[derive(Clone, Copy, Debug)]
+pub struct QuestionSetView<'a> {
+    task_id: TaskId,
+    questions: &'a [Question],
+    groups: &'a [QuestionGroup],
+}
+
+impl<'a> QuestionSetView<'a> {
+    /// # Errors
+    ///
+    /// Rejects invalid leaf Questions or an invalid structured hierarchy.
+    pub fn try_new(
+        task_id: TaskId,
+        questions: &'a [Question],
+        groups: &'a [QuestionGroup],
+    ) -> Result<Self, QuestionValidationError> {
+        if questions.is_empty()
+            || questions
+                .iter()
+                .any(|question| question.validate().is_err())
+        {
+            return Err(QuestionValidationError::InvalidQuestion);
+        }
+        validate_question_groups(task_id, questions, groups)?;
+        Ok(Self {
+            task_id,
+            questions,
+            groups,
+        })
+    }
+
+    pub const fn task_id(&self) -> TaskId {
+        self.task_id
+    }
+
+    pub fn question(&self, question_id: QuestionId) -> Option<&'a Question> {
+        self.questions
+            .iter()
+            .find(|question| question.id == question_id)
+    }
+
+    /// Returns the leaf's own option set, or the nearest non-empty shared
+    /// ancestor option set when the leaf intentionally carries none.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown leaf or an inconsistent hierarchy.
+    pub fn answer_options(
+        &self,
+        question_id: QuestionId,
+    ) -> Result<&'a [QuestionOption], QuestionValidationError> {
+        let question = self
+            .question(question_id)
+            .ok_or(QuestionValidationError::InvalidQuestion)?;
+        if !question.options.is_empty() {
+            return Ok(&question.options);
+        }
+        let mut question_parent = BTreeMap::new();
+        let mut group_parent = BTreeMap::new();
+        let groups = self
+            .groups
+            .iter()
+            .map(|group| (group.id, group))
+            .collect::<BTreeMap<_, _>>();
+        for group in self.groups {
+            for child in &group.children {
+                match child {
+                    QuestionGroupChild::Question(child_id) => {
+                        question_parent.insert(*child_id, group.id);
+                    }
+                    QuestionGroupChild::Group(child_id) => {
+                        group_parent.insert(*child_id, group.id);
+                    }
+                }
+            }
+        }
+        let mut current = question_parent.get(&question_id).copied();
+        while let Some(group_id) = current {
+            let group = groups
+                .get(&group_id)
+                .ok_or(QuestionValidationError::InvalidGroup)?;
+            if !group.options.is_empty() {
+                return Ok(&group.options);
+            }
+            current = group_parent.get(&group_id).copied();
+        }
+        Ok(&question.options)
+    }
+
+    /// Hashes exact semantic leaf content plus all shared ancestors while
+    /// ignoring snapshot-local identity, position, option labels and option
+    /// ordering. Duplicate semantic options fail closed because they cannot be
+    /// uniquely rebound.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown leaf, invalid hierarchy, ambiguous semantic options
+    /// or an unencodable sanitized representation.
+    pub fn semantic_fingerprint(
+        &self,
+        question_id: QuestionId,
+    ) -> Result<QuestionSemanticFingerprint, QuestionValidationError> {
+        let question = self
+            .question(question_id)
+            .ok_or(QuestionValidationError::InvalidQuestion)?;
+        let material = semantic_question_material(self, question)?;
+        let encoded = serde_json::to_vec(&material)
+            .map_err(|_| QuestionValidationError::InvalidFingerprint)?;
+        let digest = Sha256::digest(encoded);
+        let mut value = String::with_capacity(QUESTION_SEMANTIC_FINGERPRINT_PREFIX.len() + 64);
+        value.push_str(QUESTION_SEMANTIC_FINGERPRINT_PREFIX);
+        for byte in digest {
+            write!(&mut value, "{byte:02x}")
+                .map_err(|_| QuestionValidationError::InvalidFingerprint)?;
+        }
+        Ok(QuestionSemanticFingerprint(value))
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SemanticQuestionMaterial {
+    ancestors: Vec<SemanticGroupMaterial>,
+    kind: QuestionKind,
+    stem: String,
+    options: Vec<SemanticOptionMaterial>,
+    attachments: Vec<QuestionAttachment>,
+    metadata_sanitized: Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SemanticGroupMaterial {
+    stem: Option<String>,
+    options: Vec<SemanticOptionMaterial>,
+    attachments: Vec<QuestionAttachment>,
+    metadata_sanitized: Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SemanticOptionMaterial {
+    content: Option<String>,
+    attachments: Vec<QuestionAttachment>,
+    metadata_sanitized: Value,
+}
+
+fn semantic_question_material(
+    view: &QuestionSetView<'_>,
+    question: &Question,
+) -> Result<SemanticQuestionMaterial, QuestionValidationError> {
+    let mut question_parent = BTreeMap::new();
+    let mut group_parent = BTreeMap::new();
+    let groups = view
+        .groups
+        .iter()
+        .map(|group| (group.id, group))
+        .collect::<BTreeMap<_, _>>();
+    for group in view.groups {
+        for child in &group.children {
+            match child {
+                QuestionGroupChild::Question(question_id) => {
+                    question_parent.insert(*question_id, group.id);
+                }
+                QuestionGroupChild::Group(group_id) => {
+                    group_parent.insert(*group_id, group.id);
+                }
+            }
+        }
+    }
+    let mut ancestor_ids = Vec::new();
+    let mut current = question_parent.get(&question.id).copied();
+    while let Some(group_id) = current {
+        ancestor_ids.push(group_id);
+        current = group_parent.get(&group_id).copied();
+    }
+    ancestor_ids.reverse();
+    let mut ancestors = Vec::with_capacity(ancestor_ids.len());
+    for group_id in ancestor_ids {
+        let group = groups
+            .get(&group_id)
+            .ok_or(QuestionValidationError::InvalidGroup)?;
+        ancestors.push(SemanticGroupMaterial {
+            stem: group.stem.clone(),
+            options: semantic_options(&group.options)?,
+            attachments: group.attachments.clone(),
+            metadata_sanitized: group.metadata_sanitized.clone(),
+        });
+    }
+    Ok(SemanticQuestionMaterial {
+        ancestors,
+        kind: question.kind,
+        stem: question.stem.clone(),
+        options: semantic_options(&question.options)?,
+        attachments: question.attachments.clone(),
+        metadata_sanitized: question.metadata_sanitized.clone(),
+    })
+}
+
+fn semantic_options(
+    options: &[QuestionOption],
+) -> Result<Vec<SemanticOptionMaterial>, QuestionValidationError> {
+    let mut keyed = Vec::with_capacity(options.len());
+    for option in options {
+        let material = SemanticOptionMaterial {
+            content: option.content.clone(),
+            attachments: option.attachments.clone(),
+            metadata_sanitized: option.metadata_sanitized.clone(),
+        };
+        let key = serde_json::to_string(&material)
+            .map_err(|_| QuestionValidationError::InvalidFingerprint)?;
+        keyed.push((key, material));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(QuestionValidationError::AmbiguousSemanticOptions);
+    }
+    Ok(keyed.into_iter().map(|(_, material)| material).collect())
+}
+
+/// Rebinds one reusable semantic answer to a fresh Question set. The complete
+/// structured fingerprints must match first; choice labels are then mapped by
+/// unique option content. Unsupported or ambiguous answer shapes fail closed.
+///
+/// # Errors
+///
+/// Rejects invalid sets, semantic drift, ambiguous option content and answer
+/// kinds that cannot be conservatively remapped.
+pub fn rebind_semantic_answer(
+    source: QuestionSetView<'_>,
+    source_question_id: QuestionId,
+    target: QuestionSetView<'_>,
+    target_question_id: QuestionId,
+    answer: &NormalizedAnswer,
+) -> Result<NormalizedAnswer, SemanticAnswerRebindError> {
+    if source
+        .semantic_fingerprint(source_question_id)
+        .map_err(|_| SemanticAnswerRebindError::InvalidQuestionSet)?
+        != target
+            .semantic_fingerprint(target_question_id)
+            .map_err(|_| SemanticAnswerRebindError::InvalidQuestionSet)?
+    {
+        return Err(SemanticAnswerRebindError::SemanticMismatch);
+    }
+    let source_options = source
+        .answer_options(source_question_id)
+        .map_err(|_| SemanticAnswerRebindError::InvalidQuestionSet)?;
+    let target_options = target
+        .answer_options(target_question_id)
+        .map_err(|_| SemanticAnswerRebindError::InvalidQuestionSet)?;
+    let rebound =
+        match answer {
+            NormalizedAnswer::Selections(values) => NormalizedAnswer::Selections(
+                rebind_selection_values(source_options, target_options, values, true)?,
+            ),
+            NormalizedAnswer::Ordering(values) => NormalizedAnswer::Ordering(
+                rebind_selection_values(source_options, target_options, values, false)?,
+            ),
+            NormalizedAnswer::Texts(_) | NormalizedAnswer::Boolean(_) => answer.clone(),
+            NormalizedAnswer::Pairs(_)
+            | NormalizedAnswer::Composite(_)
+            | NormalizedAnswer::Skip
+            | NormalizedAnswer::Unknown => {
+                return Err(SemanticAnswerRebindError::UnsupportedAnswer);
+            }
+        };
+    rebound
+        .validate()
+        .map_err(|_| SemanticAnswerRebindError::UnsupportedAnswer)?;
+    Ok(rebound)
+}
+
+fn rebind_selection_values(
+    source: &[QuestionOption],
+    target: &[QuestionOption],
+    values: &[String],
+    target_order: bool,
+) -> Result<Vec<String>, SemanticAnswerRebindError> {
+    let mut mapped = Vec::with_capacity(values.len());
+    for value in values {
+        let source_option = source
+            .iter()
+            .find(|option| option.id == *value)
+            .ok_or(SemanticAnswerRebindError::UnsupportedAnswer)?;
+        let source_key = semantic_option_key(source_option)?;
+        let matches = target
+            .iter()
+            .filter_map(|option| {
+                semantic_option_key(option)
+                    .ok()
+                    .filter(|key| *key == source_key)
+                    .map(|_| option.id.clone())
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(SemanticAnswerRebindError::AmbiguousOption);
+        }
+        mapped.push(matches[0].clone());
+    }
+    if target_order {
+        let selected = mapped.into_iter().collect::<BTreeSet<_>>();
+        Ok(target
+            .iter()
+            .filter(|option| selected.contains(&option.id))
+            .map(|option| option.id.clone())
+            .collect())
+    } else {
+        Ok(mapped)
+    }
+}
+
+fn semantic_option_key(option: &QuestionOption) -> Result<String, SemanticAnswerRebindError> {
+    serde_json::to_string(&SemanticOptionMaterial {
+        content: option.content.clone(),
+        attachments: option.attachments.clone(),
+        metadata_sanitized: option.metadata_sanitized.clone(),
+    })
+    .map_err(|_| SemanticAnswerRebindError::InvalidQuestionSet)
+}
+
 #[derive(Serialize)]
 struct QuestionFingerprintMaterial<'a> {
     kind: QuestionKind,
@@ -144,22 +664,7 @@ impl Question {
         if self.options.len() > MAX_OPTIONS || self.attachments.len() > MAX_ATTACHMENTS {
             return Err(QuestionValidationError::TooManyItems);
         }
-        let mut option_ids = BTreeSet::new();
-        for option in &self.options {
-            if !valid_text(&option.id, MAX_REMOTE_ID_BYTES)
-                || option
-                    .content
-                    .as_deref()
-                    .is_some_and(|value| !valid_optional_content(value, MAX_OPTION_CONTENT_BYTES))
-                || (option.content.is_none() && option.attachments.is_empty())
-                || option.attachments.len() > MAX_ATTACHMENTS
-                || !option_ids.insert(option.id.as_str())
-                || !valid_sanitized_json(&option.metadata_sanitized)
-            {
-                return Err(QuestionValidationError::InvalidOption);
-            }
-            validate_attachments(&option.attachments)?;
-        }
+        validate_options(&self.options)?;
         validate_attachments(&self.attachments)?;
         if !valid_sanitized_json(&self.metadata_sanitized) {
             return Err(QuestionValidationError::UnsanitizedMetadata);
@@ -369,6 +874,26 @@ fn validate_attachments(attachments: &[QuestionAttachment]) -> Result<(), Questi
     Ok(())
 }
 
+fn validate_options(options: &[QuestionOption]) -> Result<(), QuestionValidationError> {
+    let mut option_ids = BTreeSet::new();
+    for option in options {
+        if !valid_text(&option.id, MAX_REMOTE_ID_BYTES)
+            || option
+                .content
+                .as_deref()
+                .is_some_and(|value| !valid_optional_content(value, MAX_OPTION_CONTENT_BYTES))
+            || (option.content.is_none() && option.attachments.is_empty())
+            || option.attachments.len() > MAX_ATTACHMENTS
+            || !option_ids.insert(option.id.as_str())
+            || !valid_sanitized_json(&option.metadata_sanitized)
+        {
+            return Err(QuestionValidationError::InvalidOption);
+        }
+        validate_attachments(&option.attachments)?;
+    }
+    Ok(())
+}
+
 fn validate_unique_answer_values(values: &[String]) -> Result<(), QuestionValidationError> {
     validate_answer_values(values)?;
     let mut unique = BTreeSet::new();
@@ -448,6 +973,8 @@ pub enum QuestionValidationError {
     TooManyItems,
     #[error("question option is malformed or duplicated")]
     InvalidOption,
+    #[error("question group is malformed, cross-bound, duplicated, or cyclic")]
+    InvalidGroup,
     #[error("question attachment is malformed or unsanitized")]
     InvalidAttachment,
     #[error("question metadata is oversized or not sanitized")]
@@ -456,6 +983,20 @@ pub enum QuestionValidationError {
     InvalidAnswer,
     #[error("question content fingerprint is invalid")]
     InvalidFingerprint,
+    #[error("question options do not have unique semantic identities")]
+    AmbiguousSemanticOptions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SemanticAnswerRebindError {
+    #[error("question set is invalid for semantic matching")]
+    InvalidQuestionSet,
+    #[error("source and target question semantics differ")]
+    SemanticMismatch,
+    #[error("answer shape cannot be safely rebound")]
+    UnsupportedAnswer,
+    #[error("option content does not map uniquely")]
+    AmbiguousOption,
 }
 
 #[cfg(test)]
@@ -566,5 +1107,236 @@ mod tests {
             fingerprint
         );
         assert!("v1:ABC".parse::<QuestionContentFingerprint>().is_err());
+    }
+
+    #[test]
+    fn shared_question_groups_are_ordered_nested_and_task_bound() {
+        let first = valid_question();
+        let mut second = first.clone();
+        second.id = QuestionId::new();
+        second.remote_question_id = Some("question-2".to_owned());
+        second.position = 2;
+        let nested_id = QuestionGroupId::new();
+        let root_id = QuestionGroupId::new();
+        let nested = QuestionGroup {
+            id: nested_id,
+            task_id: first.task_id,
+            remote_group_id: Some("material-child".to_owned()),
+            stem: Some("Choose from the shared options.".to_owned()),
+            options: first.options.clone(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({"kind": "common_options"}),
+            children: vec![QuestionGroupChild::Question(second.id)],
+        };
+        let root = QuestionGroup {
+            id: root_id,
+            task_id: first.task_id,
+            remote_group_id: Some("material-root".to_owned()),
+            stem: Some("Read the passage.".to_owned()),
+            options: Vec::new(),
+            attachments: vec![QuestionAttachment {
+                kind: QuestionAttachmentKind::Image,
+                remote_id: Some("image-1".to_owned()),
+                label: Some("Figure one".to_owned()),
+                metadata_sanitized: serde_json::json!({}),
+            }],
+            metadata_sanitized: serde_json::json!({"kind": "reading"}),
+            children: vec![
+                QuestionGroupChild::Question(first.id),
+                QuestionGroupChild::Group(nested_id),
+            ],
+        };
+        let questions = [first.clone(), second.clone()];
+        assert_eq!(
+            validate_question_groups(first.task_id, &questions, &[root.clone(), nested.clone()]),
+            Ok(())
+        );
+
+        let mut duplicate_parent = root.clone();
+        duplicate_parent
+            .children
+            .push(QuestionGroupChild::Question(second.id));
+        assert_eq!(
+            validate_question_groups(
+                first.task_id,
+                &questions,
+                &[duplicate_parent, nested.clone()],
+            ),
+            Err(QuestionValidationError::InvalidGroup)
+        );
+
+        let mut cycle = nested;
+        cycle.children = vec![QuestionGroupChild::Group(root_id)];
+        assert_eq!(
+            validate_question_groups(first.task_id, &questions, &[root, cycle]),
+            Err(QuestionValidationError::InvalidGroup)
+        );
+    }
+
+    #[test]
+    fn semantic_fingerprint_rebinds_only_unique_reordered_options() {
+        let source_question = valid_question();
+        let source_group = QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: source_question.task_id,
+            remote_group_id: Some("source-passage".to_owned()),
+            stem: Some("Shared passage".to_owned()),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({"family": "reading"}),
+            children: vec![QuestionGroupChild::Question(source_question.id)],
+        };
+        let mut target_question = source_question.clone();
+        target_question.id = QuestionId::new();
+        target_question.remote_question_id = Some("target-question".to_owned());
+        target_question.position = 17;
+        target_question.options = vec![
+            QuestionOption {
+                id: "Y".to_owned(),
+                content: Some("Second".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({}),
+            },
+            QuestionOption {
+                id: "X".to_owned(),
+                content: Some("First".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({}),
+            },
+        ];
+        let target_group = QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: target_question.task_id,
+            remote_group_id: Some("target-passage".to_owned()),
+            stem: source_group.stem.clone(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: source_group.metadata_sanitized.clone(),
+            children: vec![QuestionGroupChild::Question(target_question.id)],
+        };
+        let source_questions = [source_question.clone()];
+        let source_groups = [source_group];
+        let target_questions = [target_question.clone()];
+        let target_groups = [target_group.clone()];
+        let source =
+            QuestionSetView::try_new(source_question.task_id, &source_questions, &source_groups)
+                .unwrap();
+        let target =
+            QuestionSetView::try_new(target_question.task_id, &target_questions, &target_groups)
+                .unwrap();
+        assert_eq!(
+            source.semantic_fingerprint(source_question.id).unwrap(),
+            target.semantic_fingerprint(target_question.id).unwrap()
+        );
+        assert_eq!(
+            rebind_semantic_answer(
+                source,
+                source_question.id,
+                target,
+                target_question.id,
+                &NormalizedAnswer::Selections(vec!["A".to_owned()]),
+            ),
+            Ok(NormalizedAnswer::Selections(vec!["X".to_owned()]))
+        );
+
+        let mut changed_group = target_group;
+        changed_group.stem = Some("Different passage".to_owned());
+        let changed_groups = [changed_group];
+        let changed =
+            QuestionSetView::try_new(target_question.task_id, &target_questions, &changed_groups)
+                .unwrap();
+        assert_eq!(
+            rebind_semantic_answer(
+                source,
+                source_question.id,
+                changed,
+                target_question.id,
+                &NormalizedAnswer::Selections(vec!["A".to_owned()]),
+            ),
+            Err(SemanticAnswerRebindError::SemanticMismatch)
+        );
+
+        let mut ambiguous_question = target_question.clone();
+        ambiguous_question.options[1].content = Some("Second".to_owned());
+        let ambiguous_questions = [ambiguous_question.clone()];
+        let ambiguous_group = QuestionGroup {
+            children: vec![QuestionGroupChild::Question(ambiguous_question.id)],
+            ..target_groups[0].clone()
+        };
+        let ambiguous_groups = [ambiguous_group];
+        let ambiguous = QuestionSetView::try_new(
+            ambiguous_question.task_id,
+            &ambiguous_questions,
+            &ambiguous_groups,
+        )
+        .unwrap();
+        assert_eq!(
+            ambiguous.semantic_fingerprint(ambiguous_question.id),
+            Err(QuestionValidationError::AmbiguousSemanticOptions)
+        );
+    }
+
+    #[test]
+    fn semantic_rebind_uses_the_nearest_shared_option_set() {
+        let mut source_question = valid_question();
+        let source_options = std::mem::take(&mut source_question.options);
+        let source_group = QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: source_question.task_id,
+            remote_group_id: Some("source-common-options".to_owned()),
+            stem: Some("Choose from the common options.".to_owned()),
+            options: source_options,
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({"family": "common_options"}),
+            children: vec![QuestionGroupChild::Question(source_question.id)],
+        };
+        let mut target_question = source_question.clone();
+        target_question.id = QuestionId::new();
+        target_question.remote_question_id = Some("target-common-option-child".to_owned());
+        target_question.position = 9;
+        let target_group = QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: target_question.task_id,
+            remote_group_id: Some("target-common-options".to_owned()),
+            stem: source_group.stem.clone(),
+            options: vec![
+                QuestionOption {
+                    id: "Y".to_owned(),
+                    content: Some("Second".to_owned()),
+                    attachments: Vec::new(),
+                    metadata_sanitized: serde_json::json!({}),
+                },
+                QuestionOption {
+                    id: "X".to_owned(),
+                    content: Some("First".to_owned()),
+                    attachments: Vec::new(),
+                    metadata_sanitized: serde_json::json!({}),
+                },
+            ],
+            attachments: Vec::new(),
+            metadata_sanitized: source_group.metadata_sanitized.clone(),
+            children: vec![QuestionGroupChild::Question(target_question.id)],
+        };
+        let source_questions = [source_question.clone()];
+        let source_groups = [source_group];
+        let target_questions = [target_question.clone()];
+        let target_groups = [target_group];
+        let source =
+            QuestionSetView::try_new(source_question.task_id, &source_questions, &source_groups)
+                .unwrap();
+        let target =
+            QuestionSetView::try_new(target_question.task_id, &target_questions, &target_groups)
+                .unwrap();
+
+        assert_eq!(
+            rebind_semantic_answer(
+                source,
+                source_question.id,
+                target,
+                target_question.id,
+                &NormalizedAnswer::Selections(vec!["A".to_owned()]),
+            ),
+            Ok(NormalizedAnswer::Selections(vec!["X".to_owned()]))
+        );
     }
 }

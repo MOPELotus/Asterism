@@ -456,6 +456,7 @@ mod tests {
             provider_version: "1.0.0".to_owned(),
             captured_at: Utc::now(),
             questions: vec![target_question],
+            groups: Vec::new(),
         };
         (
             LocalAnswerCacheService::new(FakeRepository {

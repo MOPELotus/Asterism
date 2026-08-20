@@ -813,6 +813,7 @@ mod tests {
             provider_version: "0.1.0".to_owned(),
             captured_at: now,
             questions,
+            groups: Vec::new(),
         };
         let candidate = AnswerCandidateRecord {
             id: AnswerCandidateId::new(),

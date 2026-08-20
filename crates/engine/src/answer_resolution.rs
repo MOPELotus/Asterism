@@ -372,6 +372,7 @@ mod tests {
                     provider_version: "1.0.0".to_owned(),
                     captured_at: now,
                     questions,
+                    groups: Vec::new(),
                 },
                 candidates: Mutex::new(candidates),
             }),

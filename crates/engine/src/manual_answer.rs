@@ -224,6 +224,7 @@ mod tests {
                 metadata_sanitized: serde_json::json!({}),
                 position: 1,
             }],
+            groups: Vec::new(),
         };
         let command = CreateManualAnswerCandidateCommand {
             owner_id,

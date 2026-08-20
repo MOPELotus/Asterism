@@ -3,7 +3,7 @@ use std::{str::FromStr, sync::Arc};
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, Execution,
     ExecutionAttempt, ExecutionInvocationDraftId, NormalizedAnswer, ProviderAccountId, ProviderId,
-    Question, QuestionId, QuestionSnapshotId, RemoteState, ScoreImprovementWorkflow,
+    Question, QuestionGroup, QuestionId, QuestionSnapshotId, RemoteState, ScoreImprovementWorkflow,
     StrictCompletionWorkflow, StrictCompletionWorkflowId, SubmissionDraftId,
     SubmissionQuestionVerificationStatus, SubmissionResultId, SubmissionResultStatus,
     SubmissionScore, Task, TaskCapability, TaskId, TaskLifecycleAction, Timestamp,
@@ -521,6 +521,7 @@ pub(super) async fn get_task_questions(
             provider_version,
             captured_at,
             questions,
+            groups,
         } => Ok(crate::auth::no_store(
             Json(TaskQuestionsResponse {
                 snapshot_id,
@@ -529,6 +530,7 @@ pub(super) async fn get_task_questions(
                 provider_version,
                 captured_at,
                 questions,
+                groups,
             })
             .into_response(),
         )),
@@ -559,6 +561,7 @@ pub(super) async fn get_task_question_snapshot(
             snapshot_id: snapshot.id,
             captured_at: snapshot.captured_at,
             questions: snapshot.questions,
+            groups: snapshot.groups,
         })
         .into_response(),
     ))
@@ -2241,6 +2244,7 @@ struct TaskQuestionsResponse {
     provider_version: String,
     captured_at: Timestamp,
     questions: Vec<Question>,
+    groups: Vec<QuestionGroup>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

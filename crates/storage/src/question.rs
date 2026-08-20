@@ -7,10 +7,12 @@ use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerEvidenceClass, AnswerSource,
     CorpusProjectionEligibility, CourseId, ExecutionAttemptId, ExecutionId, PrivateAnswerEvidence,
     PrivateAnswerEvidenceId, ProviderAccountId, ProviderId, Question, QuestionContentFingerprint,
-    QuestionId, QuestionSnapshotId, SelectedAnswer, SubmissionAnswerCoverage, SubmissionDraft,
-    SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadPreview,
-    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult, SubmissionResultId,
-    SubmissionResultStatus, SubmissionVerificationSnapshot, TaskId, Timestamp, UserId,
+    QuestionGroup, QuestionGroupChild, QuestionGroupId, QuestionId, QuestionSnapshotId,
+    SelectedAnswer, SubmissionAnswerCoverage, SubmissionDraft, SubmissionDraftId,
+    SubmissionDraftItem, SubmissionPayloadPreview, SubmissionQuestionVerificationStatus,
+    SubmissionReceipt, SubmissionResult, SubmissionResultId, SubmissionResultStatus,
+    SubmissionVerificationSnapshot, TaskId, Timestamp, UnmatchedEvidenceReason, UserId,
+    validate_question_groups,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -27,6 +29,7 @@ use crate::{
 
 const MAX_QUESTIONS_PER_SNAPSHOT: usize = 5_000;
 const MAX_QUESTION_SNAPSHOT_BYTES: usize = 16 * 1_024 * 1_024;
+const MAX_QUESTION_GROUP_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_PROVIDER_VERSION_BYTES: usize = 128;
 const MAX_CANDIDATES_PER_SNAPSHOT: usize = 20_000;
 const MAX_ANSWER_CANDIDATE_BYTES: usize = 16 * 1_024 * 1_024;
@@ -67,7 +70,7 @@ impl QuestionSnapshotRepository for SqliteQuestionSnapshotRepository {
         let row = sqlx::query(
             "SELECT snapshot.id, snapshot.task_id, snapshot.provider_id, \
                     snapshot.provider_version, snapshot.captured_at, \
-                    snapshot.question_count, snapshot.total_bytes \
+                    snapshot.question_count, snapshot.group_count, snapshot.total_bytes \
              FROM question_snapshots AS snapshot \
              INNER JOIN tasks AS task ON task.id = snapshot.task_id \
              INNER JOIN provider_accounts AS account \
@@ -92,7 +95,7 @@ impl QuestionSnapshotRepository for SqliteQuestionSnapshotRepository {
         let row = sqlx::query(
             "SELECT snapshot.id, snapshot.task_id, snapshot.provider_id, \
                     snapshot.provider_version, snapshot.captured_at, \
-                    snapshot.question_count, snapshot.total_bytes \
+                    snapshot.question_count, snapshot.group_count, snapshot.total_bytes \
              FROM question_snapshots AS snapshot \
              INNER JOIN tasks AS task ON task.id = snapshot.task_id \
              INNER JOIN provider_accounts AS account \
@@ -131,8 +134,8 @@ pub(crate) async fn save_question_snapshot_in_transaction(
     }
     sqlx::query(
         "INSERT INTO question_snapshots \
-         (id, task_id, provider_id, provider_version, captured_at, question_count, total_bytes) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         (id, task_id, provider_id, provider_version, captured_at, question_count, group_count, \
+          total_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(snapshot.id.to_string())
     .bind(snapshot.task_id.to_string())
@@ -140,6 +143,7 @@ pub(crate) async fn save_question_snapshot_in_transaction(
     .bind(&snapshot.provider_version)
     .bind(encode_timestamp(snapshot.captured_at))
     .bind(i64::try_from(encoded.len()).expect("bounded Question count fits i64"))
+    .bind(i64::try_from(encoded.groups.len()).expect("bounded Question group count fits i64"))
     .bind(
         i64::try_from(encoded.total_bytes).expect("bounded Question snapshot byte count fits i64"),
     )
@@ -160,6 +164,20 @@ pub(crate) async fn save_question_snapshot_in_transaction(
         .execute(&mut **transaction)
         .await?;
     }
+    for (index, group) in encoded.groups.into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO question_snapshot_groups \
+             (snapshot_id, group_id, ordinal, remote_group_id, group_json) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(snapshot.id.to_string())
+        .bind(group.id.to_string())
+        .bind(i64::try_from(index + 1).expect("bounded Question group ordinal fits i64"))
+        .bind(group.remote_id)
+        .bind(group.json)
+        .execute(&mut **transaction)
+        .await?;
+    }
     Ok(())
 }
 
@@ -170,6 +188,8 @@ async fn decode_question_snapshot(
     let snapshot_id = parse_id::<QuestionSnapshotId>(row.try_get("id")?)?;
     let stored_count = usize::try_from(row.try_get::<i64, _>("question_count")?)
         .map_err(|_| invalid_snapshot())?;
+    let stored_group_count =
+        usize::try_from(row.try_get::<i64, _>("group_count")?).map_err(|_| invalid_snapshot())?;
     let stored_bytes =
         usize::try_from(row.try_get::<i64, _>("total_bytes")?).map_err(|_| invalid_snapshot())?;
     let item_rows = sqlx::query(
@@ -215,6 +235,38 @@ async fn decode_question_snapshot(
         return Err(invalid_snapshot());
     }
 
+    let group_rows = sqlx::query(
+        "SELECT group_id, ordinal, remote_group_id, group_json \
+         FROM question_snapshot_groups WHERE snapshot_id = ? ORDER BY ordinal",
+    )
+    .bind(snapshot_id.to_string())
+    .fetch_all(database.pool())
+    .await?;
+    if group_rows.len() != stored_group_count {
+        return Err(invalid_snapshot());
+    }
+    let mut group_bytes = 0_usize;
+    let mut groups = Vec::with_capacity(group_rows.len());
+    for (index, group_row) in group_rows.into_iter().enumerate() {
+        let json: &str = group_row.try_get("group_json")?;
+        group_bytes = group_bytes
+            .checked_add(json.len())
+            .filter(|bytes| *bytes <= MAX_QUESTION_GROUP_BYTES)
+            .ok_or_else(invalid_snapshot)?;
+        let group: QuestionGroup = serde_json::from_str(json)?;
+        let stored_id = parse_id::<QuestionGroupId>(group_row.try_get("group_id")?)?;
+        let stored_ordinal = usize::try_from(group_row.try_get::<i64, _>("ordinal")?)
+            .map_err(|_| invalid_snapshot())?;
+        let stored_remote_id: Option<String> = group_row.try_get("remote_group_id")?;
+        if group.id != stored_id
+            || stored_ordinal != index + 1
+            || group.remote_group_id != stored_remote_id
+        {
+            return Err(invalid_snapshot());
+        }
+        groups.push(group);
+    }
+
     let snapshot = QuestionSnapshot {
         id: snapshot_id,
         task_id: parse_id::<TaskId>(row.try_get("task_id")?)?,
@@ -223,6 +275,7 @@ async fn decode_question_snapshot(
         provider_version: row.try_get("provider_version")?,
         captured_at: decode_timestamp(row.try_get("captured_at")?)?,
         questions,
+        groups,
     };
     validate_and_encode(&snapshot)?;
     Ok(snapshot)
@@ -261,6 +314,7 @@ impl AnswerCacheRepository for SqliteQuestionSnapshotRepository {
                AND candidate.question_id = source_item.question_id \
              WHERE account.owner_user_id = ? AND target_snapshot.task_id = ? \
                AND target_snapshot.id = ? AND target_item.content_fingerprint IS NOT NULL \
+               AND target_snapshot.group_count = 0 AND source_snapshot.group_count = 0 \
                AND candidate.source <> 'local_cache' \
                AND (source_snapshot.captured_at < target_snapshot.captured_at OR \
                     (source_snapshot.captured_at = target_snapshot.captured_at \
@@ -944,6 +998,8 @@ async fn project_submission_result_evidence(
         return Ok(());
     }
     let context = load_submission_evidence_context(transaction, result).await?;
+    let grouped_question_ids =
+        load_grouped_question_ids(transaction, result.question_snapshot_id, result.task_id).await?;
     let rows = sqlx::query(
         "SELECT item.question_id, item.answer_candidate_id, candidate.candidate_json, \
                 question.question_json \
@@ -1015,16 +1071,56 @@ async fn project_submission_result_evidence(
                 "progress_percent": result.verification.progress_percent,
                 "receipt": result.receipt,
             }),
-            projection: CorpusProjectionEligibility::for_question_answer(
-                &question,
-                &candidate.answer,
-            ),
+            projection: if grouped_question_ids.contains(&question_id) {
+                CorpusProjectionEligibility::Unmatched(
+                    UnmatchedEvidenceReason::MissingSharedContext,
+                )
+            } else {
+                CorpusProjectionEligibility::for_question_answer(&question, &candidate.answer)
+            },
             observed_at: result.verification.verified_at,
             verified_at: result.verification.verified_at,
         };
         record_answer_evidence_in_transaction(transaction, &evidence).await?;
     }
     Ok(())
+}
+
+async fn load_grouped_question_ids(
+    transaction: &mut Transaction<'_, Sqlite>,
+    snapshot_id: QuestionSnapshotId,
+    task_id: TaskId,
+) -> Result<BTreeSet<QuestionId>, StorageError> {
+    let questions = sqlx::query_scalar::<_, String>(
+        "SELECT question_json FROM question_snapshot_items \
+         WHERE snapshot_id = ? ORDER BY position",
+    )
+    .bind(snapshot_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?
+    .into_iter()
+    .map(|json| serde_json::from_str::<Question>(&json))
+    .collect::<Result<Vec<_>, _>>()?;
+    let groups = sqlx::query_scalar::<_, String>(
+        "SELECT group_json FROM question_snapshot_groups \
+         WHERE snapshot_id = ? ORDER BY ordinal",
+    )
+    .bind(snapshot_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?
+    .into_iter()
+    .map(|json| serde_json::from_str::<QuestionGroup>(&json))
+    .collect::<Result<Vec<_>, _>>()?;
+    validate_question_groups(task_id, &questions, &groups)
+        .map_err(|_| invalid_submission_result())?;
+    Ok(groups
+        .iter()
+        .flat_map(|group| group.children.iter())
+        .filter_map(|child| match child {
+            QuestionGroupChild::Question(question_id) => Some(*question_id),
+            QuestionGroupChild::Group(_) => None,
+        })
+        .collect())
 }
 
 fn reliable_submission_verifications(
@@ -1272,7 +1368,14 @@ struct EncodedQuestion {
 
 struct EncodedSnapshot {
     questions: Vec<EncodedQuestion>,
+    groups: Vec<EncodedQuestionGroup>,
     total_bytes: usize,
+}
+
+struct EncodedQuestionGroup {
+    id: QuestionGroupId,
+    remote_id: Option<String>,
+    json: String,
 }
 
 impl EncodedSnapshot {
@@ -1284,6 +1387,8 @@ impl EncodedSnapshot {
 fn validate_and_encode(snapshot: &QuestionSnapshot) -> Result<EncodedSnapshot, StorageError> {
     if snapshot.questions.len() > MAX_QUESTIONS_PER_SNAPSHOT
         || !valid_text(&snapshot.provider_version, MAX_PROVIDER_VERSION_BYTES)
+        || validate_question_groups(snapshot.task_id, &snapshot.questions, &snapshot.groups)
+            .is_err()
     {
         return Err(invalid_snapshot());
     }
@@ -1319,8 +1424,23 @@ fn validate_and_encode(snapshot: &QuestionSnapshot) -> Result<EncodedSnapshot, S
                 .map_err(|_| invalid_snapshot())?,
         });
     }
+    let mut group_bytes = 0_usize;
+    let mut groups = Vec::with_capacity(snapshot.groups.len());
+    for group in &snapshot.groups {
+        let json = serde_json::to_string(group)?;
+        group_bytes = group_bytes
+            .checked_add(json.len())
+            .filter(|bytes| *bytes <= MAX_QUESTION_GROUP_BYTES)
+            .ok_or_else(invalid_snapshot)?;
+        groups.push(EncodedQuestionGroup {
+            id: group.id,
+            remote_id: group.remote_group_id.clone(),
+            json,
+        });
+    }
     Ok(EncodedSnapshot {
         questions,
+        groups,
         total_bytes,
     })
 }
@@ -1378,9 +1498,9 @@ fn invalid_submission_result() -> StorageError {
 mod tests {
     use asterism_domain::{
         AnswerConfidence, NormalizedAnswer, QuestionAttachment, QuestionAttachmentKind,
-        QuestionKind, QuestionOption, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
-        SubmissionQuestionVerification, SubmissionQuestionVerificationStatus, SubmissionScore,
-        SubmissionVerificationStatus,
+        QuestionGroupChild, QuestionKind, QuestionOption, SubmissionPayloadEncoding,
+        SubmissionPayloadFieldPreview, SubmissionQuestionVerification,
+        SubmissionQuestionVerificationStatus, SubmissionScore, SubmissionVerificationStatus,
     };
     use chrono::Duration;
 
@@ -1428,6 +1548,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn shared_question_groups_round_trip_and_fail_closed_on_tampering() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let mut snapshot = fixture.snapshot("Child stem", fixture.now);
+        snapshot.groups.push(QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: fixture.task,
+            remote_group_id: Some("reading-material-1".to_owned()),
+            stem: Some("Read the shared passage.".to_owned()),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({"family": "reading"}),
+            children: vec![QuestionGroupChild::Question(snapshot.questions[0].id)],
+        });
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        assert_eq!(
+            repository
+                .find_owned_question_snapshot(fixture.owner, snapshot.id)
+                .await
+                .unwrap(),
+            Some(snapshot.clone())
+        );
+
+        sqlx::query("UPDATE question_snapshot_groups SET group_id = ? WHERE snapshot_id = ?")
+            .bind(QuestionGroupId::new().to_string())
+            .bind(snapshot.id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .find_owned_question_snapshot(fixture.owner, snapshot.id)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1621,6 +1779,80 @@ mod tests {
         assert!(
             repository
                 .list_owned_prior_answer_evidence(fixture.owner, fixture.task, changed_target.id,)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_prior_answer_evidence_skips_structured_snapshots() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let mut grouped_prior = fixture.snapshot("Shared leaf", fixture.now);
+        grouped_prior.groups.push(QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: fixture.task,
+            remote_group_id: Some("prior-passage".to_owned()),
+            stem: Some("Prior shared context".to_owned()),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            children: vec![QuestionGroupChild::Question(grouped_prior.questions[0].id)],
+        });
+        let flat_target = fixture.snapshot("Shared leaf", fixture.now + Duration::seconds(1));
+        repository
+            .save_question_snapshot(&grouped_prior)
+            .await
+            .unwrap();
+        repository
+            .save_question_snapshot(&flat_target)
+            .await
+            .unwrap();
+        let grouped_candidate =
+            Fixture::candidate(&grouped_prior, AnswerSource::ProviderNative, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&grouped_candidate))
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .list_owned_prior_answer_evidence(fixture.owner, fixture.task, flat_target.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let flat_prior = fixture.snapshot("Second shared leaf", fixture.now + Duration::seconds(2));
+        let mut grouped_target =
+            fixture.snapshot("Second shared leaf", fixture.now + Duration::seconds(3));
+        grouped_target.groups.push(QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: fixture.task,
+            remote_group_id: Some("target-passage".to_owned()),
+            stem: Some("Target shared context".to_owned()),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            children: vec![QuestionGroupChild::Question(grouped_target.questions[0].id)],
+        });
+        repository
+            .save_question_snapshot(&flat_prior)
+            .await
+            .unwrap();
+        repository
+            .save_question_snapshot(&grouped_target)
+            .await
+            .unwrap();
+        let flat_candidate =
+            Fixture::candidate(&flat_prior, AnswerSource::ProviderNative, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&flat_candidate))
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .list_owned_prior_answer_evidence(fixture.owner, fixture.task, grouped_target.id)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1854,6 +2086,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grouped_question_results_do_not_project_without_shared_context() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let mut snapshot = fixture.snapshot("Shared-context result question", fixture.now);
+        snapshot.questions[0].attachments.clear();
+        snapshot.groups.push(QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: fixture.task,
+            remote_group_id: Some("shared-passage-1".to_owned()),
+            stem: Some("Read this passage before answering.".to_owned()),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({"kind": "passage"}),
+            children: vec![QuestionGroupChild::Question(snapshot.questions[0].id)],
+        });
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let candidate = Fixture::candidate(&snapshot, AnswerSource::Manual, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&candidate))
+            .await
+            .unwrap();
+        let draft = fixture.draft(&snapshot, &candidate);
+        repository.save_submission_draft(&draft).await.unwrap();
+        let (execution_id, attempt_id) = fixture.execution_attempt().await;
+        let result = fixture.result(&draft, execution_id, attempt_id);
+        repository.save_submission_result(&result).await.unwrap();
+
+        let projection: (String, Option<String>) = sqlx::query_as(
+            "SELECT projection_state, unmatched_reason FROM private_answer_evidence",
+        )
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            projection,
+            (
+                "unmatched".to_owned(),
+                Some("missing_shared_context".to_owned())
+            )
+        );
+        assert_eq!(
+            count_rows(&fixture.database, "global_answer_corpus_entries").await,
+            0
+        );
+        assert_eq!(
+            count_rows(&fixture.database, "global_answer_corpus_projections").await,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn rejected_submission_projects_negative_but_unverified_projects_nothing() {
         let fixture = Fixture::new().await;
         let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
@@ -2053,6 +2336,7 @@ mod tests {
                     metadata_sanitized: serde_json::json!({"page_kind": "work_preview"}),
                     position: 1,
                 }],
+                groups: Vec::new(),
             }
         }
 

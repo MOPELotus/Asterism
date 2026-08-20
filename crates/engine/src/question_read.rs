@@ -2,9 +2,9 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use asterism_domain::{
     AuditActor, AuthState, MAX_QUESTION_READ_ATTEMPT_TTL_SECONDS, MAX_QUESTION_SESSION_TTL_SECONDS,
-    ProviderAccount, ProviderId, Question, QuestionKind, QuestionReadAttempt,
+    ProviderAccount, ProviderId, Question, QuestionGroup, QuestionKind, QuestionReadAttempt,
     QuestionReadAttemptId, QuestionReadAttemptState, QuestionSession, QuestionSnapshotId, Task,
-    TaskCapability, TaskId, Timestamp, UserId,
+    TaskCapability, TaskId, Timestamp, UserId, validate_question_groups,
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionReadOperation, ProviderContext, ProviderEntry, ProviderError,
@@ -53,6 +53,7 @@ fn result_from_snapshot(snapshot: QuestionSnapshot) -> ProviderQuestionReadResul
         provider_version: snapshot.provider_version,
         captured_at: snapshot.captured_at,
         questions: snapshot.questions,
+        groups: snapshot.groups,
     }
 }
 
@@ -80,6 +81,16 @@ fn validate_materialized_questions(
     } else {
         Ok(())
     }
+}
+
+fn validate_materialized_question_set(
+    task_id: TaskId,
+    questions: &[Question],
+    groups: &[QuestionGroup],
+) -> Result<(), ProviderQuestionReadError> {
+    validate_materialized_questions(task_id, questions)?;
+    validate_question_groups(task_id, questions, groups)
+        .map_err(|_| ProviderQuestionReadError::ProviderResponseInvalid)
 }
 
 fn valid_provider_label(provider_id: &ProviderId, value: &str) -> bool {
@@ -110,6 +121,7 @@ pub enum ProviderQuestionReadResult {
         provider_version: String,
         captured_at: Timestamp,
         questions: Vec<Question>,
+        groups: Vec<QuestionGroup>,
     },
     Completed {
         task_id: TaskId,
@@ -421,7 +433,7 @@ where
         validate_references(&references)?;
         references.sort_by_key(|reference| reference.position);
         let parsed = match parser
-            .parse_question_set(&context, task.id, &task.remote_id, &references)
+            .parse_structured_question_set(&context, task.id, &task.remote_id, &references)
             .await
         {
             Ok(parsed) => parsed,
@@ -437,14 +449,14 @@ where
                 return Err(error.into());
             }
         };
-        let (questions, artifact) = parsed.into_parts();
+        let (questions, groups, artifact) = parsed.into_parts();
         if questions.len() != references.len() {
             return Err(ProviderQuestionReadError::ProviderResponseInvalid);
         }
         for (reference, question) in references.iter().zip(&questions) {
             validate_question_binding(&task, reference, question)?;
         }
-        validate_materialized_questions(task.id, &questions)?;
+        validate_materialized_question_set(task.id, &questions, &groups)?;
         let captured_at = Utc::now();
         let snapshot = QuestionSnapshot {
             id: QuestionSnapshotId::new(),
@@ -453,6 +465,7 @@ where
             provider_version: entry.metadata.implementation_version.clone(),
             captured_at,
             questions: questions.clone(),
+            groups,
         };
         if let Some(artifact) = artifact {
             let durable = self
@@ -832,6 +845,60 @@ where
                         provider_version: provider_version.to_owned(),
                         captured_at: received_at,
                         questions,
+                        groups: Vec::new(),
+                    };
+                    let session =
+                        QuestionSession::active(
+                            attempt.owner_user_id,
+                            attempt.provider_account_id,
+                            task.id,
+                            provider_id.clone(),
+                            provider_version.to_owned(),
+                            snapshot.id,
+                            artifact_type,
+                            artifact_digest,
+                            received_at,
+                            received_at
+                                + Duration::seconds(i64::try_from(ttl_seconds).map_err(|_| {
+                                    ProviderQuestionReadError::ProviderResponseInvalid
+                                })?),
+                        )
+                        .map_err(|_| ProviderQuestionReadError::ProviderResponseInvalid)?;
+                    let materialized = scoped
+                        .materialize_question_read_operation(QuestionReadMaterializeRequest {
+                            operation: &operation,
+                            snapshot: &snapshot,
+                            session: &session,
+                            artifact_phase: &phase,
+                            artifact: value,
+                            result_digest: response_digest,
+                            materialized_at: received_at,
+                            access: &access,
+                        })
+                        .await?;
+                    if !matches!(
+                        materialized,
+                        QuestionReadMaterializeOutcome::Materialized { .. }
+                            | QuestionReadMaterializeOutcome::Duplicate { .. }
+                    ) {
+                        return Err(ProviderQuestionReadError::StateConflict);
+                    }
+                    return Ok(result_from_snapshot(snapshot));
+                }
+                ProviderQuestionReadStepOutcome::MaterializeStructured(materialization) => {
+                    let (questions, groups, artifact, response_digest, received_at) =
+                        materialization.into_parts();
+                    validate_materialized_question_set(task.id, &questions, &groups)?;
+                    let (artifact_type, artifact_digest, phase, value, ttl_seconds) =
+                        artifact.into_parts();
+                    let snapshot = QuestionSnapshot {
+                        id: QuestionSnapshotId::new(),
+                        task_id: task.id,
+                        provider_id: provider_id.clone(),
+                        provider_version: provider_version.to_owned(),
+                        captured_at: received_at,
+                        questions,
+                        groups,
                     };
                     let session =
                         QuestionSession::active(
@@ -1030,15 +1097,17 @@ mod tests {
 
     use asterism_domain::{
         AssessmentClass, OrchestrationState, ProtocolObservationKind, ProtocolSurface,
-        ProviderAccount, ProviderAccountId, RemoteState, SourceType, Task,
+        ProviderAccount, ProviderAccountId, QuestionGroupChild, QuestionGroupId, RemoteState,
+        SourceType, Task,
     };
     use asterism_provider_api::{
         PreparedProviderQuestionReadOperation, ProviderCapability, ProviderEntry,
         ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderQuestionMaterialization,
         ProviderQuestionReadContinuation, ProviderQuestionReadStepOutcome, ProviderResult,
-        ProviderRouteContext, ProviderRuntimeSettingsSchema, QuestionInventoryCapability,
-        QuestionParseCapability, ResolvedProviderQuestionReadContinuation,
-        ResolvedProviderRuntimeSettings, VerificationLevel,
+        ProviderRouteContext, ProviderRuntimeSettingsSchema, ProviderStructuredQuestionParseSet,
+        QuestionInventoryCapability, QuestionParseCapability,
+        ResolvedProviderQuestionReadContinuation, ResolvedProviderRuntimeSettings,
+        VerificationLevel,
     };
     use asterism_secrets::{SecretKey, SecretValue};
     use asterism_storage::{
@@ -1106,6 +1175,7 @@ mod tests {
         references: Mutex<Vec<RemoteQuestionRef>>,
         parsed_task_id: Mutex<Option<TaskId>>,
         protocol_drift: AtomicBool,
+        structured: AtomicBool,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1203,6 +1273,37 @@ mod tests {
                 position: reference.position,
             })
         }
+
+        async fn parse_structured_question_set(
+            &self,
+            context: &ProviderContext,
+            task_id: TaskId,
+            remote_task_id: &str,
+            references: &[RemoteQuestionRef],
+        ) -> ProviderResult<ProviderStructuredQuestionParseSet> {
+            let parsed = self
+                .parse_question_set(context, task_id, remote_task_id, references)
+                .await?;
+            let (questions, artifact) = parsed.into_parts();
+            let groups = if self.structured.load(Ordering::Relaxed) {
+                vec![QuestionGroup {
+                    id: QuestionGroupId::new(),
+                    task_id,
+                    remote_group_id: Some("shared-material".to_owned()),
+                    stem: Some("Shared passage".to_owned()),
+                    options: Vec::new(),
+                    attachments: Vec::new(),
+                    metadata_sanitized: serde_json::json!({}),
+                    children: questions
+                        .iter()
+                        .map(|question| QuestionGroupChild::Question(question.id))
+                        .collect(),
+                }]
+            } else {
+                Vec::new()
+            };
+            ProviderStructuredQuestionParseSet::try_new(questions, groups, artifact)
+        }
     }
 
     #[tokio::test]
@@ -1237,6 +1338,31 @@ mod tests {
             *fixture.capability.parsed_task_id.lock().unwrap(),
             Some(fixture.task_id)
         );
+    }
+
+    #[tokio::test]
+    async fn structured_question_set_is_persisted_and_returned_without_flattening() {
+        let fixture = fixture(true);
+        fixture.capability.structured.store(true, Ordering::Relaxed);
+        let result = fixture
+            .service
+            .read(ReadTaskQuestionsCommand {
+                owner_id: fixture.owner_id,
+                task_id: fixture.task_id,
+                correlation_id: "question-read-structured".to_owned(),
+            })
+            .await
+            .unwrap();
+        let ProviderQuestionReadResult::Questions {
+            questions, groups, ..
+        } = result
+        else {
+            panic!("expected a structured Question snapshot");
+        };
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].children.len(), questions.len());
+        let snapshots = fixture.snapshots.snapshots.lock().unwrap();
+        assert_eq!(snapshots[0].groups, groups);
     }
 
     #[tokio::test]
@@ -1685,6 +1811,7 @@ mod tests {
             references: Mutex::new(vec![reference("question-2", 2), reference("question-1", 1)]),
             parsed_task_id: Mutex::new(None),
             protocol_drift: AtomicBool::new(false),
+            structured: AtomicBool::new(false),
         });
         let mut registry = ProviderRegistry::default();
         registry
