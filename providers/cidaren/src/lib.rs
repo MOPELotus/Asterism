@@ -4,8 +4,9 @@
 //! structured external OAuth authentication, account-isolated `BrowserBridge`,
 //! class/ordinary-study inventory and fresh task reads. It also implements the
 //! current `jv=99` crypto boundary, task-bound answer evidence and a one-shot
-//! assessment state machine. Public durable attempt integration and live
-//! compatibility remain in progress.
+//! assessment state machine. Durable pre-Question and post-materialization
+//! attempt integration is registered; authenticated-browser acquisition and
+//! live compatibility remain external validation gates.
 //!
 //! Browser result bytes remain opaque outside the Provider. The public runtime
 //! surface issues typed commands, accepts only Core-persisted results and
@@ -101,9 +102,11 @@ pub use assessment_response::{
 };
 pub use assessment_transport::{CidarenAssessmentTransport, CidarenAssessmentTransportOutcome};
 pub use attempt_flow::{
+    CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE, CidarenAssessmentMutationProjection,
     CidarenAttemptFlow, CidarenAttemptFlowStatus, CidarenAttemptOperation,
     CidarenDurableStepOutcome, CidarenIssuedCommand, CidarenIssuedOutcome,
-    CidarenPreQuestionContinuation, CidarenQuestionMaterialization,
+    CidarenPreQuestionContinuation, CidarenQuestionMaterialization, CidarenTerminalCompletion,
+    EncodedCidarenAssessmentMutationProjection,
 };
 pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
@@ -113,9 +116,11 @@ pub use browser_bridge::{
     CidarenBrowserBridge, CidarenCaptureExchangeCompleted, CidarenCaptureExchangeIssued,
 };
 pub use browser_protocol::{
-    CIDAREN_CAPTURE_COMMAND_TYPE, CIDAREN_CAPTURE_RESULT_TYPE, CidarenBrowserCaptureSource,
+    CIDAREN_CAPTURE_COMMAND_TYPE, CIDAREN_CAPTURE_RESULT_TYPE,
+    CidarenBrowserCaptureEnvironmentSnapshot, CidarenBrowserCaptureSource,
     CidarenBrowserCapturedValue, CidarenBrowserCommand, CidarenBrowserCommandEnvelope,
-    CidarenBrowserHelperAction, CidarenBrowserHelperProjection, CidarenCaptureMode,
+    CidarenBrowserContextAuthentication, CidarenBrowserHelperAction,
+    CidarenBrowserHelperProjection, CidarenBrowserProxyDisposition, CidarenCaptureMode,
     EncodedCidarenBrowserCommandArtifact, EncodedCidarenBrowserResultArtifact,
     project_browser_helper_command,
 };

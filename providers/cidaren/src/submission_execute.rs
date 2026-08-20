@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use asterism_domain::{
-    NormalizedAnswer, QuestionId, SubmissionDraft, SubmissionReceipt, TaskCapability,
+    NormalizedAnswer, QuestionId, SubmissionDraft, SubmissionReceipt, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink,
@@ -92,50 +92,16 @@ impl CidarenSubmissionExecute {
         }
         Ok(())
     }
-}
 
-impl fmt::Debug for CidarenSubmissionExecute {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CidarenSubmissionExecute")
-            .field("metadata", &self.metadata)
-            .field("preview", &self.preview)
-            .field("questions", &"configured")
-            .finish()
-    }
-}
-
-impl ProviderIdentity for CidarenSubmissionExecute {
-    fn metadata(&self) -> &ProviderMetadata {
-        &self.metadata
-    }
-}
-
-#[async_trait]
-impl SubmissionExecuteCapability for CidarenSubmissionExecute {
-    async fn execute_submission(
-        &self,
-        context: &ProviderContext,
-        _remote_task_id: &str,
-        _draft: &SubmissionDraft,
-        _runtime_settings: &ResolvedProviderRuntimeSettings,
-        _events: &(dyn ExecutionEventSink + Send + Sync),
-    ) -> ProviderResult<SubmissionReceipt> {
-        validate_context(context, &self.metadata)?;
-        Err(ProviderError::new(
-            ProviderErrorKind::UnsupportedTask,
-            "Cidaren submission requires its durable Question session",
-        ))
-    }
-
-    async fn prepare_submission_operation(
+    pub(crate) async fn prepare_submission_operation_at(
         &self,
         context: &ProviderContext,
         remote_task_id: &str,
         draft: &SubmissionDraft,
         continuation: ResolvedProviderQuestionSessionContinuation<'_>,
         runtime_settings: &ResolvedProviderRuntimeSettings,
-    ) -> ProviderResult<Option<Box<dyn PreparedProviderSubmissionOperation>>> {
+        issued_at: Timestamp,
+    ) -> ProviderResult<PreparedCidarenSubmissionOperation> {
         validate_context(context, &self.metadata)?;
         self.validate_draft(context, remote_task_id, draft).await?;
         let settings = CidarenRuntimeSettings::resolve(runtime_settings)?;
@@ -207,7 +173,6 @@ impl SubmissionExecuteCapability for CidarenSubmissionExecute {
             }
         };
 
-        let issued_at = Utc::now();
         let command = match flow.status() {
             CidarenAttemptFlowStatus::CurrentQuestion => match &item.selected.answer {
                 NormalizedAnswer::Skip => flow.issue_skip(&settings, issued_at)?,
@@ -226,28 +191,144 @@ impl SubmissionExecuteCapability for CidarenSubmissionExecute {
                 ));
             }
         };
-        Ok(Some(Box::new(PreparedCidarenSubmissionOperation {
+        Ok(PreparedCidarenSubmissionOperation {
             provider_id: self.metadata.id.clone(),
             previous_question_id: item.question.id,
             previous_position: item.question.position,
             flow,
             command,
             assessments: self.questions.assessment_transport(),
-        })))
+        })
+    }
+}
+
+impl fmt::Debug for CidarenSubmissionExecute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenSubmissionExecute")
+            .field("metadata", &self.metadata)
+            .field("preview", &self.preview)
+            .field("questions", &"configured")
+            .finish()
+    }
+}
+
+impl ProviderIdentity for CidarenSubmissionExecute {
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
+}
+
+#[async_trait]
+impl SubmissionExecuteCapability for CidarenSubmissionExecute {
+    async fn execute_submission(
+        &self,
+        context: &ProviderContext,
+        _remote_task_id: &str,
+        _draft: &SubmissionDraft,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+        _events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<SubmissionReceipt> {
+        validate_context(context, &self.metadata)?;
+        Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "Cidaren submission requires its durable Question session",
+        ))
+    }
+
+    async fn prepare_submission_operation(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<Box<dyn PreparedProviderSubmissionOperation>>> {
+        Ok(Some(Box::new(
+            self.prepare_submission_operation_at(
+                context,
+                remote_task_id,
+                draft,
+                continuation,
+                runtime_settings,
+                Utc::now(),
+            )
+            .await?,
+        )))
     }
 
     async fn recover_ambiguous_submission_operation(
         &self,
         context: &ProviderContext,
-        _remote_task_id: &str,
-        _draft: &SubmissionDraft,
-        _continuation: ResolvedProviderQuestionSessionContinuation<'_>,
-        _operation: &AmbiguousProviderQuestionSessionOperation,
-        _runtime_settings: &ResolvedProviderRuntimeSettings,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        operation: &AmbiguousProviderQuestionSessionOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
     ) -> ProviderResult<Option<ProviderSubmissionStepOutcome>> {
         validate_context(context, &self.metadata)?;
+        validate_ambiguous_operation_metadata(operation, continuation.revision)?;
+        let prepared = self
+            .prepare_submission_operation_at(
+                context,
+                remote_task_id,
+                draft,
+                continuation,
+                runtime_settings,
+                operation.issued_at,
+            )
+            .await?;
+        validate_rebuilt_ambiguous_operation(
+            operation,
+            prepared.command.operation_type(),
+            prepared.command.request_digest(),
+        )?;
+        // Freshly rebuilding the immutable Draft/Attempt request is only a
+        // recovery check. The prepared mutation is deliberately discarded so
+        // the ambiguous operation cannot be replayed.
+        drop(prepared);
         Ok(None)
     }
+}
+
+fn validate_ambiguous_operation_metadata(
+    operation: &AmbiguousProviderQuestionSessionOperation,
+    continuation_revision: u32,
+) -> ProviderResult<()> {
+    if operation.continuation_revision != continuation_revision {
+        return Err(remote_changed(
+            "Cidaren ambiguous submission continuation revision changed",
+        ));
+    }
+    if operation.operation_type.is_empty() || operation.request_digest == [0; 32] {
+        return Err(protocol_drift(
+            "Cidaren ambiguous submission identity is missing",
+        ));
+    }
+    if operation.ambiguous_at < operation.issued_at {
+        return Err(protocol_drift(
+            "Cidaren ambiguous submission timestamps are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rebuilt_ambiguous_operation(
+    operation: &AmbiguousProviderQuestionSessionOperation,
+    operation_type: &str,
+    request_digest: [u8; 32],
+) -> ProviderResult<()> {
+    if operation.operation_type != operation_type {
+        return Err(remote_changed(
+            "Cidaren ambiguous submission type changed after fresh readback",
+        ));
+    }
+    if operation.request_digest != request_digest {
+        return Err(remote_changed(
+            "Cidaren ambiguous submission request changed after fresh readback",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_continuation_shape(
@@ -276,7 +357,7 @@ fn validate_continuation_shape(
     Ok(())
 }
 
-struct PreparedCidarenSubmissionOperation {
+pub(crate) struct PreparedCidarenSubmissionOperation {
     provider_id: asterism_domain::ProviderId,
     previous_question_id: QuestionId,
     previous_position: u32,
@@ -363,8 +444,14 @@ impl PreparedProviderSubmissionOperation for PreparedCidarenSubmissionOperation 
             }
             CidarenDurableStepOutcome::Completed {
                 receipt,
+                receipt_digest,
                 response_digest,
             } => {
+                if receipt_digest == [0; 32] {
+                    return Err(internal(
+                        "Cidaren completion receipt lost its binding digest",
+                    ));
+                }
                 let received_at = receipt.received_at;
                 ProviderSubmissionStepOutcome::submitted(receipt, response_digest, received_at)
             }
@@ -401,4 +488,67 @@ fn remote_changed(message: &'static str) -> ProviderError {
 
 fn internal(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::Internal, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ambiguous_submission_readback_rejects_revision_request_and_time_drift() {
+        let issued_at = Utc::now();
+        let operation = AmbiguousProviderQuestionSessionOperation {
+            continuation_revision: 3,
+            operation_type: "cidaren.submit-answer-and-save.v1".to_owned(),
+            request_digest: [4; 32],
+            issued_at,
+            ambiguous_at: issued_at + chrono::Duration::seconds(1),
+        };
+        validate_ambiguous_operation_metadata(&operation, 3).unwrap();
+        validate_rebuilt_ambiguous_operation(
+            &operation,
+            "cidaren.submit-answer-and-save.v1",
+            [4; 32],
+        )
+        .unwrap();
+
+        assert_eq!(
+            validate_ambiguous_operation_metadata(&operation, 4)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        let mut drifted = operation.clone();
+        drifted.request_digest = [0; 32];
+        assert_eq!(
+            validate_ambiguous_operation_metadata(&drifted, 3)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        let mut drifted = operation.clone();
+        drifted.ambiguous_at = issued_at - chrono::Duration::seconds(1);
+        assert_eq!(
+            validate_ambiguous_operation_metadata(&drifted, 3)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        assert_eq!(
+            validate_rebuilt_ambiguous_operation(&operation, "cidaren.verify-answer.v1", [4; 32],)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            validate_rebuilt_ambiguous_operation(
+                &operation,
+                "cidaren.submit-answer-and-save.v1",
+                [5; 32],
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
 }

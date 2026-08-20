@@ -2,8 +2,8 @@ use std::fmt;
 
 use asterism_domain::{BrowserBridgeSessionId, SessionKind};
 use asterism_provider_api::{
-    BrowserBridgeReadSource, CredentialReplacement, ProviderError, ProviderErrorKind,
-    ProviderResult,
+    BrowserBridgeReadSource, BrowserBridgeResultDisposition, CredentialReplacement, ProviderError,
+    ProviderErrorKind, ProviderResult,
 };
 use asterism_secrets::{CredentialField, SecretPurpose, SecretString, SecretValue};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ const MAX_BROWSER_COMMAND_BYTES: usize = 4 * 1_024;
 const MAX_BROWSER_DOCUMENT_BYTES: usize = 256 * 1_024;
 const MAX_SESSION_NONCE_BYTES: usize = 512;
 const MAX_FRAME_ID_BYTES: usize = 256;
+const MAX_AUTHENTICATED_DOCUMENT_ID_BYTES: usize = 512;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 768;
 const MAX_CAPTURE_VALUE_BYTES: usize = 64 * 1_024;
 
@@ -24,6 +25,14 @@ const MAX_CAPTURE_VALUE_BYTES: usize = 64 * 1_024;
 pub const CIDAREN_CAPTURE_COMMAND_TYPE: &str = "cidaren.capture.snapshot";
 /// Stable Core `BrowserBridge` exchange type for one Cidaren Capture result.
 pub const CIDAREN_CAPTURE_RESULT_TYPE: &str = "cidaren.capture.snapshot.result";
+pub(crate) const CIDAREN_BROWSER_CREDENTIAL_RESULT_TYPES: [&str; 1] = [CIDAREN_CAPTURE_RESULT_TYPE];
+
+pub(crate) fn cidaren_browser_result_disposition(
+    result_type: &str,
+) -> Option<BrowserBridgeResultDisposition> {
+    (result_type == CIDAREN_CAPTURE_RESULT_TYPE)
+        .then_some(BrowserBridgeResultDisposition::CredentialTerminal)
+}
 
 /// Encrypted-at-rest command material required to validate a helper result
 /// after process recovery. The digest remains safe for the ordinary exchange
@@ -225,17 +234,143 @@ pub enum CidarenBrowserHelperAction {
     CaptureSnapshotComposite,
 }
 
+/// Environment assertion for the Cidaren document used by one Capture.
+///
+/// The environment owns the proof behind this assertion. The Provider does
+/// not infer authentication from a URL, an origin-only page or the mere
+/// presence of browser storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CidarenBrowserContextAuthentication {
+    Authenticated,
+    Unverified,
+}
+
+/// Terminal state of any environment-owned proxy mutation used for Capture.
+///
+/// Direct document reads use [`Self::OriginalStateUnchanged`]. A proxy helper
+/// may use [`Self::OriginalStateRestored`] only after it restored the exact
+/// pre-acquisition setting. Unknown, partially restored or still-modified
+/// state is never an acceptable credential-result boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CidarenBrowserProxyDisposition {
+    OriginalStateUnchanged,
+    OriginalStateRestored,
+    UnverifiedOrModified,
+}
+
+/// One environment-bound, same-document Cidaren Capture observation.
+///
+/// This is the sole Provider-private environment input beyond the already
+/// authenticated command projection. `acquisition_id` must be the exact Core
+/// `BrowserBridge` session, `authenticated_document_id` is one bounded opaque
+/// document binding, and every captured value must come from one atomic read
+/// of that document. The identifier deliberately has no CDP, `XWeb` target or
+/// proxy implementation semantics.
+pub struct CidarenBrowserCaptureEnvironmentSnapshot {
+    acquisition_id: BrowserBridgeSessionId,
+    authenticated_document_id: Zeroizing<String>,
+    authentication: CidarenBrowserContextAuthentication,
+    proxy_disposition: CidarenBrowserProxyDisposition,
+    result_type: String,
+    result_disposition: BrowserBridgeResultDisposition,
+    captured: Vec<CidarenBrowserCapturedValue>,
+}
+
+impl CidarenBrowserCaptureEnvironmentSnapshot {
+    /// Constructs one same-document environment observation.
+    ///
+    /// `captured` must be produced by one indivisible environment snapshot;
+    /// values from separate documents or acquisitions must never be merged
+    /// into this boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid document binding, an unauthenticated context, an
+    /// unverified proxy terminal state, an undeclared result
+    /// type/disposition pair or an impossible value count.
+    pub fn try_new(
+        acquisition_id: BrowserBridgeSessionId,
+        authenticated_document_id: String,
+        authentication: CidarenBrowserContextAuthentication,
+        proxy_disposition: CidarenBrowserProxyDisposition,
+        result_type: String,
+        result_disposition: BrowserBridgeResultDisposition,
+        captured: Vec<CidarenBrowserCapturedValue>,
+    ) -> ProviderResult<Self> {
+        let authenticated_document_id = Zeroizing::new(authenticated_document_id);
+        if !valid_token(
+            authenticated_document_id.as_str(),
+            MAX_AUTHENTICATED_DOCUMENT_ID_BYTES,
+        ) {
+            return Err(invalid_response(
+                "Cidaren authenticated document binding is invalid",
+            ));
+        }
+        if authentication != CidarenBrowserContextAuthentication::Authenticated {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Cidaren Capture environment is not authenticated",
+            ));
+        }
+        if proxy_disposition == CidarenBrowserProxyDisposition::UnverifiedOrModified {
+            return Err(protocol_drift(
+                "Cidaren Capture environment did not preserve the original proxy state",
+            ));
+        }
+        if cidaren_browser_result_disposition(&result_type) != Some(result_disposition) {
+            return Err(protocol_drift(
+                "Cidaren Capture environment result type or disposition is not declared",
+            ));
+        }
+        if captured.is_empty() || captured.len() > 2 {
+            return Err(invalid_response(
+                "Cidaren environment snapshot has an invalid captured-value count",
+            ));
+        }
+        Ok(Self {
+            acquisition_id,
+            authenticated_document_id,
+            authentication,
+            proxy_disposition,
+            result_type,
+            result_disposition,
+            captured,
+        })
+    }
+}
+
+impl fmt::Debug for CidarenBrowserCaptureEnvironmentSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenBrowserCaptureEnvironmentSnapshot")
+            .field("acquisition_id", &"[REDACTED]")
+            .field("authenticated_document_id", &"[REDACTED]")
+            .field(
+                "authenticated_document_id_bytes",
+                &self.authenticated_document_id.len(),
+            )
+            .field("authentication", &self.authentication)
+            .field("proxy_disposition", &self.proxy_disposition)
+            .field("result_type", &self.result_type)
+            .field("result_disposition", &self.result_disposition)
+            .field("captured_value_count", &self.captured.len())
+            .finish()
+    }
+}
+
 /// Helper projection for one exact Cidaren Capture action.
 ///
 /// This contains no selector or executable script. Its dispatch bindings stay
 /// zeroizing and Debug-redacted until the projection is consumed into a result.
 pub struct CidarenBrowserHelperProjection {
     action: CidarenBrowserHelperAction,
+    acquisition_id: BrowserBridgeSessionId,
     session_nonce: Zeroizing<String>,
     origin: Zeroizing<String>,
     frame_id: Zeroizing<String>,
     remote_task_id: Zeroizing<String>,
     sequence: u32,
+    authenticated_document_id: Option<Zeroizing<String>>,
 }
 
 impl CidarenBrowserHelperProjection {
@@ -264,6 +399,100 @@ impl CidarenBrowserHelperProjection {
                 CidarenBrowserCaptureSource::SessionStorageLoginInfo,
             ],
         }
+    }
+
+    /// Binds this authenticated command projection to the one opaque document
+    /// selected by the environment before terminal values are accepted.
+    ///
+    /// The Provider neither discovers nor interprets the identifier. Attached
+    /// browser/`XWeb` or proxy environments own that operation and must pass
+    /// the same binding into their indivisible result snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign acquisition, invalid document binding,
+    /// unauthenticated context or a second attempt to rebind the projection.
+    pub fn bind_authenticated_document(
+        mut self,
+        acquisition_id: BrowserBridgeSessionId,
+        authenticated_document_id: String,
+        authentication: CidarenBrowserContextAuthentication,
+    ) -> ProviderResult<Self> {
+        let authenticated_document_id = Zeroizing::new(authenticated_document_id);
+        if acquisition_id != self.acquisition_id {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Cidaren authenticated document belongs to another acquisition",
+            ));
+        }
+        if !valid_token(
+            authenticated_document_id.as_str(),
+            MAX_AUTHENTICATED_DOCUMENT_ID_BYTES,
+        ) {
+            return Err(invalid_response(
+                "Cidaren authenticated document binding is invalid",
+            ));
+        }
+        if authentication != CidarenBrowserContextAuthentication::Authenticated {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Cidaren projected document is not authenticated",
+            ));
+        }
+        if self.authenticated_document_id.is_some() {
+            return Err(protocol_drift(
+                "Cidaren helper projection document is already bound",
+            ));
+        }
+        self.authenticated_document_id = Some(authenticated_document_id);
+        Ok(self)
+    }
+
+    /// Consumes one explicitly authenticated, same-document environment
+    /// snapshot into the ordinary typed result builder.
+    ///
+    /// This method is the strict boundary for attached XWeb/browser or
+    /// system-proxy environments. It validates the independent acquisition
+    /// binding before any captured secret is interpreted; source ordering,
+    /// recipe completeness and `jv=99` context are then checked by the same
+    /// fail-closed result path used by ordinary helper projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign acquisition/document, undeclared terminal
+    /// disposition or any invalid captured result shape.
+    pub fn into_environment_bound_result_artifact(
+        self,
+        snapshot: CidarenBrowserCaptureEnvironmentSnapshot,
+    ) -> ProviderResult<EncodedCidarenBrowserResultArtifact> {
+        if snapshot.acquisition_id != self.acquisition_id {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Cidaren Capture environment belongs to another acquisition",
+            ));
+        }
+        let Some(authenticated_document_id) = self.authenticated_document_id.as_ref() else {
+            return Err(protocol_drift(
+                "Cidaren helper projection has no authenticated document binding",
+            ));
+        };
+        if snapshot.authenticated_document_id.as_str() != authenticated_document_id.as_str() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Cidaren Capture result belongs to another authenticated document",
+            ));
+        }
+        let expected_result_type = snapshot.result_type;
+        let expected_disposition = snapshot.result_disposition;
+        let artifact = self.into_result_artifact(snapshot.captured)?;
+        if artifact.result_type() != expected_result_type
+            || artifact.disposition() != expected_disposition
+        {
+            return Err(protocol_drift(
+                "Cidaren Capture result changed its declared terminal disposition",
+            ));
+        }
+        Ok(artifact)
     }
 
     /// Consumes this dispatch and constructs one exact typed result artifact.
@@ -368,11 +597,13 @@ impl fmt::Debug for CidarenBrowserHelperProjection {
         formatter
             .debug_struct("CidarenBrowserHelperProjection")
             .field("action", &self.action)
+            .field("acquisition_id", &"[REDACTED]")
             .field("session_nonce", &"[REDACTED]")
             .field("origin", &"[REDACTED]")
             .field("frame_id", &"[REDACTED]")
             .field("remote_task_id", &"[REDACTED]")
             .field("sequence", &"[REDACTED]")
+            .field("authenticated_document_id", &"[REDACTED]")
             .finish()
     }
 }
@@ -450,6 +681,10 @@ pub struct EncodedCidarenBrowserResultArtifact {
 impl EncodedCidarenBrowserResultArtifact {
     pub const fn result_type(&self) -> &'static str {
         CIDAREN_CAPTURE_RESULT_TYPE
+    }
+
+    pub const fn disposition(&self) -> BrowserBridgeResultDisposition {
+        BrowserBridgeResultDisposition::CredentialTerminal
     }
 
     pub const fn digest(&self) -> [u8; 32] {
@@ -739,11 +974,13 @@ pub fn project_browser_helper_command(
     };
     Ok(CidarenBrowserHelperProjection {
         action,
+        acquisition_id: expected_session_id,
         session_nonce: Zeroizing::new(command.session_nonce.clone()),
         origin: Zeroizing::new(command.origin.clone()),
         frame_id: Zeroizing::new(command.frame_id.clone()),
         remote_task_id: Zeroizing::new(command.remote_task_id.clone()),
         sequence: command.sequence,
+        authenticated_document_id: None,
     })
 }
 
@@ -1396,6 +1633,201 @@ mod tests {
     }
 
     #[test]
+    fn environment_snapshot_requires_authenticated_single_acquisition_and_proxy_cleanup() {
+        let token_value = || {
+            vec![CidarenBrowserCapturedValue::from((
+                CidarenBrowserCaptureSource::RequestHeaderUserToken,
+                SecretString::new("synthetic-user-token"),
+            ))]
+        };
+        let acquisition_id = BrowserBridgeSessionId::new();
+        assert_eq!(
+            CidarenBrowserCaptureEnvironmentSnapshot::try_new(
+                acquisition_id,
+                "document-a".to_owned(),
+                CidarenBrowserContextAuthentication::Unverified,
+                CidarenBrowserProxyDisposition::OriginalStateUnchanged,
+                CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+                BrowserBridgeResultDisposition::CredentialTerminal,
+                token_value(),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::Authentication
+        );
+        assert_eq!(
+            CidarenBrowserCaptureEnvironmentSnapshot::try_new(
+                acquisition_id,
+                "document-a".to_owned(),
+                CidarenBrowserContextAuthentication::Authenticated,
+                CidarenBrowserProxyDisposition::UnverifiedOrModified,
+                CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+                BrowserBridgeResultDisposition::CredentialTerminal,
+                token_value(),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        assert_eq!(
+            CidarenBrowserCaptureEnvironmentSnapshot::try_new(
+                acquisition_id,
+                "document\nforeign".to_owned(),
+                CidarenBrowserContextAuthentication::Authenticated,
+                CidarenBrowserProxyDisposition::OriginalStateRestored,
+                CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+                BrowserBridgeResultDisposition::CredentialTerminal,
+                token_value(),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn environment_terminal_projection_rejects_disposition_and_binding_drift() {
+        let token_value = || {
+            vec![CidarenBrowserCapturedValue::from((
+                CidarenBrowserCaptureSource::RequestHeaderUserToken,
+                SecretString::new("synthetic-user-token"),
+            ))]
+        };
+        let acquisition_id = BrowserBridgeSessionId::new();
+        for (result_type, result_disposition) in [
+            (
+                CIDAREN_CAPTURE_RESULT_TYPE,
+                BrowserBridgeResultDisposition::ExecutionTerminal,
+            ),
+            (
+                "cidaren.capture.snapshot.execution.result",
+                BrowserBridgeResultDisposition::ExecutionTerminal,
+            ),
+            (
+                "cidaren.capture.snapshot.result.extra",
+                BrowserBridgeResultDisposition::CredentialTerminal,
+            ),
+        ] {
+            assert_eq!(
+                CidarenBrowserCaptureEnvironmentSnapshot::try_new(
+                    acquisition_id,
+                    "document-a".to_owned(),
+                    CidarenBrowserContextAuthentication::Authenticated,
+                    CidarenBrowserProxyDisposition::OriginalStateRestored,
+                    result_type.to_owned(),
+                    result_disposition,
+                    token_value(),
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+
+        let (_, projection) = helper_projection(CidarenCaptureMode::TokenOnly);
+        let snapshot = CidarenBrowserCaptureEnvironmentSnapshot::try_new(
+            BrowserBridgeSessionId::new(),
+            "document-foreign-acquisition".to_owned(),
+            CidarenBrowserContextAuthentication::Authenticated,
+            CidarenBrowserProxyDisposition::OriginalStateUnchanged,
+            CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+            BrowserBridgeResultDisposition::CredentialTerminal,
+            token_value(),
+        )
+        .unwrap();
+        assert_eq!(
+            projection
+                .into_environment_bound_result_artifact(snapshot)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let (command, projection) = helper_projection(CidarenCaptureMode::TokenOnly);
+        let acquisition_id = command.session_nonce.parse().unwrap();
+        let snapshot = CidarenBrowserCaptureEnvironmentSnapshot::try_new(
+            acquisition_id,
+            "document-result".to_owned(),
+            CidarenBrowserContextAuthentication::Authenticated,
+            CidarenBrowserProxyDisposition::OriginalStateRestored,
+            CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+            BrowserBridgeResultDisposition::CredentialTerminal,
+            token_value(),
+        )
+        .unwrap();
+        assert_eq!(
+            projection
+                .bind_authenticated_document(
+                    acquisition_id,
+                    "document-command".to_owned(),
+                    CidarenBrowserContextAuthentication::Authenticated,
+                )
+                .unwrap()
+                .into_environment_bound_result_artifact(snapshot)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[test]
+    fn environment_snapshot_builds_one_atomic_same_document_composite_result() {
+        let (command, projection) = helper_projection(CidarenCaptureMode::Composite);
+        let acquisition_id = command
+            .session_nonce
+            .parse::<BrowserBridgeSessionId>()
+            .unwrap();
+        let login_info = r#"{"login_info":{"a":"hc3ludGhldGljLXNoYXJlZC1zZWNyZXQ=","b":"ac3ludGhldGljLXNhbHQ="}}"#;
+        let snapshot = CidarenBrowserCaptureEnvironmentSnapshot::try_new(
+            acquisition_id,
+            "opaque-authenticated-document".to_owned(),
+            CidarenBrowserContextAuthentication::Authenticated,
+            CidarenBrowserProxyDisposition::OriginalStateRestored,
+            CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+            BrowserBridgeResultDisposition::CredentialTerminal,
+            vec![
+                CidarenBrowserCapturedValue::from((
+                    CidarenBrowserCaptureSource::RequestHeaderUserToken,
+                    SecretString::new("synthetic-user-token"),
+                )),
+                CidarenBrowserCapturedValue::from((
+                    CidarenBrowserCaptureSource::SessionStorageLoginInfo,
+                    SecretString::new(login_info),
+                )),
+            ],
+        )
+        .unwrap();
+        let debug = format!("{snapshot:?}");
+        assert!(debug.contains("Authenticated") && debug.contains("OriginalStateRestored"));
+        assert!(!debug.contains("opaque-authenticated-document"));
+        assert!(!debug.contains("synthetic-user-token") && !debug.contains(login_info));
+
+        let artifact = projection
+            .bind_authenticated_document(
+                acquisition_id,
+                "opaque-authenticated-document".to_owned(),
+                CidarenBrowserContextAuthentication::Authenticated,
+            )
+            .unwrap()
+            .into_environment_bound_result_artifact(snapshot)
+            .unwrap();
+        assert_eq!(artifact.result_type(), CIDAREN_CAPTURE_RESULT_TYPE);
+        assert_eq!(
+            artifact.disposition(),
+            BrowserBridgeResultDisposition::CredentialTerminal
+        );
+        let digest = artifact.digest();
+        let value = artifact.into_secret_value();
+        let document = CidarenBrowserResultDocument::try_from_secret_value(&value, digest).unwrap();
+        let snapshot = parse_browser_event(document.as_str(), &command, CIDAREN_ORIGIN)
+            .unwrap()
+            .into_capture_snapshot(&command, CIDAREN_ORIGIN)
+            .unwrap();
+        assert_eq!(snapshot.user_token(), Some("synthetic-user-token"));
+        assert_eq!(snapshot.login_info(), Some(login_info));
+    }
+
+    #[test]
     fn helper_projection_rejects_dispatch_binding_drift() {
         let session_id = BrowserBridgeSessionId::new();
         let command = CidarenBrowserCommandEnvelope::capture_snapshot(
@@ -1913,6 +2345,32 @@ mod tests {
                 .kind,
             ProviderErrorKind::ProtocolDrift
         );
+    }
+
+    #[test]
+    fn terminal_result_decode_rejects_unknown_envelope_and_event_fields() {
+        let command = command(CidarenCaptureMode::TokenOnly);
+        let base: serde_json::Value =
+            serde_json::from_str(&document(CidarenCaptureMode::TokenOnly)).unwrap();
+        let mut unknown_envelope = base.clone();
+        unknown_envelope
+            .as_object_mut()
+            .unwrap()
+            .insert("execution_terminal".to_owned(), json!(true));
+        let mut unknown_event = base;
+        unknown_event["event"]
+            .as_object_mut()
+            .unwrap()
+            .insert("document_id".to_owned(), json!("foreign-document"));
+
+        for value in [unknown_envelope, unknown_event] {
+            assert_eq!(
+                parse_browser_event(&value.to_string(), &command, CIDAREN_ORIGIN)
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::InvalidResponse
+            );
+        }
     }
 
     #[test]

@@ -222,15 +222,7 @@ fn validate_fresh_detail(
     detail: &asterism_provider_api::RemoteTaskDetail,
     remote_task_id: &str,
 ) -> ProviderResult<()> {
-    let schema = detail
-        .normalized_detail
-        .get("schema")
-        .and_then(Value::as_str);
     if detail.task.remote_id != remote_task_id
-        || !matches!(
-            schema,
-            Some("cidaren.class-task.detail.v1" | "cidaren.study-task.detail.v1")
-        )
         || !detail
             .task
             .capabilities
@@ -240,7 +232,97 @@ fn validate_fresh_detail(
             "Cidaren submission verification Task identity or capability changed",
         ));
     }
-    Ok(())
+    let task = detail
+        .task
+        .normalized
+        .as_object()
+        .ok_or_else(|| protocol_drift("Cidaren verification Task shape is invalid"))?;
+    let course_id = task
+        .get("course_id")
+        .and_then(Value::as_str)
+        .filter(|value| valid_task_component(value))
+        .ok_or_else(|| protocol_drift("Cidaren verification Course identity is invalid"))?;
+    if detail.task.course_remote_id.as_deref() != Some(format!("course:{course_id}").as_str()) {
+        return Err(remote_changed(
+            "Cidaren submission verification Task belongs to another Course",
+        ));
+    }
+    if detail.normalized_detail.get("task") != Some(&detail.task.normalized) {
+        return Err(remote_changed(
+            "Cidaren submission verification detail no longer repeats its fresh Task",
+        ));
+    }
+
+    let detail_schema = detail
+        .normalized_detail
+        .get("schema")
+        .and_then(Value::as_str);
+    if let Some(release_id) = remote_task_id.strip_prefix("class-task:") {
+        if !valid_release_id(release_id) {
+            return Err(protocol_drift(
+                "Cidaren class verification identity is invalid",
+            ));
+        }
+        if task.get("schema").and_then(Value::as_str) != Some("cidaren.class-task.v1")
+            || task.get("release_id").and_then(Value::as_str) != Some(release_id)
+            || detail_schema != Some("cidaren.class-task.detail.v1")
+            || detail
+                .normalized_detail
+                .get("release_id")
+                .and_then(Value::as_str)
+                != Some(release_id)
+        {
+            return Err(remote_changed(
+                "Cidaren class verification release identity changed",
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(identity) = remote_task_id.strip_prefix("study-task:")
+        && let Some((remote_course_id, list_id)) = identity.split_once(':')
+        && valid_task_component(remote_course_id)
+        && valid_task_component(list_id)
+    {
+        if task.get("schema").and_then(Value::as_str) != Some("cidaren.study-task.v1")
+            || course_id != remote_course_id
+            || task.get("list_id").and_then(Value::as_str) != Some(list_id)
+            || detail_schema != Some("cidaren.study-task.detail.v1")
+            || detail
+                .normalized_detail
+                .get("course_id")
+                .and_then(Value::as_str)
+                != Some(remote_course_id)
+            || detail
+                .normalized_detail
+                .get("list_id")
+                .and_then(Value::as_str)
+                != Some(list_id)
+        {
+            return Err(remote_changed(
+                "Cidaren study verification Course/list identity changed",
+            ));
+        }
+        return Ok(());
+    }
+    Err(protocol_drift(
+        "Cidaren submission verification Task identity is invalid",
+    ))
+}
+
+fn valid_release_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value != "0"
+        && !value.starts_with('0')
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_task_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn invalid_response(message: impl Into<String>) -> ProviderError {
@@ -304,6 +386,14 @@ mod tests {
             _context: &ProviderContext,
             remote_task_id: &str,
         ) -> ProviderResult<RemoteTaskDetail> {
+            let normalized = json!({
+                "schema": "cidaren.class-task.v1",
+                "release_id": "2002",
+                "course_id": "course-a",
+                "task_id": 812,
+                "progress": self.progress,
+                "score": null,
+            });
             Ok(RemoteTaskDetail {
                 task: RemoteTask {
                     remote_id: remote_task_id.to_owned(),
@@ -317,18 +407,13 @@ mod tests {
                     closes_at: None,
                     capabilities: [TaskCapability::SubmissionBuild].into_iter().collect(),
                     fingerprint: "fixture".to_owned(),
-                    normalized: json!({
-                        "schema": "cidaren.class-task.v1",
-                        "release_id": "2002",
-                        "task_id": 812,
-                        "progress": self.progress,
-                        "score": null,
-                    }),
+                    normalized: normalized.clone(),
                     raw_sanitized: json!({}),
                 },
                 normalized_detail: json!({
                     "schema": "cidaren.class-task.detail.v1",
                     "release_id": "2002",
+                    "task": normalized,
                 }),
             })
         }
@@ -410,6 +495,127 @@ mod tests {
             let mut unfinished = snapshot.clone();
             unfinished.remote_state = Some(state);
             assert_eq!(verifier.completion_diagnosis(&unfinished), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_verification_rebinds_class_course_release_and_exact_detail_copy() {
+        let detail = FixtureDetail {
+            state: RemoteState::Completed,
+            progress: 100,
+        }
+        .task_detail(&context(), "class-task:2002")
+        .await
+        .unwrap();
+        validate_fresh_detail(&detail, "class-task:2002").unwrap();
+
+        let mut drifted = detail.clone();
+        drifted.task.course_remote_id = Some("course:course-b".to_owned());
+        assert_eq!(
+            validate_fresh_detail(&drifted, "class-task:2002")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        let mut drifted = detail.clone();
+        drifted.task.normalized["release_id"] = json!("2003");
+        assert_eq!(
+            validate_fresh_detail(&drifted, "class-task:2002")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        let mut drifted = detail.clone();
+        drifted.normalized_detail["release_id"] = json!("2003");
+        assert_eq!(
+            validate_fresh_detail(&drifted, "class-task:2002")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        let mut drifted = detail.clone();
+        drifted.normalized_detail["task"]["progress"] = json!(99);
+        assert_eq!(
+            validate_fresh_detail(&drifted, "class-task:2002")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            validate_fresh_detail(&detail, "class-task:02002")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[test]
+    fn fresh_verification_rebinds_study_course_list_and_exact_detail_copy() {
+        let normalized = json!({
+            "schema": "cidaren.study-task.v1",
+            "course_id": "course-a",
+            "list_id": "course-a_02",
+            "task_id": 71002,
+            "progress": 100,
+        });
+        let detail = RemoteTaskDetail {
+            task: RemoteTask {
+                remote_id: "study-task:course-a:course-a_02".to_owned(),
+                course_remote_id: Some("course:course-a".to_owned()),
+                title: "Synthetic Study Task".to_owned(),
+                source_type: asterism_domain::SourceType::Practice,
+                assessment_class: asterism_domain::AssessmentClass::Routine,
+                remote_state: RemoteState::Completed,
+                opens_at: None,
+                due_at: None,
+                closes_at: None,
+                capabilities: [TaskCapability::SubmissionBuild].into_iter().collect(),
+                fingerprint: "fixture-study".to_owned(),
+                normalized: normalized.clone(),
+                raw_sanitized: json!({}),
+            },
+            normalized_detail: json!({
+                "schema": "cidaren.study-task.detail.v1",
+                "course_id": "course-a",
+                "list_id": "course-a_02",
+                "task": normalized,
+            }),
+        };
+        validate_fresh_detail(&detail, "study-task:course-a:course-a_02").unwrap();
+
+        for drifted in [
+            {
+                let mut value = detail.clone();
+                value.task.course_remote_id = Some("course:course-b".to_owned());
+                value
+            },
+            {
+                let mut value = detail.clone();
+                value.task.normalized["list_id"] = json!("course-a_03");
+                value
+            },
+            {
+                let mut value = detail.clone();
+                value.normalized_detail["course_id"] = json!("course-b");
+                value
+            },
+            {
+                let mut value = detail.clone();
+                value.normalized_detail["list_id"] = json!("course-a_03");
+                value
+            },
+            {
+                let mut value = detail.clone();
+                value.normalized_detail["task"]["progress"] = json!(99);
+                value
+            },
+        ] {
+            assert_eq!(
+                validate_fresh_detail(&drifted, "study-task:course-a:course-a_02")
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::RemoteChanged
+            );
         }
     }
 

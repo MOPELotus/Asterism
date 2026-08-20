@@ -10,6 +10,8 @@ use asterism_domain::{
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteTaskDetail,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -29,6 +31,10 @@ use crate::{
 const MAX_CORRELATION_ID_BYTES: usize = 512;
 const MAX_TOPIC_CODE_BYTES: usize = 4_096;
 const MAX_VERIFIED_STEPS: u32 = 256;
+const MAX_MUTATION_PROJECTION_ARTIFACT_BYTES: usize = 2_048;
+
+pub const CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE: &str =
+    "cidaren.assessment-mutation-projection.v1";
 
 /// One donor-observed remote mutation in the Cidaren answer lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +55,263 @@ impl CidarenAttemptOperation {
             Self::SubmitAnswerAndSave => "cidaren.submit-answer-and-save.v1",
             Self::SkipAnswer => "cidaren.skip-answer.v1",
         }
+    }
+
+    fn from_operation_type(value: &str) -> ProviderResult<Self> {
+        match value {
+            "cidaren.submit-chose-word.v1" => Ok(Self::SubmitChoseWord),
+            "cidaren.start-answer.v1" => Ok(Self::StartAnswer),
+            "cidaren.verify-answer.v1" => Ok(Self::VerifyAnswer),
+            "cidaren.submit-answer-and-save.v1" => Ok(Self::SubmitAnswerAndSave),
+            "cidaren.skip-answer.v1" => Ok(Self::SkipAnswer),
+            _ => Err(protocol_drift(
+                "Cidaren persisted mutation operation identity is invalid",
+            )),
+        }
+    }
+}
+
+/// Stable credential-free bytes suitable for Provider-private durable storage.
+pub struct EncodedCidarenAssessmentMutationProjection {
+    bytes: Vec<u8>,
+    digest: [u8; 32],
+}
+
+impl EncodedCidarenAssessmentMutationProjection {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl fmt::Debug for EncodedCidarenAssessmentMutationProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedCidarenAssessmentMutationProjection")
+            .field("bytes", &"[REDACTED]")
+            .field("encoded_len", &self.bytes.len())
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
+
+/// Credential-free immutable authority for one exact Native HTTP assessment
+/// mutation.
+///
+/// The Draft-selected answer is represented only through the exact frozen
+/// request digest. Course, Task, assessment and attempt digests are independent
+/// so delayed result acceptance can fail on the precise changed binding.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CidarenAssessmentMutationProjection {
+    account_digest: [u8; 32],
+    course_digest: [u8; 32],
+    task_digest: [u8; 32],
+    assessment_digest: [u8; 32],
+    attempt_digest: [u8; 32],
+    operation: CidarenAttemptOperation,
+    request_digest: [u8; 32],
+}
+
+impl CidarenAssessmentMutationProjection {
+    pub const fn operation(&self) -> CidarenAttemptOperation {
+        self.operation
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    /// Encodes the complete immutable mutation authority as canonical,
+    /// credential-free JSON for Provider-private durable storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if any digest is missing or the stable encoded
+    /// representation exceeds its tight bound.
+    pub fn encode_persisted(&self) -> ProviderResult<EncodedCidarenAssessmentMutationProjection> {
+        self.validate_complete()?;
+        let bytes = serde_json::to_vec(&MutationProjectionWire::from_projection(self))
+            .map_err(|_| invalid_response("Cidaren mutation projection could not be encoded"))?;
+        if bytes.is_empty() || bytes.len() > MAX_MUTATION_PROJECTION_ARTIFACT_BYTES {
+            return Err(invalid_response(
+                "Cidaren mutation projection exceeds its encoded bound",
+            ));
+        }
+        let digest = Sha256::digest(&bytes).into();
+        Ok(EncodedCidarenAssessmentMutationProjection { bytes, digest })
+    }
+
+    /// Decodes one persisted projection, verifies its exact byte digest and
+    /// compares every decoded binding with a freshly rebuilt projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for size, schema, canonical-form, digest or any
+    /// account/Course/Task/assessment/attempt/operation/request drift.
+    pub fn decode_persisted_bound(
+        bytes: &[u8],
+        expected_artifact_digest: [u8; 32],
+        rebuilt: &Self,
+    ) -> ProviderResult<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_MUTATION_PROJECTION_ARTIFACT_BYTES {
+            return Err(invalid_response(
+                "Cidaren mutation projection exceeds its encoded bound",
+            ));
+        }
+        if Sha256::digest(bytes).as_slice() != expected_artifact_digest {
+            return Err(protocol_drift(
+                "Cidaren mutation projection digest changed after persistence",
+            ));
+        }
+        let wire: MutationProjectionWire = serde_json::from_slice(bytes)
+            .map_err(|_| protocol_drift("Cidaren mutation projection schema is invalid"))?;
+        let canonical = serde_json::to_vec(&wire)
+            .map_err(|_| protocol_drift("Cidaren mutation projection is not serializable"))?;
+        if canonical != bytes {
+            return Err(protocol_drift(
+                "Cidaren mutation projection encoding is not canonical",
+            ));
+        }
+        let decoded = wire.into_projection()?;
+        decoded.validate_complete()?;
+        decoded.validate_same_issued(rebuilt)?;
+        Ok(decoded)
+    }
+
+    fn validate_complete(&self) -> ProviderResult<()> {
+        if [
+            self.account_digest,
+            self.course_digest,
+            self.task_digest,
+            self.assessment_digest,
+            self.attempt_digest,
+            self.request_digest,
+        ]
+        .contains(&[0; 32])
+        {
+            return Err(protocol_drift(
+                "Cidaren mutation projection has an empty binding digest",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_same_issued(&self, expected: &Self) -> ProviderResult<()> {
+        for (matches, message) in [
+            (
+                self.account_digest == expected.account_digest,
+                "Cidaren mutation result belongs to another account",
+            ),
+            (
+                self.course_digest == expected.course_digest,
+                "Cidaren mutation result belongs to another Course",
+            ),
+            (
+                self.task_digest == expected.task_digest,
+                "Cidaren mutation result belongs to another Task",
+            ),
+            (
+                self.assessment_digest == expected.assessment_digest,
+                "Cidaren mutation result belongs to another assessment",
+            ),
+            (
+                self.attempt_digest == expected.attempt_digest,
+                "Cidaren mutation result belongs to another attempt",
+            ),
+            (
+                self.operation == expected.operation,
+                "Cidaren mutation result operation changed",
+            ),
+            (
+                self.request_digest == expected.request_digest,
+                "Cidaren mutation result request changed",
+            ),
+        ] {
+            if !matches {
+                return Err(remote_changed(message));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MutationProjectionWire {
+    schema: String,
+    account_digest: String,
+    course_digest: String,
+    task_digest: String,
+    assessment_digest: String,
+    attempt_digest: String,
+    operation_type: String,
+    request_digest: String,
+}
+
+impl MutationProjectionWire {
+    fn from_projection(projection: &CidarenAssessmentMutationProjection) -> Self {
+        Self {
+            schema: CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE.to_owned(),
+            account_digest: encode_projection_digest(projection.account_digest),
+            course_digest: encode_projection_digest(projection.course_digest),
+            task_digest: encode_projection_digest(projection.task_digest),
+            assessment_digest: encode_projection_digest(projection.assessment_digest),
+            attempt_digest: encode_projection_digest(projection.attempt_digest),
+            operation_type: projection.operation.operation_type().to_owned(),
+            request_digest: encode_projection_digest(projection.request_digest),
+        }
+    }
+
+    fn into_projection(self) -> ProviderResult<CidarenAssessmentMutationProjection> {
+        if self.schema != CIDAREN_ASSESSMENT_MUTATION_PROJECTION_TYPE {
+            return Err(protocol_drift(
+                "Cidaren mutation projection version is unsupported",
+            ));
+        }
+        Ok(CidarenAssessmentMutationProjection {
+            account_digest: decode_projection_digest(&self.account_digest)?,
+            course_digest: decode_projection_digest(&self.course_digest)?,
+            task_digest: decode_projection_digest(&self.task_digest)?,
+            assessment_digest: decode_projection_digest(&self.assessment_digest)?,
+            attempt_digest: decode_projection_digest(&self.attempt_digest)?,
+            operation: CidarenAttemptOperation::from_operation_type(&self.operation_type)?,
+            request_digest: decode_projection_digest(&self.request_digest)?,
+        })
+    }
+}
+
+fn encode_projection_digest(value: [u8; 32]) -> String {
+    URL_SAFE_NO_PAD.encode(value)
+}
+
+fn decode_projection_digest(value: &str) -> ProviderResult<[u8; 32]> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| protocol_drift("Cidaren mutation projection digest encoding is invalid"))?;
+    decoded
+        .try_into()
+        .map_err(|_| protocol_drift("Cidaren mutation projection digest length is invalid"))
+}
+
+impl fmt::Debug for CidarenAssessmentMutationProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenAssessmentMutationProjection")
+            .field("account", &"bound")
+            .field("course", &"bound")
+            .field("task", &"bound")
+            .field("assessment", &"bound")
+            .field("attempt", &"bound")
+            .field("operation", &self.operation)
+            .field("request_digest", &self.request_digest)
+            .finish_non_exhaustive()
     }
 }
 
@@ -93,7 +356,8 @@ pub struct CidarenAttemptFlow {
 
 #[derive(Clone, Copy)]
 struct CidarenQuestionResponseBinding {
-    response_digest: [u8; 32],
+    projection: CidarenAssessmentMutationProjection,
+    fresh_result_digest: [u8; 32],
     received_at: Timestamp,
 }
 
@@ -114,7 +378,7 @@ enum CidarenAttemptPhase {
         verified_steps: u32,
     },
     Issued {
-        operation: CidarenAttemptOperation,
+        projection: CidarenAssessmentMutationProjection,
         continuation: CidarenAttemptContinuation,
     },
     Receipt {
@@ -149,9 +413,7 @@ enum CidarenAttemptContinuation {
 /// Opaque one-shot command produced only after the flow enters `Issued`.
 /// Debug output contains no answer, topic code, word map or account identity.
 pub struct CidarenIssuedCommand {
-    context_binding: [u8; 32],
-    flow_binding: [u8; 32],
-    operation: CidarenAttemptOperation,
+    projection: CidarenAssessmentMutationProjection,
     action: CidarenIssuedAction,
     delay_before_execute_seconds: u64,
 }
@@ -178,11 +440,9 @@ impl CidarenIssuedAction {
 
 /// Successful transport result bound to exactly one flow and operation.
 pub struct CidarenIssuedOutcome {
-    flow_binding: [u8; 32],
-    operation: CidarenAttemptOperation,
-    request_digest: [u8; 32],
+    projection: CidarenAssessmentMutationProjection,
     response: CidarenAssessmentResponse,
-    response_digest: [u8; 32],
+    fresh_result_digest: [u8; 32],
     received_at: asterism_domain::Timestamp,
 }
 
@@ -270,7 +530,7 @@ impl CidarenPreQuestionContinuation {
 
     pub const fn response_digest(&self) -> Option<[u8; 32]> {
         match self.response_binding {
-            Some(binding) => Some(binding.response_digest),
+            Some(binding) => Some(binding.fresh_result_digest),
             None => None,
         }
     }
@@ -293,7 +553,8 @@ impl CidarenPreQuestionContinuation {
         (
             self.artifact,
             self.phase,
-            self.response_binding.map(|binding| binding.response_digest),
+            self.response_binding
+                .map(|binding| binding.fresh_result_digest),
             self.response_binding.map(|binding| binding.received_at),
         )
     }
@@ -322,8 +583,34 @@ pub enum CidarenDurableStepOutcome {
     PreQuestion(CidarenPreQuestionContinuation),
     Completed {
         receipt: SubmissionReceipt,
+        receipt_digest: [u8; 32],
         response_digest: [u8; 32],
     },
+}
+
+/// Definite terminal receipt plus its Provider-private immutable binding and
+/// the independently retained digest of the fresh raw result.
+pub struct CidarenTerminalCompletion {
+    receipt: SubmissionReceipt,
+    receipt_digest: [u8; 32],
+    fresh_result_digest: [u8; 32],
+}
+
+impl CidarenTerminalCompletion {
+    pub fn into_parts(self) -> (SubmissionReceipt, [u8; 32], [u8; 32]) {
+        (self.receipt, self.receipt_digest, self.fresh_result_digest)
+    }
+}
+
+impl fmt::Debug for CidarenTerminalCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenTerminalCompletion")
+            .field("receipt", &self.receipt)
+            .field("receipt_digest", &self.receipt_digest)
+            .field("fresh_result_digest", &self.fresh_result_digest)
+            .finish()
+    }
 }
 
 impl CidarenAttemptFlow {
@@ -544,8 +831,8 @@ impl CidarenAttemptFlow {
             Some(CidarenAttemptPhase::ReadyToAdvance { .. }) => {
                 CidarenAttemptFlowStatus::ReadyToAdvance
             }
-            Some(CidarenAttemptPhase::Issued { operation, .. }) => {
-                CidarenAttemptFlowStatus::Issued(*operation)
+            Some(CidarenAttemptPhase::Issued { projection, .. }) => {
+                CidarenAttemptFlowStatus::Issued(projection.operation)
             }
             Some(CidarenAttemptPhase::Receipt { kind, .. }) => {
                 CidarenAttemptFlowStatus::Receipt(*kind)
@@ -680,7 +967,7 @@ impl CidarenAttemptFlow {
             question: current.question.clone(),
             artifact: artifact.encode()?,
             phase,
-            response_digest: binding.response_digest,
+            response_digest: binding.fresh_result_digest,
             received_at: binding.received_at,
         }))
     }
@@ -1067,15 +1354,16 @@ impl CidarenAttemptFlow {
         Ok(receipt)
     }
 
-    /// Returns the definite terminal receipt together with the exact raw
-    /// response digest accepted by this flow. Non-terminal phases return
-    /// `None`; malformed terminal response binding fails closed.
+    /// Returns the definite terminal receipt together with its Provider-private
+    /// binding digest and the exact fresh raw-response digest accepted by this
+    /// flow. Non-terminal phases return `None`; malformed terminal response
+    /// binding fails closed.
     ///
     /// # Errors
     ///
     /// Returns a typed error if a completed receipt lost or changed its
     /// response binding.
-    pub fn terminal_completion(&self) -> ProviderResult<Option<(SubmissionReceipt, [u8; 32])>> {
+    pub fn terminal_completion(&self) -> ProviderResult<Option<CidarenTerminalCompletion>> {
         if self.status() == CidarenAttemptFlowStatus::Invalid {
             return Err(internal("Cidaren terminal attempt phase is invalid"));
         }
@@ -1088,12 +1376,18 @@ impl CidarenAttemptFlow {
         let binding = self
             .last_response_binding
             .ok_or_else(|| invalid_state("Cidaren terminal receipt has no response binding"))?;
-        if binding.received_at != receipt.received_at || binding.response_digest == [0; 32] {
+        if binding.received_at != receipt.received_at || binding.fresh_result_digest == [0; 32] {
             return Err(protocol_drift(
                 "Cidaren terminal receipt response binding is inconsistent",
             ));
         }
-        Ok(Some((receipt, binding.response_digest)))
+        let receipt_digest =
+            terminal_receipt_digest(&receipt, &binding.projection, binding.fresh_result_digest);
+        Ok(Some(CidarenTerminalCompletion {
+            receipt,
+            receipt_digest,
+            fresh_result_digest: binding.fresh_result_digest,
+        }))
     }
 
     /// Classifies one accepted operation into its only truthful durable
@@ -1116,9 +1410,11 @@ impl CidarenAttemptFlow {
             }
             return Ok(CidarenDurableStepOutcome::PreQuestion(continuation));
         }
-        if let Some((receipt, response_digest)) = self.terminal_completion()? {
+        if let Some(completion) = self.terminal_completion()? {
+            let (receipt, receipt_digest, response_digest) = completion.into_parts();
             return Ok(CidarenDurableStepOutcome::Completed {
                 receipt,
+                receipt_digest,
                 response_digest,
             });
         }
@@ -1135,14 +1431,9 @@ impl CidarenAttemptFlow {
     /// Returns a typed error for cross-flow outcomes, unexpected response
     /// semantics, invalid rotated tokens or malformed next steps.
     pub fn accept(&mut self, outcome: CidarenIssuedOutcome) -> ProviderResult<()> {
-        if outcome.flow_binding != self.flow_binding {
-            return Err(remote_changed(
-                "Cidaren attempt outcome belongs to another execution",
-            ));
-        }
         let phase = self.take_phase()?;
         let CidarenAttemptPhase::Issued {
-            operation,
+            projection,
             continuation,
         } = phase
         else {
@@ -1151,22 +1442,27 @@ impl CidarenAttemptFlow {
                 "Cidaren attempt has no issued operation to accept",
             ));
         };
-        if operation != outcome.operation {
+        if let Err(error) = outcome.projection.validate_same_issued(&projection) {
             self.phase = Some(CidarenAttemptPhase::Issued {
-                operation,
+                projection,
                 continuation,
             });
-            return Err(remote_changed(
-                "Cidaren attempt outcome operation does not match",
+            return Err(error);
+        }
+        if outcome.fresh_result_digest == [0; 32] {
+            self.phase = Some(CidarenAttemptPhase::FailedClosed(projection.operation));
+            return Err(protocol_drift(
+                "Cidaren mutation result has no fresh response digest",
             ));
         }
         let response_binding = CidarenQuestionResponseBinding {
-            response_digest: outcome.response_digest,
+            projection: outcome.projection,
+            fresh_result_digest: outcome.fresh_result_digest,
             received_at: outcome.received_at,
         };
         let applied = self.apply_response(continuation, outcome.response, outcome.received_at);
         if applied.is_err() {
-            self.phase = Some(CidarenAttemptPhase::FailedClosed(operation));
+            self.phase = Some(CidarenAttemptPhase::FailedClosed(projection.operation));
         } else {
             self.last_response_binding = Some(response_binding);
         }
@@ -1181,13 +1477,13 @@ impl CidarenAttemptFlow {
     /// Returns a typed error unless an operation is currently issued.
     pub fn mark_ambiguous(&mut self) -> ProviderResult<()> {
         let phase = self.take_phase()?;
-        let CidarenAttemptPhase::Issued { operation, .. } = phase else {
+        let CidarenAttemptPhase::Issued { projection, .. } = phase else {
             self.phase = Some(phase);
             return Err(invalid_state(
                 "Cidaren attempt has no issued operation to mark ambiguous",
             ));
         };
-        self.phase = Some(CidarenAttemptPhase::Ambiguous(operation));
+        self.phase = Some(CidarenAttemptPhase::Ambiguous(projection.operation));
         Ok(())
     }
 
@@ -1203,17 +1499,42 @@ impl CidarenAttemptFlow {
                 "Cidaren attempt tried to overlap remote mutations",
             ));
         }
+        let request_digest = action.request_digest();
+        if request_digest == [0; 32] {
+            return Err(internal("Cidaren issued request digest is invalid"));
+        }
+        let projection = self.mutation_projection(operation, request_digest);
         self.phase = Some(CidarenAttemptPhase::Issued {
-            operation,
+            projection,
             continuation,
         });
         Ok(CidarenIssuedCommand {
-            context_binding: self.context_binding,
-            flow_binding: self.flow_binding,
-            operation,
+            projection,
             action,
             delay_before_execute_seconds,
         })
+    }
+
+    fn mutation_projection(
+        &self,
+        operation: CidarenAttemptOperation,
+        request_digest: [u8; 32],
+    ) -> CidarenAssessmentMutationProjection {
+        let assessment_digest = self.binding.assessment_binding_digest();
+        CidarenAssessmentMutationProjection {
+            account_digest: self.context_binding,
+            course_digest: self.binding.course_binding_digest(),
+            task_digest: task_binding(self.task_id, &self.remote_task_id),
+            assessment_digest,
+            attempt_digest: attempt_binding(
+                self.flow_binding,
+                assessment_digest,
+                self.remote_attempt_task_id,
+                self.position,
+            ),
+            operation,
+            request_digest,
+        }
     }
 
     fn apply_response(
@@ -1407,25 +1728,29 @@ impl Drop for CidarenAttemptFlow {
         self.context_binding.zeroize();
         self.flow_binding.zeroize();
         if let Some(binding) = &mut self.last_response_binding {
-            binding.response_digest.zeroize();
+            binding.fresh_result_digest.zeroize();
         }
     }
 }
 
 impl CidarenIssuedCommand {
     pub const fn operation(&self) -> CidarenAttemptOperation {
-        self.operation
+        self.projection.operation
     }
 
     /// Stable Provider operation label for Core's durable operation ledger.
     pub const fn operation_type(&self) -> &'static str {
-        self.operation.operation_type()
+        self.projection.operation.operation_type()
     }
 
     /// Digest of the exact credential-free path/query or path/body/signature
     /// already frozen into this one-shot command.
-    pub fn request_digest(&self) -> [u8; 32] {
-        self.action.request_digest()
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.projection.request_digest
+    }
+
+    pub const fn projection(&self) -> &CidarenAssessmentMutationProjection {
+        &self.projection
     }
 
     /// Returns the stable donor-observed residence time which Core must
@@ -1449,12 +1774,16 @@ impl CidarenIssuedCommand {
         transport: Arc<dyn CidarenAssessmentTransport>,
         context: &ProviderContext,
     ) -> ProviderResult<CidarenIssuedOutcome> {
-        if context_binding(context) != self.context_binding {
+        if context_binding(context) != self.projection.account_digest {
             return Err(remote_changed(
                 "Cidaren issued command received another account context",
             ));
         }
-        let request_digest = self.request_digest();
+        if self.action.request_digest() != self.projection.request_digest {
+            return Err(protocol_drift(
+                "Cidaren issued command request changed after projection",
+            ));
+        }
         let transport_outcome = match &self.action {
             CidarenIssuedAction::SubmitChoseWord(request) => {
                 transport.submit_chose_word(context, request).await
@@ -1474,11 +1803,9 @@ impl CidarenIssuedCommand {
         }?;
         let (response, response_digest, received_at) = transport_outcome.into_parts();
         Ok(CidarenIssuedOutcome {
-            flow_binding: self.flow_binding,
-            operation: self.operation,
-            request_digest,
+            projection: self.projection,
             response,
-            response_digest,
+            fresh_result_digest: response_digest,
             received_at,
         })
     }
@@ -1488,7 +1815,7 @@ impl fmt::Debug for CidarenIssuedCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CidarenIssuedCommand")
-            .field("operation", &self.operation)
+            .field("projection", &self.projection)
             .field(
                 "delay_before_execute_seconds",
                 &self.delay_before_execute_seconds,
@@ -1502,10 +1829,9 @@ impl fmt::Debug for CidarenIssuedOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CidarenIssuedOutcome")
-            .field("operation", &self.operation)
-            .field("request_digest", &self.request_digest)
+            .field("projection", &self.projection)
             .field("response", &self.response)
-            .field("response_digest", &self.response_digest)
+            .field("fresh_result_digest", &self.fresh_result_digest)
             .finish_non_exhaustive()
     }
 }
@@ -1513,12 +1839,12 @@ impl fmt::Debug for CidarenIssuedOutcome {
 impl CidarenIssuedOutcome {
     /// Digest of the exact credential-free request frozen before transport.
     pub const fn request_digest(&self) -> [u8; 32] {
-        self.request_digest
+        self.projection.request_digest
     }
 
     /// Digest of the exact raw response bytes accepted by the strict parser.
     pub const fn response_digest(&self) -> [u8; 32] {
-        self.response_digest
+        self.fresh_result_digest
     }
 
     /// Actual response observation time retained across delayed acceptance.
@@ -1685,6 +2011,53 @@ fn flow_binding(context_binding: [u8; 32], task_id: TaskId, remote_task_id: &str
         .chain_update(remote_task_id.as_bytes())
         .finalize()
         .into()
+}
+
+fn task_binding(task_id: TaskId, remote_task_id: &str) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(b"asterism:cidaren:attempt-task:v1\0")
+        .chain_update(task_id.to_string().as_bytes())
+        .chain_update(b"\0")
+        .chain_update(remote_task_id.as_bytes())
+        .finalize()
+        .into()
+}
+
+fn attempt_binding(
+    flow_binding: [u8; 32],
+    assessment_binding: [u8; 32],
+    remote_attempt_task_id: Option<i64>,
+    position: u32,
+) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(b"asterism:cidaren:attempt-instance:v1\0")
+        .chain_update(flow_binding)
+        .chain_update(assessment_binding)
+        .chain_update(remote_attempt_task_id.unwrap_or(-1).to_be_bytes())
+        .chain_update(position.to_be_bytes())
+        .finalize()
+        .into()
+}
+
+fn terminal_receipt_digest(
+    receipt: &SubmissionReceipt,
+    projection: &CidarenAssessmentMutationProjection,
+    fresh_result_digest: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new()
+        .chain_update(b"asterism:cidaren:attempt-receipt:v1\0")
+        .chain_update(projection.attempt_digest)
+        .chain_update(projection.operation.operation_type().as_bytes())
+        .chain_update(b"\0")
+        .chain_update(projection.request_digest)
+        .chain_update(fresh_result_digest)
+        .chain_update(receipt.received_at.timestamp_millis().to_be_bytes())
+        .chain_update(receipt.remote_status.as_bytes());
+    if let Some(message) = &receipt.message_sanitized {
+        hasher.update(b"\0message\0");
+        hasher.update(message.as_bytes());
+    }
+    hasher.finalize().into()
 }
 
 fn step_entropy(flow_binding: [u8; 32], position: u32, operation: &[u8]) -> [u8; 32] {
@@ -2192,6 +2565,295 @@ mod tests {
     }
 
     #[test]
+    fn issued_projection_rejects_each_binding_and_request_drift_before_acceptance() {
+        let context = context();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail(),
+            None,
+        )
+        .unwrap();
+        let command = flow.issue_start(request_at()).unwrap();
+        let expected = *command.projection();
+        let mut foreign = [expected; 7];
+        foreign[0].account_digest = [1; 32];
+        foreign[1].course_digest = [2; 32];
+        foreign[2].task_digest = [3; 32];
+        foreign[3].assessment_digest = [4; 32];
+        foreign[4].attempt_digest = [5; 32];
+        foreign[5].operation = CidarenAttemptOperation::VerifyAnswer;
+        foreign[6].request_digest = [6; 32];
+
+        for projection in foreign {
+            let error = flow
+                .accept(CidarenIssuedOutcome {
+                    projection,
+                    response: receipt(CidarenAssessmentReceiptKind::Completed),
+                    fresh_result_digest: [9; 32],
+                    received_at: request_at(),
+                })
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+            assert_eq!(
+                flow.status(),
+                CidarenAttemptFlowStatus::Issued(CidarenAttemptOperation::StartAnswer)
+            );
+        }
+
+        flow.accept(CidarenIssuedOutcome {
+            projection: expected,
+            response: receipt(CidarenAssessmentReceiptKind::Completed),
+            fresh_result_digest: [9; 32],
+            received_at: request_at(),
+        })
+        .unwrap();
+        assert!(flow.terminal_completion().unwrap().is_some());
+    }
+
+    #[test]
+    fn persisted_mutation_projection_is_canonical_bounded_and_credential_free() {
+        const DYNAMIC_ANSWER: &str = "dynamic-answer-value-never-persist";
+        const TOKEN: &str = "UserToken=opaque-token-never-persist";
+        const COOKIE: &str = "Cookie: session=cookie-never-persist";
+        const FULL_REQUEST: &str =
+            "POST /Student/ClassTask/VerifyAnswer?topic_code=secret-topic&answer=dynamic";
+        let request_digest = Sha256::new()
+            .chain_update(DYNAMIC_ANSWER)
+            .chain_update(TOKEN)
+            .chain_update(COOKIE)
+            .chain_update(FULL_REQUEST)
+            .finalize()
+            .into();
+        let projection = projection_fixture(request_digest);
+
+        let encoded = projection.encode_persisted().unwrap();
+        assert!(encoded.as_bytes().len() <= MAX_MUTATION_PROJECTION_ARTIFACT_BYTES);
+        let json = String::from_utf8(encoded.as_bytes().to_vec()).unwrap();
+        for forbidden in [DYNAMIC_ANSWER, TOKEN, COOKIE, FULL_REQUEST, "secret-topic"] {
+            assert!(!json.contains(forbidden));
+            assert!(!format!("{projection:?}").contains(forbidden));
+            assert!(!format!("{encoded:?}").contains(forbidden));
+        }
+        let object = serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            object,
+            [
+                "account_digest",
+                "assessment_digest",
+                "attempt_digest",
+                "course_digest",
+                "operation_type",
+                "request_digest",
+                "schema",
+                "task_digest",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        assert_eq!(
+            CidarenAssessmentMutationProjection::decode_persisted_bound(
+                encoded.as_bytes(),
+                encoded.digest(),
+                &projection,
+            )
+            .unwrap(),
+            projection
+        );
+    }
+
+    #[test]
+    fn persisted_mutation_projection_rejects_unknown_oversize_and_every_binding_tamper() {
+        let projection = projection_fixture([6; 32]);
+        let encoded = projection.encode_persisted().unwrap();
+
+        assert_eq!(
+            CidarenAssessmentMutationProjection::decode_persisted_bound(
+                encoded.as_bytes(),
+                [9; 32],
+                &projection,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        let oversized = vec![b'x'; MAX_MUTATION_PROJECTION_ARTIFACT_BYTES + 1];
+        assert_eq!(
+            CidarenAssessmentMutationProjection::decode_persisted_bound(
+                &oversized,
+                Sha256::digest(&oversized).into(),
+                &projection,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::InvalidResponse
+        );
+
+        let mut unknown = encoded.as_bytes().to_vec();
+        assert_eq!(unknown.pop(), Some(b'}'));
+        unknown.extend_from_slice(b",\"unknown\":true}");
+        assert_eq!(
+            decode_projection_tamper(&unknown, &projection).kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        let mut noncanonical = encoded.as_bytes().to_vec();
+        noncanonical.insert(1, b' ');
+        assert_eq!(
+            decode_projection_tamper(&noncanonical, &projection).kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        for mutate in [
+            |wire: &mut MutationProjectionWire| {
+                wire.account_digest = encode_projection_digest([11; 32]);
+            },
+            |wire: &mut MutationProjectionWire| {
+                wire.course_digest = encode_projection_digest([12; 32]);
+            },
+            |wire: &mut MutationProjectionWire| {
+                wire.task_digest = encode_projection_digest([13; 32]);
+            },
+            |wire: &mut MutationProjectionWire| {
+                wire.assessment_digest = encode_projection_digest([14; 32]);
+            },
+            |wire: &mut MutationProjectionWire| {
+                wire.attempt_digest = encode_projection_digest([15; 32]);
+            },
+            |wire: &mut MutationProjectionWire| {
+                wire.request_digest = encode_projection_digest([16; 32]);
+            },
+        ] {
+            let mut wire: MutationProjectionWire =
+                serde_json::from_slice(encoded.as_bytes()).unwrap();
+            mutate(&mut wire);
+            let tampered = serde_json::to_vec(&wire).unwrap();
+            assert_eq!(
+                decode_projection_tamper(&tampered, &projection).kind,
+                ProviderErrorKind::RemoteChanged
+            );
+        }
+
+        let mut wire: MutationProjectionWire = serde_json::from_slice(encoded.as_bytes()).unwrap();
+        wire.operation_type = CidarenAttemptOperation::SkipAnswer
+            .operation_type()
+            .to_owned();
+        let tampered = serde_json::to_vec(&wire).unwrap();
+        assert_eq!(
+            decode_projection_tamper(&tampered, &projection).kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let mut wire: MutationProjectionWire = serde_json::from_slice(encoded.as_bytes()).unwrap();
+        wire.schema = "cidaren.assessment-mutation-projection.v2".to_owned();
+        let tampered = serde_json::to_vec(&wire).unwrap();
+        assert_eq!(
+            decode_projection_tamper(&tampered, &projection).kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_account_execution_fails_before_transport_and_cannot_be_replayed() {
+        let context = context();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail(),
+            None,
+        )
+        .unwrap();
+        let command = flow.issue_start(request_at()).unwrap();
+        let mut foreign_context = recovered_context(&context);
+        foreign_context.account_id = ProviderAccountId::new();
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([response(&start_payload())])),
+            operations: Mutex::new(Vec::new()),
+        });
+        assert_eq!(
+            command
+                .execute(transport.clone(), &foreign_context)
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert!(transport.operations.lock().unwrap().is_empty());
+        flow.mark_ambiguous().unwrap();
+        assert!(flow.issue_start(request_at()).is_err());
+    }
+
+    #[test]
+    fn terminal_receipt_digest_binds_request_and_fresh_result() {
+        let context = context();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail(),
+            None,
+        )
+        .unwrap();
+        let command = flow.issue_start(request_at()).unwrap();
+        let projection = *command.projection();
+        let receipt = SubmissionReceipt {
+            remote_status: "completed".to_owned(),
+            message_sanitized: Some("synthetic completion".to_owned()),
+            provider_trace_id: None,
+            received_at: request_at(),
+        };
+        let digest = terminal_receipt_digest(&receipt, &projection, [9; 32]);
+        let mut changed_request = projection;
+        changed_request.request_digest = [8; 32];
+        assert_ne!(
+            terminal_receipt_digest(&receipt, &changed_request, [9; 32]),
+            digest
+        );
+        assert_ne!(
+            terminal_receipt_digest(&receipt, &projection, [7; 32]),
+            digest
+        );
+    }
+
+    #[test]
+    fn result_without_fresh_digest_fails_closed_after_issue() {
+        let context = context();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail(),
+            None,
+        )
+        .unwrap();
+        let command = flow.issue_start(request_at()).unwrap();
+        assert_eq!(
+            flow.accept(CidarenIssuedOutcome {
+                projection: *command.projection(),
+                response: receipt(CidarenAssessmentReceiptKind::Completed),
+                fresh_result_digest: [0; 32],
+                received_at: request_at(),
+            })
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        assert_eq!(
+            flow.status(),
+            CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::StartAnswer)
+        );
+    }
+
+    #[test]
     fn terminal_receipt_preserves_the_outcome_observation_time() {
         let context = context();
         let mut flow = CidarenAttemptFlow::try_new(
@@ -2205,11 +2867,9 @@ mod tests {
         let command = flow.issue_start(request_at()).unwrap();
         let received_at = Utc.with_ymd_and_hms(2026, 8, 14, 1, 2, 3).unwrap();
         let outcome = CidarenIssuedOutcome {
-            flow_binding: flow.flow_binding,
-            operation: command.operation(),
-            request_digest: command.request_digest(),
+            projection: *command.projection(),
             response: receipt(CidarenAssessmentReceiptKind::Completed),
-            response_digest: [9; 32],
+            fresh_result_digest: [9; 32],
             received_at,
         };
         drop(command);
@@ -2217,11 +2877,14 @@ mod tests {
         flow.accept(outcome).unwrap();
         assert_eq!(flow.completion_receipt().unwrap().received_at, received_at);
         let CidarenDurableStepOutcome::Completed {
-            response_digest, ..
+            receipt_digest,
+            response_digest,
+            ..
         } = flow.accepted_step_outcome().unwrap()
         else {
             panic!("expected terminal durable outcome");
         };
+        assert_ne!(receipt_digest, [0; 32]);
         assert_eq!(response_digest, [9; 32]);
     }
 
@@ -2984,6 +3647,30 @@ mod tests {
             .unwrap()
             .unwrap();
         (detail, plan)
+    }
+
+    fn projection_fixture(request_digest: [u8; 32]) -> CidarenAssessmentMutationProjection {
+        CidarenAssessmentMutationProjection {
+            account_digest: [1; 32],
+            course_digest: [2; 32],
+            task_digest: [3; 32],
+            assessment_digest: [4; 32],
+            attempt_digest: [5; 32],
+            operation: CidarenAttemptOperation::VerifyAnswer,
+            request_digest,
+        }
+    }
+
+    fn decode_projection_tamper(
+        bytes: &[u8],
+        projection: &CidarenAssessmentMutationProjection,
+    ) -> ProviderError {
+        CidarenAssessmentMutationProjection::decode_persisted_bound(
+            bytes,
+            Sha256::digest(bytes).into(),
+            projection,
+        )
+        .unwrap_err()
     }
 
     fn settings() -> CidarenRuntimeSettings {

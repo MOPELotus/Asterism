@@ -16,9 +16,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     browser_protocol::{
-        CidarenBrowserCaptureSource, CidarenBrowserCommandEnvelope, CidarenBrowserEventEnvelope,
-        CidarenBrowserResultDocument, CidarenCaptureMode, CidarenCaptureSnapshot,
-        EncodedCidarenBrowserCommandArtifact, parse_browser_event, valid_remote_task_id,
+        CIDAREN_BROWSER_CREDENTIAL_RESULT_TYPES, CidarenBrowserCaptureSource,
+        CidarenBrowserCommandEnvelope, CidarenBrowserEventEnvelope, CidarenBrowserResultDocument,
+        CidarenCaptureMode, CidarenCaptureSnapshot, EncodedCidarenBrowserCommandArtifact,
+        cidaren_browser_result_disposition, parse_browser_event, valid_remote_task_id,
     },
     metadata::development_metadata,
 };
@@ -525,12 +526,11 @@ impl BrowserBridgeCapability for CidarenBrowserBridge {
         &self,
         result_type: &str,
     ) -> Option<BrowserBridgeResultDisposition> {
-        (result_type == crate::CIDAREN_CAPTURE_RESULT_TYPE)
-            .then_some(BrowserBridgeResultDisposition::CredentialTerminal)
+        cidaren_browser_result_disposition(result_type)
     }
 
     fn browser_bridge_credential_result_types(&self) -> &'static [&'static str] {
-        &[crate::CIDAREN_CAPTURE_RESULT_TYPE]
+        &CIDAREN_BROWSER_CREDENTIAL_RESULT_TYPES
     }
 
     async fn complete_browser_bridge_credential_result(
@@ -809,6 +809,11 @@ mod tests {
             capability.browser_bridge_credential_result_types(),
             [crate::CIDAREN_CAPTURE_RESULT_TYPE]
         );
+        assert!(
+            capability
+                .browser_bridge_execution_result_types()
+                .is_empty()
+        );
         assert_eq!(
             capability.browser_bridge_result_disposition(crate::CIDAREN_CAPTURE_RESULT_TYPE),
             Some(BrowserBridgeResultDisposition::CredentialTerminal)
@@ -817,6 +822,7 @@ mod tests {
             "",
             "cidaren.capture.snapshot",
             "cidaren.capture.snapshot.result.extra",
+            "cidaren.capture.snapshot.execution.result",
             "CIDAREN.CAPTURE.SNAPSHOT.RESULT",
             "uai.capture.snapshot.result",
         ] {

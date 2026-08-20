@@ -66,6 +66,7 @@ pub fn build_development_provider(
             class_tasks.clone(),
             study_tasks.clone(),
         )?)),
+        course_enrollment: None,
         task_inventory: Some(Arc::new(CidarenTaskInventory::try_new(
             class_tasks,
             study_tasks,
@@ -318,10 +319,13 @@ mod tests {
         assert!(entry.task_progress.is_some());
         assert!(entry.duration_read.is_some());
         assert!(entry.question_inventory.is_some());
+        assert!(entry.question_parse.is_none());
         assert!(entry.answer_resolve.is_some());
         assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_some());
         assert!(entry.submission_verify.is_some());
+        assert!(entry.answer_history_harvest.is_none());
+        assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_some());
         assert_eq!(entry.runtime_settings.version, 2);
         assert_eq!(entry.runtime_settings.definitions.len(), 8);

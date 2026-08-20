@@ -25,6 +25,7 @@ const MAX_TIME_SPENT_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CidarenAssessmentBinding {
     family: CidarenTaskFamily,
+    course_id: String,
     task_id: i64,
     // The decoded payload echoes the inventory row family (class learning 1,
     // class test 2, ordinary study 3), which is distinct from StartAnswer's
@@ -59,6 +60,17 @@ impl CidarenAssessmentBinding {
             .and_then(Value::as_i64)
             .filter(|value| *value == -1 || *value > 0)
             .ok_or_else(|| protocol_drift("Cidaren fresh Task detail has an invalid task ID"))?;
+        let course_id = task
+            .get("course_id")
+            .and_then(Value::as_str)
+            .filter(|value| valid_component(value))
+            .ok_or_else(|| protocol_drift("Cidaren fresh Task detail has an invalid Course ID"))?;
+        let expected_course_remote_id = format!("course:{course_id}");
+        if detail.task.course_remote_id.as_deref() != Some(expected_course_remote_id.as_str()) {
+            return Err(remote_changed(
+                "Cidaren fresh Task detail belongs to another Course",
+            ));
+        }
 
         if let Some(release_id) = remote_task_id.strip_prefix("class-task:") {
             let response_task_type = match task.get("task_type").and_then(Value::as_str) {
@@ -89,6 +101,7 @@ impl CidarenAssessmentBinding {
             }
             return Ok(Self {
                 family: CidarenTaskFamily::Class,
+                course_id: course_id.to_owned(),
                 task_id,
                 response_task_type,
                 stable_binding: release_id.to_owned(),
@@ -125,6 +138,7 @@ impl CidarenAssessmentBinding {
         }
         Ok(Self {
             family: CidarenTaskFamily::Study,
+            course_id: course_id.to_owned(),
             task_id,
             response_task_type: 3,
             stable_binding: identity.0.to_owned(),
@@ -163,6 +177,29 @@ impl CidarenAssessmentBinding {
             return Ok(Some(self.task_id));
         }
         Ok(remote_attempt_task_id)
+    }
+
+    pub(crate) fn course_binding_digest(&self) -> [u8; 32] {
+        Sha256::new()
+            .chain_update(b"asterism:cidaren:assessment-course:v1\0")
+            .chain_update(self.course_id.as_bytes())
+            .finalize()
+            .into()
+    }
+
+    pub(crate) fn assessment_binding_digest(&self) -> [u8; 32] {
+        Sha256::new()
+            .chain_update(b"asterism:cidaren:assessment-binding:v1\0")
+            .chain_update(self.family.endpoint_family().as_bytes())
+            .chain_update(b"\0")
+            .chain_update(self.course_id.as_bytes())
+            .chain_update(b"\0")
+            .chain_update(self.task_id.to_be_bytes())
+            .chain_update([self.response_task_type])
+            .chain_update(b"\0")
+            .chain_update(self.stable_binding.as_bytes())
+            .finalize()
+            .into()
     }
 
     fn endpoint(&self, operation: &str) -> String {
@@ -847,6 +884,15 @@ mod tests {
         assert!(
             CidarenAssessmentBinding::from_fresh_detail("study-task:course-a:list-a", &detail)
                 .is_err()
+        );
+
+        let mut detail = class_detail();
+        detail.task.course_remote_id = Some("course:course-b".to_owned());
+        assert_eq!(
+            CidarenAssessmentBinding::from_fresh_detail("class-task:2002", &detail)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
         );
     }
 

@@ -89,6 +89,64 @@ impl CidarenQuestionInventory {
     pub(crate) fn assessment_transport(&self) -> Arc<dyn CidarenAssessmentTransport> {
         self.assessments.clone()
     }
+
+    async fn prepare_question_read_operation_at(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+        issued_at: Timestamp,
+    ) -> ProviderResult<PreparedCidarenQuestionReadOperation> {
+        validate_context(context, &self.metadata)?;
+        if continuation.continuation_type != CIDAREN_PRE_QUESTION_ARTIFACT_TYPE {
+            return Err(protocol_drift(
+                "Cidaren pre-Question continuation type is invalid",
+            ));
+        }
+        let settings = CidarenRuntimeSettings::resolve(runtime_settings)?;
+        let artifact = CidarenPreQuestionArtifact::decode_bound(
+            continuation.value,
+            continuation.continuation_digest,
+            task_id,
+            remote_task_id,
+        )?;
+        if artifact.phase() != continuation.phase {
+            return Err(protocol_drift(
+                "Cidaren pre-Question continuation phase does not match its payload",
+            ));
+        }
+        let (detail, selection) = self
+            .fresh_detail_and_phase_selection(context, remote_task_id, continuation.phase)
+            .await?;
+        let mut flow = CidarenAttemptFlow::restore_pre_question(
+            context,
+            task_id,
+            remote_task_id,
+            &detail,
+            artifact,
+            selection,
+        )?;
+        let command = match flow.status() {
+            CidarenAttemptFlowStatus::ReadyToSelectWords => flow.issue_word_selection(issued_at)?,
+            CidarenAttemptFlowStatus::ReadyToStart => flow.issue_start(issued_at)?,
+            CidarenAttemptFlowStatus::CurrentReadingCard => {
+                flow.issue_advance(&settings, issued_at)?
+            }
+            _ => {
+                return Err(protocol_drift(
+                    "Cidaren restored an unsupported pre-Question phase",
+                ));
+            }
+        };
+        Ok(PreparedCidarenQuestionReadOperation {
+            provider_id: self.metadata.id.clone(),
+            flow,
+            command,
+            assessments: self.assessments.clone(),
+        })
+    }
 }
 
 impl fmt::Debug for CidarenQuestionInventory {
@@ -158,68 +216,91 @@ impl QuestionInventoryCapability for CidarenQuestionInventory {
         continuation: ResolvedProviderQuestionReadContinuation<'_>,
         runtime_settings: &ResolvedProviderRuntimeSettings,
     ) -> ProviderResult<Box<dyn PreparedProviderQuestionReadOperation>> {
-        validate_context(context, &self.metadata)?;
-        if continuation.continuation_type != CIDAREN_PRE_QUESTION_ARTIFACT_TYPE {
-            return Err(protocol_drift(
-                "Cidaren pre-Question continuation type is invalid",
-            ));
-        }
-        let settings = CidarenRuntimeSettings::resolve(runtime_settings)?;
-        let artifact = CidarenPreQuestionArtifact::decode_bound(
-            continuation.value,
-            continuation.continuation_digest,
-            task_id,
-            remote_task_id,
-        )?;
-        if artifact.phase() != continuation.phase {
-            return Err(protocol_drift(
-                "Cidaren pre-Question continuation phase does not match its payload",
-            ));
-        }
-        let (detail, selection) = self
-            .fresh_detail_and_phase_selection(context, remote_task_id, continuation.phase)
-            .await?;
-        let mut flow = CidarenAttemptFlow::restore_pre_question(
-            context,
-            task_id,
-            remote_task_id,
-            &detail,
-            artifact,
-            selection,
-        )?;
-        let issued_at = Utc::now();
-        let command = match flow.status() {
-            CidarenAttemptFlowStatus::ReadyToSelectWords => flow.issue_word_selection(issued_at)?,
-            CidarenAttemptFlowStatus::ReadyToStart => flow.issue_start(issued_at)?,
-            CidarenAttemptFlowStatus::CurrentReadingCard => {
-                flow.issue_advance(&settings, issued_at)?
-            }
-            _ => {
-                return Err(protocol_drift(
-                    "Cidaren restored an unsupported pre-Question phase",
-                ));
-            }
-        };
-        Ok(Box::new(PreparedCidarenQuestionReadOperation {
-            provider_id: self.metadata.id.clone(),
-            flow,
-            command,
-            assessments: self.assessments.clone(),
-        }))
+        Ok(Box::new(
+            self.prepare_question_read_operation_at(
+                context,
+                task_id,
+                remote_task_id,
+                continuation,
+                runtime_settings,
+                Utc::now(),
+            )
+            .await?,
+        ))
     }
 
     async fn recover_ambiguous_question_read_operation(
         &self,
         context: &ProviderContext,
-        _task_id: TaskId,
-        _remote_task_id: &str,
-        _continuation: ResolvedProviderQuestionReadContinuation<'_>,
-        _operation: &AmbiguousProviderQuestionReadOperation,
-        _runtime_settings: &ResolvedProviderRuntimeSettings,
+        task_id: TaskId,
+        remote_task_id: &str,
+        continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        operation: &AmbiguousProviderQuestionReadOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
     ) -> ProviderResult<Option<ProviderQuestionReadStepOutcome>> {
         validate_context(context, &self.metadata)?;
+        validate_ambiguous_operation_metadata(operation, continuation.revision)?;
+        let prepared = self
+            .prepare_question_read_operation_at(
+                context,
+                task_id,
+                remote_task_id,
+                continuation,
+                runtime_settings,
+                operation.issued_at,
+            )
+            .await?;
+        validate_rebuilt_ambiguous_operation(
+            operation,
+            prepared.command.operation_type(),
+            prepared.command.request_digest(),
+        )?;
+        // Preparing performs the bounded fresh reads and reconstructs the exact
+        // immutable request. Dropping it keeps the attempt locked and grants no
+        // replay of the ambiguous non-idempotent operation.
+        drop(prepared);
         Ok(None)
     }
+}
+
+fn validate_ambiguous_operation_metadata(
+    operation: &AmbiguousProviderQuestionReadOperation,
+    continuation_revision: u32,
+) -> ProviderResult<()> {
+    if operation.continuation_revision != continuation_revision {
+        return Err(remote_changed(
+            "Cidaren ambiguous operation continuation revision changed",
+        ));
+    }
+    if operation.operation_type.is_empty() || operation.request_digest == [0; 32] {
+        return Err(protocol_drift(
+            "Cidaren ambiguous operation identity is missing",
+        ));
+    }
+    if operation.ambiguous_at < operation.issued_at {
+        return Err(protocol_drift(
+            "Cidaren ambiguous operation timestamps are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rebuilt_ambiguous_operation(
+    operation: &AmbiguousProviderQuestionReadOperation,
+    operation_type: &str,
+    request_digest: [u8; 32],
+) -> ProviderResult<()> {
+    if operation.operation_type != operation_type {
+        return Err(remote_changed(
+            "Cidaren ambiguous operation type changed after fresh readback",
+        ));
+    }
+    if operation.request_digest != request_digest {
+        return Err(remote_changed(
+            "Cidaren ambiguous operation request changed after fresh readback",
+        ));
+    }
+    Ok(())
 }
 
 struct PreparedCidarenQuestionReadOperation {
@@ -288,8 +369,16 @@ impl PreparedProviderQuestionReadOperation for PreparedCidarenQuestionReadOperat
             }
             CidarenDurableStepOutcome::Completed {
                 receipt,
+                receipt_digest,
                 response_digest,
-            } => ProviderQuestionReadStepOutcome::completed(receipt, response_digest),
+            } => {
+                if receipt_digest == [0; 32] {
+                    return Err(internal(
+                        "Cidaren completion receipt lost its binding digest",
+                    ));
+                }
+                ProviderQuestionReadStepOutcome::completed(receipt, response_digest)
+            }
         }
     }
 }
@@ -373,6 +462,10 @@ fn protocol_drift(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
 }
 
+fn remote_changed(message: &'static str) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::RemoteChanged, message)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::VecDeque, sync::Mutex};
@@ -384,9 +477,10 @@ mod tests {
         TaskCapability,
     };
     use asterism_provider_api::{
-        ExecutionEventSink, ProviderExecutionLog, ProviderProgress, ProviderSubmissionStepOutcome,
-        RemoteTask, ResolvedProviderQuestionSessionContinuation, SubmissionBuildCapability,
-        SubmissionExecuteCapability,
+        AmbiguousProviderQuestionSessionOperation, ExecutionEventSink,
+        PreparedProviderSubmissionOperation, ProviderExecutionLog, ProviderProgress,
+        ProviderSubmissionStepOutcome, RemoteTask, ResolvedProviderQuestionSessionContinuation,
+        SubmissionBuildCapability, SubmissionExecuteCapability,
     };
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
@@ -429,6 +523,155 @@ mod tests {
         async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn ambiguous_readback_rejects_every_persisted_operation_drift() {
+        let issued_at = Utc::now();
+        let operation = AmbiguousProviderQuestionReadOperation {
+            continuation_revision: 7,
+            operation_type: "cidaren.start-answer.v1".to_owned(),
+            request_digest: [9; 32],
+            issued_at,
+            ambiguous_at: issued_at + chrono::Duration::seconds(1),
+        };
+        validate_ambiguous_operation_metadata(&operation, 7).unwrap();
+        validate_rebuilt_ambiguous_operation(&operation, "cidaren.start-answer.v1", [9; 32])
+            .unwrap();
+
+        assert_eq!(
+            validate_ambiguous_operation_metadata(&operation, 8)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        let mut drifted = operation.clone();
+        drifted.operation_type.clear();
+        assert_eq!(
+            validate_ambiguous_operation_metadata(&drifted, 7)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        let mut drifted = operation.clone();
+        drifted.request_digest = [0; 32];
+        assert_eq!(
+            validate_ambiguous_operation_metadata(&drifted, 7)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        let mut drifted = operation.clone();
+        drifted.ambiguous_at = issued_at - chrono::Duration::seconds(1);
+        assert_eq!(
+            validate_ambiguous_operation_metadata(&drifted, 7)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        assert_eq!(
+            validate_rebuilt_ambiguous_operation(&operation, "cidaren.skip-answer.v1", [9; 32])
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            validate_rebuilt_ambiguous_operation(&operation, "cidaren.start-answer.v1", [8; 32],)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_question_recovery_rebuilds_exact_request_without_transport_replay() {
+        let boundaries = Arc::new(FixtureBoundaries::new(detail("test", -1), Vec::new()));
+        let capability = CidarenQuestionInventory::try_new(
+            boundaries.clone(),
+            boundaries.clone(),
+            boundaries.clone(),
+        )
+        .unwrap();
+        let context = context();
+        let task_id = TaskId::new();
+        let settings = settings();
+        let initial = capability
+            .prepare_question_read_attempt(&context, task_id, REMOTE_TASK_ID, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let (continuation_type, continuation_digest, phase, value, _) = initial.into_parts();
+        let issued_at = Utc::now();
+        let prepared = capability
+            .prepare_question_read_operation_at(
+                &context,
+                task_id,
+                REMOTE_TASK_ID,
+                ResolvedProviderQuestionReadContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest,
+                    phase: &phase,
+                    revision: 1,
+                    value: &value,
+                },
+                &settings,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let operation = AmbiguousProviderQuestionReadOperation {
+            continuation_revision: 1,
+            operation_type: prepared.command.operation_type().to_owned(),
+            request_digest: prepared.command.request_digest(),
+            issued_at,
+            ambiguous_at: issued_at + chrono::Duration::seconds(1),
+        };
+        drop(prepared);
+
+        let recovered = capability
+            .recover_ambiguous_question_read_operation(
+                &context,
+                task_id,
+                REMOTE_TASK_ID,
+                ResolvedProviderQuestionReadContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest,
+                    phase: &phase,
+                    revision: 1,
+                    value: &value,
+                },
+                &operation,
+                &settings,
+            )
+            .await
+            .unwrap();
+        assert!(recovered.is_none());
+        assert!(boundaries.operations.lock().unwrap().is_empty());
+
+        let mut drifted = operation;
+        drifted.request_digest = [7; 32];
+        assert_eq!(
+            capability
+                .recover_ambiguous_question_read_operation(
+                    &context,
+                    task_id,
+                    REMOTE_TASK_ID,
+                    ResolvedProviderQuestionReadContinuation {
+                        continuation_type: &continuation_type,
+                        continuation_digest,
+                        phase: &phase,
+                        revision: 1,
+                        value: &value,
+                    },
+                    &drifted,
+                    &settings,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert!(boundaries.operations.lock().unwrap().is_empty());
     }
 
     impl FixtureBoundaries {
@@ -844,15 +1087,23 @@ mod tests {
             payload_preview: preview,
             created_at: Utc::now(),
         };
-        let prepared =
-            prepare_submission_operation(&execute, &context, &draft, continuation, 1, &settings)
-                .await;
-        assert_eq!(prepared.operation_type(), "cidaren.skip-answer.v1");
+        let prepared = prepare_after_ambiguous_skip_readback(
+            &execute,
+            boundaries.as_ref(),
+            &context,
+            &draft,
+            continuation,
+            &settings,
+        )
+        .await;
         let ProviderSubmissionStepOutcome::Submitted {
             receipt,
             response_digest,
             ..
-        } = prepared.execute(&context, &NoopEvents).await.unwrap()
+        } = Box::new(prepared)
+            .execute(&context, &NoopEvents)
+            .await
+            .unwrap()
         else {
             panic!("definite Cidaren completion must close without a continuation");
         };
@@ -1352,6 +1603,73 @@ mod tests {
                 CidarenAttemptOperation::StartAnswer,
             ]
         );
+    }
+
+    async fn prepare_after_ambiguous_skip_readback(
+        capability: &CidarenSubmissionExecute,
+        boundaries: &FixtureBoundaries,
+        context: &ProviderContext,
+        draft: &SubmissionDraft,
+        continuation: ProviderQuestionReadContinuation,
+        settings: &ResolvedProviderRuntimeSettings,
+    ) -> crate::submission_execute::PreparedCidarenSubmissionOperation {
+        let (continuation_type, continuation_digest, phase, value, _) = continuation.into_parts();
+        let issued_at = Utc::now();
+        let resolved = || ResolvedProviderQuestionSessionContinuation {
+            continuation_type: &continuation_type,
+            continuation_digest,
+            phase: &phase,
+            revision: 1,
+            value: &value,
+        };
+        let prepared = capability
+            .prepare_submission_operation_at(
+                context,
+                REMOTE_TASK_ID,
+                draft,
+                resolved(),
+                settings,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let ambiguous = AmbiguousProviderQuestionSessionOperation {
+            continuation_revision: 1,
+            operation_type: prepared.operation_type().to_owned(),
+            request_digest: prepared.request_digest(),
+            issued_at,
+            ambiguous_at: issued_at + chrono::Duration::seconds(1),
+        };
+        drop(prepared);
+        assert!(
+            capability
+                .recover_ambiguous_submission_operation(
+                    context,
+                    REMOTE_TASK_ID,
+                    draft,
+                    resolved(),
+                    &ambiguous,
+                    settings,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            *boundaries.operations.lock().unwrap(),
+            [CidarenAttemptOperation::StartAnswer]
+        );
+        capability
+            .prepare_submission_operation_at(
+                context,
+                REMOTE_TASK_ID,
+                draft,
+                resolved(),
+                settings,
+                Utc::now(),
+            )
+            .await
+            .unwrap()
     }
 
     async fn prepare_operation(
