@@ -880,10 +880,10 @@ impl fmt::Debug for ChaoxingCourseJoinPreparation {
     }
 }
 
-/// Provider-private, credential-free `CourseEnrollment` authority proposal. It
+/// Legacy Provider-private, credential-free `CourseEnrollment` audit model. It
 /// binds the exact Provider account and remote Course/Class to the frozen
-/// preview and join request. Core cannot persist this artifact through the
-/// current Task-owned `ExecutionMutationSink`, so this type grants no send or
+/// preview and join request. The registered shared capability uses
+/// `ProviderCourseEnrollmentDraft`; this retained value still grants no send or
 /// replay authority by itself.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ChaoxingCourseEnrollmentCommand {
@@ -896,8 +896,8 @@ pub struct ChaoxingCourseEnrollmentCommand {
 }
 
 impl ChaoxingCourseEnrollmentCommand {
-    /// Freezes the Provider-private artifact, one-step mutation plan and exact
-    /// issue identity for a future `CourseEnrollment` Core boundary.
+    /// Freezes the legacy Provider-private artifact, one-step mutation plan and
+    /// exact issue identity used by protocol regression tests.
     ///
     /// # Errors
     ///
@@ -1088,8 +1088,7 @@ impl ChaoxingCourseEnrollmentCommand {
         )
     }
 
-    /// Builds the hash-only verification proposed for a future Course mutation
-    /// lifecycle.
+    /// Builds the legacy hash-only verification for the exact observation.
     ///
     /// # Errors
     ///
@@ -1127,7 +1126,7 @@ impl ChaoxingCourseEnrollmentCommand {
 
     #[allow(
         dead_code,
-        reason = "the marker remains unreachable until Core adds CourseEnrollment issue authority"
+        reason = "the legacy audit model is retained beside the shared CourseEnrollment adapter"
     )]
     pub(crate) fn bind_issued<'a>(
         &self,
@@ -1203,8 +1202,7 @@ pub enum ChaoxingCourseEnrollmentRecoveryOutcome {
     Rejected,
 }
 
-/// Opaque proof that the exact join issue was matched after durable issuance.
-/// Only a future `CourseEnrollment` coordinator in this module can construct it.
+/// Opaque legacy proof that an exact join issue and preparation were matched.
 pub struct ChaoxingIssuedCourseJoin<'a> {
     preparation: &'a ChaoxingCourseJoinPreparation,
 }
@@ -1226,8 +1224,8 @@ impl fmt::Debug for ChaoxingIssuedCourseJoin<'_> {
     }
 }
 
-/// Opaque shared-draft marker constructed only after the exact mutation issue
-/// has been durably accepted by Core.
+/// Opaque shared-draft marker validated before issue and handed to transport
+/// only after Core has durably accepted the exact mutation issue.
 pub struct ChaoxingIssuedCourseEnrollment<'a> {
     draft: &'a ProviderCourseEnrollmentDraft,
 }
@@ -1269,8 +1267,8 @@ impl fmt::Debug for ChaoxingIssuedCourseEnrollment<'_> {
 /// Provider-private transport contract. Preview and fallback reads are safe to
 /// retry. Join request construction must finish before durable issue; sending
 /// consumes that prepared transport exactly once and requires the opaque issued
-/// marker. No generic Execution coordinator is exposed while Course identity
-/// and ambiguous verification persistence are missing from Core.
+/// marker. The registered shared Course-enrollment adapter owns the complete
+/// issue/dispatch/fresh-inventory verification sequence.
 #[async_trait]
 pub trait ChaoxingCourseEnrollmentTransport: Send + Sync {
     type PreparedJoin: Send;

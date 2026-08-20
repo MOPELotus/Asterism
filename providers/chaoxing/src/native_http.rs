@@ -65,6 +65,10 @@ const CHAPTER_WORK_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/api/work";
 const CHAPTER_RESOURCE_VERSION: &str = "2025-0424-1038-3";
 const DOCUMENT_COMPLETE_BASE: &str = "https://mooc1.chaoxing.com/ananas/job/document";
 const READ_COMPLETE_BASE: &str = "https://mooc1.chaoxing.com/ananas/job/readv2";
+const IMMEDIATE_MUTATION_OPERATION: &str = "chaoxing.resource.immediate-complete";
+const IMMEDIATE_REQUEST_DIGEST_DOMAIN: &[u8] = b"asterism.chaoxing.immediate-resource-request.v1\0";
+const IMMEDIATE_RESPONSE_DIGEST_DOMAIN: &[u8] =
+    b"asterism.chaoxing.immediate-resource-response.v1\0";
 const VIDEO_STATUS_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const VIDEO_REPORT_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const VIDEO_REFERER: &str =
@@ -866,18 +870,38 @@ impl NativeChaoxingInventoryTransport {
         route: ChaoxingCourseRoute<'_>,
         knowledge_id: &str,
         target: &ChaoxingImmediateResourceTarget,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
     ) -> ProviderResult<()> {
-        let response = self
+        let url = immediate_resource_url(route, knowledge_id, target)?;
+        let request_digest = immediate_mutation_request_digest(target.job_id(), &url)?;
+        let request = self
             .client
-            .get(immediate_resource_url(route, knowledge_id, target)?)
+            .get(url)
             .header(COOKIE, session.header_value()?)
             .header(ACCEPT, "application/json,text/html,*/*")
-            .send()
-            .await
+            .build()
             .map_err(|error| classify_reqwest_error(&error))?;
-        validate_response_status(&response)?;
-        let _response = read_response_body(response).await?;
-        Ok(())
+        let issue = ExecutionMutationIssue::new(1, IMMEDIATE_MUTATION_OPERATION, request_digest)?;
+        mutations.issue(&issue).await?;
+        let response = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|error| immediate_post_mutation_error(classify_reqwest_error(&error)))?;
+        let response_status = response.status();
+        let response_result = validate_response_status(&response);
+        let body = read_live_mutation_body(response)
+            .await
+            .map_err(immediate_post_mutation_error)?;
+        let response_digest = immediate_mutation_response_digest(response_status, body.as_str())?;
+        let accepted = response_result.is_ok();
+        let receipt = ExecutionMutationReceipt::new(issue.ordinal(), response_digest, accepted)
+            .map_err(immediate_post_mutation_error)?;
+        mutations
+            .record_receipt(receipt)
+            .await
+            .map_err(immediate_post_mutation_error)?;
+        response_result.map_err(immediate_post_mutation_error)
     }
 
     async fn video_status_once(
@@ -1540,19 +1564,11 @@ impl ChaoxingImmediateResourceTransport for NativeChaoxingInventoryTransport {
         route: ChaoxingCourseRoute<'_>,
         knowledge_id: &str,
         target: &ChaoxingImmediateResourceTarget,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
     ) -> ProviderResult<()> {
-        let (session, renewed) = self.session_for_operation(context).await?;
-        match self
-            .complete_immediate_resource_once(&session, route, knowledge_id, target)
+        let session = self.session_for_operation(context).await?.0;
+        self.complete_immediate_resource_once(&session, route, knowledge_id, target, mutations)
             .await
-        {
-            Err(error) if should_renew_after(&error, renewed) => {
-                let session = self.sessions.renew_session(context).await?;
-                self.complete_immediate_resource_once(&session, route, knowledge_id, target)
-                    .await
-            }
-            result => result,
-        }
     }
 }
 
@@ -2297,6 +2313,51 @@ fn live_report_url(
     Ok(url)
 }
 
+fn immediate_mutation_request_digest(job_id: &str, url: &Url) -> ProviderResult<[u8; 32]> {
+    if job_id.is_empty()
+        || job_id.len() > 128
+        || job_id.chars().any(char::is_control)
+        || url.scheme() != "https"
+        || url.host_str() != Some("mooc1.chaoxing.com")
+        || !matches!(url.path(), "/ananas/job/document" | "/ananas/job/readv2")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.as_str().len() > 16 * 1_024
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing immediate resource request identity is invalid",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(IMMEDIATE_REQUEST_DIGEST_DOMAIN);
+    hash_immediate_component(&mut hash, b"GET")?;
+    hash_immediate_component(&mut hash, job_id.as_bytes())?;
+    hash_immediate_component(&mut hash, url.as_str().as_bytes())?;
+    Ok(hash.finalize().into())
+}
+
+fn immediate_mutation_response_digest(status: StatusCode, body: &str) -> ProviderResult<[u8; 32]> {
+    let mut hash = Sha256::new();
+    hash.update(IMMEDIATE_RESPONSE_DIGEST_DOMAIN);
+    hash.update(status.as_u16().to_be_bytes());
+    hash_immediate_component(&mut hash, body.as_bytes())?;
+    Ok(hash.finalize().into())
+}
+
+fn hash_immediate_component(hash: &mut Sha256, value: &[u8]) -> ProviderResult<()> {
+    let length = u64::try_from(value.len()).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing immediate resource digest input is invalid",
+        )
+    })?;
+    hash.update(length.to_be_bytes());
+    hash.update(value);
+    Ok(())
+}
+
 fn live_mutation_request_digest(ordinal: u32, job_id: &str, url: &Url) -> ProviderResult<[u8; 32]> {
     if !(1..=100_000).contains(&ordinal)
         || job_id.is_empty()
@@ -2723,6 +2784,21 @@ fn ambiguous_course_join_error() -> ProviderError {
     )
 }
 
+fn immediate_post_mutation_error(error: ProviderError) -> ProviderError {
+    if error.kind == ProviderErrorKind::HumanRequired {
+        return error;
+    }
+    let reason = if error.kind == ProviderErrorKind::Authentication {
+        HumanRequiredReason::SessionExpired
+    } else {
+        HumanRequiredReason::ManualIntervention
+    };
+    ProviderError::human_required(
+        "Chaoxing immediate resource completion was issued and requires fresh progress recovery",
+        reason,
+    )
+}
+
 fn has_identity_cookie(cookie: &str) -> bool {
     cookie.split(';').any(|field| {
         let Some((name, value)) = field.trim().split_once('=') else {
@@ -3088,6 +3164,19 @@ mod tests {
             Some("PRIVATE_READ_TOKEN")
         );
         assert!(query(&read_url, "_dc").is_none());
+        let read_digest = immediate_mutation_request_digest(read.job_id(), &read_url).unwrap();
+        assert_eq!(
+            read_digest,
+            immediate_mutation_request_digest(read.job_id(), &read_url).unwrap()
+        );
+        assert_ne!(
+            read_digest,
+            immediate_mutation_request_digest("job-read-other", &read_url).unwrap()
+        );
+        assert_ne!(
+            read_digest,
+            immediate_mutation_response_digest(StatusCode::OK, "accepted").unwrap()
+        );
 
         let pending_document = RESOURCE_MIXED.replace(
             "\"jobid\":\"job-document\",\"isPassed\":true",
@@ -3105,6 +3194,14 @@ mod tests {
         let document_url = immediate_resource_url(route, "4001", &document).unwrap();
         assert_eq!(document_url.path(), "/ananas/job/document");
         assert!(query(&document_url, "_dc").is_some());
+        assert_ne!(
+            read_digest,
+            immediate_mutation_request_digest(document.job_id(), &document_url).unwrap()
+        );
+        assert_ne!(
+            immediate_mutation_response_digest(StatusCode::OK, "accepted").unwrap(),
+            immediate_mutation_response_digest(StatusCode::BAD_REQUEST, "accepted").unwrap()
+        );
 
         let work_url = discover_work_list_url(COURSE_PAGE, route).unwrap();
         assert_eq!(work_url.host_str(), Some("mooc1.chaoxing.com"));

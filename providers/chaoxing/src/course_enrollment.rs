@@ -35,7 +35,7 @@ pub struct ChaoxingCourseEnrollment<T> {
 }
 
 impl<T> ChaoxingCourseEnrollment<T> {
-    /// Builds the unregistered capability adapter.
+    /// Builds the shared Course-enrollment capability adapter.
     ///
     /// # Errors
     ///

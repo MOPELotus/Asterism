@@ -32,6 +32,7 @@ pub(crate) trait ChaoxingImmediateResourceTransport: Send + Sync {
         route: ChaoxingCourseRoute<'_>,
         knowledge_id: &str,
         target: &ChaoxingImmediateResourceTarget,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
     ) -> ProviderResult<()>;
 }
 
@@ -393,6 +394,12 @@ impl ChaoxingResourceExecution {
                 .await?;
             return Ok(completed_outcome(target.kind(), true));
         }
+        let mutations = events.mutation_sink().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Chaoxing immediate resource execution requires a durable Core mutation sink",
+            )
+        })?;
         events
             .report(ProviderProgress {
                 percent: Some(0),
@@ -410,7 +417,13 @@ impl ChaoxingResourceExecution {
             ))
             .await?;
         self.immediate
-            .complete_immediate_resource(context, route, resource_request.knowledge_id(), &target)
+            .complete_immediate_resource(
+                context,
+                route,
+                resource_request.knowledge_id(),
+                &target,
+                mutations,
+            )
             .await?;
         events
             .report(ProviderProgress {
@@ -1412,6 +1425,7 @@ mod tests {
             _route: ChaoxingCourseRoute<'_>,
             knowledge_id: &str,
             target: &ChaoxingImmediateResourceTarget,
+            mutations: &(dyn ExecutionMutationSink + Send + Sync),
         ) -> ProviderResult<()> {
             assert_eq!(knowledge_id, "4001");
             assert_eq!(target.kind(), ChaoxingImmediateResourceKind::Read);
@@ -1419,8 +1433,18 @@ mod tests {
                 target.token().unwrap().expose_secret(),
                 "PRIVATE_READ_TOKEN"
             );
+            mutations
+                .issue(&ExecutionMutationIssue::new(
+                    1,
+                    "chaoxing.resource.immediate-complete",
+                    [1; 32],
+                )?)
+                .await?;
             self.execute_calls.fetch_add(1, Ordering::Relaxed);
             self.completed_read.store(true, Ordering::Relaxed);
+            mutations
+                .record_receipt(ExecutionMutationReceipt::new(1, [2; 32], true)?)
+                .await?;
             Ok(())
         }
     }
@@ -1592,7 +1616,10 @@ mod tests {
             fixture.clone(),
         )
         .unwrap();
-        let events = RecordingEvents::default();
+        let events = RecordingEvents {
+            mutations_enabled: true,
+            ..RecordingEvents::default()
+        };
         let outcome = execution
             .execute(
                 &context(),
@@ -1607,8 +1634,38 @@ mod tests {
         assert_eq!(outcome.result_sanitized["resource_kind"], "read");
         assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *events.mutation_events.lock().unwrap(),
+            [
+                "issue:1:chaoxing.resource.immediate-complete",
+                "receipt:1:true",
+            ]
+        );
         assert_eq!(events.progress.load(Ordering::Relaxed), 3);
         assert_eq!(events.logs.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn immediate_execution_requires_durable_issue_before_send() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        let error = execution
+            .execute(
+                &context(),
+                &execution_request("resource:100:200:4001:job-read"),
+                &RecordingEvents::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+        assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
