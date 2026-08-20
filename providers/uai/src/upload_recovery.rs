@@ -2,13 +2,15 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::SubmissionDraft;
 use asterism_provider_api::{
-    ExecutionMutationVerification, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderResult, TaskDetailCapability,
+    ExecutionMutationRecoveryRecord, ExecutionMutationVerification, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderResult, TaskDetailCapability,
 };
 
 use crate::{
-    UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiCompoundUploadVerification,
-    UaiUploadFinalPlanState, UaiUploadFinalResultState, UaiUploadFinalSubmissionKind,
+    UaiCompoundUploadDraftAttemptBinding, UaiCompoundUploadPreparation,
+    UaiCompoundUploadSubmission, UaiCompoundUploadVerification, UaiUploadAttemptBinding,
+    UaiUploadAttemptScope, UaiUploadAttemptStateDigests, UaiUploadFinalPlanState,
+    UaiUploadFinalResultState, UaiUploadFinalSubmissionKind, UaiUploadFinalSubmissionSequence,
     UaiUploadGrantState, UaiUploadInputState, UaiUploadIntent, UaiUploadObjectState,
     UaiUploadPreparation, UaiUploadSubmission, UaiUploadVerification,
     build_compound_upload_submission_request, build_upload_multipart,
@@ -78,6 +80,104 @@ impl fmt::Debug for UaiRecoveredUploadFinalPlan {
             .debug_struct("UaiRecoveredUploadFinalPlan")
             .field("final_plan", &"[REDACTED]")
             .field("object_request_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+/// Fully owner/account/Attempt-bound read-only single-upload recovery owner.
+/// It exposes neither the object-store nor final-submit mutation request.
+pub struct UaiRecoveredBoundUploadFinalPlan {
+    binding: UaiUploadAttemptBinding,
+    recovered: UaiRecoveredUploadFinalPlan,
+}
+
+impl UaiRecoveredBoundUploadFinalPlan {
+    pub const fn binding(&self) -> &UaiUploadAttemptBinding {
+        &self.binding
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.recovered.request_digest()
+    }
+
+    /// Revalidates only the exact previously persisted receipt-versioned
+    /// readback. Fresh progress remains a separate completion check.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a changed result or readback digest and never dispatches a
+    /// mutation.
+    pub fn verify_single_readback(
+        &self,
+        result: &UaiUploadFinalResultState,
+        document: &str,
+    ) -> ProviderResult<(UaiUploadVerification, ExecutionMutationVerification)> {
+        let (verification, mutation_verification) =
+            self.recovered.verify_single_readback(result, document)?;
+        if mutation_verification.ordinal() != self.binding.final_ordinal()
+            || mutation_verification.observation_digest() != self.binding.readback_digest()
+        {
+            return Err(foreign_recovery_chain());
+        }
+        Ok((verification, mutation_verification))
+    }
+}
+
+impl fmt::Debug for UaiRecoveredBoundUploadFinalPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiRecoveredBoundUploadFinalPlan")
+            .field("binding", &self.binding)
+            .field("recovered", &self.recovered)
+            .finish()
+    }
+}
+
+/// Fully owner/account/Draft/Attempt-bound read-only compound-upload recovery
+/// owner. The atomic ordinary answer plus object-key request is never exposed.
+pub struct UaiRecoveredBoundCompoundUploadFinalPlan {
+    binding: UaiCompoundUploadDraftAttemptBinding,
+    recovered: UaiRecoveredUploadFinalPlan,
+}
+
+impl UaiRecoveredBoundCompoundUploadFinalPlan {
+    pub const fn binding(&self) -> &UaiCompoundUploadDraftAttemptBinding {
+        &self.binding
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.recovered.request_digest()
+    }
+
+    /// Revalidates only the exact previously persisted atomic answer-plus-key
+    /// readback. It cannot dispatch either mutation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a changed Draft result, accepted version or readback digest.
+    pub fn verify_compound_readback(
+        &self,
+        result: &UaiUploadFinalResultState,
+        document: &str,
+    ) -> ProviderResult<(UaiCompoundUploadVerification, ExecutionMutationVerification)> {
+        let (verification, mutation_verification) =
+            self.recovered.verify_compound_readback(result, document)?;
+        if verification.ordinary_draft_id() != self.binding.ordinary_draft_id()
+            || mutation_verification.ordinal() != self.binding.final_ordinal()
+            || mutation_verification.observation_digest() != self.binding.readback_digest()
+        {
+            return Err(foreign_recovery_chain());
+        }
+        Ok((verification, mutation_verification))
+    }
+}
+
+impl fmt::Debug for UaiRecoveredBoundCompoundUploadFinalPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiRecoveredBoundCompoundUploadFinalPlan")
+            .field("binding", &self.binding)
+            .field("recovered", &self.recovered)
             .finish()
     }
 }
@@ -195,6 +295,67 @@ impl UaiUploadStageRecovery {
         })
     }
 
+    /// Validates the complete credential-free upload Attempt projection before
+    /// any fresh Task read, then performs the same predecessor and dynamic
+    /// request rebind without dispatching either mutation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects Core scope, state handle, Qiniu issue/receipt, final
+    /// issue/receipt/readback, predecessor or Course/account request drift.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "recovery receives every independently persisted upload authority"
+    )]
+    pub async fn bind_verified_single_final_state(
+        &self,
+        context: &ProviderContext,
+        scope: &UaiUploadAttemptScope,
+        binding: &UaiUploadAttemptBinding,
+        input: &UaiUploadInputState,
+        grant: &UaiUploadGrantState,
+        final_plan: UaiUploadFinalPlanState,
+        sequence: &UaiUploadFinalSubmissionSequence,
+        object_record: &ExecutionMutationRecoveryRecord,
+        final_record: &ExecutionMutationRecoveryRecord,
+        state_digests: UaiUploadAttemptStateDigests,
+        course_instance_id: &str,
+        account_openid: &str,
+    ) -> ProviderResult<UaiRecoveredBoundUploadFinalPlan> {
+        if scope.provider_account_id() != context.account_id {
+            return Err(foreign_recovery_chain());
+        }
+        let object = UaiUploadObjectState::decode_recovery_record(object_record)?;
+        let result = UaiUploadFinalResultState::decode_recovery_record(sequence, final_record)?;
+        binding.validate_before_recovery(
+            scope,
+            sequence,
+            input,
+            grant,
+            &object,
+            &final_plan,
+            &result,
+            object_record,
+            final_record,
+            state_digests,
+        )?;
+        let recovered = self
+            .bind_single_final_state(
+                context,
+                input,
+                grant,
+                &object,
+                final_plan,
+                course_instance_id,
+                account_openid,
+            )
+            .await?;
+        Ok(UaiRecoveredBoundUploadFinalPlan {
+            binding: binding.clone(),
+            recovered,
+        })
+    }
+
     /// Rebinds a decoded compound final-plan state to the complete predecessor
     /// chain, immutable ordinary Draft and exact Course/account request.
     ///
@@ -234,6 +395,71 @@ impl UaiUploadStageRecovery {
         Ok(UaiRecoveredUploadFinalPlan {
             final_plan,
             object_request_digest: object.uploaded().object_request_digest(),
+        })
+    }
+
+    /// Validates the complete compound Draft/Attempt projection before any
+    /// fresh Task read, then performs the same predecessor, complete ordinary
+    /// Draft and dynamic atomic-request rebind without dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Rejects Core scope, same-ID Draft answer, state handle, Qiniu
+    /// issue/receipt, final atomic issue/receipt/readback, predecessor or
+    /// Course/account request drift.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "recovery receives every independently persisted compound-upload authority"
+    )]
+    pub async fn bind_verified_compound_final_state(
+        &self,
+        context: &ProviderContext,
+        scope: &UaiUploadAttemptScope,
+        binding: &UaiCompoundUploadDraftAttemptBinding,
+        ordinary_draft: &SubmissionDraft,
+        input: &UaiUploadInputState,
+        grant: &UaiUploadGrantState,
+        final_plan: UaiUploadFinalPlanState,
+        sequence: &UaiUploadFinalSubmissionSequence,
+        object_record: &ExecutionMutationRecoveryRecord,
+        final_record: &ExecutionMutationRecoveryRecord,
+        state_digests: UaiUploadAttemptStateDigests,
+        course_instance_id: &str,
+        account_openid: &str,
+    ) -> ProviderResult<UaiRecoveredBoundCompoundUploadFinalPlan> {
+        if scope.provider_account_id() != context.account_id {
+            return Err(foreign_recovery_chain());
+        }
+        let object = UaiUploadObjectState::decode_recovery_record(object_record)?;
+        let result = UaiUploadFinalResultState::decode_recovery_record(sequence, final_record)?;
+        binding.validate_before_recovery(
+            scope,
+            ordinary_draft,
+            sequence,
+            input,
+            grant,
+            &object,
+            &final_plan,
+            &result,
+            object_record,
+            final_record,
+            state_digests,
+        )?;
+        let recovered = self
+            .bind_compound_final_state(
+                context,
+                input,
+                ordinary_draft,
+                grant,
+                &object,
+                final_plan,
+                course_instance_id,
+                account_openid,
+            )
+            .await?;
+        Ok(UaiRecoveredBoundCompoundUploadFinalPlan {
+            binding: binding.clone(),
+            recovered,
         })
     }
 }
@@ -299,19 +525,26 @@ fn foreign_recovery_chain() -> ProviderError {
 #[cfg(test)]
 mod tests {
     use asterism_domain::{
-        AnswerCandidateId, AnswerSource, AssessmentClass, NormalizedAnswer, ProviderAccountId,
-        ProviderId, Question, QuestionId, QuestionKind, QuestionOption, QuestionSnapshotId,
-        RemoteState, SecretId, SelectedAnswer, SourceType, SubmissionAnswerCoverage,
-        SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadEncoding,
-        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, TaskCapability, TaskId,
+        AnswerCandidateId, AnswerSource, AssessmentClass, CourseId, ExecutionAttemptId,
+        ExecutionId, NormalizedAnswer, ProviderAccountId, ProviderId, Question, QuestionId,
+        QuestionKind, QuestionOption, QuestionSnapshotId, RemoteState, SecretId, SelectedAnswer,
+        SourceType, SubmissionAnswerCoverage, SubmissionDraftId, SubmissionDraftItem,
+        SubmissionPayloadEncoding, SubmissionPayloadFieldPreview, SubmissionPayloadPreview,
+        TaskCapability, TaskId, UserId,
     };
-    use asterism_provider_api::{ProviderIdentity, ProviderMetadata, RemoteTask, RemoteTaskDetail};
+    use asterism_provider_api::{
+        ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
+        ProviderIdentity, ProviderMetadata, RemoteTask, RemoteTaskDetail,
+    };
     use async_trait::async_trait;
     use serde_json::json;
 
     use crate::{
         EncodedUaiUploadFinalPlanState, EncodedUaiUploadGrantState, EncodedUaiUploadInputState,
-        EncodedUaiUploadObjectState, UaiUploadArtifact, UaiUploadFinalSubmissionSequence,
+        EncodedUaiUploadObjectState, UAI_UPLOAD_FINAL_OPERATION_TYPE,
+        UAI_UPLOAD_OBJECT_OPERATION_TYPE, UAI_UPLOAD_OBJECT_STATE_TYPE,
+        UaiCompoundUploadDraftAttemptBinding, UaiUploadArtifact, UaiUploadAttemptBinding,
+        UaiUploadAttemptScope, UaiUploadAttemptStateDigests, UaiUploadFinalSubmissionSequence,
         UaiUploadedArtifact, build_upload_grant_request, parse_upload_grant_bound,
         parse_upload_object_result,
     };
@@ -471,6 +704,106 @@ mod tests {
         assert_eq!(
             mutation_verification.observation_digest(),
             verification.result_digest()
+        );
+
+        let object_record = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(
+                1,
+                UAI_UPLOAD_OBJECT_OPERATION_TYPE,
+                uploaded.object_request_digest(),
+            )
+            .unwrap(),
+            Some(
+                ExecutionMutationReceipt::new(1, uploaded.object_response_digest(), true).unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        let object_record = with_stage_output(
+            object_record,
+            UAI_UPLOAD_OBJECT_STATE_TYPE,
+            object_digest,
+            asterism_secrets::SecretValue::new(object_value.expose_secret().to_vec()),
+        );
+        let initial_final_record = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(
+                1,
+                UAI_UPLOAD_FINAL_OPERATION_TYPE,
+                final_request.request_digest(),
+            )
+            .unwrap(),
+            Some(
+                ExecutionMutationReceipt::new(1, accepted_outcome.response_digest(), true).unwrap(),
+            ),
+            Some(mutation_verification),
+        )
+        .unwrap();
+        let encoded_result = accepted_result.encode().unwrap();
+        let result_digest = encoded_result.digest();
+        let result_value = encoded_result.into_secret_value();
+        let final_record = with_stage_output(
+            initial_final_record,
+            crate::UAI_UPLOAD_FINAL_RESULT_STATE_TYPE,
+            result_digest,
+            asterism_secrets::SecretValue::new(result_value.expose_secret().to_vec()),
+        );
+        let state_digests = UaiUploadAttemptStateDigests::new(
+            input_digest,
+            grant_digest,
+            object_digest,
+            final_digest,
+            result_digest,
+        );
+        let binding_plan =
+            UaiUploadFinalPlanState::decode_bound(&final_value, final_digest, &final_sequence)
+                .unwrap();
+        let scope = UaiUploadAttemptScope::new(
+            UserId::new(),
+            context.account_id,
+            CourseId::new(),
+            TaskId::new(),
+            ExecutionId::new(),
+            ExecutionAttemptId::new(),
+        );
+        let binding = UaiUploadAttemptBinding::try_new(
+            &scope,
+            &final_sequence,
+            &input,
+            &grant_state,
+            &object_state,
+            &binding_plan,
+            &accepted_result,
+            &object_record,
+            &final_record,
+            &verification,
+            state_digests,
+        )
+        .unwrap();
+        let bound_plan = recovery
+            .bind_verified_single_final_state(
+                &context,
+                &scope,
+                &binding,
+                &input,
+                &grant_state,
+                binding_plan,
+                &final_sequence,
+                &object_record,
+                &final_record,
+                state_digests,
+                "course-instance-1",
+                "openid-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(bound_plan.binding(), &binding);
+        bound_plan
+            .verify_single_readback(&accepted_result, &readback)
+            .unwrap();
+        assert!(
+            bound_plan
+                .verify_single_readback(&accepted_result, &format!("{readback} "))
+                .is_err()
         );
 
         let encoded_foreign =
@@ -643,6 +976,192 @@ mod tests {
         assert_eq!(
             mutation_verification.observation_digest(),
             verification.result_digest()
+        );
+
+        let object_record = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(
+                1,
+                UAI_UPLOAD_OBJECT_OPERATION_TYPE,
+                uploaded.object_request_digest(),
+            )
+            .unwrap(),
+            Some(
+                ExecutionMutationReceipt::new(1, uploaded.object_response_digest(), true).unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        let object_record = with_stage_output(
+            object_record,
+            UAI_UPLOAD_OBJECT_STATE_TYPE,
+            object_digest,
+            asterism_secrets::SecretValue::new(object_value.expose_secret().to_vec()),
+        );
+        let initial_final_record = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(
+                1,
+                UAI_UPLOAD_FINAL_OPERATION_TYPE,
+                final_request.request_digest(),
+            )
+            .unwrap(),
+            Some(
+                ExecutionMutationReceipt::new(1, accepted_outcome.response_digest(), true).unwrap(),
+            ),
+            Some(mutation_verification),
+        )
+        .unwrap();
+        let encoded_result = accepted_result.encode().unwrap();
+        let result_digest = encoded_result.digest();
+        let result_value = encoded_result.into_secret_value();
+        let final_record = with_stage_output(
+            initial_final_record,
+            crate::UAI_UPLOAD_FINAL_RESULT_STATE_TYPE,
+            result_digest,
+            asterism_secrets::SecretValue::new(result_value.expose_secret().to_vec()),
+        );
+        let state_digests = UaiUploadAttemptStateDigests::new(
+            input_digest,
+            grant_digest,
+            object_digest,
+            final_digest,
+            result_digest,
+        );
+        let binding_plan =
+            UaiUploadFinalPlanState::decode_bound(&final_value, final_digest, &final_sequence)
+                .unwrap();
+        let scope = UaiUploadAttemptScope::new(
+            UserId::new(),
+            context.account_id,
+            CourseId::new(),
+            draft.task_id,
+            ExecutionId::new(),
+            ExecutionAttemptId::new(),
+        );
+        let binding = UaiCompoundUploadDraftAttemptBinding::try_new(
+            &scope,
+            &draft,
+            &final_sequence,
+            &input,
+            &grant_state,
+            &object_state,
+            &binding_plan,
+            &accepted_result,
+            &object_record,
+            &final_record,
+            &verification,
+            state_digests,
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&binding).unwrap();
+        for secret in [
+            "compound-upload-token",
+            "course/42/nothing.mp3",
+            "openid-1",
+            "course-instance-1",
+            "compound-v1",
+            "\"A\"",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+        assert_ne!(binding.draft_binding_digest(), [0; 32]);
+        assert_ne!(binding.attempt_binding_digest(), [0; 32]);
+
+        let mut changed_draft = draft.clone();
+        changed_draft.items[0].selected.answer = NormalizedAnswer::Selections(vec!["B".to_owned()]);
+        changed_draft.validate().unwrap();
+        assert!(
+            binding
+                .validate_before_recovery(
+                    &scope,
+                    &changed_draft,
+                    &final_sequence,
+                    &input,
+                    &grant_state,
+                    &object_state,
+                    &binding_plan,
+                    &accepted_result,
+                    &object_record,
+                    &final_record,
+                    state_digests,
+                )
+                .is_err()
+        );
+        let foreign_scope = UaiUploadAttemptScope::new(
+            scope.owner_user_id(),
+            ProviderAccountId::new(),
+            scope.course_id(),
+            scope.task_id(),
+            scope.execution_id(),
+            scope.execution_attempt_id(),
+        );
+        assert!(
+            binding
+                .validate_before_recovery(
+                    &foreign_scope,
+                    &draft,
+                    &final_sequence,
+                    &input,
+                    &grant_state,
+                    &object_state,
+                    &binding_plan,
+                    &accepted_result,
+                    &object_record,
+                    &final_record,
+                    state_digests,
+                )
+                .is_err()
+        );
+        let changed_state_digests = UaiUploadAttemptStateDigests::new(
+            state_digests.input(),
+            state_digests.grant(),
+            [9; 32],
+            state_digests.final_plan(),
+            state_digests.final_result(),
+        );
+        assert!(
+            binding
+                .validate_before_recovery(
+                    &scope,
+                    &draft,
+                    &final_sequence,
+                    &input,
+                    &grant_state,
+                    &object_state,
+                    &binding_plan,
+                    &accepted_result,
+                    &object_record,
+                    &final_record,
+                    changed_state_digests,
+                )
+                .is_err()
+        );
+
+        let bound_plan = recovery
+            .bind_verified_compound_final_state(
+                &context,
+                &scope,
+                &binding,
+                &draft,
+                &input,
+                &grant_state,
+                binding_plan,
+                &final_sequence,
+                &object_record,
+                &final_record,
+                state_digests,
+                "course-instance-1",
+                "openid-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(bound_plan.binding(), &binding);
+        bound_plan
+            .verify_compound_readback(&accepted_result, &readback)
+            .unwrap();
+        assert!(
+            bound_plan
+                .verify_compound_readback(&accepted_result, &format!("{readback} "))
+                .is_err()
         );
     }
 
@@ -840,6 +1359,27 @@ mod tests {
             },
         })
         .to_string()
+    }
+
+    fn with_stage_output(
+        record: ExecutionMutationRecoveryRecord,
+        output_type: &str,
+        digest: [u8; 32],
+        value: asterism_secrets::SecretValue,
+    ) -> ExecutionMutationRecoveryRecord {
+        let ordinal = record.issue().ordinal();
+        record
+            .try_with_stage_output(
+                asterism_provider_api::ExecutionMutationStageOutput::try_new(
+                    ProviderId::new(crate::metadata::PROVIDER_ID).unwrap(),
+                    ordinal,
+                    output_type,
+                    digest,
+                    value,
+                )
+                .unwrap(),
+            )
+            .unwrap()
     }
 
     fn context() -> ProviderContext {

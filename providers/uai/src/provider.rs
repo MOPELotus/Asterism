@@ -145,6 +145,7 @@ pub fn build_development_provider(
         runtime_settings: runtime_settings_schema(),
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
+        course_enrollment: None,
         task_inventory: Some(task_inventory),
         task_detail: Some(task_detail),
         task_progress: Some(task_progress),

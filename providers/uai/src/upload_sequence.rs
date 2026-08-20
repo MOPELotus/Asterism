@@ -4,8 +4,9 @@ use asterism_domain::{ProviderId, SubmissionReceipt, Timestamp};
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
     ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
-    ExecutionMutationSequencePlan, ExecutionMutationSink, ExecutionMutationVerification,
-    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderResult,
+    ExecutionMutationSequencePlan, ExecutionMutationSink, ExecutionMutationStageOutput,
+    ExecutionMutationVerification, ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact,
+    ProviderResult,
 };
 use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
@@ -325,18 +326,28 @@ impl UaiUploadFinalSubmissionSequence {
         if !outcome.matches(ordinal, kind, sequence_binding_digest, request_digest) {
             return Err(foreign_sequence_material());
         }
-        let receipt = if outcome.accepted() {
-            ExecutionMutationReceipt::new(ordinal, outcome.response_digest(), true)?
+        if outcome.accepted() {
+            let receipt = ExecutionMutationReceipt::new(ordinal, outcome.response_digest(), true)?;
+            let encoded = self.accepted_result_state(outcome)?.encode()?;
+            let stage_output = ExecutionMutationStageOutput::try_new(
+                ProviderId::new(PROVIDER_ID).map_err(|_| invalid_result_state())?,
+                ordinal,
+                UAI_UPLOAD_FINAL_RESULT_STATE_TYPE,
+                encoded.digest(),
+                encoded.into_secret_value(),
+            )?;
+            sink.record_receipt_with_stage_output(receipt, stage_output)
+                .await
         } else {
-            ExecutionMutationReceipt::new_retryable_rejection(
+            let receipt = ExecutionMutationReceipt::new_retryable_rejection(
                 ordinal,
                 outcome.response_digest(),
                 outcome
                     .retry_after_seconds()
                     .ok_or_else(foreign_sequence_material)?,
-            )?
-        };
-        sink.record_receipt(receipt).await
+            )?;
+            sink.record_receipt(receipt).await
+        }
     }
 
     fn validate_request(
@@ -394,6 +405,27 @@ pub struct UaiUploadFinalResultState {
 }
 
 impl UaiUploadFinalResultState {
+    /// Restores one accepted final-submit successor only from Core's atomic
+    /// receipt-plus-stage-output recovery record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing encrypted successor bytes and any Provider, type,
+    /// ordinal, request, response, sequence or digest substitution.
+    pub fn decode_recovery_record(
+        sequence: &UaiUploadFinalSubmissionSequence,
+        record: &ExecutionMutationRecoveryRecord,
+    ) -> ProviderResult<Self> {
+        let output = record.stage_output().ok_or_else(foreign_result_state)?;
+        if output.provider_id().as_str() != PROVIDER_ID
+            || output.ordinal() != record.issue().ordinal()
+            || output.output_type() != UAI_UPLOAD_FINAL_RESULT_STATE_TYPE
+        {
+            return Err(foreign_result_state());
+        }
+        Self::decode_bound(output.value(), output.output_digest(), sequence, record)
+    }
+
     pub const fn ordinal(&self) -> u32 {
         self.ordinal
     }
@@ -424,6 +456,18 @@ impl UaiUploadFinalResultState {
 
     pub fn submission_version(&self) -> &str {
         &self.submission_version
+    }
+
+    pub(crate) fn same_recovery_authority(&self, other: &Self) -> bool {
+        self.ordinal == other.ordinal
+            && self.kind == other.kind
+            && self.plan_digest == other.plan_digest
+            && self.artifact_digest == other.artifact_digest
+            && self.sequence_binding_digest == other.sequence_binding_digest
+            && self.request_digest == other.request_digest
+            && self.response_digest == other.response_digest
+            && self.accepted_at == other.accepted_at
+            && self.submission_version == other.submission_version
     }
 
     /// Rebinds an accepted recovered result to the complete single-upload
@@ -1079,6 +1123,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the recovery regression covers exact stage output, plan and readback lineage"
+    )]
     fn accepted_result_state_round_trips_only_against_exact_recovery_lineage() {
         let submission = UaiUploadSubmission::fixture("course/42/nothing.mp3", "fixture-a");
         let sequence = UaiUploadFinalSubmissionSequence::for_single(&submission).unwrap();
@@ -1116,9 +1164,26 @@ mod tests {
             Some(ExecutionMutationReceipt::new(1, outcome.response_digest(), true).unwrap()),
             None,
         )
+        .unwrap()
+        .try_with_stage_output(
+            ExecutionMutationStageOutput::try_new(
+                ProviderId::new(PROVIDER_ID).unwrap(),
+                1,
+                UAI_UPLOAD_FINAL_RESULT_STATE_TYPE,
+                digest,
+                SecretValue::new(value.expose_secret().to_vec()),
+            )
+            .unwrap(),
+        )
         .unwrap();
         let decoded =
             UaiUploadFinalResultState::decode_bound(&value, digest, &sequence, &record).unwrap();
+        assert_eq!(
+            UaiUploadFinalResultState::decode_recovery_record(&sequence, &record)
+                .unwrap()
+                .submission_version(),
+            "upload-v1"
+        );
         assert_eq!(decoded.submission_version(), "upload-v1");
         assert_eq!(decoded.accepted_at(), state.accepted_at());
         let document = single_upload_verification_document("course/42/nothing.mp3", "upload-v1");
@@ -1341,6 +1406,7 @@ mod tests {
         now_seconds: u64,
         issues: Vec<(u32, [u8; 32])>,
         receipts: Vec<(u32, bool, Option<u64>)>,
+        outputs: Vec<ExecutionMutationStageOutput>,
     }
 
     impl FixtureSequenceSink {
@@ -1421,6 +1487,23 @@ mod tests {
             state
                 .receipts
                 .push((receipt.ordinal(), receipt.accepted(), retry_not_before));
+            Ok(())
+        }
+
+        async fn record_receipt_with_stage_output(
+            &self,
+            receipt: ExecutionMutationReceipt,
+            output: ExecutionMutationStageOutput,
+        ) -> ProviderResult<()> {
+            if !receipt.accepted()
+                || output.ordinal() != receipt.ordinal()
+                || output.provider_id().as_str() != PROVIDER_ID
+                || output.output_type() != UAI_UPLOAD_FINAL_RESULT_STATE_TYPE
+            {
+                return Err(foreign_sequence_material());
+            }
+            self.record_receipt(receipt).await?;
+            self.state.lock().unwrap().outputs.push(output);
             Ok(())
         }
     }

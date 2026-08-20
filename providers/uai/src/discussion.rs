@@ -106,6 +106,18 @@ impl UaiDiscussionBinding {
     pub fn current_user_id(&self) -> &str {
         &self.current_user
     }
+
+    pub(crate) fn course_instance_id(&self) -> &str {
+        &self.course_instance
+    }
+
+    pub(crate) fn class_id(&self) -> &str {
+        &self.class
+    }
+
+    pub(crate) fn curricula_id(&self) -> &str {
+        &self.curricula
+    }
 }
 
 impl fmt::Debug for UaiDiscussionBinding {
@@ -321,6 +333,10 @@ impl UaiDiscussionCompletionPlan {
         &self.remote_task_id
     }
 
+    pub(crate) fn task_fingerprint(&self) -> &str {
+        &self.task_fingerprint
+    }
+
     pub fn course_resource_id(&self) -> &str {
         &self.course_resource_id
     }
@@ -353,6 +369,73 @@ impl UaiDiscussionCompletionPlan {
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "recovery rebinds every immutable completion-plan field"
+    )]
+    pub(crate) fn restore_state(
+        mut remote_task_id: String,
+        mut task_fingerprint: String,
+        mut course_resource_id: String,
+        mut unit_id: String,
+        mut group_id: String,
+        topic_id: u64,
+        reply_request_digest: [u8; 32],
+        reply_digest: [u8; 32],
+        request_digest: [u8; 32],
+        mut fingerprint: String,
+    ) -> ProviderResult<Self> {
+        let expected_remote = format!("group:{course_resource_id}:{unit_id}:{group_id}");
+        let expected_request = discussion_completion_request_digest(
+            &remote_task_id,
+            &task_fingerprint,
+            &course_resource_id,
+            &unit_id,
+            &group_id,
+            topic_id,
+            reply_request_digest,
+            reply_digest,
+        );
+        let expected_fingerprint = format!(
+            "uai-discussion-complete-v1:{}",
+            hex_digest(expected_request)
+        );
+        let invalid = remote_task_id != expected_remote
+            || required_identifier(&course_resource_id, "Course resource").is_err()
+            || required_identifier(&unit_id, "Unit").is_err()
+            || required_identifier(&group_id, "Group").is_err()
+            || task_fingerprint.is_empty()
+            || task_fingerprint.len() > 8 * 1_024
+            || topic_id == 0
+            || [reply_request_digest, reply_digest, request_digest].contains(&[0; 32])
+            || request_digest != expected_request
+            || fingerprint != expected_fingerprint;
+        if invalid {
+            remote_task_id.zeroize();
+            task_fingerprint.zeroize();
+            course_resource_id.zeroize();
+            unit_id.zeroize();
+            group_id.zeroize();
+            fingerprint.zeroize();
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI recovered discussion completion plan is stale or foreign",
+            ));
+        }
+        Ok(Self {
+            remote_task_id,
+            task_fingerprint,
+            course_resource_id,
+            unit_id,
+            group_id,
+            topic_id,
+            reply_request_digest,
+            reply_digest,
+            request_digest,
+            fingerprint,
+        })
     }
 }
 
@@ -456,32 +539,17 @@ pub fn prepare_discussion_completion(
             "UAI discussion completion hierarchy is foreign to its Task",
         ));
     }
-    let mut reply_digest = Sha256::new();
-    reply_digest.update(b"asterism:uai:discussion-reply:v1\0");
-    reply_digest.update(draft.binding.current_user.as_bytes());
-    reply_digest.update(b"\0");
-    reply_digest.update(draft.topic_id.to_be_bytes());
-    reply_digest.update(b"\0");
-    reply_digest.update(draft.content.as_bytes());
-    let reply_digest: [u8; 32] = reply_digest.finalize().into();
-    let mut request_digest = Sha256::new();
-    request_digest.update(b"asterism:uai:discussion-completion-request:v1\0");
-    request_digest.update(remote_task_id.as_bytes());
-    request_digest.update(b"\0");
-    request_digest.update(detail.task.fingerprint.as_bytes());
-    request_digest.update(b"\0");
-    request_digest.update(draft.binding.course_resource.as_bytes());
-    request_digest.update(b"\0");
-    request_digest.update(unit_id.as_bytes());
-    request_digest.update(b"\0");
-    request_digest.update(draft.binding.group.as_bytes());
-    request_digest.update(b"\0");
-    request_digest.update(draft.topic_id.to_be_bytes());
-    request_digest.update(b"\0");
-    request_digest.update(draft.request_digest());
-    request_digest.update(b"\0");
-    request_digest.update(reply_digest);
-    let request_digest: [u8; 32] = request_digest.finalize().into();
+    let reply_digest = discussion_reply_digest(draft);
+    let request_digest = discussion_completion_request_digest(
+        remote_task_id,
+        &detail.task.fingerprint,
+        &draft.binding.course_resource,
+        &unit_id,
+        &draft.binding.group,
+        draft.topic_id,
+        draft.request_digest(),
+        reply_digest,
+    );
     Ok(UaiDiscussionCompletionPlan {
         remote_task_id: remote_task_id.to_owned(),
         task_fingerprint: detail.task.fingerprint.clone(),
@@ -494,6 +562,51 @@ pub fn prepare_discussion_completion(
         request_digest,
         fingerprint: format!("uai-discussion-complete-v1:{}", hex_digest(request_digest)),
     })
+}
+
+pub(crate) fn discussion_reply_digest(draft: &UaiDiscussionReplyDraft) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:discussion-reply:v1\0");
+    digest.update(draft.binding.current_user.as_bytes());
+    digest.update(b"\0");
+    digest.update(draft.topic_id.to_be_bytes());
+    digest.update(b"\0");
+    digest.update(draft.content.as_bytes());
+    digest.finalize().into()
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completion digest binds every independent immutable identity"
+)]
+pub(crate) fn discussion_completion_request_digest(
+    remote_task_id: &str,
+    task_fingerprint: &str,
+    course_resource_id: &str,
+    unit_id: &str,
+    group_id: &str,
+    topic_id: u64,
+    reply_request_digest: [u8; 32],
+    reply_digest: [u8; 32],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:discussion-completion-request:v1\0");
+    digest.update(remote_task_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(task_fingerprint.as_bytes());
+    digest.update(b"\0");
+    digest.update(course_resource_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(unit_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(group_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(topic_id.to_be_bytes());
+    digest.update(b"\0");
+    digest.update(reply_request_digest);
+    digest.update(b"\0");
+    digest.update(reply_digest);
+    digest.finalize().into()
 }
 
 fn hex_digest(digest: [u8; 32]) -> String {

@@ -15,14 +15,21 @@ mod browser_batch;
 mod browser_bridge;
 mod browser_cursor;
 mod compound_oral;
+mod compound_oral_binding;
 mod compound_oral_plan_state;
+mod compound_oral_recovery;
 mod compound_oral_sequence;
 mod compound_upload;
+mod compound_upload_binding;
 mod course_inventory;
 mod course_policy;
 mod course_progress;
 mod discussion;
+mod discussion_binding;
+mod discussion_completion_state;
+mod discussion_recovery;
 mod discussion_sequence;
+mod discussion_state;
 mod duration;
 mod encrypted;
 mod inventory_capabilities;
@@ -43,6 +50,7 @@ mod task_detail;
 mod task_inventory;
 mod task_type;
 mod upload;
+mod upload_binding;
 mod upload_final_plan;
 mod upload_grant_state;
 mod upload_input_state;
@@ -103,18 +111,29 @@ pub use compound_oral::{
     UaiCompoundOralSubmissionRequest, UaiCompoundOralTransport, UaiCompoundOralVerification,
     build_compound_oral_submission_request, parse_compound_oral_verification,
 };
+pub use compound_oral_binding::{
+    UAI_COMPOUND_ORAL_DRAFT_ATTEMPT_BINDING_TYPE, UaiCompoundOralAttemptScope,
+    UaiCompoundOralDraftAttemptBinding,
+};
 pub use compound_oral_plan_state::{
     EncodedUaiCompoundOralPlanState, UAI_COMPOUND_ORAL_PLAN_STATE_TYPE, UaiCompoundOralPlanState,
 };
+pub use compound_oral_recovery::{
+    UaiCompoundOralRecovery, UaiRecoveredBoundCompoundOralPlan, UaiRecoveredCompoundOralPlan,
+};
 pub use compound_oral_sequence::{
-    UAI_COMPOUND_ORAL_MAXIMUM_ATTEMPTS, UAI_COMPOUND_ORAL_OPERATION_TYPE,
-    UAI_COMPOUND_ORAL_SEQUENCE_TYPE, UaiCompoundOralSubmissionOutcome,
+    EncodedUaiCompoundOralResultState, UAI_COMPOUND_ORAL_MAXIMUM_ATTEMPTS,
+    UAI_COMPOUND_ORAL_OPERATION_TYPE, UAI_COMPOUND_ORAL_RESULT_STATE_TYPE,
+    UAI_COMPOUND_ORAL_SEQUENCE_TYPE, UaiCompoundOralResultState, UaiCompoundOralSubmissionOutcome,
     UaiCompoundOralSubmissionSequence,
 };
 pub use compound_upload::{
     UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest,
     UaiCompoundUploadTransport, UaiCompoundUploadVerification,
     build_compound_upload_submission_request, parse_compound_upload_verification,
+};
+pub use compound_upload_binding::{
+    UAI_COMPOUND_UPLOAD_DRAFT_ATTEMPT_BINDING_TYPE, UaiCompoundUploadDraftAttemptBinding,
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
 pub use course_policy::{
@@ -132,11 +151,26 @@ pub use discussion::{
     build_discussion_topic_request, parse_discussion_binding, parse_discussion_reply_page,
     parse_discussion_reply_receipt, parse_discussion_topic, prepare_discussion_completion,
 };
+pub use discussion_binding::{
+    UAI_DISCUSSION_DRAFT_ATTEMPT_BINDING_TYPE, UaiDiscussionAttemptScope,
+    UaiDiscussionDraftAttemptBinding,
+};
+pub use discussion_completion_state::{
+    EncodedUaiDiscussionCompletionState, UAI_DISCUSSION_COMPLETION_STATE_TYPE,
+    UaiDiscussionCompletionState,
+};
+pub use discussion_recovery::{
+    UAI_DISCUSSION_RECOVERY_MAX_PAGES, UAI_DISCUSSION_RECOVERY_PAGE_SIZE, UaiDiscussionRecovery,
+    UaiDiscussionRecoveryReadTransport, UaiRecoveredDiscussionWorkflow,
+};
 pub use discussion_sequence::{
     UAI_DISCUSSION_COMPLETION_OPERATION_TYPE, UAI_DISCUSSION_PLAN_ARTIFACT_TYPE,
     UAI_DISCUSSION_REPLY_OPERATION_TYPE, UAI_DISCUSSION_REPLY_READBACK_OBSERVATION_TYPE,
     UAI_DISCUSSION_SEQUENCE_TYPE, UaiDiscussionMutationKind, UaiDiscussionMutationOutcome,
     UaiDiscussionMutationSequence, UaiDiscussionRecoveryState, UaiDiscussionReplyReadbackGate,
+};
+pub use discussion_state::{
+    EncodedUaiDiscussionReplyState, UAI_DISCUSSION_REPLY_STATE_TYPE, UaiDiscussionReplyState,
 };
 pub use duration::{
     UaiDurationDocument, UaiDurationTransport, UaiTaskDuration, UaiTaskStudyRecord,
@@ -197,6 +231,10 @@ pub use upload::{
     parse_upload_grant_bound, parse_upload_object_result, parse_upload_result,
     parse_upload_verification,
 };
+pub use upload_binding::{
+    UAI_UPLOAD_ATTEMPT_BINDING_TYPE, UAI_UPLOAD_OBJECT_OPERATION_TYPE, UaiUploadAttemptBinding,
+    UaiUploadAttemptScope, UaiUploadAttemptStateDigests,
+};
 pub use upload_final_plan::{
     EncodedUaiUploadFinalPlanState, UAI_UPLOAD_FINAL_PLAN_STATE_TYPE, UaiUploadFinalPlanState,
 };
@@ -208,8 +246,12 @@ pub use upload_input_state::{
 };
 pub use upload_object_state::{
     EncodedUaiUploadObjectState, UAI_UPLOAD_OBJECT_STATE_TYPE, UaiUploadObjectState,
+    record_accepted_upload_object,
 };
-pub use upload_recovery::{UaiRecoveredUploadFinalPlan, UaiUploadStageRecovery};
+pub use upload_recovery::{
+    UaiRecoveredBoundCompoundUploadFinalPlan, UaiRecoveredBoundUploadFinalPlan,
+    UaiRecoveredUploadFinalPlan, UaiUploadStageRecovery,
+};
 pub use upload_sequence::{
     EncodedUaiUploadFinalResultState, UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS,
     UAI_UPLOAD_FINAL_OPERATION_TYPE, UAI_UPLOAD_FINAL_PLAN_ARTIFACT_TYPE,

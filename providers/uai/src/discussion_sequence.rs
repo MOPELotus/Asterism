@@ -5,15 +5,17 @@ use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
     ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequenceObservation,
     ExecutionMutationSequencePhase, ExecutionMutationSequencePlan,
-    ExecutionMutationSequenceRecoverySnapshot, ExecutionMutationSink,
+    ExecutionMutationSequenceRecoverySnapshot, ExecutionMutationSink, ExecutionMutationStageOutput,
     ExecutionMutationVerification, ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact,
     ProviderResult,
 };
 use sha2::{Digest, Sha256};
 
 use crate::{
-    UaiDiscussionCompletionPlan, UaiDiscussionReplyDraft, metadata::PROVIDER_ID,
-    parse_discussion_reply_receipt, parse_submission_receipt,
+    EncodedUaiDiscussionCompletionState, EncodedUaiDiscussionReplyState,
+    UaiDiscussionCompletionPlan, UaiDiscussionCompletionState, UaiDiscussionReplyDraft,
+    UaiDiscussionReplyState, metadata::PROVIDER_ID, parse_discussion_reply_receipt,
+    parse_submission_receipt,
 };
 
 pub const UAI_DISCUSSION_PLAN_ARTIFACT_TYPE: &str = "uai.discussion.reply-plan.v1";
@@ -162,11 +164,13 @@ impl UaiDiscussionMutationSequence {
         sink: &(dyn ExecutionMutationSink + Send + Sync),
     ) -> ProviderResult<()> {
         self.validate_draft(draft)?;
+        let output = EncodedUaiDiscussionReplyState::try_new(draft, self)?.into_stage_output()?;
         self.record_outcome(
             UaiDiscussionMutationKind::Reply,
             UAI_DISCUSSION_REPLY_ORDINAL,
             draft.request_digest(),
             outcome,
+            output,
             sink,
         )
         .await
@@ -285,15 +289,24 @@ impl UaiDiscussionMutationSequence {
     pub async fn record_completion_outcome(
         &self,
         completion: &UaiDiscussionCompletionPlan,
+        draft: &UaiDiscussionReplyDraft,
         outcome: &UaiDiscussionMutationOutcome,
         sink: &(dyn ExecutionMutationSink + Send + Sync),
     ) -> ProviderResult<()> {
         self.validate_completion_plan(completion)?;
+        self.validate_draft(draft)?;
+        let encoded_reply = EncodedUaiDiscussionReplyState::try_new(draft, self)?;
+        let reply_digest = encoded_reply.digest();
+        let reply_value = encoded_reply.into_secret_value();
+        let reply = UaiDiscussionReplyState::decode_bound(&reply_value, reply_digest, self)?;
+        let output = EncodedUaiDiscussionCompletionState::try_new(completion, &reply, self)?
+            .into_stage_output()?;
         self.record_outcome(
             UaiDiscussionMutationKind::Completion,
             UAI_DISCUSSION_COMPLETION_ORDINAL,
             completion.request_digest(),
             outcome,
+            output,
             sink,
         )
         .await
@@ -343,7 +356,8 @@ impl UaiDiscussionMutationSequence {
             self.reply_request_digest,
         )?;
         let Some(reply_receipt) = reply.receipt() else {
-            return if records.len() == 1
+            return if reply.stage_output().is_none()
+                && records.len() == 1
                 && reply.verification().is_none()
                 && observations.is_empty()
             {
@@ -355,6 +369,7 @@ impl UaiDiscussionMutationSequence {
         if !reply_receipt.accepted() {
             return Err(foreign_sequence_material());
         }
+        let reply_state = UaiDiscussionReplyState::decode_recovery_record(self, reply)?;
         let Some(reply_verification) = reply.verification() else {
             return if records.len() == 1 && observations.is_empty() {
                 Ok(UaiDiscussionRecoveryState::ReplyAcceptedAwaitingReadback)
@@ -393,11 +408,21 @@ impl UaiDiscussionMutationSequence {
             return Err(foreign_sequence_material());
         }
         match completion_record.receipt() {
-            None => Ok(UaiDiscussionRecoveryState::CompletionIssuedAmbiguous),
+            None if completion_record.stage_output().is_none() => {
+                Ok(UaiDiscussionRecoveryState::CompletionIssuedAmbiguous)
+            }
             Some(receipt) if receipt.accepted() => {
+                let recovered_completion = UaiDiscussionCompletionState::decode_recovery_record(
+                    self,
+                    &reply_state,
+                    completion_record,
+                )?;
+                if !same_completion_plan(recovered_completion.completion(), completion) {
+                    return Err(foreign_sequence_material());
+                }
                 Ok(UaiDiscussionRecoveryState::CompletionAcceptedAwaitingProgress)
             }
-            Some(_) => Err(foreign_sequence_material()),
+            None | Some(_) => Err(foreign_sequence_material()),
         }
     }
 
@@ -407,16 +432,16 @@ impl UaiDiscussionMutationSequence {
         ordinal: u32,
         request_digest: [u8; 32],
         outcome: &UaiDiscussionMutationOutcome,
+        output: ExecutionMutationStageOutput,
         sink: &(dyn ExecutionMutationSink + Send + Sync),
     ) -> ProviderResult<()> {
         if !outcome.matches(kind, ordinal, self.reply_request_digest, request_digest) {
             return Err(foreign_sequence_material());
         }
-        sink.record_receipt(ExecutionMutationReceipt::new(
-            ordinal,
-            outcome.response_digest(),
-            true,
-        )?)
+        sink.record_receipt_with_stage_output(
+            ExecutionMutationReceipt::new(ordinal, outcome.response_digest(), true)?,
+            output,
+        )
         .await
     }
 
@@ -665,6 +690,22 @@ fn validate_issue(
     }
 }
 
+fn same_completion_plan(
+    left: &UaiDiscussionCompletionPlan,
+    right: &UaiDiscussionCompletionPlan,
+) -> bool {
+    left.remote_task_id() == right.remote_task_id()
+        && left.task_fingerprint() == right.task_fingerprint()
+        && left.course_resource_id() == right.course_resource_id()
+        && left.unit_id() == right.unit_id()
+        && left.group_id() == right.group_id()
+        && left.topic_id() == right.topic_id()
+        && left.reply_request_digest() == right.reply_request_digest()
+        && left.reply_digest() == right.reply_digest()
+        && left.request_digest() == right.request_digest()
+        && left.fingerprint() == right.fingerprint()
+}
+
 fn observation_matches(
     observation: &ExecutionMutationSequenceObservation,
     digest: [u8; 32],
@@ -789,13 +830,14 @@ mod tests {
         assert_eq!(completed.kind(), UaiDiscussionMutationKind::Completion);
         assert_eq!(completed.ordinal(), 2);
         sequence
-            .record_completion_outcome(&completion, &completed, &sink)
+            .record_completion_outcome(&completion, &draft, &completed, &sink)
             .await
             .unwrap();
 
         let state = sink.state.lock().unwrap();
         assert_eq!(state.issues.len(), 2);
         assert_eq!(state.receipts.len(), 2);
+        assert_eq!(state.stage_outputs.len(), 2);
         assert_eq!(state.verifications.len(), 1);
         assert_eq!(state.observations.len(), 1);
         assert_eq!(state.issues[0].request_digest(), draft.request_digest());
@@ -1001,7 +1043,7 @@ mod tests {
             .classify_completion_mutation_response(COMPLETION_ACCEPTED, "course-instance-1")
             .unwrap();
         sequence
-            .record_completion_outcome(&completion, &completed, &sink)
+            .record_completion_outcome(&completion, &draft, &completed, &sink)
             .await
             .unwrap();
         assert_eq!(
@@ -1119,6 +1161,7 @@ mod tests {
         prepared: Option<ExecutionMutationSequencePlan>,
         issues: Vec<ExecutionMutationIssue>,
         receipts: Vec<ExecutionMutationReceipt>,
+        stage_outputs: Vec<ExecutionMutationStageOutput>,
         verifications: Vec<ExecutionMutationVerification>,
         observations: Vec<ExecutionMutationSequenceObservation>,
     }
@@ -1133,7 +1176,7 @@ mod tests {
                 .issues
                 .iter()
                 .map(|issue| {
-                    ExecutionMutationRecoveryRecord::try_new(
+                    let record = ExecutionMutationRecoveryRecord::try_new(
                         issue.clone(),
                         state
                             .receipts
@@ -1146,7 +1189,17 @@ mod tests {
                             .find(|verification| verification.ordinal() == issue.ordinal())
                             .copied(),
                     )
-                    .unwrap()
+                    .unwrap();
+                    if let Some(output) = state
+                        .stage_outputs
+                        .iter()
+                        .find(|output| output.ordinal() == issue.ordinal())
+                        .cloned()
+                    {
+                        record.try_with_stage_output(output).unwrap()
+                    } else {
+                        record
+                    }
                 })
                 .collect();
             ExecutionMutationSequenceRecoverySnapshot::try_new(
@@ -1224,6 +1277,33 @@ mod tests {
                 return Err(foreign_sequence_material());
             }
             state.receipts.push(receipt);
+            Ok(())
+        }
+
+        async fn record_receipt_with_stage_output(
+            &self,
+            receipt: ExecutionMutationReceipt,
+            output: ExecutionMutationStageOutput,
+        ) -> ProviderResult<()> {
+            let mut state = self.state.lock().unwrap();
+            let expected_type = match receipt.ordinal() {
+                UAI_DISCUSSION_REPLY_ORDINAL => crate::UAI_DISCUSSION_REPLY_STATE_TYPE,
+                UAI_DISCUSSION_COMPLETION_ORDINAL => crate::UAI_DISCUSSION_COMPLETION_STATE_TYPE,
+                _ => return Err(foreign_sequence_material()),
+            };
+            if !receipt.accepted()
+                || output.provider_id().as_str() != PROVIDER_ID
+                || output.ordinal() != receipt.ordinal()
+                || output.output_type() != expected_type
+                || state.issues.len() != state.receipts.len() + 1
+                || state.issues.last().map(ExecutionMutationIssue::ordinal)
+                    != Some(receipt.ordinal())
+                || state.stage_outputs.len() != state.receipts.len()
+            {
+                return Err(foreign_sequence_material());
+            }
+            state.receipts.push(receipt);
+            state.stage_outputs.push(output);
             Ok(())
         }
 

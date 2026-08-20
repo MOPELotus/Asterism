@@ -1,12 +1,16 @@
 use std::fmt;
 
-use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_domain::ProviderId;
+use asterism_provider_api::{
+    ExecutionMutationReceipt, ExecutionMutationRecoveryRecord, ExecutionMutationSink,
+    ExecutionMutationStageOutput, ProviderError, ProviderErrorKind, ProviderResult,
+};
 use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::UaiUploadedArtifact;
+use crate::{UAI_UPLOAD_OBJECT_OPERATION_TYPE, UaiUploadedArtifact, metadata::PROVIDER_ID};
 
 pub const UAI_UPLOAD_OBJECT_STATE_TYPE: &str = "uai.upload.object.v1";
 
@@ -65,6 +69,16 @@ impl EncodedUaiUploadObjectState {
     pub fn into_secret_value(self) -> SecretValue {
         self.value
     }
+
+    fn into_stage_output(self, ordinal: u32) -> ProviderResult<ExecutionMutationStageOutput> {
+        ExecutionMutationStageOutput::try_new(
+            ProviderId::new(PROVIDER_ID).map_err(|_| invalid_object_state())?,
+            ordinal,
+            UAI_UPLOAD_OBJECT_STATE_TYPE,
+            self.digest,
+            self.value,
+        )
+    }
 }
 
 impl fmt::Debug for EncodedUaiUploadObjectState {
@@ -83,6 +97,38 @@ pub struct UaiUploadObjectState {
 }
 
 impl UaiUploadObjectState {
+    /// Restores one definitely accepted Qiniu successor only from Core's
+    /// atomic receipt-plus-stage-output recovery record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing encrypted successor bytes and any Provider, type,
+    /// ordinal, request, response or digest substitution.
+    pub fn decode_recovery_record(
+        record: &ExecutionMutationRecoveryRecord,
+    ) -> ProviderResult<Self> {
+        let receipt = record
+            .receipt()
+            .filter(|receipt| receipt.accepted())
+            .ok_or_else(foreign_object_state)?;
+        let output = record.stage_output().ok_or_else(foreign_object_state)?;
+        if record.issue().operation_type() != UAI_UPLOAD_OBJECT_OPERATION_TYPE
+            || record.issue().ordinal() != 1
+            || record.verification().is_some()
+            || output.provider_id().as_str() != PROVIDER_ID
+            || output.ordinal() != record.issue().ordinal()
+            || output.output_type() != UAI_UPLOAD_OBJECT_STATE_TYPE
+        {
+            return Err(foreign_object_state());
+        }
+        Self::decode_bound(
+            output.value(),
+            output.output_digest(),
+            record.issue().request_digest(),
+            receipt.response_digest(),
+        )
+    }
+
     /// Decodes one accepted object state against Core's exact issue/receipt
     /// digests. The response remains a mutation receipt, never readback proof.
     ///
@@ -137,6 +183,43 @@ impl UaiUploadObjectState {
     pub fn into_uploaded(self) -> UaiUploadedArtifact {
         self.uploaded
     }
+
+    pub(crate) fn same_recovery_authority(&self, other: &Self) -> bool {
+        let left = self.uploaded();
+        let right = other.uploaded();
+        left.remote_task_id() == right.remote_task_id()
+            && left.task_fingerprint() == right.task_fingerprint()
+            && left.course_resource_id() == right.course_resource_id()
+            && left.unit_id() == right.unit_id()
+            && left.group_id() == right.group_id()
+            && left.upload_position() == right.upload_position()
+            && left.file_key() == right.file_key()
+            && left.artifact_digest() == right.artifact_digest()
+            && left.intent_fingerprint() == right.intent_fingerprint()
+            && left.object_request_digest() == right.object_request_digest()
+            && left.object_response_digest() == right.object_response_digest()
+            && left.object_hash() == right.object_hash()
+    }
+}
+
+/// Atomically records one definite accepted Qiniu receipt and its encrypted
+/// uploaded-object successor. The helper never performs the upload itself.
+///
+/// # Errors
+///
+/// Rejects a non-first object ordinal, incomplete uploaded state, or a sink
+/// that cannot persist the accepted receipt and successor in one transaction.
+pub async fn record_accepted_upload_object(
+    ordinal: u32,
+    uploaded: &UaiUploadedArtifact,
+    sink: &(dyn ExecutionMutationSink + Send + Sync),
+) -> ProviderResult<()> {
+    if ordinal != 1 {
+        return Err(foreign_object_state());
+    }
+    let receipt = ExecutionMutationReceipt::new(ordinal, uploaded.object_response_digest(), true)?;
+    let output = EncodedUaiUploadObjectState::try_new(uploaded)?.into_stage_output(ordinal)?;
+    sink.record_receipt_with_stage_output(receipt, output).await
 }
 
 impl fmt::Debug for UaiUploadObjectState {
@@ -252,5 +335,48 @@ mod tests {
             )
             .is_err()
         );
+
+        let recovery = ExecutionMutationRecoveryRecord::try_new(
+            asterism_provider_api::ExecutionMutationIssue::new(
+                1,
+                UAI_UPLOAD_OBJECT_OPERATION_TYPE,
+                uploaded.object_request_digest(),
+            )
+            .unwrap(),
+            Some(
+                ExecutionMutationReceipt::new(1, uploaded.object_response_digest(), true).unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        assert!(UaiUploadObjectState::decode_recovery_record(&recovery).is_err());
+        let recovered = recovery
+            .clone()
+            .try_with_stage_output(
+                EncodedUaiUploadObjectState::try_new(&uploaded)
+                    .unwrap()
+                    .into_stage_output(1)
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            UaiUploadObjectState::decode_recovery_record(&recovered)
+                .unwrap()
+                .same_recovery_authority(&restored)
+        );
+        let foreign_encoded = EncodedUaiUploadObjectState::try_new(&uploaded).unwrap();
+        let foreign = recovery
+            .try_with_stage_output(
+                ExecutionMutationStageOutput::try_new(
+                    ProviderId::new("foreign").unwrap(),
+                    1,
+                    "foreign.upload.object.v1",
+                    foreign_encoded.digest(),
+                    foreign_encoded.into_secret_value(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(UaiUploadObjectState::decode_recovery_record(&foreign).is_err());
     }
 }
