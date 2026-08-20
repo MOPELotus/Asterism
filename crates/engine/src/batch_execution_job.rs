@@ -5,8 +5,10 @@ use asterism_domain::{
     ExecutionState, ProviderAccountId, ProviderId, ScheduleId, Timestamp,
 };
 use asterism_provider_api::{
-    BatchExecutionPlanningRequest, PreparedProviderBatchExecutionPlan, ProviderContext,
-    ProviderError, ProviderExecutionBatchPlan, ProviderRegistry, ProviderRuntimeSettingsSchema,
+    BatchExecutionPlanningRequest, PreparedProviderBatchExecutionPlan,
+    ProviderBatchExecutionMaterializationBinding, ProviderBatchExecutionRuntimeSettingsRevision,
+    ProviderContext, ProviderError, ProviderExecutionBatchPlan, ProviderRegistry,
+    ProviderRuntimeSettingsSchema,
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
@@ -17,7 +19,9 @@ use asterism_storage::{
     BatchExecutionChildExecutionRecord, BatchExecutionChildExecutionRepository,
     BatchExecutionChildPlanMaterializeOutcome, BatchExecutionChildPlanMaterializeRequest,
     BatchExecutionChildPlanRecord, BatchExecutionChildPlanRepository,
-    BatchExecutionParentSnapshotBindOutcome, BatchExecutionParentSnapshotBindRequest,
+    BatchExecutionMaterializationBindingBindOutcome,
+    BatchExecutionMaterializationBindingBindRequest, BatchExecutionParentSnapshotBindOutcome,
+    BatchExecutionParentSnapshotBindRequest, BatchExecutionParentSnapshotRepository,
     BatchExecutionParentSnapshotRepositoryFactory, BatchExecutionParentSnapshotResolveRequest,
     BatchExecutionPlanningInputRepository, BatchExecutionPlanningInputResolveRequest,
     BatchExecutionRepository, BatchExecutionRuntimeSettingsBindOutcome,
@@ -192,6 +196,48 @@ impl BatchExecutionPlanningService {
         let parent_repository = self
             .parent_snapshots
             .for_provider(account.provider_id.clone());
+        let resolved_input = self
+            .planning_inputs
+            .resolve_batch_execution_planning_input(BatchExecutionPlanningInputResolveRequest {
+                batch_execution_id: batch.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: command.scheduler_job_id,
+                worker_id: &command.worker_id,
+                correlation_id: &command.correlation_id,
+                at: command.at,
+                access: &access,
+            })
+            .await?;
+        if resolved_input.metadata.provider_id != account.provider_id
+            || resolved_input.public_metadata.provider_id != account.provider_id
+            || resolved_input.input.provider_id() != &account.provider_id
+            || resolved_input.public_input.provider_id() != &account.provider_id
+        {
+            return Err(BatchExecutionPlanningError::ParentBindingConflict);
+        }
+        let context = ProviderContext {
+            provider_id: account.provider_id.clone(),
+            account_id: account.id,
+            credential_refs: account.credential_refs,
+            correlation_id: command.correlation_id.clone(),
+        };
+        let runtime_settings_revision = ProviderBatchExecutionRuntimeSettingsRevision::try_new(
+            runtime_settings.resolved.schema_version,
+            runtime_settings.provider_revision,
+            runtime_settings.provider_account_revision,
+        )?;
+        let planning_request = BatchExecutionPlanningRequest {
+            batch_execution_id: batch.id,
+            attempt_id: attempt.id,
+            course_id: course.id,
+            remote_course_id: &course.remote_id,
+            requested_capabilities: &batch.requested_capabilities,
+            expected_child_count: batch.expected_child_count,
+            runtime_settings: &runtime_settings.resolved,
+            runtime_settings_revision,
+            public_input: &resolved_input.public_input,
+            planning_input: &resolved_input.input,
+        };
         if let Some(resolved) = parent_repository
             .resolve_batch_execution_parent_snapshot(BatchExecutionParentSnapshotResolveRequest {
                 batch_execution_id: batch.id,
@@ -204,12 +250,27 @@ impl BatchExecutionPlanningService {
             })
             .await?
         {
+            let existing_materialization_binding = resolved.materialization_binding;
             let restored = capability.restore_batch_execution_plan(&resolved.snapshot)?;
             let prepared = PreparedProviderBatchExecutionPlan::try_new(
                 resolved.snapshot,
                 restored,
                 batch.expected_child_count,
             )?;
+            let candidate = capability.build_batch_execution_materialization_binding(
+                &context,
+                &planning_request,
+                &prepared,
+            )?;
+            self.ensure_materialization_binding(
+                &command,
+                &attempt,
+                parent_repository.as_ref(),
+                existing_materialization_binding.as_ref(),
+                candidate,
+                &access,
+            )
+            .await?;
             let (_, execution_batch_plan) = prepared.into_parts();
             let child_plans = self
                 .materialize_child_plans(&command, &batch, &attempt, &execution_batch_plan)
@@ -228,48 +289,18 @@ impl BatchExecutionPlanningService {
             });
         }
 
-        let resolved_input = self
-            .planning_inputs
-            .resolve_batch_execution_planning_input(BatchExecutionPlanningInputResolveRequest {
-                batch_execution_id: batch.id,
-                attempt_id: attempt.id,
-                scheduler_job_id: command.scheduler_job_id,
-                worker_id: &command.worker_id,
-                correlation_id: &command.correlation_id,
-                at: command.at,
-                access: &access,
-            })
-            .await?;
-        if resolved_input.metadata.provider_id != account.provider_id
-            || resolved_input.input.provider_id() != &account.provider_id
-        {
-            return Err(BatchExecutionPlanningError::ParentBindingConflict);
-        }
-        let context = ProviderContext {
-            provider_id: account.provider_id.clone(),
-            account_id: account.id,
-            credential_refs: account.credential_refs,
-            correlation_id: command.correlation_id.clone(),
-        };
         let prepared = capability
-            .prepare_batch_execution_plan(
-                &context,
-                &BatchExecutionPlanningRequest {
-                    batch_execution_id: batch.id,
-                    attempt_id: attempt.id,
-                    course_id: course.id,
-                    remote_course_id: &course.remote_id,
-                    requested_capabilities: &batch.requested_capabilities,
-                    expected_child_count: batch.expected_child_count,
-                    runtime_settings: &runtime_settings.resolved,
-                    planning_input: &resolved_input.input,
-                },
-            )
+            .prepare_batch_execution_plan(&context, &planning_request)
             .await?;
         let restored = capability.restore_batch_execution_plan(prepared.parent_snapshot())?;
         if &restored != prepared.execution_batch_plan() {
             return Err(BatchExecutionPlanningError::DeterministicPlanMismatch);
         }
+        let materialization_binding = capability.build_batch_execution_materialization_binding(
+            &context,
+            &planning_request,
+            &prepared,
+        )?;
         let (parent_snapshot, execution_batch_plan) = prepared.into_parts();
         let outcome = parent_repository
             .bind_batch_execution_parent_snapshot(BatchExecutionParentSnapshotBindRequest {
@@ -287,6 +318,15 @@ impl BatchExecutionPlanningService {
             BatchExecutionParentSnapshotBindOutcome::Bound(_)
             | BatchExecutionParentSnapshotBindOutcome::AlreadyBound(_) => {}
         }
+        self.ensure_materialization_binding(
+            &command,
+            &attempt,
+            parent_repository.as_ref(),
+            None,
+            materialization_binding,
+            &access,
+        )
+        .await?;
         let child_plans = self
             .materialize_child_plans(&command, &batch, &attempt, &execution_batch_plan)
             .await?;
@@ -346,6 +386,55 @@ impl BatchExecutionPlanningService {
                 }
             }
         })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the immutable Provider binding stays visibly tied to its parent Attempt, claim and secret audit context"
+    )]
+    async fn ensure_materialization_binding(
+        &self,
+        command: &PlanBatchExecutionCommand,
+        attempt: &BatchExecutionAttempt,
+        repository: &dyn BatchExecutionParentSnapshotRepository,
+        existing: Option<&ProviderBatchExecutionMaterializationBinding>,
+        candidate: Option<ProviderBatchExecutionMaterializationBinding>,
+        access: &SecretAccess,
+    ) -> Result<(), BatchExecutionPlanningError> {
+        match (existing, candidate) {
+            (None, None) => Ok(()),
+            (Some(_), None) => Err(BatchExecutionPlanningError::MaterializationBindingConflict),
+            (Some(existing), Some(candidate)) => {
+                if existing.provider_id() == candidate.provider_id()
+                    && existing.binding_type() == candidate.binding_type()
+                    && existing.binding_digest() == candidate.binding_digest()
+                {
+                    Ok(())
+                } else {
+                    Err(BatchExecutionPlanningError::MaterializationBindingConflict)
+                }
+            }
+            (None, Some(binding)) => {
+                let outcome = repository
+                    .bind_batch_execution_materialization_binding(
+                        BatchExecutionMaterializationBindingBindRequest {
+                            batch_execution_id: command.batch_execution_id,
+                            attempt_id: attempt.id,
+                            scheduler_job_id: command.scheduler_job_id,
+                            worker_id: &command.worker_id,
+                            binding,
+                            correlation_id: &command.correlation_id,
+                            at: command.at,
+                            access,
+                        },
+                    )
+                    .await?;
+                match outcome {
+                    BatchExecutionMaterializationBindingBindOutcome::Bound(_)
+                    | BatchExecutionMaterializationBindingBindOutcome::AlreadyBound(_) => Ok(()),
+                }
+            }
+        }
     }
 
     async fn materialize_child_plans(
@@ -510,6 +599,8 @@ pub enum BatchExecutionPlanningError {
     RuntimeSettingsInvalid,
     #[error("fresh Provider batch output differs from parent-only reconstruction")]
     DeterministicPlanMismatch,
+    #[error("Provider batch materialization binding differs from the frozen parent Attempt")]
+    MaterializationBindingConflict,
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -532,8 +623,8 @@ mod tests {
 
     use asterism_domain::{
         AuthMethod, AuthState, CourseId, CreditAmount, CreditReservation, CreditReservationId,
-        CreditReservationState, PriceQuote, PriceQuoteId, ProviderAccountId, ProviderId,
-        RequestSource, SessionKind, TaskCapability, UserId,
+        CreditReservationState, ExecutionLease, PriceQuote, PriceQuoteId, ProviderAccountId,
+        ProviderId, RequestSource, SessionKind, TaskCapability, UserId,
     };
     use asterism_provider_api::{
         ExecutionEventSink, ExecutionMutationSequenceAdvanceCondition,
@@ -543,12 +634,14 @@ mod tests {
         ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderResult,
         ProviderRuntimeSettingsSchema, TaskExecutionCapability, VerificationLevel,
     };
-    use asterism_secrets::{SecretKey, SecretValue};
+    use asterism_secrets::{SecretAccess, SecretActor, SecretKey, SecretValue};
     use asterism_storage::{
-        BatchExecutionChildActivationBilling, BatchExecutionRepository,
+        BatchExecutionChildActivationBilling, BatchExecutionChildParentSnapshotResolveRequest,
+        BatchExecutionParentSnapshotRepository, BatchExecutionRepository,
         BatchExecutionScheduleOutcome, BatchExecutionScheduleRequest, Database,
-        ExecutionBillingReservation, SchedulerRepository, SecretKeyring,
-        SqliteBatchExecutionRepository, SqliteCourseProgressRepository,
+        ExecutionAttemptStartRequest, ExecutionBillingReservation, ExecutionLeaseRepository,
+        ExecutionRepository, SchedulerRepository, SecretKeyring, SqliteBatchExecutionRepository,
+        SqliteCourseProgressRepository, SqliteExecutionLeaseRepository, SqliteExecutionRepository,
         SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
         SqliteSchedulerRepository, SqliteSecretStore,
     };
@@ -587,6 +680,36 @@ mod tests {
             let parent = fake_parent()?;
             let plan = fake_plan(&parent)?;
             PreparedProviderBatchExecutionPlan::try_new(parent, plan, 2)
+        }
+
+        fn build_batch_execution_materialization_binding(
+            &self,
+            context: &ProviderContext,
+            request: &BatchExecutionPlanningRequest<'_>,
+            prepared: &PreparedProviderBatchExecutionPlan,
+        ) -> ProviderResult<Option<ProviderBatchExecutionMaterializationBinding>> {
+            if context.provider_id != self.metadata.id
+                || request.public_input.payload().expose_secret() != b"PUBLIC_POLICY"
+                || request.planning_input.payload().expose_secret() != b"PRIVATE_SELECTION"
+                || request.runtime_settings_revision.schema_version() != 1
+                || prepared.parent_snapshot().provider_id() != &self.metadata.id
+            {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "fake materialization binding request drifted",
+                ));
+            }
+            let mut payload = b"BOUND_MATERIALIZATION\0".to_vec();
+            payload.extend_from_slice(&request.public_input.input_digest());
+            payload.extend_from_slice(&request.planning_input.input_digest());
+            payload.extend_from_slice(&prepared.parent_snapshot().authority_digest());
+            payload.extend_from_slice(&prepared.parent_snapshot().batch_digest());
+            ProviderBatchExecutionMaterializationBinding::try_new(
+                self.metadata.id.clone(),
+                "test-batch.materialization-binding.v1",
+                SecretValue::new(payload),
+            )
+            .map(Some)
         }
 
         fn restore_batch_execution_plan(
@@ -719,6 +842,12 @@ mod tests {
             SecretValue::new(b"PRIVATE_SELECTION".to_vec()),
         )
         .unwrap();
+        let public_input = asterism_provider_api::ProviderBatchExecutionPublicInput::try_new(
+            ProviderId::new("test-batch").unwrap(),
+            "test-batch.public-request.v1",
+            SecretValue::new(b"PUBLIC_POLICY".to_vec()),
+        )
+        .unwrap();
         let batch = BatchExecution {
             id: BatchExecutionId::new(),
             provider_account_id: account_id,
@@ -740,6 +869,7 @@ mod tests {
             batch_repository
                 .schedule_batch_execution(BatchExecutionScheduleRequest {
                     batch_execution: &batch,
+                    public_input: &public_input,
                     planning_input: &planning_input,
                     idempotency_scope: "user:test-owner",
                     idempotency_key: "batch-plan-once",
@@ -769,6 +899,7 @@ mod tests {
                 runtime_settings: ProviderRuntimeSettingsSchema::default(),
                 authentication: None,
                 course_inventory: None,
+                course_enrollment: None,
                 task_inventory: None,
                 task_detail: None,
                 task_progress: None,
@@ -797,7 +928,7 @@ mod tests {
             Arc::new(SqliteProviderRuntimeSettingsRepository::new(
                 database.clone(),
             )),
-            secret_store,
+            secret_store.clone(),
             Arc::new(registry),
         );
         let command = PlanBatchExecutionCommand {
@@ -895,6 +1026,17 @@ mod tests {
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM batch_execution_parent_snapshots \
+                 WHERE batch_execution_id = ?",
+            )
+            .bind(batch.id.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM batch_execution_materialization_bindings \
                  WHERE batch_execution_id = ?",
             )
             .bind(batch.id.to_string())
@@ -1091,6 +1233,86 @@ mod tests {
                 .await
                 .unwrap(),
             2
+        );
+        let child_claimed_at = activation_command.at + Duration::seconds(1);
+        let child_jobs = scheduler
+            .claim_due_execution_jobs(
+                "batch-child-worker",
+                child_claimed_at,
+                child_claimed_at + Duration::minutes(5),
+                2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(child_jobs.len(), 2);
+        let child = &activated.child_activations[0];
+        let child_job = child_jobs
+            .iter()
+            .find(|job| job.id == child.scheduler_job_id)
+            .unwrap();
+        let child_lease = ExecutionLease {
+            task_id: child.task_id,
+            execution_id: child.execution_id,
+            worker_id: "batch-child-worker".to_owned(),
+            expires_at: child_claimed_at + Duration::minutes(5),
+        };
+        SqliteExecutionLeaseRepository::new(database.clone())
+            .try_acquire(&child_lease, child_claimed_at)
+            .await
+            .unwrap();
+        SqliteExecutionRepository::new(database.clone())
+            .start_attempt(ExecutionAttemptStartRequest {
+                execution_id: child.execution_id,
+                scheduler_job_id: child_job.id,
+                worker_id: "batch-child-worker",
+                at: child_claimed_at,
+                correlation_id: "batch-child-attempt",
+            })
+            .await
+            .unwrap();
+        let child_access = SecretAccess {
+            actor: SecretActor::CoreService("batch-child-test"),
+            correlation_id: "batch-child-parent-resolve".to_owned(),
+            reason: "resolve exact parent from activated child claim".to_owned(),
+        };
+        let resolved_child_parent = secret_store
+            .batch_execution_parent_snapshots(ProviderId::new("test-batch").unwrap())
+            .resolve_batch_execution_child_parent_snapshot(
+                BatchExecutionChildParentSnapshotResolveRequest {
+                    execution_id: child.execution_id,
+                    scheduler_job_id: child_job.id,
+                    worker_id: "batch-child-worker",
+                    correlation_id: "batch-child-parent-resolve",
+                    at: child_claimed_at,
+                    access: &child_access,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_child_parent.metadata.attempt_id, first.attempt.id);
+        assert_eq!(resolved_child_parent.position, child.position);
+        assert_eq!(resolved_child_parent.task_id, child.task_id);
+        assert_eq!(resolved_child_parent.execution_id, child.execution_id);
+        assert_eq!(
+            resolved_child_parent.snapshot.authority().expose_secret(),
+            b"PARENT_AUTHORITY"
+        );
+        assert_eq!(
+            resolved_child_parent.snapshot.batch().expose_secret(),
+            b"COMPLETE_BATCH"
+        );
+        let child_binding = resolved_child_parent.materialization_binding.unwrap();
+        assert_eq!(child_binding.provider_id().as_str(), "test-batch");
+        assert_eq!(
+            child_binding.binding_type(),
+            "test-batch.materialization-binding.v1"
+        );
+        assert!(
+            child_binding
+                .payload()
+                .expose_secret()
+                .starts_with(b"BOUND_MATERIALIZATION\0")
         );
         let post_activation = service.plan(command.clone()).await.unwrap();
         assert!(!post_activation.planned_fresh);

@@ -12,6 +12,7 @@ mod browser_bridge_credential;
 mod browser_bridge_session;
 mod browser_bridge_workflow;
 mod completion_observation;
+mod course_enrollment;
 mod credential;
 mod execution_job;
 mod execution_request;
@@ -99,6 +100,10 @@ pub use browser_bridge_workflow::{
 pub use completion_observation::{
     CompletionObservation, CompletionObservationError, observe_execution_completion,
     observe_submission_completion,
+};
+pub use course_enrollment::{
+    CourseEnrollmentRunResult, CourseEnrollmentService, CourseEnrollmentServiceError,
+    ExecuteCourseEnrollmentCommand, PrepareCourseEnrollmentCommand, RecoverCourseEnrollmentCommand,
 };
 pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use execution_job::{

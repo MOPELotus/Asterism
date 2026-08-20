@@ -11,6 +11,7 @@ pub mod automation;
 pub mod browser_bridge;
 pub mod browser_bridge_exchange;
 pub mod completion;
+pub mod course_enrollment;
 pub mod credits;
 pub mod execution;
 pub mod external_oauth;
@@ -69,6 +70,10 @@ pub use completion::{
     ScoreImprovementRetakeAuthority, ScoreImprovementState, ScoreImprovementWorkflow,
     ScoreImprovementWorkflowError, StrictCompletionState, StrictCompletionWorkflow,
     StrictCompletionWorkflowError, VerifiedCompletionBaseline,
+};
+pub use course_enrollment::{
+    CourseEnrollmentAttempt, CourseEnrollmentAttemptState, CourseEnrollmentDraft,
+    CourseEnrollmentMutationReceipt, CourseEnrollmentValidationError, CourseEnrollmentVerification,
 };
 pub use credits::{
     CreditAccount, CreditAmount, CreditError, CreditReservation, CreditReservationState,

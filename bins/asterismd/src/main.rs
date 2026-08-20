@@ -574,7 +574,11 @@ fn start_execution_scheduler(
             SqliteProtocolObservationRepository::new(database.clone()),
         ));
         let worker = if let Some(secret_store) = secret_store {
-            worker.with_question_session_artifacts(Arc::new(secret_store))
+            let secret_store = Arc::new(secret_store);
+            worker
+                .with_question_session_artifacts(secret_store.clone())
+                .with_batch_execution_parent_snapshots(secret_store.clone())
+                .with_execution_mutation_stage_outputs(secret_store)
         } else {
             worker
         };

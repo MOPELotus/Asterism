@@ -19,7 +19,7 @@ use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
     ExecutionMutationPlan, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
     ExecutionMutationSequenceObservation, ExecutionMutationSequencePlan,
-    ExecutionMutationSequenceRecoverySnapshot, ExecutionMutationSink,
+    ExecutionMutationSequenceRecoverySnapshot, ExecutionMutationSink, ExecutionMutationStageOutput,
     ExecutionMutationVerification, ExecutionRequest as ProviderExecutionRequest,
     ProviderCapability, ProviderContext, ProviderError, ProviderErrorKind,
     ProviderExecutionConcurrency, ProviderExecutionLog, ProviderProgress,
@@ -33,6 +33,7 @@ use asterism_scheduler::{
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
+    BatchExecutionChildParentSnapshotResolveRequest, BatchExecutionParentSnapshotRepositoryFactory,
     CompletionWorkflowRepository, ExecutionAtomicMutationIssueOutcome,
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
     ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationReceiptOutcome,
@@ -45,15 +46,18 @@ use asterism_storage::{
     ExecutionAttemptStartRequest, ExecutionCapabilityCallMutation, ExecutionCapabilityStep,
     ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
     ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
-    ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest,
-    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome, ProtocolObservationRepository,
-    ProviderAccountRuntimeRepository, QuestionSessionArtifactRepository,
-    QuestionSessionArtifactRepositoryFactory, QuestionSessionNextMaterializeOutcome,
-    QuestionSessionNextMaterializeRequest, QuestionSessionOperation,
-    QuestionSessionOperationAcceptRequest, QuestionSessionOperationFinishOutcome,
-    QuestionSessionOperationIssueOutcome, QuestionSessionOperationIssueRequest,
-    QuestionSessionOperationState, QuestionSessionTransition, QuestionSnapshot,
+    ExecutionLogAppendRequest, ExecutionMutationReceiptWithStageOutputOutcome,
+    ExecutionMutationReceiptWithStageOutputRequest, ExecutionMutationStageOutputRepositoryFactory,
+    ExecutionMutationStageOutputResolveRequest, ExecutionProgressUpdate,
+    ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest, ExecutionRepository,
+    ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome,
+    ProtocolObservationRepository, ProviderAccountRuntimeRepository,
+    QuestionSessionArtifactRepository, QuestionSessionArtifactRepositoryFactory,
+    QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
+    QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
+    QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
+    QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionTransition,
+    QuestionSnapshot, ResolvedBatchExecutionChildParentSnapshot,
     ResolvedQuestionSessionContinuation, SchedulerRepository, StorageError,
     StrictCompletionExecutionObservationRecord, StrictCompletionExecutionObservationRequest,
     SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, TaskRuntimeRepository,
@@ -208,6 +212,8 @@ pub struct ScheduledExecutionRunner<E, L, S, A, T> {
     accounts: A,
     tasks: T,
     question_sessions: Option<Arc<dyn QuestionSessionArtifactRepositoryFactory>>,
+    batch_parent_snapshots: Option<Arc<dyn BatchExecutionParentSnapshotRepositoryFactory>>,
+    mutation_stage_outputs: Option<Arc<dyn ExecutionMutationStageOutputRepositoryFactory>>,
     protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
     admission: Arc<ExecutionAdmissionController>,
     config: ExecutionRunnerConfig,
@@ -238,6 +244,8 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
             accounts,
             tasks,
             question_sessions: None,
+            batch_parent_snapshots: None,
+            mutation_stage_outputs: None,
             protocol_observations: None,
             admission: Arc::new(ExecutionAdmissionController::new(
                 config.global_concurrency_limit,
@@ -252,6 +260,24 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
         artifacts: Arc<dyn QuestionSessionArtifactRepositoryFactory>,
     ) -> Self {
         self.question_sessions = Some(artifacts);
+        self
+    }
+
+    #[must_use]
+    pub fn with_batch_execution_parent_snapshots(
+        mut self,
+        snapshots: Arc<dyn BatchExecutionParentSnapshotRepositoryFactory>,
+    ) -> Self {
+        self.batch_parent_snapshots = Some(snapshots);
+        self
+    }
+
+    #[must_use]
+    pub fn with_execution_mutation_stage_outputs(
+        mut self,
+        outputs: Arc<dyn ExecutionMutationStageOutputRepositoryFactory>,
+    ) -> Self {
+        self.mutation_stage_outputs = Some(outputs);
         self
     }
 
@@ -276,6 +302,14 @@ impl<E, L, S, A, T> std::fmt::Debug for ScheduledExecutionRunner<E, L, S, A, T> 
             .field("accounts", &"configured")
             .field("tasks", &"configured")
             .field("question_sessions", &self.question_sessions.is_some())
+            .field(
+                "mutation_stage_outputs",
+                &self.mutation_stage_outputs.is_some(),
+            )
+            .field(
+                "batch_parent_snapshots",
+                &self.batch_parent_snapshots.is_some(),
+            )
             .field(
                 "protocol_observations",
                 &self.protocol_observations.is_some(),
@@ -457,7 +491,10 @@ where
                     .await;
             }
         };
-        if !prepared.verification {
+        let requires_batch_parent = prepared
+            .capability
+            .requires_batch_execution_parent(&prepared.request);
+        if !prepared.verification && !requires_batch_parent {
             if duration_report_only(&execution.requested_capabilities) {
                 return self
                     .finish_recovery(
@@ -495,13 +532,47 @@ where
             .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
             .await?;
         let mutation_sequence = self
-            .load_execution_mutation_sequence_recovery(&prepared.request, attempt_id)
+            .load_execution_mutation_sequence_recovery(
+                job,
+                &prepared.request,
+                attempt_id,
+                now,
+                correlation_id,
+            )
             .await?;
-        let provider = prepared.capability.verify_execution_recovery(
-            &prepared.context,
-            &prepared.request,
-            mutation_sequence.as_ref(),
-        );
+        let batch_parent = self
+            .resolve_batch_child_parent(job, task, &prepared, now, correlation_id)
+            .await?;
+        let provider = async {
+            if let Some(parent) = batch_parent.as_ref() {
+                let Some(mutation_sequence) = mutation_sequence.as_ref() else {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Internal,
+                        "materialized batch-child recovery is missing its mutation sequence",
+                    ));
+                };
+                prepared
+                    .capability
+                    .verify_batch_child_recovery(
+                        &prepared.context,
+                        &parent.snapshot,
+                        parent.materialization_binding.as_ref(),
+                        parent.position,
+                        &prepared.request,
+                        mutation_sequence,
+                    )
+                    .await
+            } else {
+                prepared
+                    .capability
+                    .verify_execution_recovery(
+                        &prepared.context,
+                        &prepared.request,
+                        mutation_sequence.as_ref(),
+                    )
+                    .await
+            }
+        };
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -560,8 +631,11 @@ where
 
     async fn load_execution_mutation_sequence_recovery(
         &self,
+        job: &ScheduledJob,
         request: &ProviderExecutionRequest,
         attempt_id: asterism_domain::ExecutionAttemptId,
+        at: Timestamp,
+        correlation_id: &str,
     ) -> Result<Option<ExecutionMutationSequenceRecoverySnapshot>, ScheduledExecutionRunError> {
         let plan = self
             .executions
@@ -587,44 +661,27 @@ where
         let Some(artifact) = request.provider_plan_artifact.clone() else {
             return Err(invalid_mutation_recovery_storage());
         };
+        let mut stage_outputs = self
+            .resolve_mutation_stage_outputs_for_recovery(
+                job,
+                artifact.provider_id(),
+                request.execution_id,
+                attempt_id,
+                at,
+                correlation_id,
+            )
+            .await?;
         let mut records = Vec::with_capacity(mutations.len());
         for mutation in mutations {
-            if mutation.execution_id != request.execution_id || mutation.attempt_id != attempt_id {
-                return Err(invalid_mutation_recovery_storage());
-            }
-            let issue = ExecutionMutationIssue::new(
-                mutation.ordinal,
-                mutation.operation_type,
-                mutation.request_digest,
-            )
-            .map_err(|_| invalid_mutation_recovery_storage())?;
-            let receipt = restore_mutation_receipt(
-                mutation.ordinal,
-                mutation.response_digest,
-                mutation.accepted,
-                mutation.received_at,
-                mutation.retry_not_before,
-            )?;
-            let verification = match (
-                mutation.verification_digest,
-                mutation.verified,
-                mutation.verified_at,
-            ) {
-                (Some(observation_digest), Some(verified), Some(_)) => Some(
-                    ExecutionMutationVerification::new(
-                        mutation.ordinal,
-                        observation_digest,
-                        verified,
-                    )
-                    .map_err(|_| invalid_mutation_recovery_storage())?,
-                ),
-                (None, None, None) => None,
-                _ => return Err(invalid_mutation_recovery_storage()),
-            };
-            records.push(
-                ExecutionMutationRecoveryRecord::try_new(issue, receipt, verification)
-                    .map_err(|_| invalid_mutation_recovery_storage())?,
-            );
+            records.push(restore_mutation_recovery_record(
+                mutation,
+                request.execution_id,
+                attempt_id,
+                &mut stage_outputs,
+            )?);
+        }
+        if !stage_outputs.is_empty() {
+            return Err(invalid_mutation_recovery_storage());
         }
         let observations = observations
             .into_iter()
@@ -650,6 +707,44 @@ where
         )
         .map(Some)
         .map_err(|_| invalid_mutation_recovery_storage())
+    }
+
+    async fn resolve_mutation_stage_outputs_for_recovery(
+        &self,
+        job: &ScheduledJob,
+        provider_id: &ProviderId,
+        execution_id: ExecutionId,
+        attempt_id: asterism_domain::ExecutionAttemptId,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<BTreeMap<u32, ExecutionMutationStageOutput>, ScheduledExecutionRunError> {
+        let Some(factory) = self.mutation_stage_outputs.as_ref() else {
+            return Ok(BTreeMap::new());
+        };
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("execution-mutation-recovery"),
+            correlation_id: correlation_id.to_owned(),
+            reason: "resolve encrypted mutation successor state for read-only recovery".to_owned(),
+        };
+        factory
+            .for_provider(provider_id.clone())
+            .resolve_execution_mutation_stage_outputs(ExecutionMutationStageOutputResolveRequest {
+                execution_id,
+                attempt_id,
+                scheduler_job_id: job.id,
+                worker_id: claimed_worker(job)?,
+                correlation_id,
+                at,
+                access: &access,
+            })
+            .await
+            .map(|outputs| {
+                outputs
+                    .into_iter()
+                    .map(|output| (output.ordinal(), output))
+                    .collect()
+            })
+            .map_err(Into::into)
     }
 
     async fn record_recovery_mutation_verification(
@@ -769,7 +864,14 @@ where
             )
             .await?
         {
-            Ok(prepared) if prepared.verification => prepared,
+            Ok(prepared)
+                if prepared.verification
+                    || prepared
+                        .capability
+                        .requires_batch_execution_parent(&prepared.request) =>
+            {
+                prepared
+            }
             Ok(_) => {
                 return self
                     .finish_recovery(
@@ -797,16 +899,50 @@ where
         };
         let execution_id = claimed_execution_id(job)?;
         let mutation_sequence = self
-            .load_execution_mutation_sequence_recovery(&prepared.request, attempt_id)
+            .load_execution_mutation_sequence_recovery(
+                job,
+                &prepared.request,
+                attempt_id,
+                now,
+                correlation_id,
+            )
+            .await?;
+        let batch_parent = self
+            .resolve_batch_child_parent(job, task, &prepared, now, correlation_id)
             .await?;
         let _admission = self
             .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
             .await?;
-        let provider = prepared.capability.verify_execution_recovery(
-            &prepared.context,
-            &prepared.request,
-            mutation_sequence.as_ref(),
-        );
+        let provider = async {
+            if let Some(parent) = batch_parent.as_ref() {
+                let Some(mutation_sequence) = mutation_sequence.as_ref() else {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Internal,
+                        "materialized batch-child recovery is missing its mutation sequence",
+                    ));
+                };
+                prepared
+                    .capability
+                    .verify_batch_child_recovery(
+                        &prepared.context,
+                        &parent.snapshot,
+                        parent.materialization_binding.as_ref(),
+                        parent.position,
+                        &prepared.request,
+                        mutation_sequence,
+                    )
+                    .await
+            } else {
+                prepared
+                    .capability
+                    .verify_execution_recovery(
+                        &prepared.context,
+                        &prepared.request,
+                        mutation_sequence.as_ref(),
+                    )
+                    .await
+            }
+        };
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2160,6 +2296,9 @@ where
                     .await;
             }
             let issued_at = Utc::now().max(now);
+            let batch_parent = self
+                .resolve_batch_child_parent(job, task, &prepared, issued_at, correlation_id)
+                .await?;
             let issue = if call.capabilities.len() == 1 {
                 self.executions
                     .issue_execution_capability_step(ExecutionCapabilityStepMutation {
@@ -2213,12 +2352,30 @@ where
                 worker_id: claimed_worker(job)?,
                 correlation_id,
                 provider_id: prepared.context.provider_id.clone(),
+                mutation_stage_outputs: self.mutation_stage_outputs.as_ref(),
                 mutations_enabled: true,
                 claim_lost: Arc::clone(&claim_lost),
             };
-            let mutation = prepared
-                .capability
-                .execute(&prepared.context, &prepared.request, &sink);
+            let mutation = async {
+                if let Some(parent) = batch_parent.as_ref() {
+                    prepared
+                        .capability
+                        .execute_batch_child(
+                            &prepared.context,
+                            &parent.snapshot,
+                            parent.materialization_binding.as_ref(),
+                            parent.position,
+                            &prepared.request,
+                            &sink,
+                        )
+                        .await
+                } else {
+                    prepared
+                        .capability
+                        .execute(&prepared.context, &prepared.request, &sink)
+                        .await
+                }
+            };
             tokio::pin!(mutation);
             let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2647,6 +2804,65 @@ where
         }))
     }
 
+    async fn resolve_batch_child_parent(
+        &self,
+        job: &ScheduledJob,
+        task: &Task,
+        prepared: &PreparedProviderCall,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<Option<ResolvedBatchExecutionChildParentSnapshot>, ScheduledExecutionRunError> {
+        let requires_parent = prepared
+            .capability
+            .requires_batch_execution_parent(&prepared.request);
+        let requires_materialization_binding = prepared
+            .capability
+            .requires_batch_execution_materialization_binding(&prepared.request);
+        if requires_materialization_binding && !requires_parent {
+            return Err(ScheduledExecutionRunError::StateConflict);
+        }
+        let Some(factory) = self.batch_parent_snapshots.as_ref() else {
+            return if requires_parent {
+                Err(ScheduledExecutionRunError::StateConflict)
+            } else {
+                Ok(None)
+            };
+        };
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("execution-batch-child-dispatch"),
+            correlation_id: correlation_id.to_owned(),
+            reason: "resolve exact parent Attempt for materialized batch child".to_owned(),
+        };
+        let resolved = factory
+            .for_provider(prepared.context.provider_id.clone())
+            .resolve_batch_execution_child_parent_snapshot(
+                BatchExecutionChildParentSnapshotResolveRequest {
+                    execution_id: prepared.request.execution_id,
+                    scheduler_job_id: job.id,
+                    worker_id: claimed_worker(job)?,
+                    correlation_id,
+                    at,
+                    access: &access,
+                },
+            )
+            .await?;
+        match resolved {
+            Some(resolved)
+                if requires_parent
+                    && resolved.execution_id == prepared.request.execution_id
+                    && resolved.task_id == task.id
+                    && resolved.metadata.provider_id == prepared.context.provider_id
+                    && (!requires_materialization_binding
+                        || resolved.materialization_binding.is_some()) =>
+            {
+                Ok(Some(resolved))
+            }
+            Some(_) | None if requires_parent => Err(ScheduledExecutionRunError::StateConflict),
+            Some(_) => Err(ScheduledExecutionRunError::StateConflict),
+            None => Ok(None),
+        }
+    }
+
     async fn record_provider_completion_observation(
         &self,
         job: &ScheduledJob,
@@ -2761,6 +2977,9 @@ where
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
         let now = attempt.started_at;
+        let batch_parent = self
+            .resolve_batch_child_parent(job, task, prepared, now, correlation_id)
+            .await?;
         let _admission = self
             .acquire_admission(
                 job,
@@ -2778,12 +2997,30 @@ where
             worker_id: claimed_worker(job)?,
             correlation_id,
             provider_id: prepared.context.provider_id.clone(),
+            mutation_stage_outputs: self.mutation_stage_outputs.as_ref(),
             mutations_enabled: true,
             claim_lost: Arc::clone(&claim_lost),
         };
-        let provider = prepared
-            .capability
-            .execute(&prepared.context, &prepared.request, &sink);
+        let provider = async {
+            if let Some(parent) = batch_parent.as_ref() {
+                prepared
+                    .capability
+                    .execute_batch_child(
+                        &prepared.context,
+                        &parent.snapshot,
+                        parent.materialization_binding.as_ref(),
+                        parent.position,
+                        &prepared.request,
+                        &sink,
+                    )
+                    .await
+            } else {
+                prepared
+                    .capability
+                    .execute(&prepared.context, &prepared.request, &sink)
+                    .await
+            }
+        };
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -3001,6 +3238,7 @@ where
             worker_id: claimed_worker(job)?,
             correlation_id,
             provider_id: prepared.context.provider_id.clone(),
+            mutation_stage_outputs: self.mutation_stage_outputs.as_ref(),
             mutations_enabled: false,
             claim_lost: Arc::clone(&claim_lost),
         };
@@ -4240,6 +4478,48 @@ fn invalid_mutation_recovery_storage() -> ScheduledExecutionRunError {
     ))
 }
 
+fn restore_mutation_recovery_record(
+    mutation: asterism_storage::ExecutionAtomicMutation,
+    execution_id: ExecutionId,
+    attempt_id: asterism_domain::ExecutionAttemptId,
+    stage_outputs: &mut BTreeMap<u32, ExecutionMutationStageOutput>,
+) -> Result<ExecutionMutationRecoveryRecord, ScheduledExecutionRunError> {
+    if mutation.execution_id != execution_id || mutation.attempt_id != attempt_id {
+        return Err(invalid_mutation_recovery_storage());
+    }
+    let ordinal = mutation.ordinal;
+    let issue =
+        ExecutionMutationIssue::new(ordinal, mutation.operation_type, mutation.request_digest)
+            .map_err(|_| invalid_mutation_recovery_storage())?;
+    let receipt = restore_mutation_receipt(
+        ordinal,
+        mutation.response_digest,
+        mutation.accepted,
+        mutation.received_at,
+        mutation.retry_not_before,
+    )?;
+    let verification = match (
+        mutation.verification_digest,
+        mutation.verified,
+        mutation.verified_at,
+    ) {
+        (Some(observation_digest), Some(verified), Some(_)) => Some(
+            ExecutionMutationVerification::new(ordinal, observation_digest, verified)
+                .map_err(|_| invalid_mutation_recovery_storage())?,
+        ),
+        (None, None, None) => None,
+        _ => return Err(invalid_mutation_recovery_storage()),
+    };
+    let mut record = ExecutionMutationRecoveryRecord::try_new(issue, receipt, verification)
+        .map_err(|_| invalid_mutation_recovery_storage())?;
+    if let Some(output) = stage_outputs.remove(&ordinal) {
+        record = record
+            .try_with_stage_output(output)
+            .map_err(|_| invalid_mutation_recovery_storage())?;
+    }
+    Ok(record)
+}
+
 fn restore_mutation_receipt(
     ordinal: u32,
     response_digest: Option<[u8; 32]>,
@@ -4305,6 +4585,7 @@ struct PersistedExecutionEventSink<'a, E> {
     worker_id: &'a str,
     correlation_id: &'a str,
     provider_id: ProviderId,
+    mutation_stage_outputs: Option<&'a Arc<dyn ExecutionMutationStageOutputRepositoryFactory>>,
     mutations_enabled: bool,
     claim_lost: Arc<AtomicBool>,
 }
@@ -4582,6 +4863,54 @@ impl<E: ExecutionAtomicMutationRepository> ExecutionMutationSink
                 Err(ambiguous_mutation_error())
             }
             Err(error) => Err(self.map_mutation_storage_error(&error, true)),
+        }
+    }
+
+    async fn record_receipt_with_stage_output(
+        &self,
+        receipt: ExecutionMutationReceipt,
+        stage_output: ExecutionMutationStageOutput,
+    ) -> Result<(), ProviderError> {
+        if !receipt.accepted()
+            || receipt.ordinal() != stage_output.ordinal()
+            || stage_output.provider_id() != &self.provider_id
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation stage output is detached from its receipt",
+            ));
+        }
+        let Some(factory) = self.mutation_stage_outputs else {
+            return Err(ambiguous_mutation_error());
+        };
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("execution-mutation-stage-output"),
+            correlation_id: self.correlation_id.to_owned(),
+            reason: "atomically persist accepted mutation receipt and encrypted successor state"
+                .to_owned(),
+        };
+        match factory
+            .for_provider(self.provider_id.clone())
+            .record_execution_mutation_receipt_with_stage_output(
+                ExecutionMutationReceiptWithStageOutputRequest {
+                    execution_id: self.execution_id,
+                    attempt_id: self.attempt_id,
+                    ordinal: receipt.ordinal(),
+                    scheduler_job_id: self.scheduler_job_id,
+                    worker_id: self.worker_id,
+                    response_digest: receipt.response_digest(),
+                    stage_output,
+                    correlation_id: self.correlation_id,
+                    at: Utc::now(),
+                    access: &access,
+                },
+            )
+            .await
+        {
+            Ok(ExecutionMutationReceiptWithStageOutputOutcome::Recorded(_)) => Ok(()),
+            Ok(ExecutionMutationReceiptWithStageOutputOutcome::AlreadyRecorded(_)) | Err(_) => {
+                Err(ambiguous_mutation_error())
+            }
         }
     }
 
@@ -5054,6 +5383,7 @@ mod tests {
         SqliteSchedulerRepository, SqliteSecretStore, SqliteTaskQueryRepository,
         SubmissionDraftRepository,
     };
+    use sha2::Digest as _;
     use sqlx::Row;
 
     use super::*;
@@ -5291,8 +5621,8 @@ mod tests {
             match self.behavior {
                 ProviderBehavior::Success | ProviderBehavior::VerifiedPending => {
                     if self.behavior == ProviderBehavior::Success {
-                        persist_fixture_mutation(events, request.provider_plan_artifact.as_ref())
-                            .await?;
+                        let artifact = request.provider_plan_artifact.as_ref();
+                        persist_fixture_mutation(events, artifact, None).await?;
                     }
                     events
                         .report(ProviderProgress {
@@ -5467,12 +5797,16 @@ mod tests {
     async fn persist_fixture_mutation(
         events: &(dyn ExecutionEventSink + Send + Sync),
         artifact: Option<&asterism_provider_api::ProviderExecutionPlanArtifact>,
+        receipt: Option<ExecutionMutationReceipt>,
     ) -> ProviderResult<()> {
         let mutations = events
             .mutation_sink()
             .expect("Core execution fixture supplies durable mutation sink");
+        let uses_sequence = artifact.is_some_and(|artifact| {
+            artifact.artifact_type() == "provider-alpha.execution-sequence.v1"
+        });
         if let Some(artifact) = artifact {
-            if artifact.artifact_type() == "provider-alpha.execution-sequence.v1" {
+            if uses_sequence {
                 mutations
                     .prepare_sequence_plan(
                         &ExecutionMutationSequencePlan::try_new(
@@ -5528,12 +5862,32 @@ mod tests {
                 &ExecutionMutationIssue::new(1, "provider-alpha.fixture.save", [41; 32]).unwrap(),
             )
             .await?;
-        mutations
-            .record_receipt(ExecutionMutationReceipt::new(1, [42; 32], true).unwrap())
-            .await?;
-        mutations
-            .record_verification(ExecutionMutationVerification::new(1, [43; 32], true).unwrap())
-            .await
+        let receipt =
+            receipt.unwrap_or_else(|| ExecutionMutationReceipt::new(1, [42; 32], true).unwrap());
+        if uses_sequence && receipt.accepted() {
+            let successor = b"provider-private-fixture-successor";
+            mutations
+                .record_receipt_with_stage_output(
+                    receipt,
+                    ExecutionMutationStageOutput::try_new(
+                        ProviderId::new("provider-alpha").unwrap(),
+                        1,
+                        "provider-alpha.fixture.state.v1",
+                        sha2::Sha256::digest(successor).into(),
+                        SecretValue::new(successor.to_vec()),
+                    )
+                    .unwrap(),
+                )
+                .await?;
+        } else {
+            mutations.record_receipt(receipt).await?;
+        }
+        if receipt.accepted() {
+            mutations
+                .record_verification(ExecutionMutationVerification::new(1, [43; 32], true).unwrap())
+                .await?;
+        }
+        Ok(())
     }
 
     #[async_trait]
@@ -6967,6 +7321,19 @@ mod tests {
         assert_eq!(snapshot.records()[0].issue().ordinal(), 1);
         assert_eq!(snapshot.records()[0].receipt().unwrap().ordinal(), 1);
         assert!(snapshot.records()[0].verification().unwrap().verified());
+        let stage_output = snapshot.records()[0]
+            .stage_output()
+            .expect("accepted receipt restores its encrypted successor state");
+        assert_eq!(stage_output.provider_id().as_str(), "provider-alpha");
+        assert_eq!(stage_output.ordinal(), 1);
+        assert_eq!(
+            stage_output.output_type(),
+            "provider-alpha.fixture.state.v1"
+        );
+        assert_eq!(
+            stage_output.value().expose_secret(),
+            b"provider-private-fixture-successor"
+        );
         assert_eq!(snapshot.observations().len(), 1);
         assert_eq!(
             snapshot.observations()[0].observation_type(),
@@ -7028,28 +7395,8 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_restores_the_original_mutation_retry_delay() {
-        let fixture = Fixture::verified_sequence_recovering(ProviderBehavior::Success).await;
-        let received_at: String = sqlx::query_scalar(
-            "SELECT received_at FROM execution_atomic_mutations WHERE execution_id = ?",
-        )
-        .bind(fixture.execution_id.to_string())
-        .fetch_one(fixture.database.pool())
-        .await
-        .unwrap();
-        let received_at = chrono::DateTime::parse_from_rfc3339(&received_at)
-            .unwrap()
-            .with_timezone(&Utc);
-        sqlx::query(
-            "UPDATE execution_atomic_mutations \
-             SET accepted = 0, retry_not_before = ?, verification_digest = NULL, \
-                 verified = NULL, verified_at = NULL \
-             WHERE execution_id = ?",
-        )
-        .bind((received_at + chrono::Duration::seconds(120)).to_rfc3339())
-        .bind(fixture.execution_id.to_string())
-        .execute(fixture.database.pool())
-        .await
-        .unwrap();
+        let fixture =
+            Fixture::verified_retryable_sequence_recovering(ProviderBehavior::Success, 120).await;
 
         let outcome = fixture
             .runner
@@ -7283,6 +7630,7 @@ mod tests {
                     runtime_settings: runtime_settings_schema(),
                     authentication: None,
                     course_inventory: None,
+                    course_enrollment: None,
                     task_inventory: None,
                     task_detail: None,
                     task_progress: Some(provider.clone()),
@@ -7322,6 +7670,7 @@ mod tests {
             )
             .unwrap()
             .with_question_session_artifacts(Arc::new(secret_store.clone()))
+            .with_execution_mutation_stage_outputs(Arc::new(secret_store.clone()))
             .with_protocol_observations(Arc::new(
                 SqliteProtocolObservationRepository::new(database.clone()),
             ));
@@ -7363,7 +7712,24 @@ mod tests {
         async fn verified_sequence_recovering(behavior: ProviderBehavior) -> Self {
             Self::verified(behavior)
                 .await
-                .enter_sequence_recovery()
+                .enter_sequence_recovery(None)
+                .await
+        }
+
+        async fn verified_retryable_sequence_recovering(
+            behavior: ProviderBehavior,
+            retry_after_seconds: u64,
+        ) -> Self {
+            Self::verified(behavior)
+                .await
+                .enter_sequence_recovery(Some(
+                    ExecutionMutationReceipt::new_retryable_rejection(
+                        1,
+                        [42; 32],
+                        retry_after_seconds,
+                    )
+                    .unwrap(),
+                ))
                 .await
         }
 
@@ -7666,7 +8032,10 @@ mod tests {
             self.expire_and_claim_recovery().await
         }
 
-        async fn enter_sequence_recovery(self) -> Self {
+        async fn enter_sequence_recovery(
+            mut self,
+            receipt: Option<ExecutionMutationReceipt>,
+        ) -> Self {
             let artifact = self.attach_provider_sequence_plan_artifact().await;
             let attempt = self.start_abandoned_attempt().await;
             let claim_lost = Arc::new(AtomicBool::new(false));
@@ -7678,12 +8047,14 @@ mod tests {
                 worker_id: "execution-worker",
                 correlation_id: "stale-sequence-test",
                 provider_id: ProviderId::new("provider-alpha").unwrap(),
+                mutation_stage_outputs: self.runner.mutation_stage_outputs.as_ref(),
                 mutations_enabled: true,
                 claim_lost,
             };
-            persist_fixture_mutation(&sink, Some(&artifact))
+            persist_fixture_mutation(&sink, Some(&artifact), receipt)
                 .await
                 .unwrap();
+            self.now = Utc::now() + chrono::Duration::seconds(1);
             self.expire_and_claim_recovery().await
         }
 

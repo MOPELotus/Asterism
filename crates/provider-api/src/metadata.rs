@@ -37,6 +37,9 @@ pub enum VerificationLevel {
 pub enum ProviderCapability {
     Authentication,
     CourseInventory,
+    /// The Provider can prepare, issue once, and independently verify a
+    /// course-level enrollment mutation from an immutable encrypted draft.
+    CourseEnrollment,
     TaskInventory,
     TaskDetail,
     TaskProgressRead,

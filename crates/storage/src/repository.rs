@@ -10,7 +10,9 @@ use asterism_domain::{
     AuthBootstrapSessionId, AuthSession, AuthSessionId, BatchExecution, BatchExecutionAttempt,
     BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
     BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession, BrowserBridgeSessionId,
-    CompletionPolicySnapshot, Course, CourseAggregateProgress, CourseId, CreditAccount,
+    CompletionPolicySnapshot, Course, CourseAggregateProgress, CourseEnrollmentAttempt,
+    CourseEnrollmentAttemptId, CourseEnrollmentDraft, CourseEnrollmentDraftId,
+    CourseEnrollmentMutationReceipt, CourseEnrollmentVerification, CourseId, CreditAccount,
     CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId, Execution,
     ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent,
     ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
@@ -26,8 +28,10 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
-    ExecutionMutationPlan, ExecutionMutationSequencePlan, ExecutionParentBatchSnapshot,
-    ProviderBatchExecutionPlanningInput, ProviderExecutionBatchPlan, ProviderExecutionPlanArtifact,
+    ExecutionMutationPlan, ExecutionMutationSequencePlan, ExecutionMutationStageOutput,
+    ExecutionParentBatchSnapshot, ProviderBatchExecutionMaterializationBinding,
+    ProviderBatchExecutionPlanningInput, ProviderBatchExecutionPublicInput,
+    ProviderCourseEnrollmentDraft, ProviderExecutionBatchPlan, ProviderExecutionPlanArtifact,
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
     ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
@@ -102,6 +106,158 @@ pub trait AnswerEvidenceRepository: Send + Sync {
         owner_id: UserId,
         execution_attempt_id: ExecutionAttemptId,
     ) -> Result<Option<AnswerEvidenceClassCounts>, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CourseEnrollmentDraftRecord {
+    pub draft: CourseEnrollmentDraft,
+    pub artifact_type: String,
+    pub preview_sanitized: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub struct ResolvedCourseEnrollmentDraft {
+    pub record: CourseEnrollmentDraftRecord,
+    pub provider_draft: ProviderCourseEnrollmentDraft,
+}
+
+#[derive(Debug)]
+pub struct CourseEnrollmentDraftCreateRequest<'a> {
+    pub draft_id: CourseEnrollmentDraftId,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub provider_draft: &'a ProviderCourseEnrollmentDraft,
+    pub created_at: Timestamp,
+    pub correlation_id: &'a str,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CourseEnrollmentDraftCreateOutcome {
+    Created(CourseEnrollmentDraftRecord),
+    AlreadyExists(CourseEnrollmentDraftRecord),
+}
+
+#[derive(Debug)]
+pub struct CourseEnrollmentDraftResolveRequest<'a> {
+    pub draft_id: CourseEnrollmentDraftId,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub correlation_id: &'a str,
+    pub access: &'a SecretAccess,
+}
+
+/// Encrypted immutable draft boundary for course-level enrollment mutations.
+#[async_trait]
+pub trait CourseEnrollmentDraftRepository: Send + Sync {
+    async fn create_course_enrollment_draft(
+        &self,
+        request: CourseEnrollmentDraftCreateRequest<'_>,
+    ) -> Result<CourseEnrollmentDraftCreateOutcome, SecretStoreError>;
+
+    async fn resolve_course_enrollment_draft(
+        &self,
+        request: CourseEnrollmentDraftResolveRequest<'_>,
+    ) -> Result<Option<ResolvedCourseEnrollmentDraft>, SecretStoreError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CourseEnrollmentAttemptCreateOutcome {
+    Created(CourseEnrollmentAttempt),
+    AlreadyExists(CourseEnrollmentAttempt),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CourseEnrollmentAttemptCreateRequest {
+    pub attempt_id: CourseEnrollmentAttemptId,
+    pub draft_id: CourseEnrollmentDraftId,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CourseEnrollmentAttemptMutationIssueRequest<'a> {
+    pub attempt_id: CourseEnrollmentAttemptId,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub operation_type: &'a str,
+    pub request_digest: [u8; 32],
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CourseEnrollmentAttemptReceiptRequest {
+    pub attempt_id: CourseEnrollmentAttemptId,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub receipt: CourseEnrollmentMutationReceipt,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CourseEnrollmentAttemptVerificationBeginRequest {
+    pub attempt_id: CourseEnrollmentAttemptId,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CourseEnrollmentAttemptVerificationRecordRequest {
+    pub attempt_id: CourseEnrollmentAttemptId,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub verification: CourseEnrollmentVerification,
+}
+
+/// Atomic no-replay lifecycle for an immutable Course enrollment draft.
+#[async_trait]
+pub trait CourseEnrollmentAttemptRepository: Send + Sync {
+    async fn create_course_enrollment_attempt(
+        &self,
+        request: CourseEnrollmentAttemptCreateRequest,
+    ) -> Result<CourseEnrollmentAttemptCreateOutcome, StorageError>;
+
+    async fn issue_course_enrollment_mutation(
+        &self,
+        request: CourseEnrollmentAttemptMutationIssueRequest<'_>,
+    ) -> Result<CourseEnrollmentAttempt, StorageError>;
+
+    async fn record_course_enrollment_receipt(
+        &self,
+        request: CourseEnrollmentAttemptReceiptRequest,
+    ) -> Result<CourseEnrollmentAttempt, StorageError>;
+
+    async fn begin_course_enrollment_verification(
+        &self,
+        request: CourseEnrollmentAttemptVerificationBeginRequest,
+    ) -> Result<CourseEnrollmentAttempt, StorageError>;
+
+    async fn record_course_enrollment_verification(
+        &self,
+        request: CourseEnrollmentAttemptVerificationRecordRequest,
+    ) -> Result<CourseEnrollmentAttempt, StorageError>;
+
+    async fn find_owned_course_enrollment_attempt(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        attempt_id: CourseEnrollmentAttemptId,
+    ) -> Result<Option<CourseEnrollmentAttempt>, StorageError>;
+}
+
+pub trait CourseEnrollmentRepository:
+    CourseEnrollmentDraftRepository + CourseEnrollmentAttemptRepository
+{
+}
+
+impl<T> CourseEnrollmentRepository for T where
+    T: CourseEnrollmentDraftRepository + CourseEnrollmentAttemptRepository
+{
+}
+
+pub trait CourseEnrollmentRepositoryFactory: Send + Sync {
+    fn for_provider(&self, provider_id: ProviderId) -> Arc<dyn CourseEnrollmentRepository>;
 }
 
 #[async_trait]
@@ -2218,6 +2374,7 @@ pub trait ExecutionLeaseRepository: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct BatchExecutionScheduleRequest<'a> {
     pub batch_execution: &'a BatchExecution,
+    pub public_input: &'a ProviderBatchExecutionPublicInput,
     pub planning_input: &'a ProviderBatchExecutionPlanningInput,
     pub idempotency_scope: &'a str,
     pub idempotency_key: &'a str,
@@ -2283,6 +2440,15 @@ pub struct BatchExecutionPlanningInputRecord {
     pub bound_at: Timestamp,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchExecutionPublicInputRecord {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub provider_id: ProviderId,
+    pub input_type: String,
+    pub input_digest: [u8; 32],
+    pub bound_at: Timestamp,
+}
+
 #[derive(Clone, Debug)]
 pub struct BatchExecutionPlanningInputResolveRequest<'a> {
     pub batch_execution_id: asterism_domain::BatchExecutionId,
@@ -2297,6 +2463,8 @@ pub struct BatchExecutionPlanningInputResolveRequest<'a> {
 #[derive(Debug)]
 pub struct ResolvedBatchExecutionPlanningInput {
     pub metadata: BatchExecutionPlanningInputRecord,
+    pub public_metadata: BatchExecutionPublicInputRecord,
+    pub public_input: ProviderBatchExecutionPublicInput,
     pub input: ProviderBatchExecutionPlanningInput,
 }
 
@@ -2685,6 +2853,71 @@ pub enum ExecutionAtomicMutationReceiptOutcome {
     AlreadyRecorded(ExecutionAtomicMutation),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionMutationStageOutputRecord {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub ordinal: u32,
+    pub provider_id: ProviderId,
+    pub output_type: String,
+    pub output_digest: [u8; 32],
+    pub stored_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct ExecutionMutationReceiptWithStageOutputRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub ordinal: u32,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub response_digest: [u8; 32],
+    pub stage_output: ExecutionMutationStageOutput,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionMutationReceiptWithStageOutputOutcome {
+    Recorded(ExecutionMutationStageOutputRecord),
+    AlreadyRecorded(ExecutionMutationStageOutputRecord),
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionMutationStageOutputResolveRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+/// Provider-scoped encrypted successor state for accepted mutation receipts.
+/// The receipt and secret bind are one transaction; resolution requires the
+/// same live Execution worker claim and active Attempt.
+#[async_trait]
+pub trait ExecutionMutationStageOutputRepository: Send + Sync {
+    async fn record_execution_mutation_receipt_with_stage_output(
+        &self,
+        request: ExecutionMutationReceiptWithStageOutputRequest<'_>,
+    ) -> Result<ExecutionMutationReceiptWithStageOutputOutcome, SecretStoreError>;
+
+    async fn resolve_execution_mutation_stage_outputs(
+        &self,
+        request: ExecutionMutationStageOutputResolveRequest<'_>,
+    ) -> Result<Vec<ExecutionMutationStageOutput>, SecretStoreError>;
+}
+
+pub trait ExecutionMutationStageOutputRepositoryFactory: Send + Sync {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn ExecutionMutationStageOutputRepository>;
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionAtomicMutationVerificationRequest<'a> {
     pub execution_id: ExecutionId,
@@ -2941,6 +3174,34 @@ pub struct BatchExecutionParentSnapshotRecord {
     pub bound_at: Timestamp,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchExecutionMaterializationBindingRecord {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub provider_id: ProviderId,
+    pub binding_type: String,
+    pub binding_digest: [u8; 32],
+    pub bound_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct BatchExecutionMaterializationBindingBindRequest<'a> {
+    pub batch_execution_id: asterism_domain::BatchExecutionId,
+    pub attempt_id: asterism_domain::BatchExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub binding: ProviderBatchExecutionMaterializationBinding,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchExecutionMaterializationBindingBindOutcome {
+    Bound(BatchExecutionMaterializationBindingRecord),
+    AlreadyBound(BatchExecutionMaterializationBindingRecord),
+}
+
 #[derive(Debug)]
 pub struct BatchExecutionParentSnapshotBindRequest<'a> {
     pub batch_execution_id: asterism_domain::BatchExecutionId,
@@ -2968,6 +3229,27 @@ pub struct BatchExecutionParentSnapshotResolveRequest<'a> {
 pub struct ResolvedBatchExecutionParentSnapshot {
     pub metadata: BatchExecutionParentSnapshotRecord,
     pub snapshot: ExecutionParentBatchSnapshot,
+    pub materialization_binding: Option<ProviderBatchExecutionMaterializationBinding>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchExecutionChildParentSnapshotResolveRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct ResolvedBatchExecutionChildParentSnapshot {
+    pub metadata: BatchExecutionParentSnapshotRecord,
+    pub position: u32,
+    pub task_id: TaskId,
+    pub execution_id: ExecutionId,
+    pub snapshot: ExecutionParentBatchSnapshot,
+    pub materialization_binding: Option<ProviderBatchExecutionMaterializationBinding>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2981,6 +3263,11 @@ pub enum BatchExecutionParentSnapshotBindOutcome {
 /// live parent lease and exact active parent Attempt.
 #[async_trait]
 pub trait BatchExecutionParentSnapshotRepository: Send + Sync {
+    async fn bind_batch_execution_materialization_binding(
+        &self,
+        request: BatchExecutionMaterializationBindingBindRequest<'_>,
+    ) -> Result<BatchExecutionMaterializationBindingBindOutcome, SecretStoreError>;
+
     async fn bind_batch_execution_parent_snapshot(
         &self,
         request: BatchExecutionParentSnapshotBindRequest<'_>,
@@ -2990,6 +3277,15 @@ pub trait BatchExecutionParentSnapshotRepository: Send + Sync {
         &self,
         request: BatchExecutionParentSnapshotResolveRequest<'_>,
     ) -> Result<Option<ResolvedBatchExecutionParentSnapshot>, SecretStoreError>;
+
+    /// Resolves the same encrypted parent pair through one activated child
+    /// Execution's live scheduler claim and lease. Ordinary Executions return
+    /// `None`; a mapped child with drifted parent/Attempt/position bindings
+    /// fails closed rather than falling back to singleton dispatch.
+    async fn resolve_batch_execution_child_parent_snapshot(
+        &self,
+        request: BatchExecutionChildParentSnapshotResolveRequest<'_>,
+    ) -> Result<Option<ResolvedBatchExecutionChildParentSnapshot>, SecretStoreError>;
 }
 
 /// Creates one permanently Provider-scoped encrypted parent snapshot boundary

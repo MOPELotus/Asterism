@@ -3,8 +3,9 @@ use std::{sync::Arc, time::Duration as StdDuration};
 use asterism_domain::Timestamp;
 use asterism_provider_api::ProviderRegistry;
 use asterism_storage::{
-    CompletionWorkflowRepository, ExecutionAtomicMutationRepository,
-    ExecutionCapabilityStepRepository, ExecutionLeaseRepository, ExecutionRepository,
+    BatchExecutionParentSnapshotRepositoryFactory, CompletionWorkflowRepository,
+    ExecutionAtomicMutationRepository, ExecutionCapabilityStepRepository, ExecutionLeaseRepository,
+    ExecutionMutationStageOutputRepositoryFactory, ExecutionRepository,
     ExecutionVerificationRecoveryRepository, ProviderAccountRuntimeRepository,
     QuestionSessionArtifactRepositoryFactory, SchedulerRepository, StorageError,
     TaskRuntimeRepository,
@@ -91,6 +92,24 @@ where
         artifacts: Arc<dyn QuestionSessionArtifactRepositoryFactory>,
     ) -> Self {
         self.runner = self.runner.with_question_session_artifacts(artifacts);
+        self
+    }
+
+    #[must_use]
+    pub fn with_batch_execution_parent_snapshots(
+        mut self,
+        snapshots: Arc<dyn BatchExecutionParentSnapshotRepositoryFactory>,
+    ) -> Self {
+        self.runner = self.runner.with_batch_execution_parent_snapshots(snapshots);
+        self
+    }
+
+    #[must_use]
+    pub fn with_execution_mutation_stage_outputs(
+        mut self,
+        outputs: Arc<dyn ExecutionMutationStageOutputRepositoryFactory>,
+    ) -> Self {
+        self.runner = self.runner.with_execution_mutation_stage_outputs(outputs);
         self
     }
 

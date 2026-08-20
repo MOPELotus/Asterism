@@ -110,6 +110,8 @@ pub enum StorageError {
     BatchExecutionStateConflict,
     #[error("batch execution attempt is missing, finished, or belongs to another parent")]
     BatchExecutionAttemptNotActive,
+    #[error("course enrollment Attempt state conflicts with the requested transition")]
+    CourseEnrollmentStateConflict,
     #[error("outbox claim is no longer owned by this worker")]
     OutboxClaimLost,
     #[error("outbox claim expiry must be in the future and its batch must be non-zero")]
@@ -139,6 +141,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fresh-database check keeps the complete cross-migration schema inventory visible"
+    )]
     async fn all_migrations_apply_to_a_fresh_database() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
@@ -148,7 +154,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 80);
+        assert_eq!(migration_count, 85);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -250,6 +256,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(protocol_tables, 2);
+
+        let checkpoint_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ( \
+                'course_enrollment_drafts', 'course_enrollment_attempts', \
+                'batch_execution_public_inputs', 'batch_execution_materialization_bindings', \
+                'execution_mutation_stage_outputs' \
+             )",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(checkpoint_tables, 5);
     }
 
     #[tokio::test]

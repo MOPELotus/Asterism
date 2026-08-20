@@ -38,7 +38,10 @@ use crate::{
     auth_session::{fetch_auth_session, update_auth_session_in_transaction},
     browser_bridge::{fetch_exchange, find_claimed_session_for_exchange, insert_exchange_audit},
 };
-use crate::{QuestionReadContinuationRepositoryFactory, QuestionSessionArtifactRepositoryFactory};
+use crate::{
+    CourseEnrollmentRepositoryFactory, QuestionReadContinuationRepositoryFactory,
+    QuestionSessionArtifactRepositoryFactory,
+};
 
 const MAX_SECRET_BYTES: usize = 1024 * 1024;
 
@@ -132,6 +135,20 @@ impl SqliteSecretStore {
         Self { database, keyring }
     }
 
+    /// Builds a permanently Provider-scoped encrypted Course enrollment draft
+    /// repository. Exact invitation request bytes never pass through generic
+    /// query or API storage.
+    pub fn course_enrollment_drafts(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteCourseEnrollmentDraftRepository {
+        crate::SqliteCourseEnrollmentDraftRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
     /// Builds a permanently Provider-scoped encrypted continuation repository
     /// for operations that occur before the first real Question snapshot.
     pub fn question_read_continuations(
@@ -191,6 +208,19 @@ impl SqliteSecretStore {
         provider_id: ProviderId,
     ) -> crate::SqliteExecutionParentBatchSnapshotRepository {
         crate::SqliteExecutionParentBatchSnapshotRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
+    /// Builds the Provider-scoped repository that atomically binds a definite
+    /// accepted mutation receipt to its encrypted successor state.
+    pub fn execution_mutation_stage_outputs(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteExecutionMutationStageOutputRepository {
+        crate::SqliteExecutionMutationStageOutputRepository::new(
             self.database.clone(),
             self.keyring.clone(),
             provider_id,
@@ -319,6 +349,21 @@ impl crate::BatchExecutionParentSnapshotRepositoryFactory for SqliteSecretStore 
         provider_id: ProviderId,
     ) -> Arc<dyn crate::BatchExecutionParentSnapshotRepository> {
         Arc::new(self.batch_execution_parent_snapshots(provider_id))
+    }
+}
+
+impl crate::ExecutionMutationStageOutputRepositoryFactory for SqliteSecretStore {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn crate::ExecutionMutationStageOutputRepository> {
+        Arc::new(self.execution_mutation_stage_outputs(provider_id))
+    }
+}
+
+impl CourseEnrollmentRepositoryFactory for SqliteSecretStore {
+    fn for_provider(&self, provider_id: ProviderId) -> Arc<dyn crate::CourseEnrollmentRepository> {
+        Arc::new(self.course_enrollment_drafts(provider_id))
     }
 }
 

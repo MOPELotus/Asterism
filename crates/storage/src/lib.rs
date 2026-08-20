@@ -12,9 +12,11 @@ mod browser_bridge;
 mod browser_bridge_command;
 mod completion_workflow;
 mod course;
+mod course_enrollment;
 mod credit;
 mod database;
 mod execution;
+mod execution_mutation_stage_output;
 mod execution_parent_batch;
 mod external_oauth;
 mod interactive_auth;
@@ -50,9 +52,11 @@ pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
 pub use browser_bridge_command::SqliteBrowserBridgeCommandArtifactRepository;
 pub use completion_workflow::SqliteCompletionWorkflowRepository;
 pub use course::SqliteCourseProgressRepository;
+pub use course_enrollment::SqliteCourseEnrollmentDraftRepository;
 pub use credit::{CreditGrant, CreditGrantOutcome, CreditGrantResult, SqliteCreditRepository};
 pub use database::{Database, StorageError};
 pub use execution::SqliteExecutionRepository;
+pub use execution_mutation_stage_output::SqliteExecutionMutationStageOutputRepository;
 pub use execution_parent_batch::SqliteExecutionParentBatchSnapshotRepository;
 pub use interactive_auth::SqliteInteractiveAuthContinuationRepository;
 pub use lease::{LeaseAcquireOutcome, SqliteExecutionLeaseRepository};
@@ -82,13 +86,16 @@ pub use repository::{
     BatchExecutionChildActivationRecord, BatchExecutionChildActivationRepository,
     BatchExecutionChildActivationRequest, BatchExecutionChildExecutionCreateOutcome,
     BatchExecutionChildExecutionCreateRequest, BatchExecutionChildExecutionRecord,
-    BatchExecutionChildExecutionRepository, BatchExecutionChildPlanMaterializeOutcome,
-    BatchExecutionChildPlanMaterializeRequest, BatchExecutionChildPlanRecord,
-    BatchExecutionChildPlanRepository, BatchExecutionParentSnapshotBindOutcome,
-    BatchExecutionParentSnapshotBindRequest, BatchExecutionParentSnapshotRecord,
-    BatchExecutionParentSnapshotRepository, BatchExecutionParentSnapshotRepositoryFactory,
-    BatchExecutionParentSnapshotResolveRequest, BatchExecutionPlanningInputRecord,
-    BatchExecutionPlanningInputRepository, BatchExecutionPlanningInputResolveRequest,
+    BatchExecutionChildExecutionRepository, BatchExecutionChildParentSnapshotResolveRequest,
+    BatchExecutionChildPlanMaterializeOutcome, BatchExecutionChildPlanMaterializeRequest,
+    BatchExecutionChildPlanRecord, BatchExecutionChildPlanRepository,
+    BatchExecutionMaterializationBindingBindOutcome,
+    BatchExecutionMaterializationBindingBindRequest, BatchExecutionMaterializationBindingRecord,
+    BatchExecutionParentSnapshotBindOutcome, BatchExecutionParentSnapshotBindRequest,
+    BatchExecutionParentSnapshotRecord, BatchExecutionParentSnapshotRepository,
+    BatchExecutionParentSnapshotRepositoryFactory, BatchExecutionParentSnapshotResolveRequest,
+    BatchExecutionPlanningInputRecord, BatchExecutionPlanningInputRepository,
+    BatchExecutionPlanningInputResolveRequest, BatchExecutionPublicInputRecord,
     BatchExecutionRepository, BatchExecutionRuntimeSettingsBindOutcome,
     BatchExecutionRuntimeSettingsBindRequest, BatchExecutionRuntimeSettingsRepository,
     BatchExecutionRuntimeSettingsResolveRequest, BatchExecutionScheduleOutcome,
@@ -104,14 +111,22 @@ pub use repository::{
     BrowserBridgeWorkflowCommitOutcome, BrowserBridgeWorkflowCommitRequest,
     BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue,
     ClaimedAnswerBootstrapHarvest, CompletionWorkflowCreateOutcome, CompletionWorkflowRepository,
-    CourseAggregateProgressRecord, CourseProgressRepository, CourseRuntimeRepository,
-    CreditQueryRepository, CreditRepository, CreditReservationDetail, CreditReservationPage,
-    CreditTransactionPage, DispatchedBrowserBridgeCommand, ExecutionAtomicMutation,
-    ExecutionAtomicMutationIssueOutcome, ExecutionAtomicMutationIssueRequest,
-    ExecutionAtomicMutationPlanPrepareOutcome, ExecutionAtomicMutationPlanPrepareRequest,
-    ExecutionAtomicMutationPlanRecord, ExecutionAtomicMutationReceiptOutcome,
-    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRecoveryVerificationRequest,
-    ExecutionAtomicMutationRepository, ExecutionAtomicMutationSequenceObservationOutcome,
+    CourseAggregateProgressRecord, CourseEnrollmentAttemptCreateOutcome,
+    CourseEnrollmentAttemptCreateRequest, CourseEnrollmentAttemptMutationIssueRequest,
+    CourseEnrollmentAttemptReceiptRequest, CourseEnrollmentAttemptRepository,
+    CourseEnrollmentAttemptVerificationBeginRequest,
+    CourseEnrollmentAttemptVerificationRecordRequest, CourseEnrollmentDraftCreateOutcome,
+    CourseEnrollmentDraftCreateRequest, CourseEnrollmentDraftRecord,
+    CourseEnrollmentDraftRepository, CourseEnrollmentDraftResolveRequest,
+    CourseEnrollmentRepository, CourseEnrollmentRepositoryFactory, CourseProgressRepository,
+    CourseRuntimeRepository, CreditQueryRepository, CreditRepository, CreditReservationDetail,
+    CreditReservationPage, CreditTransactionPage, DispatchedBrowserBridgeCommand,
+    ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
+    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
+    ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationPlanRecord,
+    ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
+    ExecutionAtomicMutationRecoveryVerificationRequest, ExecutionAtomicMutationRepository,
+    ExecutionAtomicMutationSequenceObservationOutcome,
     ExecutionAtomicMutationSequenceObservationRecord,
     ExecutionAtomicMutationSequenceObservationRequest,
     ExecutionAtomicMutationSequencePlanPrepareOutcome,
@@ -121,7 +136,10 @@ pub use repository::{
     ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
     ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
     ExecutionCapabilityStepState, ExecutionDetail, ExecutionLeaseRepository,
-    ExecutionLogAppendRequest, ExecutionLogPage, ExecutionPage,
+    ExecutionLogAppendRequest, ExecutionLogPage, ExecutionMutationReceiptWithStageOutputOutcome,
+    ExecutionMutationReceiptWithStageOutputRequest, ExecutionMutationStageOutputRecord,
+    ExecutionMutationStageOutputRepository, ExecutionMutationStageOutputRepositoryFactory,
+    ExecutionMutationStageOutputResolveRequest, ExecutionPage,
     ExecutionParentBatchSnapshotBindOutcome, ExecutionParentBatchSnapshotBindRequest,
     ExecutionParentBatchSnapshotRecord, ExecutionParentBatchSnapshotRepository,
     ExecutionParentBatchSnapshotResolveRequest, ExecutionProgressUpdate, ExecutionQueryRepository,
@@ -157,9 +175,10 @@ pub use repository::{
     QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
     QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionRepository,
     QuestionSessionTransition, QuestionSnapshot, QuestionSnapshotRepository,
-    ResolvedBatchExecutionParentSnapshot, ResolvedBatchExecutionPlanningInput,
-    ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
-    ResolvedBrowserBridgeWorkflowContext, ResolvedBrowserBridgeWorkflowPlan,
+    ResolvedBatchExecutionChildParentSnapshot, ResolvedBatchExecutionParentSnapshot,
+    ResolvedBatchExecutionPlanningInput, ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
+    ResolvedBrowserBridgeRuntimeState, ResolvedBrowserBridgeWorkflowContext,
+    ResolvedBrowserBridgeWorkflowPlan, ResolvedCourseEnrollmentDraft,
     ResolvedExecutionParentBatchSnapshot, ResolvedInteractiveAuthCandidate,
     ResolvedQuestionReadContinuation, ResolvedQuestionSessionContinuation, ScanScheduleRepository,
     SchedulerRepository, ScoreImprovementBeginRequest, ScoreImprovementObserveRequest,

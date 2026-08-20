@@ -8,6 +8,7 @@ mod auth;
 mod auth_bootstrap;
 mod browser_bridge;
 mod course;
+mod course_enrollment;
 mod credit;
 mod execution;
 mod openapi_contract;
@@ -140,6 +141,18 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/api/v1/provider-accounts/{account_id}/scan",
             post(account::scan_provider_account),
+        )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/course-enrollment-drafts",
+            post(course_enrollment::prepare_course_enrollment),
+        )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/course-enrollment-drafts/{draft_id}/execute",
+            post(course_enrollment::execute_course_enrollment),
+        )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/course-enrollment-drafts/{draft_id}/attempts/{attempt_id}/recover",
+            post(course_enrollment::recover_course_enrollment),
         )
         .route(
             "/api/v1/provider-accounts/{account_id}/credentials",
@@ -614,6 +627,84 @@ pub fn openapi_document() -> Value {
                     "429": {"description": "Provider rate limit reached"},
                     "502": {"description": "Provider returned inconsistent inventory"},
                     "503": {"description": "Provider is temporarily unavailable"}
+                }
+            }},
+            "/api/v1/provider-accounts/{account_id}/course-enrollment-drafts": {"post": {
+                "operationId": "prepareCourseEnrollmentDraft",
+                "description": "Resolves one invitation read-only and freezes the exact Provider join request in encrypted storage. No enrollment mutation is issued.",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["draft_id", "invitation"],
+                    "properties": {
+                        "draft_id": {"type": "string", "format": "uuid"},
+                        "invitation": {"type": "string", "minLength": 1, "maxLength": 4096, "writeOnly": true}
+                    }
+                }}}},
+                "responses": {
+                    "201": {"description": "Immutable encrypted enrollment draft and sanitized preview created or resolved idempotently", "content": {"application/json": {"schema": {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["draft_id", "provider_account_id", "remote_course_id", "remote_class_id", "preview_sanitized", "created_at"],
+                        "properties": {
+                            "draft_id": {"type": "string", "format": "uuid"},
+                            "provider_account_id": {"type": "string", "format": "uuid"},
+                            "remote_course_id": {"type": "string"},
+                            "remote_class_id": {"type": "string"},
+                            "preview_sanitized": {"type": "object", "additionalProperties": true},
+                            "created_at": {"type": "string", "format": "date-time"}
+                        }
+                    }}}},
+                    "400": {"description": "Invalid invitation or draft identity"},
+                    "404": {"description": "Provider account not found"},
+                    "409": {"description": "Account is unauthenticated or Provider capability is unavailable"},
+                    "429": {"description": "Provider rate limit reached"},
+                    "502": {"description": "Provider returned an invalid invitation preview"},
+                    "503": {"description": "Provider or encrypted storage is unavailable"}
+                }
+            }},
+            "/api/v1/provider-accounts/{account_id}/course-enrollment-drafts/{draft_id}/execute": {"post": {
+                "operationId": "executeCourseEnrollmentDraft",
+                "description": "Issues the frozen non-idempotent join request at most once. An ambiguous response switches permanently to fresh Course inventory verification.",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [
+                    {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "draft_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                ],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["attempt_id", "confirm_non_idempotent_enrollment"],
+                    "properties": {
+                        "attempt_id": {"type": "string", "format": "uuid"},
+                        "confirm_non_idempotent_enrollment": {"type": "boolean", "enum": [true]}
+                    }
+                }}}},
+                "responses": {
+                    "200": {"description": "Durable enrollment Attempt state; verification_pending is safe to recover and never replay", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["attempt_id", "draft_id", "state", "updated_at"], "properties": {"attempt_id": {"type": "string", "format": "uuid"}, "draft_id": {"type": "string", "format": "uuid"}, "state": {"type": "string", "enum": ["prepared", "mutation_issued", "receipt_recorded", "verification_pending", "succeeded", "rejected", "cancelled", "failed_before_issue"]}, "updated_at": {"type": "string", "format": "date-time"}}}}}},
+                    "400": {"description": "Explicit confirmation or UUID is invalid"},
+                    "404": {"description": "Account or enrollment draft not found"},
+                    "409": {"description": "Attempt binding changed, is non-replayable, or account is not ready"},
+                    "429": {"description": "Provider rate limit reached"},
+                    "502": {"description": "Provider enrollment protocol drifted"},
+                    "503": {"description": "Provider is temporarily unavailable before issue"}
+                }
+            }},
+            "/api/v1/provider-accounts/{account_id}/course-enrollment-drafts/{draft_id}/attempts/{attempt_id}/recover": {"post": {
+                "operationId": "recoverCourseEnrollmentAttempt",
+                "description": "Performs only fresh Course inventory verification for a previously issued enrollment Attempt; the join mutation is never repeated.",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [
+                    {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "draft_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "attempt_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                ],
+                "responses": {
+                    "200": {"description": "Current durable enrollment Attempt state after read-only verification", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["attempt_id", "draft_id", "state", "updated_at"], "properties": {"attempt_id": {"type": "string", "format": "uuid"}, "draft_id": {"type": "string", "format": "uuid"}, "state": {"type": "string", "enum": ["prepared", "mutation_issued", "receipt_recorded", "verification_pending", "succeeded", "rejected", "cancelled", "failed_before_issue"]}, "updated_at": {"type": "string", "format": "date-time"}}}}}},
+                    "404": {"description": "Account, draft, or Attempt not found"},
+                    "409": {"description": "Attempt is pre-issue or cross-bound"},
+                    "429": {"description": "Provider rate limit reached"},
+                    "502": {"description": "Provider inventory verification drifted"},
+                    "503": {"description": "Provider inventory is temporarily unavailable"}
                 }
             }},
             "/api/v1/provider-accounts/{account_id}/credentials": {"put": {
@@ -2762,6 +2853,7 @@ mod tests {
                 },
                 authentication: None,
                 course_inventory: Some(inventory.clone()),
+                course_enrollment: None,
                 task_inventory: Some(inventory.clone()),
                 task_detail: None,
                 task_progress: None,

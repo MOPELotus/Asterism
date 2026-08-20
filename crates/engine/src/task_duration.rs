@@ -458,6 +458,7 @@ mod tests {
                 runtime_settings: ProviderRuntimeSettingsSchema::default(),
                 authentication: None,
                 course_inventory: None,
+                course_enrollment: None,
                 task_inventory: None,
                 task_detail: None,
                 task_progress: None,

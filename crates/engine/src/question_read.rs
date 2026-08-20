@@ -1439,6 +1439,7 @@ mod tests {
                 runtime_settings: ProviderRuntimeSettingsSchema::default(),
                 authentication: None,
                 course_inventory: None,
+                course_enrollment: None,
                 task_inventory: None,
                 task_detail: None,
                 task_progress: None,
@@ -1525,6 +1526,10 @@ mod tests {
         snapshots: RecordingSnapshots,
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture keeps the complete Provider capability slot matrix visible for registry validation"
+    )]
     fn fixture(advertises_questions: bool) -> Fixture {
         let owner_id = UserId::new();
         let account_id = ProviderAccountId::new();
@@ -1594,6 +1599,7 @@ mod tests {
                 runtime_settings: ProviderRuntimeSettingsSchema::default(),
                 authentication: None,
                 course_inventory: None,
+                course_enrollment: None,
                 task_inventory: None,
                 task_detail: None,
                 task_progress: None,

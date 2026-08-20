@@ -4,12 +4,12 @@ use asterism_domain::ProviderId;
 
 use crate::{
     AnswerHistoryHarvestCapability, AnswerResolveCapability, AuthenticationCapability,
-    BrowserBridgeCapability, BrowserBridgeResultDisposition, CourseInventoryCapability,
-    DurationReadCapability, ProviderCapability, ProviderIdentity, ProviderMetadata,
-    ProviderRuntimeSettingsSchema, ProviderSettingsError, QuestionInventoryCapability,
-    QuestionParseCapability, SubmissionBuildCapability, SubmissionExecuteCapability,
-    SubmissionVerifyCapability, TaskDetailCapability, TaskExecutionCapability,
-    TaskInventoryCapability, TaskProgressCapability,
+    BrowserBridgeCapability, BrowserBridgeResultDisposition, CourseEnrollmentCapability,
+    CourseInventoryCapability, DurationReadCapability, ProviderCapability, ProviderIdentity,
+    ProviderMetadata, ProviderRuntimeSettingsSchema, ProviderSettingsError,
+    QuestionInventoryCapability, QuestionParseCapability, SubmissionBuildCapability,
+    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskDetailCapability,
+    TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
 };
 
 const MAX_CAPTURE_RECIPE_ALTERNATIVES: usize = 8;
@@ -20,6 +20,7 @@ pub struct ProviderEntry {
     pub runtime_settings: ProviderRuntimeSettingsSchema,
     pub authentication: Option<Arc<dyn AuthenticationCapability>>,
     pub course_inventory: Option<Arc<dyn CourseInventoryCapability>>,
+    pub course_enrollment: Option<Arc<dyn CourseEnrollmentCapability>>,
     pub task_inventory: Option<Arc<dyn TaskInventoryCapability>>,
     pub task_detail: Option<Arc<dyn TaskDetailCapability>>,
     pub task_progress: Option<Arc<dyn TaskProgressCapability>>,
@@ -43,6 +44,7 @@ impl std::fmt::Debug for ProviderEntry {
             .field("runtime_settings", &self.runtime_settings)
             .field("authentication", &self.authentication.is_some())
             .field("course_inventory", &self.course_inventory.is_some())
+            .field("course_enrollment", &self.course_enrollment.is_some())
             .field("task_inventory", &self.task_inventory.is_some())
             .field("task_detail", &self.task_detail.is_some())
             .field("task_progress", &self.task_progress.is_some())
@@ -70,6 +72,7 @@ impl ProviderEntry {
             runtime_settings: ProviderRuntimeSettingsSchema::default(),
             authentication: None,
             course_inventory: None,
+            course_enrollment: None,
             task_inventory: None,
             task_detail: None,
             task_progress: None,
@@ -148,6 +151,10 @@ impl ProviderEntry {
             (
                 ProviderCapability::CourseInventory,
                 self.course_inventory.is_some(),
+            ),
+            (
+                ProviderCapability::CourseEnrollment,
+                self.course_enrollment.is_some(),
             ),
             (
                 ProviderCapability::TaskInventory,
@@ -247,6 +254,10 @@ impl ProviderEntry {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the registry keeps every capability slot identity in one complete audit matrix"
+    )]
     fn validate_identities(&self) -> Result<(), RegistryError> {
         self.validate_answer_history_identity()?;
         let identities = [
@@ -259,6 +270,12 @@ impl ProviderEntry {
             (
                 "course_inventory",
                 self.course_inventory
+                    .as_ref()
+                    .map(|implementation| implementation.metadata()),
+            ),
+            (
+                "course_enrollment",
+                self.course_enrollment
                     .as_ref()
                     .map(|implementation| implementation.metadata()),
             ),

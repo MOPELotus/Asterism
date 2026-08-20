@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use asterism_domain::{
     AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, BatchExecutionAttemptId,
@@ -1527,6 +1527,82 @@ pub struct ExecutionPlanningRequest<'a> {
 }
 
 const MAX_BATCH_EXECUTION_PLANNING_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_BATCH_EXECUTION_PUBLIC_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_BATCH_EXECUTION_MATERIALIZATION_BINDING_BYTES: usize = 8 * 1024 * 1024;
+
+/// Bounded Provider-namespaced product authorization bytes for one Course
+/// batch. Unlike the private planning input, this value preserves the exact
+/// caller-visible policy encoding and idempotency identity. Core encrypts it at
+/// rest even though Providers must keep the payload credential-free.
+pub struct ProviderBatchExecutionPublicInput {
+    provider_id: ProviderId,
+    input_type: String,
+    input_digest: [u8; 32],
+    payload: SecretValue,
+}
+
+impl ProviderBatchExecutionPublicInput {
+    /// Builds one namespaced, bounded public authorization input.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign/unsafe type name and empty or oversized bytes.
+    pub fn try_new(
+        provider_id: ProviderId,
+        input_type: impl Into<String>,
+        payload: SecretValue,
+    ) -> ProviderResult<Self> {
+        let input_type = input_type.into();
+        let bytes = payload.expose_secret();
+        if !valid_provider_execution_artifact_type(&provider_id, &input_type)
+            || bytes.is_empty()
+            || bytes.len() > MAX_BATCH_EXECUTION_PUBLIC_INPUT_BYTES
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider batch execution public input is invalid",
+            ));
+        }
+        Ok(Self {
+            input_digest: digest_parent_batch_bytes(
+                b"asterism.provider-batch-public-input.v1\0",
+                &input_type,
+                bytes,
+            ),
+            provider_id,
+            input_type,
+            payload,
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn input_type(&self) -> &str {
+        &self.input_type
+    }
+
+    pub const fn input_digest(&self) -> [u8; 32] {
+        self.input_digest
+    }
+
+    pub const fn payload(&self) -> &SecretValue {
+        &self.payload
+    }
+}
+
+impl fmt::Debug for ProviderBatchExecutionPublicInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderBatchExecutionPublicInput")
+            .field("provider_id", &self.provider_id)
+            .field("input_type", &self.input_type)
+            .field("input_digest", &"[HASHED]")
+            .field("payload", &self.payload)
+            .finish()
+    }
+}
 
 /// Bounded Provider-private product authorization and selection input for one
 /// Course-scoped parent planning pass. Core must persist and resolve the bytes
@@ -1602,6 +1678,125 @@ impl fmt::Debug for ProviderBatchExecutionPlanningInput {
     }
 }
 
+/// Exact Provider settings revisions frozen by Core for one batch planning
+/// Attempt. Missing override revisions mean that scope used schema defaults.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderBatchExecutionRuntimeSettingsRevision {
+    schema_version: u32,
+    provider_revision: Option<u32>,
+    provider_account_revision: Option<u32>,
+}
+
+impl ProviderBatchExecutionRuntimeSettingsRevision {
+    /// # Errors
+    ///
+    /// Rejects an unversioned schema or zero persisted revision.
+    pub fn try_new(
+        schema_version: u32,
+        provider_revision: Option<u32>,
+        provider_account_revision: Option<u32>,
+    ) -> ProviderResult<Self> {
+        if schema_version == 0
+            || provider_revision == Some(0)
+            || provider_account_revision == Some(0)
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider batch execution runtime revision is invalid",
+            ));
+        }
+        Ok(Self {
+            schema_version,
+            provider_revision,
+            provider_account_revision,
+        })
+    }
+
+    pub const fn schema_version(self) -> u32 {
+        self.schema_version
+    }
+
+    pub const fn provider_revision(self) -> Option<u32> {
+        self.provider_revision
+    }
+
+    pub const fn provider_account_revision(self) -> Option<u32> {
+        self.provider_account_revision
+    }
+}
+
+/// Provider-private, credential-free proof that the exact public product
+/// authorization, encrypted planning input, frozen Core scope and prepared
+/// parent/children were jointly materialized. Core treats the bytes as opaque,
+/// encrypts them at rest and passes them only to the exact child dispatch.
+pub struct ProviderBatchExecutionMaterializationBinding {
+    provider_id: ProviderId,
+    binding_type: String,
+    binding_digest: [u8; 32],
+    payload: SecretValue,
+}
+
+impl ProviderBatchExecutionMaterializationBinding {
+    /// # Errors
+    ///
+    /// Rejects a foreign/unsafe type name and empty or oversized bytes.
+    pub fn try_new(
+        provider_id: ProviderId,
+        binding_type: impl Into<String>,
+        payload: SecretValue,
+    ) -> ProviderResult<Self> {
+        let binding_type = binding_type.into();
+        let bytes = payload.expose_secret();
+        if !valid_provider_execution_artifact_type(&provider_id, &binding_type)
+            || bytes.is_empty()
+            || bytes.len() > MAX_BATCH_EXECUTION_MATERIALIZATION_BINDING_BYTES
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider batch execution materialization binding is invalid",
+            ));
+        }
+        Ok(Self {
+            binding_digest: digest_parent_batch_bytes(
+                b"asterism.provider-batch-materialization-binding.v1\0",
+                &binding_type,
+                bytes,
+            ),
+            provider_id,
+            binding_type,
+            payload,
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn binding_type(&self) -> &str {
+        &self.binding_type
+    }
+
+    pub const fn binding_digest(&self) -> [u8; 32] {
+        self.binding_digest
+    }
+
+    pub const fn payload(&self) -> &SecretValue {
+        &self.payload
+    }
+}
+
+impl fmt::Debug for ProviderBatchExecutionMaterializationBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderBatchExecutionMaterializationBinding")
+            .field("provider_id", &self.provider_id)
+            .field("binding_type", &self.binding_type)
+            .field("binding_digest", &"[HASHED]")
+            .field("payload", &self.payload)
+            .finish()
+    }
+}
+
 /// Exact Core-owned parent identity plus the resolved Provider-private input
 /// and account-level runtime settings for one fresh, read-only planning pass.
 pub struct BatchExecutionPlanningRequest<'a> {
@@ -1612,6 +1807,8 @@ pub struct BatchExecutionPlanningRequest<'a> {
     pub requested_capabilities: &'a [TaskCapability],
     pub expected_child_count: u32,
     pub runtime_settings: &'a ResolvedProviderRuntimeSettings,
+    pub runtime_settings_revision: ProviderBatchExecutionRuntimeSettingsRevision,
+    pub public_input: &'a ProviderBatchExecutionPublicInput,
     pub planning_input: &'a ProviderBatchExecutionPlanningInput,
 }
 
@@ -1626,6 +1823,8 @@ impl fmt::Debug for BatchExecutionPlanningRequest<'_> {
             .field("requested_capabilities", &self.requested_capabilities)
             .field("expected_child_count", &self.expected_child_count)
             .field("runtime_settings", &"[REDACTED]")
+            .field("runtime_settings_revision", &self.runtime_settings_revision)
+            .field("public_input", &self.public_input)
             .field("planning_input", &self.planning_input)
             .finish()
     }
@@ -1823,6 +2022,24 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         ))
     }
 
+    /// Purely binds the exact public authorization, private planning input,
+    /// frozen Core scope and prepared parent/children into Provider-private
+    /// credential-free bytes. Core encrypts the returned value before child
+    /// creation. The default declares no additional materialization record.
+    ///
+    /// # Errors
+    ///
+    /// Implementations must reject every scope, revision, input, parent or
+    /// ordered-child mismatch.
+    fn build_batch_execution_materialization_binding(
+        &self,
+        _context: &ProviderContext,
+        _request: &BatchExecutionPlanningRequest<'_>,
+        _prepared: &PreparedProviderBatchExecutionPlan,
+    ) -> ProviderResult<Option<ProviderBatchExecutionMaterializationBinding>> {
+        Ok(None)
+    }
+
     /// Reconstructs the complete ordered child projection using only the exact
     /// encrypted parent pair resolved by Core. It must not perform I/O, rescan,
     /// repair order, redistribute targets or issue a remote mutation.
@@ -1841,6 +2058,23 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         ))
     }
 
+    /// Declares that this materialized request is valid only as a child of an
+    /// encrypted Course batch. Core then requires a resolved parent snapshot
+    /// and position before issuing any Provider mutation. The default keeps
+    /// ordinary singleton execution unchanged.
+    fn requires_batch_execution_parent(&self, _request: &ExecutionRequest) -> bool {
+        false
+    }
+
+    /// Declares that a materialized child requires the Provider-private
+    /// materialization binding in addition to the encrypted parent snapshot.
+    fn requires_batch_execution_materialization_binding(
+        &self,
+        _request: &ExecutionRequest,
+    ) -> bool {
+        false
+    }
+
     /// Declares whether this exact selected action set requires the Provider's
     /// goal-bound, read-only verification path. Task-level `ExecutionVerify`
     /// metadata only advertises that at least one action supports this path;
@@ -1855,6 +2089,31 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         request: &ExecutionRequest,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome>;
+
+    /// Executes one Core-materialized child of an encrypted Course batch.
+    /// Core resolves the exact parent Attempt snapshot and durable one-based
+    /// child position under the child's own live scheduler claim. Providers
+    /// must jointly validate those values with `request`; neither the parent
+    /// snapshot nor the ordinary request grants mutation authority alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed unsupported-task error by default. Implementations must
+    /// fail closed on parent, position, request, artifact or sequence drift.
+    async fn execute_batch_child(
+        &self,
+        _context: &ProviderContext,
+        _parent: &ExecutionParentBatchSnapshot,
+        _materialization_binding: Option<&ProviderBatchExecutionMaterializationBinding>,
+        _position: u32,
+        _request: &ExecutionRequest,
+        _events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement materialized batch-child execution",
+        ))
+    }
 
     /// Rebinds the same frozen execution goal and reads enough fresh remote
     /// state to verify it without repeating any mutation. Providers which
@@ -1884,6 +2143,29 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         self.verify_execution(context, request)
             .await
             .map(ExecutionRecoveryOutcome::new)
+    }
+
+    /// Performs read-only recovery for one materialized batch child using the
+    /// same parent Attempt snapshot, durable position and exact same-Attempt
+    /// mutation sequence loaded by Core. This hook never authorizes replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed unsupported-task error by default. Implementations must
+    /// reject a missing, foreign or incomplete mutation sequence.
+    async fn verify_batch_child_recovery(
+        &self,
+        _context: &ProviderContext,
+        _parent: &ExecutionParentBatchSnapshot,
+        _materialization_binding: Option<&ProviderBatchExecutionMaterializationBinding>,
+        _position: u32,
+        _request: &ExecutionRequest,
+        _mutation_sequence: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement materialized batch-child recovery",
+        ))
     }
 
     /// Maps Provider-specific verified execution facts to a shared reason why
@@ -2991,6 +3273,112 @@ impl ExecutionMutationReceipt {
     }
 }
 
+const MAX_EXECUTION_MUTATION_STAGE_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Bounded Provider-private successor state produced by one definite accepted
+/// mutation receipt. Core encrypts the bytes in the same transaction as the
+/// receipt; the value grants no issue or replay authority by itself.
+pub struct ExecutionMutationStageOutput {
+    provider_id: ProviderId,
+    ordinal: u32,
+    output_type: String,
+    output_digest: [u8; 32],
+    value: Arc<SecretValue>,
+}
+
+impl ExecutionMutationStageOutput {
+    /// # Errors
+    ///
+    /// Rejects foreign namespaces, invalid ordinals, empty/oversized bytes or
+    /// an expected digest that differs from the exact plaintext.
+    pub fn try_new(
+        provider_id: ProviderId,
+        ordinal: u32,
+        output_type: impl Into<String>,
+        expected_digest: [u8; 32],
+        value: SecretValue,
+    ) -> ProviderResult<Self> {
+        let output_type = output_type.into();
+        let bytes = value.expose_secret();
+        let actual_digest: [u8; 32] = Sha256::digest(bytes).into();
+        if !(1..=100_000).contains(&ordinal)
+            || !valid_provider_execution_artifact_type(&provider_id, &output_type)
+            || bytes.is_empty()
+            || bytes.len() > MAX_EXECUTION_MUTATION_STAGE_OUTPUT_BYTES
+            || expected_digest == [0; 32]
+            || actual_digest != expected_digest
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation stage output is invalid",
+            ));
+        }
+        Ok(Self {
+            provider_id,
+            ordinal,
+            output_type,
+            output_digest: actual_digest,
+            value: Arc::new(value),
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    pub fn output_type(&self) -> &str {
+        &self.output_type
+    }
+
+    pub const fn output_digest(&self) -> [u8; 32] {
+        self.output_digest
+    }
+
+    pub fn value(&self) -> &SecretValue {
+        &self.value
+    }
+}
+
+impl Clone for ExecutionMutationStageOutput {
+    fn clone(&self) -> Self {
+        Self {
+            provider_id: self.provider_id.clone(),
+            ordinal: self.ordinal,
+            output_type: self.output_type.clone(),
+            output_digest: self.output_digest,
+            value: Arc::clone(&self.value),
+        }
+    }
+}
+
+impl PartialEq for ExecutionMutationStageOutput {
+    fn eq(&self, other: &Self) -> bool {
+        self.provider_id == other.provider_id
+            && self.ordinal == other.ordinal
+            && self.output_type == other.output_type
+            && self.output_digest == other.output_digest
+    }
+}
+
+impl Eq for ExecutionMutationStageOutput {}
+
+impl fmt::Debug for ExecutionMutationStageOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationStageOutput")
+            .field("provider_id", &self.provider_id)
+            .field("ordinal", &self.ordinal)
+            .field("output_type", &self.output_type)
+            .field("output_digest", &"[HASHED]")
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ExecutionMutationVerification {
     ordinal: u32,
@@ -3048,6 +3436,7 @@ pub struct ExecutionMutationRecoveryRecord {
     issue: ExecutionMutationIssue,
     receipt: Option<ExecutionMutationReceipt>,
     verification: Option<ExecutionMutationVerification>,
+    stage_output: Option<ExecutionMutationStageOutput>,
 }
 
 impl ExecutionMutationRecoveryRecord {
@@ -3073,7 +3462,28 @@ impl ExecutionMutationRecoveryRecord {
             issue,
             receipt,
             verification,
+            stage_output: None,
         })
+    }
+
+    /// Attaches the exact encrypted successor state loaded by Core for this
+    /// accepted ordinal.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign ordinal or output without a definite accepted
+    /// receipt.
+    pub fn try_with_stage_output(
+        mut self,
+        stage_output: ExecutionMutationStageOutput,
+    ) -> ProviderResult<Self> {
+        if stage_output.ordinal() != self.issue.ordinal()
+            || self.receipt.is_none_or(|receipt| !receipt.accepted())
+        {
+            return Err(invalid_execution_mutation_recovery());
+        }
+        self.stage_output = Some(stage_output);
+        Ok(self)
     }
 
     pub const fn issue(&self) -> &ExecutionMutationIssue {
@@ -3087,6 +3497,10 @@ impl ExecutionMutationRecoveryRecord {
     pub const fn verification(&self) -> Option<ExecutionMutationVerification> {
         self.verification
     }
+
+    pub const fn stage_output(&self) -> Option<&ExecutionMutationStageOutput> {
+        self.stage_output.as_ref()
+    }
 }
 
 impl fmt::Debug for ExecutionMutationRecoveryRecord {
@@ -3096,6 +3510,7 @@ impl fmt::Debug for ExecutionMutationRecoveryRecord {
             .field("issue", &self.issue)
             .field("receipt", &self.receipt)
             .field("verification", &self.verification)
+            .field("stage_output", &self.stage_output)
             .finish()
     }
 }
@@ -3131,6 +3546,12 @@ impl ExecutionMutationSequenceRecoverySnapshot {
                     || phase
                         .required_observation_type()
                         .is_some_and(|value| !value.starts_with(&provider_prefix))
+            })
+            || records.iter().any(|record| {
+                record.stage_output().is_some_and(|output| {
+                    output.provider_id() != artifact.provider_id()
+                        || !output.output_type().starts_with(&provider_prefix)
+                })
             })
             || !valid_recovery_records(&plan, &records, &observations)
             || !valid_recovery_observations(&provider_prefix, &plan, &observations)
@@ -3368,7 +3789,7 @@ impl ExecutionRecoveryOutcome {
 }
 
 #[async_trait]
-pub trait ExecutionMutationSink {
+pub trait ExecutionMutationSink: Send + Sync {
     /// Atomically freezes a complete immutable mutation plan before any remote
     /// step is issued. Repeating the exact preparation is idempotent.
     async fn prepare_compound_plan(&self, _plan: &ExecutionMutationPlan) -> ProviderResult<()> {
@@ -3410,6 +3831,20 @@ pub trait ExecutionMutationSink {
     /// be issued. Missing or ambiguous responses must not call this method.
     async fn record_receipt(&self, receipt: ExecutionMutationReceipt) -> ProviderResult<()>;
 
+    /// Atomically persists a definite accepted receipt and its encrypted
+    /// Provider-private successor state. Implementations must never fall back
+    /// to two separate writes.
+    async fn record_receipt_with_stage_output(
+        &self,
+        _receipt: ExecutionMutationReceipt,
+        _stage_output: ExecutionMutationStageOutput,
+    ) -> ProviderResult<()> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Atomic execution mutation receipt and stage-output persistence is not available for this sink",
+        ))
+    }
+
     /// Persists an independent read-only observation after an accepted receipt.
     /// Legacy fixture sinks may omit this until their Provider adopts compound
     /// step verification; Core's execution sink always overrides it.
@@ -3436,6 +3871,8 @@ fn valid_execution_mutation_operation_type(value: &str) -> bool {
 
 #[cfg(test)]
 mod execution_mutation_tests {
+    use sha2::Digest as _;
+
     use super::*;
 
     #[test]
@@ -3663,6 +4100,70 @@ mod execution_mutation_tests {
                 false,
                 ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached,
                 None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stage_output_is_provider_bound_digest_verified_and_receipt_gated() {
+        let provider_id = ProviderId::new("uai").unwrap();
+        let plaintext = b"provider-private successor state";
+        let digest: [u8; 32] = sha2::Sha256::digest(plaintext).into();
+        let output = ExecutionMutationStageOutput::try_new(
+            provider_id.clone(),
+            1,
+            "uai.upload.object.v1",
+            digest,
+            SecretValue::new(plaintext.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(output.provider_id(), &provider_id);
+        assert_eq!(output.output_digest(), digest);
+        let debug = format!("{output:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("successor state"));
+
+        let accepted = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(1, "uai.upload.object", [1; 32]).unwrap(),
+            Some(ExecutionMutationReceipt::new(1, [2; 32], true).unwrap()),
+            None,
+        )
+        .unwrap()
+        .try_with_stage_output(output.clone())
+        .unwrap();
+        assert_eq!(accepted.stage_output(), Some(&output));
+        let rejected = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(1, "uai.upload.object", [1; 32]).unwrap(),
+            Some(ExecutionMutationReceipt::new(1, [2; 32], false).unwrap()),
+            None,
+        )
+        .unwrap();
+        assert!(rejected.try_with_stage_output(output.clone()).is_err());
+        let wrong_ordinal = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(2, "uai.upload.final", [3; 32]).unwrap(),
+            Some(ExecutionMutationReceipt::new(2, [4; 32], true).unwrap()),
+            None,
+        )
+        .unwrap();
+        assert!(wrong_ordinal.try_with_stage_output(output).is_err());
+        assert!(
+            ExecutionMutationStageOutput::try_new(
+                provider_id.clone(),
+                1,
+                "foreign.upload.object.v1",
+                digest,
+                SecretValue::new(plaintext.to_vec()),
+            )
+            .is_err()
+        );
+        assert!(
+            ExecutionMutationStageOutput::try_new(
+                provider_id,
+                1,
+                "uai.upload.object.v1",
+                [8; 32],
+                SecretValue::new(plaintext.to_vec()),
             )
             .is_err()
         );
@@ -3942,6 +4443,47 @@ mod provider_execution_plan_tests {
                 provider_id,
                 "welearn.atomic-batch-request.v1",
                 SecretValue::new(vec![1; MAX_BATCH_EXECUTION_PLANNING_INPUT_BYTES + 1]),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_public_input_and_materialization_binding_are_distinct_bounded_secrets() {
+        let provider_id = ProviderId::new("welearn").unwrap();
+        let public = ProviderBatchExecutionPublicInput::try_new(
+            provider_id.clone(),
+            "welearn.public-batch-request.v1",
+            SecretValue::new(b"PUBLIC_POLICY".to_vec()),
+        )
+        .unwrap();
+        let binding = ProviderBatchExecutionMaterializationBinding::try_new(
+            provider_id.clone(),
+            "welearn.public-batch-materialization-binding.v1",
+            SecretValue::new(b"PUBLIC_POLICY".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(public.provider_id(), &provider_id);
+        assert_eq!(binding.provider_id(), &provider_id);
+        assert_ne!(public.input_digest(), binding.binding_digest());
+        assert!(!format!("{public:?}").contains("PUBLIC_POLICY"));
+        assert!(!format!("{binding:?}").contains("PUBLIC_POLICY"));
+        assert!(
+            ProviderBatchExecutionPublicInput::try_new(
+                provider_id.clone(),
+                "uai.public-batch-request.v1",
+                SecretValue::new(vec![1]),
+            )
+            .is_err()
+        );
+        assert!(
+            ProviderBatchExecutionMaterializationBinding::try_new(
+                provider_id,
+                "welearn.public-batch-materialization-binding.v1",
+                SecretValue::new(vec![
+                    1;
+                    MAX_BATCH_EXECUTION_MATERIALIZATION_BINDING_BYTES + 1
+                ]),
             )
             .is_err()
         );

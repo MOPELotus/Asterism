@@ -55,6 +55,8 @@ entity_id!(UserId);
 entity_id!(ProviderAccountId);
 entity_id!(ProviderRuntimeSettingsId);
 entity_id!(CourseId);
+entity_id!(CourseEnrollmentDraftId);
+entity_id!(CourseEnrollmentAttemptId);
 entity_id!(TaskId);
 entity_id!(TaskSnapshotId);
 entity_id!(TaskDiffId);
