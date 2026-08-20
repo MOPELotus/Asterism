@@ -24,6 +24,7 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
+            ProviderCapability::CourseEnrollment,
             ProviderCapability::TaskInventory,
             ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
@@ -33,6 +34,7 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,
             ProviderCapability::ResourceExecution,
+            ProviderCapability::ExecutionVerify,
         ]),
         auth_methods: BTreeSet::from([
             AuthMethod::Password,

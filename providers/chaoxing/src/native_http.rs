@@ -4,7 +4,7 @@ use asterism_domain::{HumanRequiredReason, TaskId};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSink, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderResult,
+    ProviderCourseEnrollmentDraft, ProviderError, ProviderErrorKind, ProviderResult,
 };
 use asterism_secrets::SecretString;
 use async_trait::async_trait;
@@ -21,15 +21,21 @@ use zeroize::Zeroize;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
-    ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingExamDetailFacts,
+    ChaoxingCourseEnrollmentTransport, ChaoxingCourseInventoryTransport,
+    ChaoxingCourseInviteApiDocument, ChaoxingCourseInviteApiPreparation,
+    ChaoxingCourseInvitePreviewDocument, ChaoxingCourseInvitePreviewPreparation,
+    ChaoxingCourseInvitePreviewRedirect, ChaoxingCourseJoinPreparation,
+    ChaoxingCourseJoinReceiptDocument, ChaoxingCourseRoute, ChaoxingExamDetailFacts,
     ChaoxingExamDetailRequest, ChaoxingExamQuestionArtifact, ChaoxingExamQuestionRequest,
     ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
     ChaoxingExamVerificationDocument, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
-    ChaoxingQuestionTransport, ChaoxingSignActivityListDocument, ChaoxingSignActivityReadTransport,
+    ChaoxingIssuedCourseEnrollment, ChaoxingIssuedCourseJoin, ChaoxingQuestionTransport,
+    ChaoxingSignActivityListDocument, ChaoxingSignActivityReadTransport,
     ChaoxingSignDetailDocument, ChaoxingSignDetailRequest, ChaoxingSignEventBootstrapDocument,
     ChaoxingSignEventReadTransport, ChaoxingSubmissionPlan, ChaoxingSubmissionTransport,
     ChaoxingSubmissionVerificationTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
     ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute, classify_work_detail,
+    course_invite::shared_course_join_url,
     exam_attempt::{
         ChaoxingExamStartCommand, ChaoxingExamStartOutcome, parse_exam_attempt, parse_exam_cover,
     },
@@ -187,6 +193,23 @@ pub struct NativeChaoxingInventoryTransport {
     sessions: Arc<dyn ChaoxingSessionResolver>,
 }
 
+/// Fully built, credential-bearing join request held only between preflight and
+/// durable mutation issuance. Debug output never exposes its URL or headers.
+pub struct NativeChaoxingCourseJoinRequest {
+    request: Request,
+    request_digest: [u8; 32],
+}
+
+impl fmt::Debug for NativeChaoxingCourseJoinRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeChaoxingCourseJoinRequest")
+            .field("request", &"[REDACTED]")
+            .field("request_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
 impl NativeChaoxingInventoryTransport {
     /// Builds the transport from the centrally resolved network profile.
     ///
@@ -221,6 +244,24 @@ impl NativeChaoxingInventoryTransport {
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
         classify_response(response).await
+    }
+
+    async fn get_course_invite_html(
+        &self,
+        session: &ChaoxingCookieSession,
+        url: Url,
+    ) -> ProviderResult<(SensitiveHtml, String)> {
+        let response = self
+            .client
+            .get(url)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "text/html,application/xhtml+xml")
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let source_url = response.url().to_string();
+        let document = classify_response(response).await?;
+        Ok((document, source_url))
     }
 
     async fn get_exam_html(
@@ -1026,6 +1067,112 @@ impl NativeChaoxingInventoryTransport {
         }
         Ok(documents)
     }
+
+    async fn fetch_course_invite_direct_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        preparation: &ChaoxingCourseInvitePreviewPreparation,
+    ) -> ProviderResult<ChaoxingCourseInvitePreviewDocument> {
+        let (document, source_url) = self
+            .get_course_invite_html(
+                session,
+                course_invite_url(preparation.route(), preparation.query())?,
+            )
+            .await?;
+        ChaoxingCourseInvitePreviewDocument::for_preparation_at(
+            preparation,
+            source_url,
+            document.into_string(),
+        )
+    }
+
+    async fn fetch_course_invite_api_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        preparation: &ChaoxingCourseInviteApiPreparation,
+    ) -> ProviderResult<ChaoxingCourseInviteApiDocument> {
+        let response = self
+            .client
+            .post(static_url(preparation.route())?)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+            .header(
+                CONTENT_TYPE,
+                "application/x-www-form-urlencoded; charset=UTF-8",
+            )
+            .header(ORIGIN, "https://i.chaoxing.com")
+            .header(REFERER, "https://i.chaoxing.com/")
+            .body(preparation.form_body().to_owned())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        validate_response_status(&response)?;
+        validate_json_response_head(&response)?;
+        let body = read_response_body(response).await?;
+        ChaoxingCourseInviteApiDocument::for_preparation(preparation, body.into_string())
+    }
+
+    async fn fetch_course_invite_redirect_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        redirect: &ChaoxingCourseInvitePreviewRedirect,
+    ) -> ProviderResult<ChaoxingCourseInvitePreviewDocument> {
+        let (document, source_url) = self
+            .get_course_invite_html(
+                session,
+                course_invite_url(redirect.route(), redirect.query())?,
+            )
+            .await?;
+        ChaoxingCourseInvitePreviewDocument::for_redirect_at(
+            redirect,
+            source_url,
+            document.into_string(),
+        )
+    }
+
+    fn prepare_course_join_request_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        preparation: &ChaoxingCourseJoinPreparation,
+    ) -> ProviderResult<NativeChaoxingCourseJoinRequest> {
+        let request = self
+            .client
+            .get(course_invite_url(preparation.route(), preparation.query())?)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json, text/plain, */*")
+            .header(
+                REFERER,
+                "https://mooc1.chaoxing.com/addcourse/pcqrcodemiddleview",
+            )
+            .build()
+            .map_err(|error| classify_reqwest_error(&error))?;
+        Ok(NativeChaoxingCourseJoinRequest {
+            request,
+            request_digest: preparation.request_digest_bytes(),
+        })
+    }
+
+    fn prepare_frozen_course_join_request_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        draft: &ProviderCourseEnrollmentDraft,
+    ) -> ProviderResult<NativeChaoxingCourseJoinRequest> {
+        let request = self
+            .client
+            .get(shared_course_join_url(draft)?)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json, text/plain, */*")
+            .header(
+                REFERER,
+                "https://mooc1.chaoxing.com/addcourse/pcqrcodemiddleview",
+            )
+            .build()
+            .map_err(|error| classify_reqwest_error(&error))?;
+        Ok(NativeChaoxingCourseJoinRequest {
+            request,
+            request_digest: draft.request_digest(),
+        })
+    }
 }
 
 fn is_readable_work_question_url(url: &Url) -> bool {
@@ -1521,6 +1668,148 @@ impl ChaoxingCourseInventoryTransport for NativeChaoxingInventoryTransport {
             }
             result => result,
         }
+    }
+}
+
+#[async_trait]
+impl ChaoxingCourseEnrollmentTransport for NativeChaoxingInventoryTransport {
+    type PreparedJoin = NativeChaoxingCourseJoinRequest;
+
+    async fn fetch_direct_preview(
+        &self,
+        context: &ProviderContext,
+        preparation: &ChaoxingCourseInvitePreviewPreparation,
+    ) -> ProviderResult<ChaoxingCourseInvitePreviewDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_course_invite_direct_once(&session, preparation)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_course_invite_direct_once(&session, preparation)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn fetch_invite_api(
+        &self,
+        context: &ProviderContext,
+        preparation: &ChaoxingCourseInviteApiPreparation,
+    ) -> ProviderResult<ChaoxingCourseInviteApiDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_course_invite_api_once(&session, preparation)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_course_invite_api_once(&session, preparation)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn fetch_redirect_preview(
+        &self,
+        context: &ProviderContext,
+        redirect: &ChaoxingCourseInvitePreviewRedirect,
+    ) -> ProviderResult<ChaoxingCourseInvitePreviewDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_course_invite_redirect_once(&session, redirect)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_course_invite_redirect_once(&session, redirect)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn prepare_join_transport(
+        &self,
+        context: &ProviderContext,
+        preparation: &ChaoxingCourseJoinPreparation,
+    ) -> ProviderResult<Self::PreparedJoin> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.prepare_course_join_request_once(&session, preparation) {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.prepare_course_join_request_once(&session, preparation)
+            }
+            result => result,
+        }
+    }
+
+    async fn send_issued_join(
+        &self,
+        prepared: Self::PreparedJoin,
+        issued: ChaoxingIssuedCourseJoin<'_>,
+    ) -> ProviderResult<ChaoxingCourseJoinReceiptDocument> {
+        if prepared.request_digest != issued.preparation().request_digest_bytes() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing Course join transport binding changed before send",
+            ));
+        }
+        let response = self
+            .client
+            .execute(prepared.request)
+            .await
+            .map_err(|_| ambiguous_course_join_error())?;
+        validate_response_status(&response).map_err(|_| ambiguous_course_join_error())?;
+        validate_json_response_head(&response).map_err(|_| ambiguous_course_join_error())?;
+        let body = read_live_mutation_body(response)
+            .await
+            .map_err(|_| ambiguous_course_join_error())?;
+        ChaoxingCourseJoinReceiptDocument::for_preparation(issued.preparation(), body.into_string())
+            .map_err(|_| ambiguous_course_join_error())
+    }
+
+    async fn prepare_frozen_join_transport(
+        &self,
+        context: &ProviderContext,
+        draft: &ProviderCourseEnrollmentDraft,
+    ) -> ProviderResult<Self::PreparedJoin> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.prepare_frozen_course_join_request_once(&session, draft) {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.prepare_frozen_course_join_request_once(&session, draft)
+            }
+            result => result,
+        }
+    }
+
+    async fn send_issued_frozen_join(
+        &self,
+        prepared: Self::PreparedJoin,
+        issued: ChaoxingIssuedCourseEnrollment<'_>,
+    ) -> ProviderResult<ChaoxingCourseJoinReceiptDocument> {
+        if prepared.request_digest != issued.draft().request_digest() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing frozen Course join transport binding changed before send",
+            ));
+        }
+        let response = self
+            .client
+            .execute(prepared.request)
+            .await
+            .map_err(|_| ambiguous_course_join_error())?;
+        validate_response_status(&response).map_err(|_| ambiguous_course_join_error())?;
+        validate_json_response_head(&response).map_err(|_| ambiguous_course_join_error())?;
+        let body = read_live_mutation_body(response)
+            .await
+            .map_err(|_| ambiguous_course_join_error())?;
+        ChaoxingCourseJoinReceiptDocument::for_shared_draft(issued.draft(), body.into_string())
+            .map_err(|_| ambiguous_course_join_error())
     }
 }
 
@@ -2061,6 +2350,18 @@ fn build_url(base: &str, query: &[(&str, &str)]) -> ProviderResult<Url> {
     Ok(url)
 }
 
+fn course_invite_url(base: &str, query: &str) -> ProviderResult<Url> {
+    if query.is_empty() || query.len() > 2_048 || query.chars().any(char::is_control) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Chaoxing Course invite query is invalid",
+        ));
+    }
+    let mut url = static_url(base)?;
+    url.set_query(Some(query));
+    Ok(url)
+}
+
 fn static_url(value: &str) -> ProviderResult<Url> {
     Url::parse(value).map_err(|_| static_route_error())
 }
@@ -2415,6 +2716,13 @@ pub(crate) fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
     ProviderError::new(kind, "Chaoxing inventory HTTP request failed")
 }
 
+fn ambiguous_course_join_error() -> ProviderError {
+    ProviderError::human_required(
+        "Chaoxing Course join was issued and requires fresh Course inventory recovery",
+        HumanRequiredReason::ManualIntervention,
+    )
+}
+
 fn has_identity_cookie(cookie: &str) -> bool {
     cookie.split(';').any(|field| {
         let Some((name, value)) = field.trim().split_once('=') else {
@@ -2480,6 +2788,86 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
     const RESOURCE_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/resources/cards-mixed.html");
+    const COURSE_INVITE_PREVIEW: &str =
+        include_str!("../../../fixtures/providers/chaoxing/course-invite/middle-view.html");
+
+    struct UnavailableSessions;
+
+    #[async_trait]
+    impl ChaoxingSessionResolver for UnavailableSessions {
+        async fn resolve_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<ChaoxingCookieSession> {
+            Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "fixture session resolver must not be called",
+            ))
+        }
+    }
+
+    #[test]
+    fn course_join_request_is_fully_built_before_durable_issue() {
+        let preview_request =
+            ChaoxingCourseInvitePreviewPreparation::try_prepare("12345678".to_owned()).unwrap();
+        let document = ChaoxingCourseInvitePreviewDocument::for_preparation(
+            &preview_request,
+            COURSE_INVITE_PREVIEW.to_owned(),
+        )
+        .unwrap();
+        let preview = crate::parse_course_invite_preview(&document).unwrap();
+        let join = ChaoxingCourseJoinPreparation::try_prepare(&preview).unwrap();
+        let session = ChaoxingCookieSession::try_new("_uid=777; fid=888").unwrap();
+        let transport = NativeChaoxingInventoryTransport {
+            client: Client::new(),
+            sessions: Arc::new(UnavailableSessions),
+        };
+
+        let prepared = transport
+            .prepare_course_join_request_once(&session, &join)
+            .unwrap();
+        assert_eq!(prepared.request.method(), reqwest::Method::GET);
+        assert_eq!(
+            prepared.request.url().host_str(),
+            Some("mooc1.chaoxing.com")
+        );
+        assert_eq!(
+            prepared.request.url().path(),
+            "/mooc-ans/teachingClassPhoneManage/phone/participateCls"
+        );
+        assert_eq!(prepared.request_digest, join.request_digest_bytes());
+        assert!(
+            prepared
+                .request
+                .headers()
+                .get(COOKIE)
+                .expect("Cookie is built before issue")
+                .is_sensitive()
+        );
+        let debug = format!("{prepared:?}");
+        assert!(!debug.contains("_uid=777"));
+        assert!(!debug.contains("12345678"));
+        assert!(!debug.contains("PRIVATE_ADD_CLASS_ENC"));
+
+        let draft = ProviderCourseEnrollmentDraft::try_new(
+            asterism_domain::ProviderId::new("chaoxing").unwrap(),
+            "chaoxing.course-enrollment.v1",
+            "1001",
+            "2001",
+            serde_json::json!({"course_id": "1001", "class_id": "2001"}),
+            join.frozen_request(),
+        )
+        .unwrap();
+        let frozen = transport
+            .prepare_frozen_course_join_request_once(&session, &draft)
+            .unwrap();
+        assert_eq!(frozen.request.method(), reqwest::Method::GET);
+        assert_eq!(frozen.request.url(), prepared.request.url());
+        assert_eq!(frozen.request_digest, draft.request_digest());
+        let debug = format!("{frozen:?}");
+        assert!(!debug.contains("12345678"));
+        assert!(!debug.contains("PRIVATE_ADD_CLASS_ENC"));
+    }
 
     #[test]
     fn video_routes_bind_identity_tokens_and_donor_signature() {

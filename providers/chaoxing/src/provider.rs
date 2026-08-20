@@ -5,10 +5,11 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
-    ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingQuestionRead,
-    ChaoxingResourceExecution, ChaoxingSessionResolver, ChaoxingSubmissionBuild,
-    ChaoxingSubmissionExecute, ChaoxingSubmissionVerify, ChaoxingTaskDetail, ChaoxingTaskInventory,
-    ChaoxingTaskProgress, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
+    ChaoxingAuthentication, ChaoxingCourseEnrollment, ChaoxingCourseInventory,
+    ChaoxingQuestionRead, ChaoxingResourceExecution, ChaoxingSessionResolver,
+    ChaoxingSubmissionBuild, ChaoxingSubmissionExecute, ChaoxingSubmissionVerify,
+    ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
+    NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
     NativeChaoxingQrAuthenticationTransport, StoredChaoxingSessionResolver,
     metadata::development_metadata, runtime_settings::runtime_settings_schema,
 };
@@ -70,6 +71,10 @@ fn compose_development_provider(
     let course_inventory = Arc::new(ChaoxingCourseInventory::try_new(
         inventory_transport.clone(),
     )?);
+    let course_enrollment = Arc::new(ChaoxingCourseEnrollment::try_new(
+        course_inventory.clone(),
+        inventory_transport.clone(),
+    )?);
     let task_inventory = Arc::new(ChaoxingTaskInventory::try_new(inventory_transport.clone())?);
     let task_detail = Arc::new(ChaoxingTaskDetail::try_new(
         course_inventory.clone(),
@@ -107,6 +112,7 @@ fn compose_development_provider(
         runtime_settings: runtime_settings_schema(),
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
+        course_enrollment: Some(course_enrollment),
         task_inventory: Some(task_inventory),
         task_detail: Some(task_detail),
         task_progress: Some(task_progress),
@@ -197,6 +203,7 @@ mod tests {
         assert!(entry.metadata.auth_methods.contains(&AuthMethod::QrCode));
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
+        assert!(entry.course_enrollment.is_some());
         assert!(entry.task_inventory.is_some());
         assert!(entry.task_progress.is_some());
         assert!(entry.question_inventory.is_some());
@@ -213,8 +220,9 @@ mod tests {
             entry
                 .metadata
                 .capabilities
-                .contains(&ProviderCapability::ResourceExecution)
+                .contains(&ProviderCapability::CourseEnrollment)
         );
+        assert_execution_capabilities(&entry);
         assert!(
             entry
                 .metadata
@@ -282,6 +290,21 @@ mod tests {
             registry
                 .get(&asterism_domain::ProviderId::new("chaoxing").unwrap())
                 .is_some()
+        );
+    }
+
+    fn assert_execution_capabilities(entry: &ProviderEntry) {
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::ResourceExecution)
+        );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::ExecutionVerify)
         );
     }
 }

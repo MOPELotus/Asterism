@@ -915,6 +915,7 @@ fn parse_resource_attachment(
             ("document" | "read" | "video" | "audio" | "live", RemoteState::Pending) => vec![
                 TaskCapability::ProgressRead,
                 TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
             ],
             ("document" | "read" | "video" | "audio", RemoteState::Completed) => {
                 vec![TaskCapability::ProgressRead]
@@ -1247,6 +1248,7 @@ mod tests {
                             == [
                                 TaskCapability::ProgressRead,
                                 TaskCapability::ResourceExecution,
+                                TaskCapability::ExecutionVerify,
                             ]
                     }),
                 "{suffix} capability mismatch"

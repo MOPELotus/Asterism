@@ -7,7 +7,9 @@
 mod answer;
 mod authentication;
 mod chapter_inventory;
+mod course_enrollment;
 mod course_inventory;
+mod course_invite;
 mod exam_attempt;
 mod exam_submission;
 mod history_harvest;
@@ -45,8 +47,19 @@ pub use authentication::{
     ChaoxingAuthentication, ChaoxingAuthenticationTransport, NativeChaoxingAuthenticationTransport,
 };
 pub use chapter_inventory::parse_chapter_inventory;
+pub use course_enrollment::ChaoxingCourseEnrollment;
 pub use course_inventory::{
     ChaoxingCourseInventory, ChaoxingCourseInventoryTransport, parse_course_inventory,
+};
+pub use course_invite::{
+    ChaoxingCourseEnrollmentCommand, ChaoxingCourseEnrollmentRecoveryOutcome,
+    ChaoxingCourseEnrollmentTransport, ChaoxingCourseInviteApiDocument,
+    ChaoxingCourseInviteApiPreparation, ChaoxingCourseInvitePreview,
+    ChaoxingCourseInvitePreviewDocument, ChaoxingCourseInvitePreviewPreparation,
+    ChaoxingCourseInvitePreviewRedirect, ChaoxingCourseJoinPreparation, ChaoxingCourseJoinReceipt,
+    ChaoxingCourseJoinReceiptDocument, ChaoxingCourseJoinReceiptKind,
+    ChaoxingCourseMembershipObservation, ChaoxingIssuedCourseEnrollment, ChaoxingIssuedCourseJoin,
+    parse_course_invite_api_redirect, parse_course_invite_preview, parse_course_join_receipt,
 };
 pub use exam_attempt::{
     ChaoxingExamQuestionArtifact, ChaoxingExamQuestionRequest, ChaoxingExamStartCommand,
@@ -63,7 +76,8 @@ pub use inventory::{
     ChaoxingCourseScope, classify_work_detail, parse_exam_inventory, parse_work_inventory,
 };
 pub use native_http::{
-    ChaoxingCookieSession, ChaoxingSessionResolver, NativeChaoxingInventoryTransport,
+    ChaoxingCookieSession, ChaoxingSessionResolver, NativeChaoxingCourseJoinRequest,
+    NativeChaoxingInventoryTransport,
 };
 pub use provider::{build_development_provider, build_development_provider_with_renewal};
 pub use qr_authentication::{

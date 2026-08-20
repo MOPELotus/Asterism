@@ -821,6 +821,27 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
             )),
         }
     }
+
+    async fn verify_execution(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+    ) -> ProviderResult<ExecutionOutcome> {
+        validate_context(context, &self.metadata)?;
+        if request.requested_capabilities != [TaskCapability::ResourceExecution] {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing resource verification accepts only ResourceExecution",
+            ));
+        }
+        ChaoxingRuntimeSettings::resolve(&request.runtime_settings)?;
+        let progress = self
+            .resolve_resource_progress(context, &request.remote_task_id)
+            .await?;
+        let verified =
+            progress.remote_state == RemoteState::Completed && progress.percent == Some(100);
+        Ok(resource_verification_outcome(&progress, verified))
+    }
 }
 
 fn execution_log(
@@ -1154,6 +1175,19 @@ fn live_outcome(already_completed: bool) -> ExecutionOutcome {
             "schema": "chaoxing.live-result.v1",
             "resource_kind": "live",
             "already_completed": already_completed,
+            "verification": "fresh_progress_read",
+        }),
+    }
+}
+
+fn resource_verification_outcome(progress: &RemoteProgress, verified: bool) -> ExecutionOutcome {
+    ExecutionOutcome {
+        remote_state: progress.remote_state,
+        verified,
+        result_sanitized: serde_json::json!({
+            "schema": "chaoxing.resource-execution-verification.v1",
+            "remote_state": progress.remote_state,
+            "percent": progress.percent,
             "verification": "fresh_progress_read",
         }),
     }
@@ -1624,6 +1658,42 @@ mod tests {
             .unwrap();
         assert_eq!(completed.remote_state, RemoteState::Completed);
         assert_eq!(completed.percent, Some(100));
+        assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn execution_recovery_verifies_only_fresh_remote_progress() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        let request = execution_request("resource:100:200:4001:job-live");
+
+        let pending = execution
+            .verify_execution_recovery(&context(), &request, None)
+            .await
+            .unwrap();
+        assert_eq!(pending.outcome().remote_state, RemoteState::Pending);
+        assert!(!pending.outcome().verified);
+        assert_eq!(
+            pending.outcome().result_sanitized["verification"],
+            "fresh_progress_read"
+        );
+
+        fixture.completed_live.store(true, Ordering::Relaxed);
+        let completed = execution
+            .verify_execution_recovery(&context(), &request, None)
+            .await
+            .unwrap();
+        assert_eq!(completed.outcome().remote_state, RemoteState::Completed);
+        assert!(completed.outcome().verified);
+        assert_eq!(completed.outcome().result_sanitized["percent"], 100);
+        assert!(fixture.live_reports.lock().unwrap().is_empty());
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
     }
 
