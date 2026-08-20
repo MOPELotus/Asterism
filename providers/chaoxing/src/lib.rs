@@ -39,6 +39,7 @@ mod submission_verify;
 mod task_detail;
 mod task_inventory;
 mod task_progress;
+mod work_submission;
 
 pub use answer::{
     ChaoxingAnswerResolutionTransport, ChaoxingAnswerResolve, ChaoxingChapterWorkResultRequest,
@@ -135,3 +136,4 @@ pub use task_inventory::{
     ChaoxingWorkDetailState,
 };
 pub use task_progress::ChaoxingTaskProgress;
+pub use work_submission::{ChaoxingWorkSubmissionCommand, ChaoxingWorkSubmissionResponse};

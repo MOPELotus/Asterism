@@ -143,12 +143,18 @@ impl<'a> WorkSubmissionIdentity<'a> {
 pub struct ChaoxingSubmissionPlan {
     answers: Vec<PlannedAnswer>,
     total_question_count: usize,
+    expected_question_partition: Option<Vec<PlannedQuestionBinding>>,
 }
 
 struct PlannedAnswer {
     remote_question_id: String,
     type_code: String,
     value: String,
+}
+
+struct PlannedQuestionBinding {
+    remote_question_id: String,
+    type_code: String,
 }
 
 impl ChaoxingSubmissionPlan {
@@ -207,7 +213,36 @@ impl ChaoxingSubmissionPlan {
         Ok(Self {
             answers,
             total_question_count,
+            expected_question_partition: None,
         })
+    }
+
+    pub(crate) fn bind_full_question_partition(
+        &mut self,
+        bindings: Vec<(String, String)>,
+    ) -> ProviderResult<()> {
+        let mut remote_ids = BTreeSet::new();
+        if bindings.len() != self.total_question_count
+            || bindings.iter().any(|(remote_id, type_code)| {
+                !valid_question_id(remote_id)
+                    || !valid_remote_type_code(type_code)
+                    || !remote_ids.insert(remote_id.as_str())
+            })
+        {
+            return Err(protocol_drift(
+                "Chaoxing Work Question snapshot partition is malformed",
+            ));
+        }
+        self.expected_question_partition = Some(
+            bindings
+                .into_iter()
+                .map(|(remote_question_id, type_code)| PlannedQuestionBinding {
+                    remote_question_id,
+                    type_code,
+                })
+                .collect(),
+        );
+        Ok(())
     }
 
     pub(crate) fn answers(&self) -> impl ExactSizeIterator<Item = (&str, &str, &str)> {
@@ -241,7 +276,7 @@ impl fmt::Debug for ChaoxingSubmissionPlan {
             .field("answer_count", &self.answers.len())
             .field("total_question_count", &self.total_question_count)
             .field("answers", &"[REDACTED]")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -253,6 +288,13 @@ impl Drop for ChaoxingSubmissionPlan {
             answer.value.zeroize();
         }
         self.answers.clear();
+        if let Some(bindings) = &mut self.expected_question_partition {
+            for binding in bindings.iter_mut() {
+                binding.remote_question_id.zeroize();
+                binding.type_code.zeroize();
+            }
+            bindings.clear();
+        }
     }
 }
 
@@ -439,6 +481,24 @@ fn validate_remote_question_partition(
     {
         return Err(remote_changed(
             "Chaoxing Work Questions changed after draft construction",
+        ));
+    }
+    if plan
+        .expected_question_partition
+        .as_ref()
+        .is_some_and(|expected| {
+            expected.len() != remote_types.len()
+                || expected
+                    .iter()
+                    .zip(&remote_types)
+                    .any(|(expected, actual)| {
+                        expected.remote_question_id != actual.remote_id
+                            || expected.type_code != actual.type_code
+                    })
+        })
+    {
+        return Err(remote_changed(
+            "Chaoxing Work full Question partition changed after snapshot creation",
         ));
     }
     Ok(remote_types)

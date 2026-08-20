@@ -31,6 +31,11 @@ use crate::{
     runtime_settings::runtime_settings_schema,
     submission_support::{SubmissionModule, WorkSubmissionIdentity},
     task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
+    work_submission::{
+        CHAOXING_WORK_QUESTION_ARTIFACT_TYPE, CHAOXING_WORK_QUESTIONS_READY_PHASE,
+        ChaoxingWorkQuestionArtifact, ChaoxingWorkSubmissionCommand,
+        ChaoxingWorkSubmissionResponse,
+    },
 };
 
 /// Mutation boundary for exactly one Chaoxing Work submission attempt.
@@ -52,6 +57,29 @@ pub trait ChaoxingSubmissionTransport: Send + Sync {
         target: &ChaoxingChapterWorkTarget,
         plan: &ChaoxingSubmissionPlan,
     ) -> ProviderResult<SubmissionReceipt>;
+
+    async fn prepare_work_submission(
+        &self,
+        _context: &ProviderContext,
+        _request: ChaoxingWorkDetailRequest<'_>,
+        _plan: &ChaoxingSubmissionPlan,
+    ) -> ProviderResult<ChaoxingWorkSubmissionCommand> {
+        Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "Chaoxing transport does not implement durable Work submission preparation",
+        ))
+    }
+
+    async fn submit_prepared_work(
+        &self,
+        _context: &ProviderContext,
+        _command: &ChaoxingWorkSubmissionCommand,
+    ) -> ProviderResult<ChaoxingWorkSubmissionResponse> {
+        Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "Chaoxing transport does not implement durable Work submission dispatch",
+        ))
+    }
 
     async fn prepare_exam_submission(
         &self,
@@ -132,6 +160,7 @@ impl ProviderIdentity for ChaoxingSubmissionExecute {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
     async fn execute_submission(
         &self,
@@ -221,11 +250,10 @@ impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
             .validate_resolved(runtime_settings)
             .map_err(|_| internal("Chaoxing submission settings snapshot is invalid"))?;
         let identity = WorkSubmissionIdentity::parse(remote_task_id)?;
-        if identity.module() != SubmissionModule::Exam {
+        if identity.module() == SubmissionModule::ChapterWork {
             return Ok(None);
         }
         validate_draft(draft, &self.metadata)?;
-        validate_exam_continuation(&continuation)?;
         let questions = draft
             .items
             .iter()
@@ -242,38 +270,86 @@ impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
             .await?;
         if expected_preview != draft.payload_preview {
             return Err(invalid_response(
-                "Chaoxing Exam submission draft preview is stale or foreign",
+                "Chaoxing durable submission draft preview is stale or foreign",
             ));
         }
-        ChaoxingSubmissionPlan::from_draft(draft)?;
-        validate_fresh_exam_pending(
-            self.courses.as_ref(),
-            self.inventory.as_ref(),
-            context,
-            identity,
-        )
-        .await?;
-        let artifact = ChaoxingExamQuestionArtifact::decode_bound(
-            continuation.value,
-            continuation.continuation_digest,
-            draft,
-            remote_task_id,
-        )?;
-        let command = self
-            .transport
-            .prepare_exam_submission(context, artifact, draft)
-            .await?;
-        if command.request_digest() == [0; 32] {
-            return Err(invalid_response(
-                "Chaoxing Exam transport prepared an empty request identity",
-            ));
+        let mut plan = ChaoxingSubmissionPlan::from_draft(draft)?;
+        match identity.module() {
+            SubmissionModule::IndependentWork => {
+                validate_work_continuation(&continuation)?;
+                let artifact = ChaoxingWorkQuestionArtifact::decode_bound(
+                    continuation.value,
+                    continuation.continuation_digest,
+                    draft,
+                    remote_task_id,
+                )?;
+                artifact.bind_submission_plan(&mut plan)?;
+                let courses = self.courses.list_courses(context).await?;
+                let course = matching_course(&courses, identity)?;
+                let route = ChaoxingCourseRoute::from_remote_course(course)?;
+                let document = self.inventory.fetch_work_inventory(context, route).await?;
+                let entries =
+                    parse_work_inventory_entries(document.as_str(), &route.parser_scope()?)?;
+                let entry = matching_work_entry(&entries, identity)?;
+                if !matches!(
+                    entry.task().remote_state,
+                    RemoteState::Pending | RemoteState::InProgress
+                ) {
+                    return Err(remote_changed(
+                        "Chaoxing Work is no longer pending before submission",
+                    ));
+                }
+                let request =
+                    ChaoxingWorkDetailRequest::try_new(route, remote_task_id, entry.entry())?;
+                let command = self
+                    .transport
+                    .prepare_work_submission(context, request, &plan)
+                    .await?;
+                if command.request_digest() == [0; 32] {
+                    return Err(invalid_response(
+                        "Chaoxing Work transport prepared an empty request identity",
+                    ));
+                }
+                Ok(Some(Box::new(PreparedChaoxingWorkSubmission {
+                    provider_id: context.provider_id.clone(),
+                    account_id: context.account_id,
+                    command,
+                    transport: self.transport.clone(),
+                })))
+            }
+            SubmissionModule::Exam => {
+                validate_exam_continuation(&continuation)?;
+                validate_fresh_exam_pending(
+                    self.courses.as_ref(),
+                    self.inventory.as_ref(),
+                    context,
+                    identity,
+                )
+                .await?;
+                let artifact = ChaoxingExamQuestionArtifact::decode_bound(
+                    continuation.value,
+                    continuation.continuation_digest,
+                    draft,
+                    remote_task_id,
+                )?;
+                let command = self
+                    .transport
+                    .prepare_exam_submission(context, artifact, draft)
+                    .await?;
+                if command.request_digest() == [0; 32] {
+                    return Err(invalid_response(
+                        "Chaoxing Exam transport prepared an empty request identity",
+                    ));
+                }
+                Ok(Some(Box::new(PreparedChaoxingExamSubmission {
+                    provider_id: context.provider_id.clone(),
+                    account_id: context.account_id,
+                    command,
+                    transport: self.transport.clone(),
+                })))
+            }
+            SubmissionModule::ChapterWork => unreachable!("handled before Draft validation"),
         }
-        Ok(Some(Box::new(PreparedChaoxingExamSubmission {
-            provider_id: context.provider_id.clone(),
-            account_id: context.account_id,
-            command,
-            transport: self.transport.clone(),
-        })))
     }
 
     async fn recover_ambiguous_submission_operation(
@@ -290,10 +366,31 @@ impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
             .validate_resolved(runtime_settings)
             .map_err(|_| internal("Chaoxing submission settings snapshot is invalid"))?;
         let identity = WorkSubmissionIdentity::parse(remote_task_id)?;
-        if identity.module() != SubmissionModule::Exam {
+        if identity.module() == SubmissionModule::ChapterWork {
             return Ok(None);
         }
         validate_draft(draft, &self.metadata)?;
+        if identity.module() == SubmissionModule::IndependentWork {
+            validate_work_continuation(&continuation)?;
+            ChaoxingWorkQuestionArtifact::decode_bound(
+                continuation.value,
+                continuation.continuation_digest,
+                draft,
+                remote_task_id,
+            )?;
+            if operation.continuation_revision != continuation.revision
+                || operation.operation_type != ChaoxingWorkSubmissionCommand::operation_type()
+                || operation.request_digest == [0; 32]
+                || operation.ambiguous_at < operation.issued_at
+            {
+                return Err(protocol_drift(
+                    "Chaoxing ambiguous Work operation is stale or foreign",
+                ));
+            }
+            // Work result verification is independently available through the
+            // ordinary recovery path. This hook never replays the final POST.
+            return Ok(None);
+        }
         validate_exam_continuation(&continuation)?;
         if operation.continuation_revision != continuation.revision
             || operation.request_digest == [0; 32]
@@ -359,6 +456,21 @@ impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
     }
 }
 
+fn validate_work_continuation(
+    continuation: &ResolvedProviderQuestionSessionContinuation<'_>,
+) -> ProviderResult<()> {
+    if continuation.continuation_type != CHAOXING_WORK_QUESTION_ARTIFACT_TYPE
+        || continuation.phase != CHAOXING_WORK_QUESTIONS_READY_PHASE
+        || continuation.revision == 0
+        || continuation.continuation_digest == [0; 32]
+    {
+        return Err(protocol_drift(
+            "Chaoxing Work submission continuation is stale or foreign",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_exam_continuation(
     continuation: &ResolvedProviderQuestionSessionContinuation<'_>,
 ) -> ProviderResult<()> {
@@ -412,6 +524,64 @@ struct PreparedChaoxingExamSubmission {
     account_id: ProviderAccountId,
     command: ChaoxingExamSubmissionCommand,
     transport: Arc<dyn ChaoxingSubmissionTransport>,
+}
+
+struct PreparedChaoxingWorkSubmission {
+    provider_id: ProviderId,
+    account_id: ProviderAccountId,
+    command: ChaoxingWorkSubmissionCommand,
+    transport: Arc<dyn ChaoxingSubmissionTransport>,
+}
+
+impl fmt::Debug for PreparedChaoxingWorkSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedChaoxingWorkSubmission")
+            .field("provider_id", &self.provider_id)
+            .field("account_id", &self.account_id)
+            .field("command", &self.command)
+            .field("transport", &"configured")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl PreparedProviderSubmissionOperation for PreparedChaoxingWorkSubmission {
+    fn operation_type(&self) -> &str {
+        ChaoxingWorkSubmissionCommand::operation_type()
+    }
+
+    fn request_digest(&self) -> [u8; 32] {
+        self.command.request_digest()
+    }
+
+    fn delay_before_execute_seconds(&self) -> u64 {
+        0
+    }
+
+    async fn execute(
+        self: Box<Self>,
+        context: &ProviderContext,
+        _events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ProviderSubmissionStepOutcome> {
+        let Self {
+            provider_id,
+            account_id,
+            command,
+            transport,
+        } = *self;
+        if context.provider_id != provider_id || context.account_id != account_id {
+            return Err(internal(
+                "Chaoxing prepared Work submission received a foreign context",
+            ));
+        }
+        let response = transport.submit_prepared_work(context, &command).await?;
+        ProviderSubmissionStepOutcome::submitted(
+            response.receipt,
+            response.response_digest,
+            response.received_at,
+        )
+    }
 }
 
 impl fmt::Debug for PreparedChaoxingExamSubmission {

@@ -9,7 +9,7 @@ use asterism_domain::{ProviderAccountId, ProviderId, Question, TaskId};
 use asterism_provider_api::{
     AmbiguousProviderQuestionReadOperation, CourseInventoryCapability,
     PreparedProviderQuestionReadOperation, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderIdentity, ProviderMetadata, ProviderQuestionMaterialization,
+    ProviderIdentity, ProviderMetadata, ProviderQuestionMaterialization, ProviderQuestionParseSet,
     ProviderQuestionReadContinuation, ProviderQuestionReadStepOutcome, ProviderResult,
     QuestionInventoryCapability, QuestionParseCapability, RemoteCourse, RemoteQuestionRef,
     ResolvedProviderQuestionReadContinuation, ResolvedProviderRuntimeSettings,
@@ -33,6 +33,10 @@ use crate::{
     },
     resource_inventory::locate_chapter_work_target,
     task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
+    work_submission::{
+        CHAOXING_WORK_CONTINUATION_TTL_SECONDS, CHAOXING_WORK_QUESTION_ARTIFACT_TYPE,
+        CHAOXING_WORK_QUESTIONS_READY_PHASE, ChaoxingWorkQuestionArtifact,
+    },
 };
 
 const MAX_ACTIVE_QUESTION_ATTEMPTS: usize = 128;
@@ -583,6 +587,45 @@ impl QuestionParseCapability for ChaoxingQuestionRead {
         }
         Ok(normalized)
     }
+
+    async fn parse_question_set(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        references: &[RemoteQuestionRef],
+    ) -> ProviderResult<ProviderQuestionParseSet> {
+        let identity = QuestionTaskIdentity::parse(remote_task_id)?;
+        let mut questions = Vec::with_capacity(references.len());
+        for reference in references {
+            questions.push(
+                self.parse_question(context, task_id, remote_task_id, reference)
+                    .await?,
+            );
+        }
+        let artifact = if matches!(identity, QuestionTaskIdentity::IndependentWork(_)) {
+            let encoded =
+                ChaoxingWorkQuestionArtifact::from_questions(task_id, remote_task_id, &questions)?
+                    .encode()?;
+            let expected_digest = encoded.digest();
+            let continuation = ProviderQuestionReadContinuation::try_new(
+                &self.metadata.id,
+                CHAOXING_WORK_QUESTION_ARTIFACT_TYPE,
+                CHAOXING_WORK_QUESTIONS_READY_PHASE,
+                encoded.into_secret_value(),
+                CHAOXING_WORK_CONTINUATION_TTL_SECONDS,
+            )?;
+            if continuation.continuation_digest() != expected_digest {
+                return Err(internal(
+                    "Chaoxing Work artifact digest changed at the Provider boundary",
+                ));
+            }
+            Some(continuation)
+        } else {
+            None
+        };
+        ProviderQuestionParseSet::try_new(questions, artifact)
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1060,17 +1103,24 @@ mod tests {
             .unwrap();
         assert_eq!(references.len(), 2);
         let task_id = TaskId::new();
-        for reference in &references {
-            let question = capability
-                .parse_question(&context, task_id, remote_task_id, reference)
-                .await
-                .unwrap();
+        let parsed = capability
+            .parse_question_set(&context, task_id, remote_task_id, &references)
+            .await
+            .unwrap();
+        assert_eq!(parsed.questions().len(), references.len());
+        for (question, reference) in parsed.questions().iter().zip(&references) {
             assert_eq!(question.task_id, task_id);
             assert_eq!(
                 question.remote_question_id.as_deref(),
                 Some(reference.remote_id.as_str())
             );
         }
+        let artifact = parsed.artifact().unwrap();
+        assert_eq!(
+            artifact.continuation_type(),
+            CHAOXING_WORK_QUESTION_ARTIFACT_TYPE
+        );
+        assert_eq!(artifact.phase(), CHAOXING_WORK_QUESTIONS_READY_PHASE);
         assert_eq!(transport.work.inventory.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work.question.load(Ordering::Relaxed), 1);
         let expired = capability

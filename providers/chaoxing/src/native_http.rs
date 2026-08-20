@@ -55,6 +55,10 @@ use crate::{
         CHAPTER_RESOURCE_CARD_COUNT, MAX_EXAM_DETAIL_REQUESTS, MAX_RESOURCE_BATCH_DOCUMENT_BYTES,
         MAX_RESOURCE_CHAPTER_REQUESTS,
     },
+    work_submission::{
+        ChaoxingWorkSubmissionCommand, ChaoxingWorkSubmissionResponse,
+        response_digest as work_submission_response_digest,
+    },
 };
 
 const COURSE_PAGE_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu";
@@ -1484,6 +1488,82 @@ impl ChaoxingSubmissionTransport for NativeChaoxingInventoryTransport {
             )?;
         self.post_work_submission_once(&session, &referer, &form)
             .await
+    }
+
+    async fn prepare_work_submission(
+        &self,
+        context: &ProviderContext,
+        request: ChaoxingWorkDetailRequest<'_>,
+        plan: &ChaoxingSubmissionPlan,
+    ) -> ProviderResult<ChaoxingWorkSubmissionCommand> {
+        let (mut session, renewed) = self.session_for_operation(context).await?;
+        let prepared = match self
+            .prepare_work_submission_once(&session, request, plan)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                session = self.sessions.renew_session(context).await?;
+                self.prepare_work_submission_once(&session, request, plan)
+                    .await?
+            }
+            result => result?,
+        };
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Work preparation requires one identity Cookie",
+            )
+        })?;
+        ChaoxingWorkSubmissionCommand::try_new(
+            request.remote_task_id(),
+            user_id,
+            &prepared.0,
+            &prepared.1,
+        )
+    }
+
+    async fn submit_prepared_work(
+        &self,
+        context: &ProviderContext,
+        command: &ChaoxingWorkSubmissionCommand,
+    ) -> ProviderResult<ChaoxingWorkSubmissionResponse> {
+        // Core has already persisted the command digest. Resolve one session,
+        // bind its actor, and never renew or replay after dispatch begins.
+        let (session, _) = self.session_for_operation(context).await?;
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Work dispatch requires one identity Cookie",
+            )
+        })?;
+        if !command.belongs_to_user(user_id) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Work identity Cookie changed after durable preparation",
+            ));
+        }
+        let request = build_work_submission_request(
+            &self.client,
+            &session,
+            static_url(WORK_SUBMISSION_BASE)?,
+            &command.referer()?,
+            command.fields(),
+        )?;
+        let response = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let status = response.status();
+        validate_response_status(&response)?;
+        let body = read_response_body(response).await?;
+        let response_digest = work_submission_response_digest(status.as_u16(), body.as_str())?;
+        let receipt = parse_submission_receipt(body.as_str())?;
+        Ok(ChaoxingWorkSubmissionResponse {
+            received_at: receipt.received_at,
+            receipt,
+            response_digest,
+        })
     }
 
     async fn prepare_exam_submission(

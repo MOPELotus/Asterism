@@ -18,6 +18,7 @@ use asterism_provider_api::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use reqwest::Url;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -37,6 +38,11 @@ use crate::{
     parse_chapter_work_question_page, parse_exam_question_page, parse_exam_submission_response,
     parse_work_preview_question_page,
     runtime_settings::runtime_settings_schema,
+    submission_support::{ChaoxingSubmissionForm, WorkSubmissionIdentity},
+    work_submission::{
+        CHAOXING_WORK_QUESTION_ARTIFACT_TYPE, CHAOXING_WORK_QUESTIONS_READY_PHASE,
+        ChaoxingWorkQuestionArtifact,
+    },
 };
 
 const WORK_LIST: &str = include_str!("../../../fixtures/providers/chaoxing/work/list-mixed.html");
@@ -44,6 +50,8 @@ const WORK_QUESTIONS: &str =
     include_str!("../../../fixtures/providers/chaoxing/questions/work-preview-mixed.html");
 const WORK_VIEW: &str =
     include_str!("../../../fixtures/providers/chaoxing/work/submission-view.html");
+const WORK_EDITOR: &str =
+    include_str!("../../../fixtures/providers/chaoxing/work/submission-editor.html");
 const CHAPTER_LIST: &str =
     include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
 const CHAPTER_CARDS: &str =
@@ -234,6 +242,41 @@ impl ChaoxingSubmissionTransport for FixturePlatform {
         Ok(receipt())
     }
 
+    async fn prepare_work_submission(
+        &self,
+        _context: &ProviderContext,
+        request: ChaoxingWorkDetailRequest<'_>,
+        plan: &ChaoxingSubmissionPlan,
+    ) -> ProviderResult<crate::ChaoxingWorkSubmissionCommand> {
+        let identity = WorkSubmissionIdentity::parse(request.remote_task_id())?;
+        let form =
+            ChaoxingSubmissionForm::parse(WORK_EDITOR, identity, plan)?.bind_user("SAFE_UID")?;
+        crate::ChaoxingWorkSubmissionCommand::try_new(
+            request.remote_task_id(),
+            "SAFE_UID",
+            &Url::parse("https://mooc1.chaoxing.com/mooc-ans/work/dowork?courseId=100&classId=200")
+                .unwrap(),
+            &form,
+        )
+    }
+
+    async fn submit_prepared_work(
+        &self,
+        _context: &ProviderContext,
+        command: &crate::ChaoxingWorkSubmissionCommand,
+    ) -> ProviderResult<crate::ChaoxingWorkSubmissionResponse> {
+        if command.request_digest() == [0; 32] || !command.belongs_to_user("SAFE_UID") {
+            return Err(unexpected_call());
+        }
+        self.submissions.fetch_add(1, Ordering::Relaxed);
+        let receipt = receipt();
+        Ok(crate::ChaoxingWorkSubmissionResponse {
+            received_at: receipt.received_at,
+            receipt,
+            response_digest: [44; 32],
+        })
+    }
+
     async fn prepare_exam_submission(
         &self,
         _context: &ProviderContext,
@@ -386,6 +429,56 @@ async fn execute_and_verify_use_independent_native_slots() {
     assert_eq!(platform.submissions.load(Ordering::Relaxed), 1);
     assert_eq!(platform.verifications.load(Ordering::Relaxed), 2);
     assert_eq!(platform.inventories.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn independent_work_final_post_uses_the_durable_question_session() {
+    let courses = Arc::new(FixtureCourses::new());
+    let platform = Arc::new(FixturePlatform::default());
+    let execute =
+        ChaoxingSubmissionExecute::try_new(courses, platform.clone(), platform.clone()).unwrap();
+    let context = context();
+    let draft = draft().await;
+    let questions = draft
+        .items
+        .iter()
+        .map(|item| item.question.clone())
+        .collect::<Vec<_>>();
+    let encoded = ChaoxingWorkQuestionArtifact::from_questions(
+        draft.task_id,
+        "work:100:200:work-1",
+        &questions,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let digest = encoded.digest();
+    let value = encoded.into_secret_value();
+    let operation = execute
+        .prepare_submission_operation(
+            &context,
+            "work:100:200:work-1",
+            &draft,
+            ResolvedProviderQuestionSessionContinuation {
+                continuation_type: CHAOXING_WORK_QUESTION_ARTIFACT_TYPE,
+                continuation_digest: digest,
+                phase: CHAOXING_WORK_QUESTIONS_READY_PHASE,
+                revision: 1,
+                value: &value,
+            },
+            &runtime_settings_schema().resolve(None, None, None).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.operation_type(), "chaoxing.work-final-submit.v1");
+    assert_ne!(operation.request_digest(), [0; 32]);
+    let outcome = operation.execute(&context, &NoopEvents).await.unwrap();
+    assert!(matches!(
+        outcome,
+        ProviderSubmissionStepOutcome::Submitted { .. }
+    ));
+    assert_eq!(platform.submissions.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
