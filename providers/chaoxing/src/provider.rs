@@ -5,7 +5,7 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
-    ChaoxingAuthentication, ChaoxingBrowserBridge, ChaoxingCourseEnrollment,
+    ChaoxingAnswerResolve, ChaoxingAuthentication, ChaoxingBrowserBridge, ChaoxingCourseEnrollment,
     ChaoxingCourseInventory, ChaoxingQuestionRead, ChaoxingResourceExecution,
     ChaoxingSessionResolver, ChaoxingSignActivityRead, ChaoxingSubmissionBuild,
     ChaoxingSubmissionExecute, ChaoxingSubmissionVerify, ChaoxingTaskDetail, ChaoxingTaskInventory,
@@ -103,6 +103,10 @@ fn compose_development_provider(
         task_execution.clone(),
     )?);
     let browser_bridge = Arc::new(ChaoxingBrowserBridge::try_new(task_detail.clone())?);
+    let answer_resolve = Arc::new(ChaoxingAnswerResolve::try_new(
+        task_detail.clone(),
+        inventory_transport.clone(),
+    )?);
     let submission_build = Arc::new(ChaoxingSubmissionBuild::try_new()?);
     let submission_execute = Arc::new(ChaoxingSubmissionExecute::try_new(
         course_inventory.clone(),
@@ -126,7 +130,7 @@ fn compose_development_provider(
         duration_read: None,
         question_inventory: Some(question_read.clone()),
         question_parse: Some(question_read),
-        answer_resolve: None,
+        answer_resolve: Some(answer_resolve),
         submission_build: Some(submission_build),
         submission_execute: Some(submission_execute),
         submission_verify: Some(submission_verify),
@@ -215,6 +219,7 @@ mod tests {
         assert!(entry.task_progress.is_some());
         assert!(entry.question_inventory.is_some());
         assert!(entry.question_parse.is_some());
+        assert_answer_capability(&entry);
         assert!(entry.submission_build.is_some());
         assert!(entry.task_execution.is_some());
         assert!(entry.browser_bridge.is_some());
@@ -304,6 +309,16 @@ mod tests {
             registry
                 .get(&asterism_domain::ProviderId::new("chaoxing").unwrap())
                 .is_some()
+        );
+    }
+
+    fn assert_answer_capability(entry: &ProviderEntry) {
+        assert!(entry.answer_resolve.is_some());
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::AnswerResolve)
         );
     }
 

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc};
 
 use asterism_domain::{HumanRequiredReason, TaskId};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
@@ -20,14 +20,15 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::{
-    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
-    ChaoxingCourseEnrollmentTransport, ChaoxingCourseInventoryTransport,
-    ChaoxingCourseInviteApiDocument, ChaoxingCourseInviteApiPreparation,
-    ChaoxingCourseInvitePreviewDocument, ChaoxingCourseInvitePreviewPreparation,
-    ChaoxingCourseInvitePreviewRedirect, ChaoxingCourseJoinPreparation,
-    ChaoxingCourseJoinReceiptDocument, ChaoxingCourseRoute, ChaoxingExamDetailFacts,
-    ChaoxingExamDetailRequest, ChaoxingExamQuestionArtifact, ChaoxingExamQuestionRequest,
-    ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
+    ChaoxingAnswerResolutionTransport, ChaoxingChapterResourceDocument,
+    ChaoxingChapterResourceRequest, ChaoxingChapterWorkResultRequest,
+    ChaoxingChapterWorkVerificationDocument, ChaoxingCourseEnrollmentTransport,
+    ChaoxingCourseInventoryTransport, ChaoxingCourseInviteApiDocument,
+    ChaoxingCourseInviteApiPreparation, ChaoxingCourseInvitePreviewDocument,
+    ChaoxingCourseInvitePreviewPreparation, ChaoxingCourseInvitePreviewRedirect,
+    ChaoxingCourseJoinPreparation, ChaoxingCourseJoinReceiptDocument, ChaoxingCourseRoute,
+    ChaoxingExamDetailFacts, ChaoxingExamDetailRequest, ChaoxingExamQuestionArtifact,
+    ChaoxingExamQuestionRequest, ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
     ChaoxingExamVerificationDocument, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
     ChaoxingIssuedCourseEnrollment, ChaoxingIssuedCourseJoin, ChaoxingQuestionTransport,
     ChaoxingSignActivityListDocument, ChaoxingSignActivityReadTransport,
@@ -39,7 +40,8 @@ use crate::{
     exam_attempt::{
         ChaoxingExamStartCommand, ChaoxingExamStartOutcome, parse_exam_attempt, parse_exam_cover,
     },
-    parse_exam_submission_response, parse_submission_receipt,
+    parse_chapter_inventory, parse_course_inventory, parse_exam_submission_response,
+    parse_submission_receipt,
     resource_execution::{
         ChaoxingImmediateResourceTransport, ChaoxingLiveStatus, ChaoxingLiveTransport,
         ChaoxingMediaReportOutcome, ChaoxingMediaReportRequest, ChaoxingVideoStatus,
@@ -48,7 +50,7 @@ use crate::{
     resource_inventory::{
         ChaoxingChapterWorkTarget, ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
         ChaoxingLiveResourceTarget, ChaoxingMediaKind, ChaoxingMediaResourceTarget,
-        ChaoxingVideoRt,
+        ChaoxingVideoRt, locate_chapter_work_result_target,
     },
     submission_support::ChaoxingSubmissionForm,
     task_inventory::{
@@ -1116,6 +1118,104 @@ impl NativeChaoxingInventoryTransport {
         Ok(documents)
     }
 
+    async fn fetch_chapter_work_result_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: &ChaoxingChapterWorkResultRequest,
+    ) -> ProviderResult<ChaoxingChapterWorkVerificationDocument> {
+        let mut courses = BTreeMap::new();
+        for document in self.fetch_course_inventories_once(session).await? {
+            for course in parse_course_inventory(document.as_str())? {
+                match courses.get(&course.remote_id) {
+                    Some(previous) if previous == &course => {}
+                    Some(_) => {
+                        return Err(protocol_drift(
+                            "Chaoxing course folders disagree during result rediscovery",
+                        ));
+                    }
+                    None => {
+                        courses.insert(course.remote_id.clone(), course);
+                    }
+                }
+            }
+        }
+        let remote_course_id = format!("course:{}:{}", request.course_id(), request.class_id());
+        let course = courses.get(&remote_course_id).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Chapter Work course is no longer available",
+            )
+        })?;
+        let route = ChaoxingCourseRoute::from_remote_course(course)?;
+        let scope = route.parser_scope()?;
+        let chapter_document = self.fetch_chapter_inventory_once(session, route).await?;
+        let chapter_remote_id = format!(
+            "chapter:{}:{}:{}",
+            request.course_id(),
+            request.class_id(),
+            request.knowledge_id()
+        );
+        let chapter = parse_chapter_inventory(chapter_document.as_str(), &scope)?
+            .into_iter()
+            .find(|task| task.remote_id == chapter_remote_id)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::RemoteChanged,
+                    "Chaoxing Chapter Work chapter is no longer available",
+                )
+            })?;
+        let resource_request = ChaoxingChapterResourceRequest::try_from_available_chapter(
+            &chapter,
+        )?
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Chapter Work chapter is no longer readable",
+            )
+        })?;
+        let documents = self
+            .fetch_chapter_resource_inventories_once(
+                session,
+                route,
+                std::slice::from_ref(&resource_request),
+            )
+            .await?;
+        let mut target = None;
+        for document in documents {
+            let Some(candidate) = locate_chapter_work_result_target(
+                document.as_str(),
+                &scope,
+                request.knowledge_id(),
+                document.card_index(),
+                request.remote_task_id(),
+            )?
+            else {
+                continue;
+            };
+            if target.replace(candidate).is_some() {
+                return Err(protocol_drift(
+                    "Chaoxing Chapter Work result target appears on multiple cards",
+                ));
+            }
+        }
+        let target = target.ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Chapter Work completed result is no longer available",
+            )
+        })?;
+        let (url, result) = self
+            .fetch_chapter_work_page(session, route, &resource_request, &target)
+            .await?;
+        if !is_chapter_work_result_url(&url) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Chapter Work no longer resolves to a completed result",
+            ));
+        }
+        ChaoxingChapterWorkVerificationDocument::try_new(result.into_string())
+    }
+
     async fn fetch_course_invite_direct_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -1423,6 +1523,24 @@ impl ChaoxingQuestionTransport for NativeChaoxingInventoryTransport {
         // A send error is returned directly and Core retains ambiguity.
         let (session, _) = self.session_for_operation(context).await?;
         self.execute_exam_start_once(&session, command).await
+    }
+}
+
+#[async_trait]
+impl ChaoxingAnswerResolutionTransport for NativeChaoxingInventoryTransport {
+    async fn fetch_chapter_work_result(
+        &self,
+        context: &ProviderContext,
+        request: &ChaoxingChapterWorkResultRequest,
+    ) -> ProviderResult<ChaoxingChapterWorkVerificationDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_chapter_work_result_once(&session, request).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_chapter_work_result_once(&session, request).await
+            }
+            result => result,
+        }
     }
 }
 
@@ -2182,8 +2300,20 @@ fn valid_chapter_work_url(
                 && unique_query(url, "originJobId").as_deref() == Some(target.job_id())
                 && unique_query(url, "workId").is_some_and(|value| valid_route_component(&value))
         }
+        "/mooc-ans/work/selectworkquestionyipiyue" => {
+            unique_query(url, "oldWorkId").as_deref() == Some(target.work_id())
+                && unique_query(url, "jobid").as_deref() == Some(target.job_id())
+                && unique_query(url, "workId").is_some_and(|value| valid_route_component(&value))
+                && unique_query(url, "workAnswerId")
+                    .is_none_or(|value| valid_route_component(&value))
+        }
         _ => false,
     }
+}
+
+fn is_chapter_work_result_url(url: &Url) -> bool {
+    url.path()
+        .eq_ignore_ascii_case("/mooc-ans/work/selectWorkQuestionYiPiYue")
 }
 
 fn valid_route_component(value: &str) -> bool {
@@ -3466,6 +3596,12 @@ mod tests {
         )
         .unwrap();
         assert!(valid_chapter_work_url(&redirect, route, &request, &target));
+        let result = Url::parse(
+            "https://mooc1.chaoxing.com/mooc-ans/work/selectWorkQuestionYiPiYue?courseId=100&classId=200&knowledgeid=4001&cpi=300&enc=PRIVATE_ENC&oldWorkId=job-work&jobid=job-work&workId=server-123&workAnswerId=answer-456",
+        )
+        .unwrap();
+        assert!(valid_chapter_work_url(&result, route, &request, &target));
+        assert!(is_chapter_work_result_url(&result));
         let foreign = Url::parse(
             "https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew?courseId=100&classId=201&knowledgeid=4001&cpi=300&enc=PRIVATE_ENC&oldWorkId=job-work&jobid=job-work&originJobId=job-work&workId=server-123",
         )

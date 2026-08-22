@@ -141,6 +141,7 @@ pub struct ChaoxingChapterResourceRequest {
 }
 
 impl ChaoxingChapterResourceRequest {
+    #[cfg(test)]
     pub(crate) fn try_from_chapter(task: &RemoteTask) -> ProviderResult<Option<Self>> {
         let request = Self::try_from_available_chapter(task)?;
         if task.remote_state != RemoteState::Pending {
@@ -781,12 +782,14 @@ fn chapter_resource_requests(
 ) -> ProviderResult<Vec<ChaoxingChapterResourceRequest>> {
     let requests = chapters
         .iter()
-        .filter_map(|task| ChaoxingChapterResourceRequest::try_from_chapter(task).transpose())
+        .filter_map(|task| {
+            ChaoxingChapterResourceRequest::try_from_available_chapter(task).transpose()
+        })
         .collect::<ProviderResult<Vec<_>>>()?;
     if requests.len() > MAX_RESOURCE_CHAPTER_REQUESTS {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidResponse,
-            "Chaoxing pending resource chapter count exceeds the size limit",
+            "Chaoxing available resource chapter count exceeds the size limit",
         ));
     }
     Ok(requests)
@@ -1168,6 +1171,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn capability_combines_independent_chapter_work_and_exam_inventories() {
         let transport = Arc::new(FixtureTransport::default());
         let inventory = ChaoxingTaskInventory::try_new(transport.clone()).unwrap();
@@ -1262,6 +1266,7 @@ mod tests {
                 ProviderCapability::TaskProgressRead,
                 ProviderCapability::QuestionInventory,
                 ProviderCapability::QuestionParse,
+                ProviderCapability::AnswerResolve,
                 ProviderCapability::ResourceExecution,
                 ProviderCapability::ExecutionVerify,
                 ProviderCapability::SubmissionBuild,

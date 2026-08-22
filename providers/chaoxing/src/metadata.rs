@@ -30,6 +30,7 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::TaskProgressRead,
             ProviderCapability::QuestionInventory,
             ProviderCapability::QuestionParse,
+            ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,

@@ -654,6 +654,43 @@ pub(crate) fn locate_chapter_work_target(
     card_index: u8,
     remote_task_id: &str,
 ) -> ProviderResult<Option<ChaoxingChapterWorkTarget>> {
+    locate_chapter_work_target_in_state(
+        html,
+        scope,
+        knowledge_id,
+        card_index,
+        remote_task_id,
+        RemoteState::Pending,
+    )
+}
+
+/// Locates the same fresh Chapter Work route after the card reports completion.
+/// The route is used only for the donor-observed read-only result page.
+pub(crate) fn locate_chapter_work_result_target(
+    html: &str,
+    scope: &ChaoxingCourseScope,
+    knowledge_id: &str,
+    card_index: u8,
+    remote_task_id: &str,
+) -> ProviderResult<Option<ChaoxingChapterWorkTarget>> {
+    locate_chapter_work_target_in_state(
+        html,
+        scope,
+        knowledge_id,
+        card_index,
+        remote_task_id,
+        RemoteState::Completed,
+    )
+}
+
+fn locate_chapter_work_target_in_state(
+    html: &str,
+    scope: &ChaoxingCourseScope,
+    knowledge_id: &str,
+    card_index: u8,
+    remote_task_id: &str,
+    expected_state: RemoteState,
+) -> ProviderResult<Option<ChaoxingChapterWorkTarget>> {
     if html.is_empty() || html.len() > MAX_CARD_DOCUMENT_BYTES {
         return Err(invalid_response(
             "Chaoxing chapter card document is empty or exceeds the size limit",
@@ -695,12 +732,12 @@ pub(crate) fn locate_chapter_work_target(
                 "Chaoxing chapter card contains a duplicate Chapter Work target",
             ));
         }
-        if task.remote_state != RemoteState::Pending
+        if task.remote_state != expected_state
             || task.normalized.get("resource_kind").and_then(Value::as_str) != Some("chapter_work")
         {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
-                "Chaoxing Chapter Work is not pending",
+                "Chaoxing Chapter Work state does not match the requested operation",
             ));
         }
         let card = attachment
@@ -912,6 +949,7 @@ fn parse_resource_attachment(
                 TaskCapability::SubmissionExecute,
                 TaskCapability::SubmissionVerify,
             ],
+            ("chapter_work", RemoteState::Completed) => vec![TaskCapability::AnswerResolve],
             ("document" | "read" | "video" | "audio" | "live", RemoteState::Pending) => vec![
                 TaskCapability::ProgressRead,
                 TaskCapability::ResourceExecution,
@@ -1595,6 +1633,42 @@ mod tests {
         for private in ["job-work", "PRIVATE_ENC", "PRIVATE_TOKEN"] {
             assert!(!debug.contains(private));
         }
+    }
+
+    #[test]
+    fn completed_chapter_work_locator_binds_result_material_only() {
+        let completed = CARDS_MIXED.replace(
+            r#""jobid":"job-work","isPassed":false"#,
+            r#""jobid":"job-work","isPassed":true"#,
+        );
+        let target = locate_chapter_work_result_target(
+            &completed,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-work",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(target.job_id(), "job-work");
+        let task = parse_chapter_resource_inventory(&completed, &scope(), "4001", 0)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.remote_id.ends_with(":job-work"))
+            .unwrap();
+        assert_eq!(task.capabilities, [TaskCapability::AnswerResolve]);
+        assert_eq!(
+            locate_chapter_work_target(
+                &completed,
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-work",
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::UnsupportedTask
+        );
     }
 
     #[test]
