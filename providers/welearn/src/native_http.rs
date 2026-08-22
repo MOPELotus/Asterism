@@ -2214,13 +2214,17 @@ async fn read_inventory_response(
             "WELearn returned a login page for the current session",
         ));
     }
-    if let Err(error) = content_type_result
-        && (expected_content != ResponseContent::Cmi
-            || !document.contains(UNINITIALIZED_CMI_MARKER))
-    {
-        let mut document = document;
-        document.zeroize();
-        return Err(error);
+    if let Err(error) = content_type_result {
+        let compatible_body = match expected_content {
+            ResponseContent::Json => serde_json::from_str::<serde_json::Value>(&document).is_ok(),
+            ResponseContent::Cmi => document.contains(UNINITIALIZED_CMI_MARKER),
+            ResponseContent::Html => false,
+        };
+        if !compatible_body {
+            let mut document = document;
+            document.zeroize();
+            return Err(error);
+        }
     }
     WellearnInventoryDocument::try_new(document)
 }
@@ -3602,6 +3606,36 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::Authentication);
+    }
+
+    #[tokio::test]
+    async fn json_reader_defers_wrong_mime_json_to_the_strict_inventory_parser() {
+        let wrong_mime = fixture_response(
+            "text/html; charset=utf-8",
+            include_str!("../../../fixtures/providers/welearn/courses/list-mixed.json"),
+        )
+        .await;
+        let document = read_inventory_response(wrong_mime, ResponseContent::Json)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::parse_course_inventory(document.as_str())
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let wrong_shape = fixture_response("text/html", r#"{"not_clist":[]}"#).await;
+        let document = read_inventory_response(wrong_shape, ResponseContent::Json)
+            .await
+            .unwrap();
+        assert!(crate::parse_course_inventory(document.as_str()).is_err());
+
+        let malformed = fixture_response("text/html", r#"{"clist":[}"#).await;
+        let error = read_inventory_response(malformed, ResponseContent::Json)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
     }
 
     async fn fixture_response(content_type: &'static str, body: &'static str) -> Response {
