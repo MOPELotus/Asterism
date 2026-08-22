@@ -623,18 +623,17 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
             .await?;
         let mut tasks = parse_chapter_inventory(chapter.as_str(), &scope)?;
         let resource_requests = chapter_resource_requests(&tasks)?;
-        let resource_documents = if resource_requests.is_empty() {
-            Vec::new()
-        } else {
-            self.transport
-                .fetch_chapter_resource_inventories(context, route, &resource_requests)
-                .await?
-        };
-        tasks.extend(parse_resource_documents(
-            resource_documents,
-            &resource_requests,
-            &scope,
-        )?);
+        for request_batch in resource_requests.chunks(MAX_RESOURCE_CHAPTER_REQUESTS) {
+            let resource_documents = self
+                .transport
+                .fetch_chapter_resource_inventories(context, route, request_batch)
+                .await?;
+            tasks.extend(parse_resource_documents(
+                resource_documents,
+                request_batch,
+                &scope,
+            )?);
+        }
         let work = self.transport.fetch_work_inventory(context, route).await?;
         let exam = self.transport.fetch_exam_inventory(context, route).await?;
         let mut work_tasks = parse_work_inventory_entries(work.as_str(), &scope)?;
@@ -780,19 +779,12 @@ async fn parse_exam_tasks_with_details(
 fn chapter_resource_requests(
     chapters: &[RemoteTask],
 ) -> ProviderResult<Vec<ChaoxingChapterResourceRequest>> {
-    let requests = chapters
+    chapters
         .iter()
         .filter_map(|task| {
             ChaoxingChapterResourceRequest::try_from_available_chapter(task).transpose()
         })
-        .collect::<ProviderResult<Vec<_>>>()?;
-    if requests.len() > MAX_RESOURCE_CHAPTER_REQUESTS {
-        return Err(ProviderError::new(
-            ProviderErrorKind::InvalidResponse,
-            "Chaoxing available resource chapter count exceeds the size limit",
-        ));
-    }
-    Ok(requests)
+        .collect::<ProviderResult<Vec<_>>>()
 }
 
 fn parse_resource_documents(
@@ -994,6 +986,7 @@ fn required_normalized_string<'a>(task: &'a RemoteTask, key: &str) -> ProviderRe
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use asterism_domain::{ProviderAccountId, ProviderId, SecretId, SourceType};
@@ -1168,6 +1161,99 @@ mod tests {
                 }]),
             }
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct BatchingTransport {
+        resource_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChaoxingInventoryTransport for BatchingTransport {
+        async fn fetch_chapter_inventory(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+        ) -> ProviderResult<ChaoxingInventoryDocument> {
+            let mut document = String::from("<html><body><div class='chapter_unit'><ul>");
+            for index in 1..=65 {
+                write!(
+                    document,
+                    "<li><div id='cur{}'><a class='clicktitle'>Chapter {index}</a><input class='knowledgeJobCount' value='1'></div></li>",
+                    5_000 + index
+                )
+                .unwrap();
+            }
+            document.push_str("</ul></div></body></html>");
+            ChaoxingInventoryDocument::try_new(document)
+        }
+
+        async fn fetch_work_inventory(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+        ) -> ProviderResult<ChaoxingInventoryDocument> {
+            ChaoxingInventoryDocument::try_new("<html><body></body></html>")
+        }
+
+        async fn fetch_chapter_resource_inventories(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+            requests: &[ChaoxingChapterResourceRequest],
+        ) -> ProviderResult<Vec<ChaoxingChapterResourceDocument>> {
+            let call = self.resource_calls.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(requests.len(), if call == 0 { 64 } else { 1 });
+            assert!(requests.len() <= MAX_RESOURCE_CHAPTER_REQUESTS);
+            let mut documents = Vec::new();
+            for request in requests {
+                for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+                    documents.push(ChaoxingChapterResourceDocument::for_request(
+                        request,
+                        card_index,
+                        "<html><body>empty card slot</body></html>",
+                    )?);
+                }
+            }
+            Ok(documents)
+        }
+
+        async fn fetch_exam_inventory(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+        ) -> ProviderResult<ChaoxingInventoryDocument> {
+            ChaoxingInventoryDocument::try_new("<html><body></body></html>")
+        }
+
+        async fn fetch_work_detail_states(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+            requests: &[ChaoxingWorkDetailRequest<'_>],
+        ) -> ProviderResult<Vec<ChaoxingWorkDetailState>> {
+            assert!(requests.is_empty());
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_batches_all_available_chapter_resource_reads() {
+        let transport = Arc::new(BatchingTransport::default());
+        let inventory = ChaoxingTaskInventory::try_new(transport.clone()).unwrap();
+        let tasks = inventory
+            .list_tasks(&context(), Some(&course()))
+            .await
+            .unwrap();
+
+        assert_eq!(tasks.len(), 65);
+        assert!(tasks.iter().all(|task| {
+            task.source_type == SourceType::Chapter
+                && task
+                    .capabilities
+                    .contains(&asterism_domain::TaskCapability::BrowserBridge)
+        }));
+        assert_eq!(transport.resource_calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
