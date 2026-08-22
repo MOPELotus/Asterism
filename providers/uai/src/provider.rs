@@ -376,6 +376,10 @@ mod tests {
         assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_some());
         assert!(entry.submission_verify.is_some());
+        assert!(
+            entry.answer_history_harvest.is_none(),
+            "UAI has no evidenced history enumeration or completed-Task retake authority"
+        );
         assert!(entry.task_execution.is_some());
         assert!(entry.browser_bridge.is_some());
         assert_eq!(entry.runtime_settings.definitions.len(), 7);
