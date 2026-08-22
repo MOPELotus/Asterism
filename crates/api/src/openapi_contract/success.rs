@@ -103,6 +103,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("optInScoreImprovement", "ScoreImprovementOptInResponse"),
     ("listTaskAttemptHistory", "TaskAttemptHistoryPageResponse"),
     ("getCourseProgress", "CourseProgressResponse"),
+    (
+        "createWellearnBatchExecution",
+        "CreateBatchExecutionResponse",
+    ),
     ("getTaskDetail", "TaskDetailResponse"),
     (
         "getTaskBrowserSessionSpec",
@@ -562,7 +566,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 &["session", "pairing_token"],
                 json!({
                     "session": schema_ref("AuthBootstrapSession"),
-                    "pairing_token": {"type": "string", "minLength": 1, "writeOnly": true}
+                    "pairing_token": {"type": "string", "minLength": 1, "readOnly": true}
                 }),
             ),
         ),
@@ -572,7 +576,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 &["session", "access_token", "recipe"],
                 json!({
                     "session": schema_ref("AuthBootstrapSession"),
-                    "access_token": {"type": "string", "minLength": 1, "writeOnly": true},
+                    "access_token": {"type": "string", "minLength": 1, "readOnly": true},
                     "recipe": schema_ref("CaptureRecipe")
                 }),
             ),
@@ -985,6 +989,10 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             "SubmissionPayloadPreview",
             submission_payload_preview_schema(),
         ),
+        (
+            "SubmissionAnswerCoverage",
+            submission_answer_coverage_schema(),
+        ),
         ("SubmissionDraft", submission_draft_schema()),
         ("SubmissionReceipt", submission_receipt_schema()),
         (
@@ -1026,6 +1034,14 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             page_response("CreditReservationDetailResponse"),
         ),
         ("Execution", execution_schema()),
+        ("BatchExecution", batch_execution_schema()),
+        (
+            "CreateBatchExecutionResponse",
+            object(
+                &["batch_execution", "created"],
+                json!({"batch_execution": schema_ref("BatchExecution"), "created": {"type": "boolean"}}),
+            ),
+        ),
         ("ExecutionAttempt", execution_attempt_schema()),
         ("ExecutionProgress", execution_progress_schema()),
         ("ExecutionLogEvent", execution_log_schema()),
@@ -1829,6 +1845,7 @@ fn submission_draft_schema() -> Value {
             "provider_id",
             "provider_version",
             "items",
+            "answer_coverage",
             "payload_preview",
             "created_at",
         ],
@@ -1845,8 +1862,24 @@ fn submission_draft_schema() -> Value {
                     "selected": schema_ref("SelectedAnswer")
                 }))
             },
+            "answer_coverage": schema_ref("SubmissionAnswerCoverage"),
             "payload_preview": schema_ref("SubmissionPayloadPreview"),
             "created_at": timestamp()
+        }),
+    )
+}
+
+fn submission_answer_coverage_schema() -> Value {
+    object(
+        &[
+            "total_question_count",
+            "minimum_coverage_millis",
+            "unanswered_question_ids",
+        ],
+        json!({
+            "total_question_count": {"type": "integer", "minimum": 1},
+            "minimum_coverage_millis": {"type": "integer", "minimum": 1, "maximum": 1_000},
+            "unanswered_question_ids": {"type": "array", "items": uuid()}
         }),
     )
 }
@@ -2260,6 +2293,45 @@ fn execution_schema() -> Value {
             "requested_by": nullable_uuid(),
             "request_source": string_enum(&["scheduler", "web_ui", "yunzai", "cli", "system"]),
             "quote_id": nullable_uuid(),
+            "state": string_enum(&["requested", "scheduled", "running", "recovering", "retry_waiting", "human_required", "succeeded", "failed", "cancelled"]),
+            "scheduled_at": nullable_timestamp(),
+            "started_at": nullable_timestamp(),
+            "finished_at": nullable_timestamp(),
+            "created_at": timestamp()
+        }),
+    )
+}
+
+fn batch_execution_schema() -> Value {
+    object(
+        &[
+            "id",
+            "provider_account_id",
+            "course_id",
+            "requested_capabilities",
+            "expected_child_count",
+            "requested_by",
+            "request_source",
+            "state",
+            "scheduled_at",
+            "started_at",
+            "finished_at",
+            "created_at",
+        ],
+        json!({
+            "id": uuid(),
+            "provider_account_id": uuid(),
+            "course_id": uuid(),
+            "requested_capabilities": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "uniqueItems": true,
+                "items": task_capability()
+            },
+            "expected_child_count": {"type": "integer", "minimum": 1, "maximum": 8_192},
+            "requested_by": nullable_uuid(),
+            "request_source": string_enum(&["scheduler", "web_ui", "yunzai", "cli", "system"]),
             "state": string_enum(&["requested", "scheduled", "running", "recovering", "retry_waiting", "human_required", "succeeded", "failed", "cancelled"]),
             "scheduled_at": nullable_timestamp(),
             "started_at": nullable_timestamp(),

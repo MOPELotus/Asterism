@@ -135,6 +135,13 @@ impl SqliteSecretStore {
         Self { database, keyring }
     }
 
+    /// Reuses the configured encrypted-store keyring for Provider batch
+    /// planning inputs. The API uses this only when the daemon has an active
+    /// secret store.
+    pub fn batch_executions(&self) -> crate::SqliteBatchExecutionRepository {
+        crate::SqliteBatchExecutionRepository::new(self.database.clone(), self.keyring.clone())
+    }
+
     /// Builds a permanently Provider-scoped encrypted Course enrollment draft
     /// repository. Exact invitation request bytes never pass through generic
     /// query or API storage.

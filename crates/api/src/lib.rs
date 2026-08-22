@@ -6,6 +6,7 @@ mod account;
 mod admin;
 mod auth;
 mod auth_bootstrap;
+mod batch_execution;
 mod browser_bridge;
 mod course;
 mod course_enrollment;
@@ -194,6 +195,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/api/v1/courses/{course_id}/progress",
             get(course::get_course_progress),
+        )
+        .route(
+            "/api/v1/providers/welearn/accounts/{account_id}/courses/{course_id}/batch-executions",
+            post(batch_execution::create_welearn_batch_execution),
         )
         .merge(runtime_settings_routes())
         .merge(credit_routes())
@@ -1251,6 +1256,14 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/courses/{course_id}/progress".to_owned(),
             course_progress_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/providers/welearn/accounts/{account_id}/courses/{course_id}/batch-executions"
+                .to_owned(),
+            welearn_batch_executions_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -2331,6 +2344,44 @@ fn course_progress_path() -> Value {
             "401": {"description": "Authentication required"},
             "403": {"description": "Task read permission is required"},
             "404": {"description": "Owner-scoped Course not found"}
+        }
+    }})
+}
+
+fn welearn_batch_executions_path() -> Value {
+    json!({"post": {
+        "operationId": "createWellearnBatchExecution",
+        "description": "Creates one owner-authorized WELearn Course batch from an explicit donor flow, frozen unit selection and duration policy.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "course_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 256}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+            "type": "object",
+            "required": ["course_remote_id", "flow", "expected_remote_task_id", "duration", "expected_child_count"],
+            "properties": {
+                "course_remote_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "flow": {"type": "string", "enum": ["fanyuchang_duration", "auto_duration"]},
+                "selected_unit_indices": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0}, "maxItems": 8192},
+                "expected_remote_task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "duration": {"oneOf": [
+                    {"type": "object", "required": ["kind", "target_seconds"], "properties": {"kind": {"const": "per_child_seconds"}, "target_seconds": {"type": "array", "minItems": 1, "maxItems": 8192, "items": {"type": "integer", "minimum": 0}}}, "additionalProperties": false},
+                    {"type": "object", "required": ["kind", "configured_minutes", "random_range_minutes", "sampled_offset_minutes"], "properties": {"kind": {"const": "auto_aggregate"}, "configured_minutes": {"type": "integer", "minimum": 1, "maximum": 300}, "random_range_minutes": {"type": "integer", "minimum": 0, "maximum": 30}, "sampled_offset_minutes": {"type": "integer", "minimum": -30, "maximum": 30}}, "additionalProperties": false}
+                ]},
+                "expected_child_count": {"type": "integer", "minimum": 1, "maximum": 8192}
+            },
+            "additionalProperties": false
+        }}}},
+        "responses": {
+            "200": {"description": "Existing idempotent WELearn batch execution"},
+            "201": {"description": "WELearn batch execution created and scheduled"},
+            "400": {"description": "Invalid identity, flow, policy, count or request header"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Task execution permission is required"},
+            "409": {"description": "Provider, binding or idempotency conflict"},
+            "503": {"description": "WELearn Provider or encrypted planning storage unavailable"}
         }
     }})
 }

@@ -19,6 +19,7 @@ const ProviderAccountsPage = lazy(() => import("@/pages/provider-accounts-page.t
 const ProviderAccountCreatePage = lazy(() => import("@/pages/provider-account-create-page.tsx").then((module) => ({ default: module.ProviderAccountCreatePage })));
 const ProviderAccountDetailPage = lazy(() => import("@/pages/provider-account-detail-page.tsx").then((module) => ({ default: module.ProviderAccountDetailPage })));
 const RuntimeSettingsPage = lazy(() => import("@/pages/runtime-settings-page.tsx").then((module) => ({ default: module.RuntimeSettingsPage })));
+const ProtocolObservationsPage = lazy(() => import("@/pages/protocol-observations-page.tsx").then((module) => ({ default: module.ProtocolObservationsPage })));
 const ServiceTokensPage = lazy(() => import("@/pages/service-tokens-page.tsx").then((module) => ({ default: module.ServiceTokensPage })));
 const TasksPage = lazy(() => import("@/pages/tasks-page.tsx").then((module) => ({ default: module.TasksPage })));
 const TaskDetailPage = lazy(() => import("@/pages/task-detail-page.tsx").then((module) => ({ default: module.TaskDetailPage })));
@@ -73,6 +74,7 @@ export function App() {
             <Route path="admin/audit" element={<AuditPage />} />
             <Route path="admin/service-tokens" element={<ServiceTokensPage />} />
             <Route path="admin/runtime-settings" element={<RuntimeSettingsPage />} />
+            <Route path="admin/protocol-observations" element={<ProtocolObservationsPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
 

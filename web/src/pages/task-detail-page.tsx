@@ -1,10 +1,11 @@
 import { usePermissions } from "@refinedev/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Ban, CheckCircle2, Clock3, EyeOff, FileQuestion, Hourglass, Play, RefreshCw, Settings2 } from "lucide-react";
+import { Activity, Ban, CheckCircle2, Clock3, Copy, ExternalLink, EyeOff, FileQuestion, Hourglass, MonitorUp, Play, RefreshCw, Settings2 } from "lucide-react";
 import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { approveTask, cancelTask, delayTask, executeTask, getTask, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask } from "@/api/generated/sdk.gen.ts";
+import { approveTask, cancelTask, createBrowserBridgeSession, delayTask, executeTask, getBrowserBridgeSession, getTask, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask, prepareExecutionInvocationDraft } from "@/api/generated/sdk.gen.ts";
+import type { BrowserBridgeCreateResponse } from "@/api/generated/types.gen.ts";
 import { requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
 import { QueryError, TableSkeleton } from "@/components/query-feedback.tsx";
@@ -17,8 +18,12 @@ import { Input } from "@/components/ui/input.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import { formatTimestamp, shortId } from "@/lib/format.ts";
 
-const EXECUTABLE_CAPABILITIES = ["resource_execution", "submission_execute", "duration_report", "discussion", "practice"] as const;
+const EXECUTABLE_CAPABILITIES = ["resource_execution", "submission_execute", "duration_report", "discussion", "artifact_upload", "oral_submission", "practice"] as const;
 type ExecutableCapability = (typeof EXECUTABLE_CAPABILITIES)[number];
+
+const UAI_DISCUSSION_INPUT_TYPE = "uai.discussion.reply-input.v1";
+const UAI_ARTIFACT_INPUT_TYPE = "uai.artifact-upload.mp3-input.v1";
+const UAI_ORAL_INPUT_TYPE = "uai.compound-oral.authorization.v1";
 
 export function TaskDetailPage() {
   const { taskId = "" } = useParams();
@@ -28,6 +33,10 @@ export function TaskDetailPage() {
   const canManageSystem = permissions.data?.includes("manage_system") ?? false;
   const [requestedCapabilities, setRequestedCapabilities] = useState<ExecutableCapability[]>([]);
   const [submissionDraftId, setSubmissionDraftId] = useState("");
+  const [invocationDraftId, setInvocationDraftId] = useState("");
+  const [discussionContent, setDiscussionContent] = useState("");
+  const [artifactFile, setArtifactFile] = useState<File>();
+  const [browserSession, setBrowserSession] = useState<BrowserBridgeCreateResponse>();
   const [delayedUntil, setDelayedUntil] = useState(() => new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString().slice(0, 16));
   const [actionNotice, setActionNotice] = useState<string>();
   const idempotencyKey = useRef(crypto.randomUUID());
@@ -35,12 +44,45 @@ export function TaskDetailPage() {
   const cancelKey = useRef(crypto.randomUUID());
   const delayKey = useRef(crypto.randomUUID());
   const ignoreKey = useRef(crypto.randomUUID());
+  const invocationKey = useRef(crypto.randomUUID());
 
   const task = useQuery({ queryKey: ["tasks", taskId], enabled: Boolean(taskId), queryFn: async () => requireData(await getTask({ path: { task_id: taskId } })) });
   const detail = useQuery({ queryKey: ["tasks", taskId, "remote-detail"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskDetail({ path: { task_id: taskId } })) });
   const progress = useQuery({ queryKey: ["tasks", taskId, "progress"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskProgress({ path: { task_id: taskId } })) });
   const duration = useQuery({ queryKey: ["tasks", taskId, "duration"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskDuration({ path: { task_id: taskId } })) });
   const questions = useQuery({ queryKey: ["tasks", taskId, "questions"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskQuestions({ path: { task_id: taskId } })) });
+  const browserSnapshot = useQuery({
+    queryKey: ["browser-bridge-sessions", browserSession?.session.id],
+    enabled: false,
+    retry: false,
+    queryFn: async () => requireData(await getBrowserBridgeSession({ path: { session_id: browserSession!.session.id } })),
+  });
+  const prepareInvocation = useMutation({
+    mutationFn: async () => {
+      const input = await encodeUaiInvocationInput(requestedCapabilities, discussionContent, artifactFile);
+      return requireData(await prepareExecutionInvocationDraft({
+        path: { task_id: taskId },
+        headers: {
+          "Idempotency-Key": invocationKey.current,
+          "x-asterism-invocation-input-type": input.inputType,
+          "x-asterism-requested-capabilities": requestedCapabilities.join(","),
+          ...(submissionDraftId.trim() ? { "x-asterism-submission-draft-id": submissionDraftId.trim() } : {}),
+        },
+        body: input.body,
+      }));
+    },
+    onSuccess: (draft) => {
+      invocationKey.current = crypto.randomUUID();
+      setInvocationDraftId(draft.draft_id);
+    },
+  });
+  const createBridge = useMutation({
+    mutationFn: async () => requireData(await createBrowserBridgeSession({ path: { task_id: taskId } })),
+    onSuccess: (created) => {
+      setBrowserSession(created);
+      void queryClient.removeQueries({ queryKey: ["browser-bridge-sessions"] });
+    },
+  });
   const execute = useMutation({
     mutationFn: async () => requireData(await executeTask({
       path: { task_id: taskId },
@@ -48,6 +90,7 @@ export function TaskDetailPage() {
       body: {
         requested_capabilities: requestedCapabilities,
         ...(requestedCapabilities.includes("submission_execute") && submissionDraftId.trim() ? { submission_draft_id: submissionDraftId.trim() } : {}),
+        ...(invocationDraftId.trim() ? { invocation_draft_id: invocationDraftId.trim() } : {}),
       },
     })),
     onSuccess: ({ execution }) => {
@@ -77,12 +120,14 @@ export function TaskDetailPage() {
     onSuccess: async () => { ignoreKey.current = crypto.randomUUID(); await refreshTask("任务已忽略；远端任务未被修改。"); },
   });
 
-  const error = task.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? execute.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
+  const error = task.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? browserSnapshot.error ?? prepareInvocation.error ?? createBridge.error ?? execute.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
   if (task.isLoading) return <PageShell title="任务详情" description="正在读取任务。"><TableSkeleton /></PageShell>;
   if (!task.data) return <PageShell title="任务详情" description="任务不存在或当前身份不可访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
   const executableCapabilities = EXECUTABLE_CAPABILITIES.filter((capability) => task.data.capabilities.includes(capability));
   const needsDraft = requestedCapabilities.includes("submission_execute");
+  const needsInvocation = requestedCapabilities.some((capability) => ["discussion", "artifact_upload", "oral_submission"].includes(capability));
+  const invocationShapeSupported = isSupportedUaiInvocationShape(requestedCapabilities);
   const executable = executableCapabilities.length > 0;
   const policyBlocked = task.data.assessment_class === "formal";
   const lifecyclePending = approve.isPending || cancel.isPending || delay.isPending || ignore.isPending;
@@ -106,16 +151,23 @@ export function TaskDetailPage() {
       {executable ? <div className="space-y-2"><Label>本次 Execution 的能力范围</Label><div className="flex flex-wrap gap-2">{executableCapabilities.map((capability) => {
         const selected = requestedCapabilities.includes(capability);
         return <Button key={capability} type="button" size="sm" variant={selected ? "default" : "outline"} onClick={() => setRequestedCapabilities((current) => {
-          if (capability === "submission_execute") return selected ? [] : [capability];
-          const withoutSubmission = current.filter((item) => item !== "submission_execute");
-          return selected ? withoutSubmission.filter((item) => item !== capability) : [...withoutSubmission, capability];
+          setInvocationDraftId("");
+          return selected ? current.filter((item) => item !== capability) : [...current, capability];
         })}>{capability}</Button>;
       })}</div><p className="text-sm text-muted-foreground">所选范围会冻结到 Execution；Provider 不会自动执行任务声明的其他写入能力。</p></div> : null}
       {actionNotice ? <Alert><AlertTitle>Core Action 已提交</AlertTitle><AlertDescription>{actionNotice}</AlertDescription></Alert> : null}
       {policyBlocked && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评保护生效</AlertTitle><AlertDescription>批准只改变编排等待状态，不会授予正式测评的执行或提交权限；当前 Core 默认继续阻止远端写入。</AlertDescription></Alert> : null}
       {needsDraft ? <div className="max-w-xl space-y-2"><Label htmlFor="submission-draft">Submission Draft ID</Label><Input id="submission-draft" value={submissionDraftId} onChange={(event) => setSubmissionDraftId(event.target.value)} placeholder="测评任务必须绑定已审核的不可变 Draft" /></div> : null}
+      {needsInvocation ? <div className="max-w-2xl space-y-3 rounded-lg border p-4">
+        <div><p className="font-medium">Provider 私有执行输入</p><p className="text-sm text-muted-foreground">UAI 讨论、音频上传和复合口语会先生成加密的不可变 invocation draft，再交给 Core 调度。</p></div>
+        {requestedCapabilities.includes("discussion") ? <div className="space-y-2"><Label htmlFor="discussion-content">讨论回复</Label><textarea id="discussion-content" className="min-h-28 w-full rounded-md border bg-background px-3 py-2 text-sm" value={discussionContent} onChange={(event) => { setDiscussionContent(event.target.value); setInvocationDraftId(""); }} placeholder="输入将提交的完整回复内容" /></div> : null}
+        {requestedCapabilities.includes("artifact_upload") ? <div className="space-y-2"><Label htmlFor="artifact-file">MP3 文件</Label><Input id="artifact-file" type="file" accept="audio/mpeg,.mp3" onChange={(event) => { setArtifactFile(event.target.files?.[0]); setInvocationDraftId(""); }} /></div> : null}
+        {requestedCapabilities.includes("oral_submission") ? <Alert><AlertTitle>复合口语授权</AlertTitle><AlertDescription>将使用上方 Submission Draft 的普通题答案，并按远端当前题目和已有语音证据生成口语提交计划。</AlertDescription></Alert> : null}
+        {!invocationShapeSupported ? <p className="text-sm text-destructive">当前组合不是 UAI 支持的私有调用范围。请选择 discussion、artifact_upload、submission_execute + artifact_upload，或 submission_execute + oral_submission。</p> : null}
+        <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="outline" disabled={!invocationShapeSupported || prepareInvocation.isPending || (requestedCapabilities.includes("discussion") && !discussionContent.trim()) || (requestedCapabilities.includes("artifact_upload") && !artifactFile) || (needsDraft && !submissionDraftId.trim())} onClick={() => prepareInvocation.mutate()}>{prepareInvocation.isPending ? "正在准备…" : "生成私有执行 Draft"}</Button>{invocationDraftId ? <Badge variant="secondary">Draft {shortId(invocationDraftId)}</Badge> : null}</div>
+      </div> : null}
       <div className="flex flex-wrap gap-2">
-        <Button disabled={!executable || requestedCapabilities.length === 0 || !canExecuteState || policyBlocked || execute.isPending || lifecyclePending || (needsDraft && !submissionDraftId.trim())} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : "通过 Core 调度执行"}</Button>
+        <Button disabled={!executable || requestedCapabilities.length === 0 || !canExecuteState || policyBlocked || execute.isPending || lifecyclePending || (needsDraft && !submissionDraftId.trim()) || (needsInvocation && !invocationDraftId.trim())} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : "通过 Core 调度执行"}</Button>
         <Button variant="outline" disabled={!canApprove || lifecyclePending || execute.isPending} onClick={() => approve.mutate()}><CheckCircle2 className="size-4" />{approve.isPending ? "批准中…" : "批准"}</Button>
         <Button variant="outline" disabled={!canIgnore || lifecyclePending || execute.isPending} onClick={() => { if (window.confirm("忽略后 Asterism 不会自动处理此任务，确认继续？")) ignore.mutate(); }}><EyeOff className="size-4" />{ignore.isPending ? "忽略中…" : "忽略"}</Button>
         <Button variant="destructive" disabled={!canCancel || lifecyclePending || execute.isPending} onClick={() => { if (window.confirm("取消会撤销尚未领取的执行和积分预留，确认继续？")) cancel.mutate(); }}><Ban className="size-4" />{cancel.isPending ? "取消中…" : "取消"}</Button>
@@ -125,6 +177,17 @@ export function TaskDetailPage() {
       {executable && !canExecuteState && !policyBlocked ? <p className="text-sm text-muted-foreground">当前编排状态不可直接执行；等待审批时先批准，已调度时可延迟或取消。</p> : null}
     </CardContent></Card>
 
+    {task.data.capabilities.includes("browser_bridge") ? <Card><CardHeader><CardTitle className="flex items-center gap-2"><MonitorUp className="size-5" />BrowserBridge</CardTitle></CardHeader><CardContent className="space-y-4">
+      <p className="text-sm text-muted-foreground">创建一次性浏览器会话后，用本地 Helper 的配对入口打开远端页面。令牌只在创建响应中显示。</p>
+      <div className="flex flex-wrap gap-2"><Button disabled={createBridge.isPending} onClick={() => createBridge.mutate()}>{createBridge.isPending ? "正在创建…" : "创建浏览器会话"}</Button>{browserSession ? <Button variant="outline" disabled={browserSnapshot.isFetching} onClick={() => void browserSnapshot.refetch()}><RefreshCw className="size-4" />刷新状态</Button> : null}</div>
+      {browserSession ? <div className="space-y-3 rounded-lg border p-4 text-sm">
+        <div className="flex flex-wrap items-center gap-2"><StateBadge state={browserSnapshot.data?.session.state ?? browserSession.session.state} /><Badge variant="outline">{shortId(browserSession.session.id)}</Badge></div>
+        <SecretRow label="配对令牌" value={browserSession.pairing_token} />
+        <div className="space-y-1"><p className="font-medium">启动地址</p><div className="flex flex-wrap items-center gap-2"><code className="max-w-full break-all rounded bg-muted px-2 py-1">{browserSession.spec.start_url}</code><Button type="button" size="sm" variant="outline" onClick={() => window.open(browserSession.spec.start_url, "_blank", "noopener,noreferrer")}><ExternalLink className="size-4" />打开</Button></div></div>
+        <p className="text-muted-foreground">允许来源：{browserSession.spec.allowed_origins.join("、")} · {browserSession.spec.headless ? "无头" : "可见窗口"}</p>
+      </div> : null}
+    </CardContent></Card> : null}
+
     <div className="grid gap-4 lg:grid-cols-3">
       <ReadCard title="远端详情" icon={RefreshCw} loading={detail.isFetching} onRead={() => void detail.refetch()}>{detail.data ? <JsonPreview value={detail.data.detail.normalized_detail} /> : <EmptyRead />}</ReadCard>
       <ReadCard title="实时进度" icon={Activity} loading={progress.isFetching} onRead={() => void progress.refetch()}>{progress.data ? <div className="space-y-2 text-sm"><StateBadge state={progress.data.progress.remote_state} /><p>进度 {progress.data.progress.percent == null ? "—" : `${progress.data.progress.percent}%`}</p><p>时长 {progress.data.progress.duration_seconds == null ? "—" : `${progress.data.progress.duration_seconds} 秒`}</p><p className="text-muted-foreground">{formatTimestamp(progress.data.progress.updated_at)}</p></div> : <EmptyRead />}</ReadCard>
@@ -133,6 +196,38 @@ export function TaskDetailPage() {
 
     {task.data.capabilities.includes("question_inventory") ? <Card><CardHeader className="flex-row items-center justify-between"><CardTitle className="flex items-center gap-2"><FileQuestion className="size-5" />题目快照</CardTitle><Button variant="outline" disabled={questions.isFetching} onClick={() => void questions.refetch()}>{questions.isFetching ? "读取中…" : "读取并解析"}</Button></CardHeader><CardContent>{questions.data ? <div className="space-y-4"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">snapshot {shortId(questions.data.snapshot_id)}</Badge><Badge variant="secondary">{questions.data.questions.length} 题</Badge><span className="text-sm text-muted-foreground">{formatTimestamp(questions.data.captured_at)}</span><Link className={buttonVariants({ variant: "default", size: "sm" })} to={`/tasks/${taskId}/question-snapshots/${questions.data.snapshot_id}`}>进入答案审核</Link></div>{questions.data.questions.map((question) => <div key={question.id} className="rounded-lg border p-4"><div className="mb-2 flex items-center gap-2"><Badge variant="outline">#{question.position + 1}</Badge><Badge variant="secondary">{question.kind}</Badge></div><p className="whitespace-pre-wrap text-sm">{question.stem}</p></div>)}</div> : <p className="text-sm text-muted-foreground">尚未读取当前题目快照。</p>}</CardContent></Card> : null}
   </PageShell>;
+}
+
+function isSupportedUaiInvocationShape(capabilities: readonly ExecutableCapability[]) {
+  const value = capabilities.join(",");
+  return value === "discussion" || value === "artifact_upload" || value === "submission_execute,artifact_upload" || value === "submission_execute,oral_submission";
+}
+
+async function encodeUaiInvocationInput(capabilities: readonly ExecutableCapability[], discussionContent: string, artifactFile?: File) {
+  const encoder = new TextEncoder();
+  if (capabilities.length === 1 && capabilities[0] === "discussion") {
+    const content = encoder.encode(discussionContent.trim());
+    const prefix = encoder.encode(`${UAI_DISCUSSION_INPUT_TYPE}\0`);
+    const length = new Uint8Array(4);
+    new DataView(length.buffer).setUint32(0, content.byteLength, false);
+    return { inputType: UAI_DISCUSSION_INPUT_TYPE, body: new Blob([prefix, length, content]) };
+  }
+  if (capabilities.includes("artifact_upload") && artifactFile) {
+    const filename = encoder.encode(artifactFile.name);
+    const prefix = encoder.encode(`${UAI_ARTIFACT_INPUT_TYPE}\0`);
+    const filenameLength = new Uint8Array(2);
+    new DataView(filenameLength.buffer).setUint16(0, filename.byteLength, false);
+    const bytes = new Uint8Array(await artifactFile.arrayBuffer());
+    const artifactLength = new Uint8Array(4);
+    new DataView(artifactLength.buffer).setUint32(0, bytes.byteLength, false);
+    return { inputType: UAI_ARTIFACT_INPUT_TYPE, body: new Blob([prefix, filenameLength, filename, artifactLength, bytes]) };
+  }
+  if (capabilities.includes("oral_submission")) return { inputType: UAI_ORAL_INPUT_TYPE, body: new Blob([encoder.encode(`${UAI_ORAL_INPUT_TYPE}\0`)]) };
+  throw new Error("当前 capability 组合缺少可编码的 UAI 私有输入");
+}
+
+function SecretRow({ label, value }: { label: string; value: string }) {
+  return <div className="space-y-1"><p className="font-medium">{label}</p><div className="flex flex-wrap items-center gap-2"><code className="max-w-full break-all rounded bg-muted px-2 py-1">{value}</code><Button type="button" size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(value)}><Copy className="size-4" />复制</Button></div></div>;
 }
 
 function ReadCard({ title, icon: Icon, loading, onRead, children }: { title: string; icon: typeof Activity; loading: boolean; onRead: () => void; children: React.ReactNode }) { return <Card><CardHeader className="flex-row items-center justify-between"><CardTitle className="flex items-center gap-2"><Icon className="size-4" />{title}</CardTitle><Button size="sm" variant="outline" disabled={loading} onClick={onRead}>{loading ? "读取中" : "读取"}</Button></CardHeader><CardContent>{children}</CardContent></Card>; }

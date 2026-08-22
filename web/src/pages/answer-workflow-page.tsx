@@ -14,7 +14,7 @@ import {
   resolveAnswerCandidates,
   resolveProviderAnswerCandidates,
 } from "@/api/generated/sdk.gen.ts";
-import type { AnswerCandidateResponse, NormalizedAnswer, Question, SubmissionDraft } from "@/api/generated/types.gen.ts";
+import type { AnswerCandidateResponse, NormalizedAnswer, Question, QuestionGroup, SubmissionDraft } from "@/api/generated/types.gen.ts";
 import { requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
 import { QueryError, TableSkeleton } from "@/components/query-feedback.tsx";
@@ -64,7 +64,7 @@ export function AnswerWorkflowPage() {
     mutationFn: async () => {
       if (!snapshot.data) throw new Error("题目快照尚未加载");
       const answerCandidateIds = snapshot.data.questions.map((question) => selections[question.id]).filter((candidate): candidate is string => Boolean(candidate));
-      if (answerCandidateIds.length !== snapshot.data.questions.length) throw new Error("每道题都必须明确选择一个候选答案");
+      if (!answerCandidateIds.length) throw new Error("至少选择一个候选答案；最终覆盖率由当前 Provider 运行设置校验");
       return requireData(await buildSubmissionDraft({ path: { task_id: taskId, snapshot_id: snapshotId }, body: { answer_candidate_ids: answerCandidateIds } }));
     },
     onSuccess: setDraft,
@@ -97,24 +97,40 @@ export function AnswerWorkflowPage() {
 
   return <PageShell title="答案审核" description={`${task.data.title} · snapshot ${shortId(snapshotId)}`}>
     {error ? <QueryError error={error} /> : null}
-    <Alert><FileCheck2 className="size-4" /><AlertTitle>不可变审核边界</AlertTitle><AlertDescription>候选来源不会自动成为提交答案。请逐题确认选择；Draft 构建后固定题目、候选和 Provider payload preview，执行仍走统一 Core Action。</AlertDescription></Alert>
+    <Alert><FileCheck2 className="size-4" /><AlertTitle>不可变审核边界</AlertTitle><AlertDescription>候选来源不会自动成为提交答案。可以明确留下暂未支持或无可靠答案的题目；Core 会按完整快照和 Provider 覆盖率设置决定能否构建 Draft。</AlertDescription></Alert>
+    {snapshot.data.groups.length ? <QuestionGroupOverview groups={snapshot.data.groups} questions={snapshot.data.questions} /> : null}
     <Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle>候选证据</CardTitle><p className="mt-1 text-sm text-muted-foreground">采集于 {formatTimestamp(snapshot.data.captured_at)} · 已选择 {selectedCount}/{snapshot.data.questions.length}</p></div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={localImport.isPending} onClick={() => localImport.mutate()}><DatabaseZap className="size-4" />导入本地证据</Button>{canResolveProvider ? <Button variant="outline" disabled={providerResolve.isPending} onClick={() => providerResolve.mutate()}><Sparkles className="size-4" />Provider 解析</Button> : null}<Button variant="ghost" onClick={() => void refreshEvidence()}><RefreshCw className="size-4" />刷新</Button></div></CardHeader></Card>
 
-    <div className="space-y-5">{snapshot.data.questions.map((question) => <QuestionReview key={question.id} question={question} candidates={groupedCandidates.get(question.id) ?? []} selected={selections[question.id]} resolutionState={resolution.data?.decisions.find((decision) => decision.question_id === question.id)?.status} onSelect={(candidateId) => { setDraft(null); setSelections((current) => ({ ...current, [question.id]: candidateId })); }} onCreated={refreshEvidence} taskId={taskId} snapshotId={snapshotId} />)}</div>
+    <div className="space-y-5">{snapshot.data.questions.map((question) => <QuestionReview key={question.id} question={question} candidates={groupedCandidates.get(question.id) ?? []} selected={selections[question.id]} resolutionState={resolution.data?.decisions.find((decision) => decision.question_id === question.id)?.status} onSelect={(candidateId) => { setDraft(null); setSelections((current) => ({ ...current, [question.id]: candidateId })); }} onClear={() => { setDraft(null); setSelections((current) => { const next = { ...current }; delete next[question.id]; return next; }); }} onCreated={refreshEvidence} taskId={taskId} snapshotId={snapshotId} />)}</div>
 
     <Card><CardHeader><CardTitle>Submission Draft</CardTitle></CardHeader><CardContent className="space-y-4">
-      {!draft ? <Button disabled={!canBuild || buildDraft.isPending || selectedCount !== snapshot.data.questions.length} onClick={() => buildDraft.mutate()}><FileCheck2 className="size-4" />{buildDraft.isPending ? "构建中…" : "构建不可变 Draft"}</Button> : <><div className="rounded-lg border p-4"><div className="flex flex-wrap gap-2"><Badge variant="outline">{draft.id}</Badge><Badge variant="secondary">{draft.items.length} 项</Badge><Badge variant="secondary">{draft.payload_preview.encoding}</Badge></div><pre className="mt-3 max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify(draft.payload_preview, null, 2)}</pre></div>{task.data.assessment_class === "routine" ? <Button disabled={execute.isPending} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : "提交 Draft 并执行"}</Button> : <Alert className="border-amber-300 bg-amber-50"><AlertTitle>正式任务仍被 Core 策略阻止</AlertTitle><AlertDescription>需要持久化审批契约后才能执行；WebUI 不会用本地确认绕过。</AlertDescription></Alert>}</>}
+      {!draft ? <Button disabled={!canBuild || buildDraft.isPending || selectedCount === 0} onClick={() => buildDraft.mutate()}><FileCheck2 className="size-4" />{buildDraft.isPending ? "构建中…" : "按当前覆盖构建 Draft"}</Button> : <><div className="rounded-lg border p-4"><div className="flex flex-wrap gap-2"><Badge variant="outline">{draft.id}</Badge><Badge variant="secondary">{draft.items.length}/{draft.answer_coverage.total_question_count} 题</Badge><Badge variant="secondary">最低覆盖 {draft.answer_coverage.minimum_coverage_millis / 10}%</Badge><Badge variant="secondary">{draft.payload_preview.encoding}</Badge></div><pre className="mt-3 max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify(draft.payload_preview, null, 2)}</pre></div>{task.data.assessment_class === "routine" ? <Button disabled={execute.isPending} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : "提交 Draft 并执行"}</Button> : <Alert className="border-amber-300 bg-amber-50"><AlertTitle>正式任务仍被 Core 策略阻止</AlertTitle><AlertDescription>需要持久化审批契约后才能执行；WebUI 不会用本地确认绕过。</AlertDescription></Alert>}</>}
       {!canBuild ? <p className="text-sm text-muted-foreground">此 Task 未声明 SubmissionBuild capability。</p> : null}
     </CardContent></Card>
   </PageShell>;
 }
 
-function QuestionReview({ question, candidates, selected, resolutionState, onSelect, onCreated, taskId, snapshotId }: { question: Question; candidates: AnswerCandidateResponse[]; selected?: string; resolutionState?: string; onSelect: (candidateId: string) => void; onCreated: () => Promise<void>; taskId: string; snapshotId: string }) {
+function QuestionReview({ question, candidates, selected, resolutionState, onSelect, onClear, onCreated, taskId, snapshotId }: { question: Question; candidates: AnswerCandidateResponse[]; selected?: string; resolutionState?: string; onSelect: (candidateId: string) => void; onClear: () => void; onCreated: () => Promise<void>; taskId: string; snapshotId: string }) {
   return <Card><CardHeader><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">#{question.position + 1}</Badge><Badge variant="secondary">{question.kind}</Badge>{resolutionState ? <Badge variant={resolutionState === "selected" ? "success" : "warning"}>{resolutionState}</Badge> : null}</div><CardTitle className="whitespace-pre-wrap text-base leading-relaxed">{question.stem}</CardTitle></CardHeader><CardContent className="space-y-3">
     {candidates.map((candidate) => <label key={candidate.id} className={`block cursor-pointer rounded-lg border p-3 ${selected === candidate.id ? "border-primary bg-primary/5" : ""}`}><div className="flex items-start gap-3"><input className="mt-1" type="radio" name={`answer-${question.id}`} checked={selected === candidate.id} onChange={() => onSelect(candidate.id)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap gap-2"><Badge variant="outline">{candidate.candidate.source}</Badge>{candidate.candidate.confidence == null ? null : <Badge variant="secondary">置信度 {candidate.candidate.confidence}</Badge>}<span className="font-mono text-xs text-muted-foreground">{shortId(candidate.id)}</span></div><pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">{JSON.stringify(candidate.candidate.answer, null, 2)}</pre>{candidate.candidate.explanation ? <p className="mt-2 text-sm text-muted-foreground">{candidate.candidate.explanation}</p> : null}</div></div></label>)}
     {!candidates.length ? <p className="text-sm text-muted-foreground">尚无候选证据。</p> : null}
-    <ManualCandidateForm questionId={question.id} taskId={taskId} snapshotId={snapshotId} onCreated={onCreated} />
+    <div className="flex flex-wrap gap-2">{selected ? <Button size="sm" variant="outline" onClick={onClear}>不提交此题</Button> : null}<ManualCandidateForm questionId={question.id} taskId={taskId} snapshotId={snapshotId} onCreated={onCreated} /></div>
   </CardContent></Card>;
+}
+
+function QuestionGroupOverview({ groups, questions }: { groups: QuestionGroup[]; questions: Question[] }) {
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  const questionById = new Map(questions.map((question) => [question.id, question]));
+  const childGroupIds = new Set(groups.flatMap((group) => group.children.filter((child) => child.type === "group").map((child) => child.id)));
+  const roots = groups.filter((group) => !childGroupIds.has(group.id));
+  const renderGroup = (group: QuestionGroup, depth: number): React.ReactNode => <div key={group.id} className="space-y-2 rounded-lg border p-3" style={{ marginLeft: `${Math.min(depth, 4) * 12}px` }}>
+    <div className="flex flex-wrap gap-2"><Badge variant="outline">题组</Badge>{group.remote_group_id ? <Badge variant="secondary">{group.remote_group_id}</Badge> : null}<Badge variant="secondary">{group.children.length} 个子项</Badge></div>
+    {group.stem ? <p className="whitespace-pre-wrap text-sm">{group.stem}</p> : null}
+    {group.options.length ? <div className="grid gap-1 text-sm text-muted-foreground">{group.options.map((option) => <div key={option.id}><span className="font-mono">{option.id}</span>{option.content ? ` · ${option.content}` : ""}</div>)}</div> : null}
+    {group.attachments.length ? <div className="flex flex-wrap gap-2">{group.attachments.map((attachment, index) => <Badge key={`${attachment.kind}-${attachment.remote_id ?? index}`} variant="outline">{attachment.kind}{attachment.label ? ` · ${attachment.label}` : ""}</Badge>)}</div> : null}
+    <div className="space-y-2">{group.children.map((child) => child.type === "group" ? (groupById.get(child.id) ? renderGroup(groupById.get(child.id)!, depth + 1) : <p key={child.id} className="text-sm text-destructive">缺失子题组 {child.id}</p>) : <p key={child.id} className="text-sm text-muted-foreground">题目 #{(questionById.get(child.id)?.position ?? -1) + 1} · {questionById.get(child.id)?.stem ?? child.id}</p>)}</div>
+  </div>;
+  return <Card><CardHeader><CardTitle>共享材料与复合题结构</CardTitle></CardHeader><CardContent className="space-y-3">{roots.map((group) => renderGroup(group, 0))}</CardContent></Card>;
 }
 
 function ManualCandidateForm({ questionId, taskId, snapshotId, onCreated }: { questionId: string; taskId: string; snapshotId: string; onCreated: () => Promise<void> }) {
