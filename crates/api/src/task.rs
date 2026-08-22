@@ -4,9 +4,10 @@ use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, Execution,
     ExecutionAttempt, ExecutionInvocationDraftId, NormalizedAnswer, ProviderAccountId, ProviderId,
     Question, QuestionGroup, QuestionId, QuestionSnapshotId, RemoteState, ScoreImprovementWorkflow,
-    StrictCompletionWorkflow, StrictCompletionWorkflowId, SubmissionDraftId,
-    SubmissionQuestionVerificationStatus, SubmissionResultId, SubmissionResultStatus,
-    SubmissionScore, Task, TaskCapability, TaskId, TaskLifecycleAction, Timestamp,
+    ScoreImprovementWorkflowId, StrictCompletionWorkflow, StrictCompletionWorkflowId,
+    SubmissionDraftId, SubmissionQuestionVerificationStatus, SubmissionResultId,
+    SubmissionResultStatus, SubmissionScore, Task, TaskCapability, TaskId, TaskLifecycleAction,
+    Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
@@ -31,14 +32,14 @@ use asterism_provider_api::{
 use asterism_secrets::SecretValue;
 use asterism_storage::{
     AnswerCandidateRepository, AnswerEvidenceClassCounts, AnswerEvidenceRepository,
-    CompletionWorkflowRepository, ExecutionQueryRepository, ExecutionStrictCompletionRetryRequest,
-    QuestionSnapshotRepository, SqliteAnswerEvidenceRepository,
-    SqliteAnswerHistoryIngestionRepository, SqliteCompletionWorkflowRepository,
-    SqliteExecutionRepository, SqliteProtocolObservationRepository,
-    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
-    SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository,
-    SqliteTaskLifecycleRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
-    SubmissionResultRepository, TaskQueryRepository,
+    CompletionWorkflowRepository, ExecutionQueryRepository, ExecutionScoreImprovementRetakeRequest,
+    ExecutionStrictCompletionRetryRequest, QuestionSnapshotRepository,
+    SqliteAnswerEvidenceRepository, SqliteAnswerHistoryIngestionRepository,
+    SqliteCompletionWorkflowRepository, SqliteExecutionRepository,
+    SqliteProtocolObservationRepository, SqliteProviderAccountRepository,
+    SqliteProviderRuntimeSettingsRepository, SqliteQuestionReadAttemptRepository,
+    SqliteQuestionSnapshotRepository, SqliteTaskLifecycleRepository, SqliteTaskQueryRepository,
+    SubmissionDraftRepository, SubmissionResultRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -928,6 +929,28 @@ pub(super) async fn execute_task(
             })
         })
         .transpose()?;
+    let score_improvement_retake = request
+        .score_improvement_retake_confirmation
+        .map(|confirmation| {
+            let workflow_id = ScoreImprovementWorkflowId::from_str(&confirmation.workflow_id)
+                .map_err(|_| {
+                    ApiError::bad_request(
+                        "invalid_score_improvement_workflow_id",
+                        "Score Improvement workflow ID is invalid",
+                    )
+                })?;
+            if confirmation.expected_revision == 0 {
+                return Err(ApiError::bad_request(
+                    "invalid_score_improvement_workflow_revision",
+                    "Score Improvement workflow revision must be positive",
+                ));
+            }
+            Ok(ExecutionScoreImprovementRetakeRequest {
+                workflow_id,
+                expected_revision: confirmation.expected_revision,
+            })
+        })
+        .transpose()?;
     let invocation_store = state.secret_store.clone();
     let mut service = ExecutionRequestService::new(
         SqliteTaskQueryRepository::new(state.database.clone()),
@@ -936,7 +959,10 @@ pub(super) async fn execute_task(
         SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
         SqliteQuestionSnapshotRepository::new(state.database),
         state.providers,
-        if formal_assessment_confirmed || strict_completion_retry.is_some() {
+        if formal_assessment_confirmed
+            || strict_completion_retry.is_some()
+            || score_improvement_retake.is_some()
+        {
             FormalAssessmentPolicy {
                 allow_execution: true,
                 allow_submission: true,
@@ -956,6 +982,7 @@ pub(super) async fn execute_task(
             submission_draft_id,
             invocation_draft_id,
             strict_completion_retry,
+            score_improvement_retake,
             request_source,
             actor: auth.audit_actor(),
             idempotency_key: idempotency_key.to_owned(),
@@ -1309,6 +1336,10 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
         ExecutionRequestError::StrictCompletionRetryConflict => ApiError::conflict(
             "strict_completion_retry_conflict",
             "the Strict Completion retry confirmation is missing, stale, or invalid",
+        ),
+        ExecutionRequestError::ScoreImprovementRetakeConflict => ApiError::conflict(
+            "score_improvement_retake_conflict",
+            "Score Improvement retake confirmation is missing, stale, or invalid",
         ),
         ExecutionRequestError::Assessment(_) => ApiError::conflict(
             "formal_assessment_blocked",
@@ -2199,11 +2230,19 @@ pub(super) struct ExecuteTaskRequest {
     invocation_draft_id: Option<String>,
     formal_assessment_confirmation: Option<bool>,
     strict_completion_retry_confirmation: Option<StrictCompletionRetryConfirmationRequest>,
+    score_improvement_retake_confirmation: Option<ScoreImprovementRetakeConfirmationRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct StrictCompletionRetryConfirmationRequest {
+    workflow_id: String,
+    expected_revision: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct ScoreImprovementRetakeConfirmationRequest {
     workflow_id: String,
     expected_revision: u32,
 }

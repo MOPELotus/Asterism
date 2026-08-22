@@ -270,6 +270,7 @@ mod tests {
                 billing: None,
                 runtime_settings: None,
                 strict_completion_retry: None,
+                score_improvement_retake: None,
                 expected_task_state: OrchestrationState::Ready,
                 idempotency_scope: "test:execution-worker",
                 idempotency_key: "terminal-execution",

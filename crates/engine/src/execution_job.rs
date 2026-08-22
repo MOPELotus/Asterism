@@ -8,12 +8,13 @@ use std::{
 };
 
 use asterism_domain::{
-    AttemptResult, AuthState, Execution, ExecutionAttempt, ExecutionId, ExecutionLease,
-    ExecutionProgress, ExecutionStage, ExecutionState, HumanRequiredReason, OrchestrationState,
-    ProviderAccountId, ProviderErrorClass, ProviderId, Question, QuestionGroup, QuestionSnapshotId,
-    RemoteState, StrictCompletionState, SubmissionAttemptReceipt, SubmissionDraft,
-    SubmissionResult, SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot,
-    SubmissionVerificationStatus, Task, TaskCapability, Timestamp, validate_question_groups,
+    AttemptResult, AuthState, CompletionDiagnosis, Execution, ExecutionAttempt, ExecutionId,
+    ExecutionLease, ExecutionProgress, ExecutionStage, ExecutionState, HumanRequiredReason,
+    OrchestrationState, ProviderAccountId, ProviderErrorClass, ProviderId, Question, QuestionGroup,
+    QuestionSnapshotId, RemoteState, StrictCompletionState, SubmissionAttemptReceipt,
+    SubmissionDraft, SubmissionResult, SubmissionResultId, SubmissionResultStatus,
+    SubmissionVerificationSnapshot, SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
+    validate_question_groups,
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
@@ -61,9 +62,10 @@ use asterism_storage::{
     QuestionSessionOperationIssueRequest, QuestionSessionOperationState,
     QuestionSessionOperationTerminalRequest, QuestionSessionTransition, QuestionSnapshot,
     ResolvedBatchExecutionChildParentSnapshot, ResolvedQuestionSessionContinuation,
-    SchedulerRepository, StorageError, StrictCompletionExecutionObservationRecord,
-    StrictCompletionExecutionObservationRequest, SubmissionReceiptPersistRequest,
-    SubmissionResultPersistRequest, TaskRuntimeRepository, VerificationRecoveryStartRequest,
+    SchedulerRepository, ScoreImprovementObserveRequest, StorageError,
+    StrictCompletionExecutionObservationRecord, StrictCompletionExecutionObservationRequest,
+    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, TaskRuntimeRepository,
+    VerificationRecoveryStartRequest,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1577,6 +1579,8 @@ where
                 correlation_id,
             )
             .await?;
+        self.record_score_improvement_observation(&result, at)
+            .await?;
         self.finish_recovery_from_submission_result(
             job,
             &result,
@@ -1585,6 +1589,51 @@ where
             correlation_id,
         )
         .await
+    }
+
+    async fn record_score_improvement_observation(
+        &self,
+        result: &SubmissionResult,
+        at: Timestamp,
+    ) -> Result<(), ScheduledExecutionRunError> {
+        let Some(confirmation) = self
+            .executions
+            .find_execution_score_improvement_retake_confirmation(result.execution_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        let record = self
+            .executions
+            .find_owned_score_improvement_workflow(confirmation.confirmed_by, result.task_id)
+            .await?
+            .ok_or(ScheduledExecutionRunError::StateConflict)?;
+        if record.workflow.id != confirmation.workflow_id
+            || record.revision != confirmation.workflow_revision.saturating_add(1)
+        {
+            return Err(ScheduledExecutionRunError::StateConflict);
+        }
+        let diagnosis = match result.status {
+            SubmissionResultStatus::Confirmed if result.verification.score.is_some() => None,
+            SubmissionResultStatus::Rejected | SubmissionResultStatus::ExecutionFailed => {
+                Some(CompletionDiagnosis::HumanActionRequired)
+            }
+            SubmissionResultStatus::Confirmed | SubmissionResultStatus::Inconclusive => {
+                Some(CompletionDiagnosis::RemoteUnknown)
+            }
+        };
+        self.executions
+            .observe_score_improvement(ScoreImprovementObserveRequest {
+                owner_user_id: confirmation.confirmed_by,
+                workflow_id: confirmation.workflow_id,
+                expected_revision: record.revision,
+                score: result.verification.score,
+                retake_still_allowed: true,
+                diagnosis,
+                at,
+            })
+            .await?;
+        Ok(())
     }
 
     async fn defer_or_require_submission_review(
@@ -4120,6 +4169,8 @@ where
                 now,
                 correlation_id,
             )
+            .await?;
+        self.record_score_improvement_observation(&result, now)
             .await?;
         match completion.workflow.workflow.state {
             StrictCompletionState::Completed => {
@@ -8738,6 +8789,7 @@ mod tests {
                     schema: &schema,
                 }),
                 strict_completion_retry: None,
+                score_improvement_retake: None,
                 expected_task_state: OrchestrationState::Ready,
                 idempotency_scope: "test",
                 idempotency_key: "execution",

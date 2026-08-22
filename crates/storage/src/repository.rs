@@ -2800,6 +2800,21 @@ pub struct ExecutionStrictCompletionRetryConfirmation {
     pub confirmed_at: Timestamp,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecutionScoreImprovementRetakeRequest {
+    pub workflow_id: asterism_domain::ScoreImprovementWorkflowId,
+    pub expected_revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecutionScoreImprovementRetakeConfirmation {
+    pub execution_id: ExecutionId,
+    pub workflow_id: asterism_domain::ScoreImprovementWorkflowId,
+    pub workflow_revision: u32,
+    pub confirmed_by: UserId,
+    pub confirmed_at: Timestamp,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionScheduleRequest<'a> {
     pub execution: &'a Execution,
@@ -2817,6 +2832,7 @@ pub struct ExecutionScheduleRequest<'a> {
     pub billing: Option<ExecutionBillingReservation<'a>>,
     pub runtime_settings: Option<ExecutionRuntimeSettingsResolution<'a>>,
     pub strict_completion_retry: Option<ExecutionStrictCompletionRetryRequest>,
+    pub score_improvement_retake: Option<ExecutionScoreImprovementRetakeRequest>,
     pub expected_task_state: OrchestrationState,
     pub idempotency_scope: &'a str,
     pub idempotency_key: &'a str,
@@ -3417,6 +3433,7 @@ pub enum ExecutionScheduleOutcome {
     TaskStateConflict,
     RuntimeSettingsConflict,
     StrictCompletionRetryConflict,
+    ScoreImprovementRetakeConflict,
 }
 
 #[derive(Clone, Debug)]
@@ -3609,6 +3626,11 @@ pub trait ExecutionRepository: Send + Sync {
         &self,
         execution_id: ExecutionId,
     ) -> Result<Option<ExecutionStrictCompletionRetryConfirmation>, StorageError>;
+
+    async fn find_execution_score_improvement_retake_confirmation(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionScoreImprovementRetakeConfirmation>, StorageError>;
 
     async fn find_execution_provider_plan_artifact(
         &self,

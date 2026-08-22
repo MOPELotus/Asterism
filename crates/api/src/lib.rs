@@ -1594,6 +1594,16 @@ fn task_execute_path() -> Value {
                             "workflow_id": {"type": "string", "format": "uuid"},
                             "expected_revision": {"type": "integer", "format": "int64", "minimum": 1}
                         }
+                    },
+                    "score_improvement_retake_confirmation": {
+                        "type": "object",
+                        "required": ["workflow_id", "expected_revision"],
+                        "additionalProperties": false,
+                        "description": "Explicitly starts one bounded Score Improvement retake and schedules this Execution atomically against the current workflow revision.",
+                        "properties": {
+                            "workflow_id": {"type": "string", "format": "uuid"},
+                            "expected_revision": {"type": "integer", "format": "int64", "minimum": 1}
+                        }
                     }
                 }
             }}}
@@ -4036,7 +4046,7 @@ mod tests {
         reason = "the API test assembles the verified completion and exact history authority before exercising the owner opt-in"
     )]
     async fn score_improvement_opt_in_is_explicit_result_bound_and_idempotent() {
-        let (app, database) = test_app(false, None).await;
+        let (app, database) = settings_test_app().await;
         let bootstrap = bootstrap(&app).await;
         let cookie = bootstrap.headers()[header::SET_COOKIE]
             .to_str()
@@ -4066,7 +4076,7 @@ mod tests {
               assessment_class, title, remote_state, orchestration_state, discovered_at, \
               updated_at, capabilities_json) \
              VALUES (?, ?, 'score-opt-in-task', 'score-opt-in-fingerprint', 'work', \
-                     'formal', 'Score opt-in', 'completed', 'succeeded', ?, ?, '[]')",
+                     'formal', 'Score opt-in', 'completed', 'succeeded', ?, ?, '[\"resource_execution\",\"execution_verify\"]')",
         )
         .bind(task_id.to_string())
         .bind(account_id.to_string())
@@ -4202,6 +4212,57 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(workflow_count, 1);
+
+        let execute = |idempotency_key: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            let workflow_id = workflow_id.clone();
+            async move {
+                app.oneshot(
+                    Request::post(format!("/api/v1/tasks/{task_id}/execute"))
+                        .header(header::COOKIE, cookie)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("x-request-id", format!("request-{idempotency_key}"))
+                        .header("idempotency-key", idempotency_key)
+                        .body(Body::from(
+                            serde_json::json!({
+                                "requested_capabilities": ["resource_execution"],
+                                "score_improvement_retake_confirmation": {
+                                    "workflow_id": workflow_id,
+                                    "expected_revision": 1,
+                                }
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let scheduled = execute("score-retake").await;
+        let scheduled_status = scheduled.status();
+        let scheduled = response_json(scheduled).await;
+        assert_eq!(scheduled_status, StatusCode::CREATED, "{scheduled}");
+        let execution_id = scheduled["execution"]["id"].as_str().unwrap();
+        let replay = execute("score-retake").await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(response_json(replay).await["execution"]["id"], execution_id);
+        let state: (String, i64) =
+            sqlx::query_as("SELECT state, revision FROM score_improvement_workflows WHERE id = ?")
+                .bind(workflow_id.as_str().unwrap())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(state, ("attempt_running".to_owned(), 2));
+        let confirmation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM execution_score_improvement_retake_confirmations WHERE execution_id = ?",
+        )
+        .bind(execution_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(confirmation_count, 1);
     }
 
     #[tokio::test]

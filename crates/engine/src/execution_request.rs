@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use asterism_domain::{
     AuditActor, Execution, ExecutionId, ExecutionInvocationDraftId, ExecutionState,
-    OrchestrationState, RemoteState, RequestSource, StrictCompletionState, SubmissionDraft,
-    SubmissionDraftId, Task, TaskCapability, TaskId, Timestamp, UserId,
+    OrchestrationState, RemoteState, RequestSource, ScoreImprovementState, StrictCompletionState,
+    SubmissionDraft, SubmissionDraftId, Task, TaskCapability, TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::{
     ExecutionInvocationPreparationRequest, ExecutionPlanningRequest,
@@ -16,9 +16,10 @@ use asterism_storage::{
     ExecutionInvocationDraftCreateRequest, ExecutionInvocationDraftRecord,
     ExecutionInvocationDraftRepositoryFactory, ExecutionRepository,
     ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
-    ExecutionScheduleRequest, ExecutionStrictCompletionRetryRequest,
-    ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRepository,
-    ProviderRuntimeSettingsTarget, StorageError, SubmissionDraftRepository, TaskQueryRepository,
+    ExecutionScheduleRequest, ExecutionScoreImprovementRetakeRequest,
+    ExecutionStrictCompletionRetryRequest, ProviderAccountRuntimeRepository,
+    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, StorageError,
+    SubmissionDraftRepository, TaskQueryRepository,
 };
 
 use crate::{
@@ -34,6 +35,7 @@ pub struct ExecuteTaskCommand {
     pub submission_draft_id: Option<SubmissionDraftId>,
     pub invocation_draft_id: Option<ExecutionInvocationDraftId>,
     pub strict_completion_retry: Option<ExecutionStrictCompletionRetryRequest>,
+    pub score_improvement_retake: Option<ExecutionScoreImprovementRetakeRequest>,
     pub request_source: RequestSource,
     pub actor: AuditActor,
     pub idempotency_key: String,
@@ -166,6 +168,7 @@ where
             &task,
             &command.requested_capabilities,
             true,
+            false,
             false,
             self.formal_policy,
         )?;
@@ -323,7 +326,21 @@ where
                 .find_execution_invocation_draft_id(existing.id)
                 .await?
                 == command.invocation_draft_id;
+            let persisted_retake = self
+                .executions
+                .find_execution_score_improvement_retake_confirmation(existing.id)
+                .await?;
+            let retake_matches = match (persisted_retake, command.score_improvement_retake) {
+                (None, None) => true,
+                (Some(persisted), Some(requested)) => {
+                    persisted.workflow_id == requested.workflow_id
+                        && persisted.workflow_revision == requested.expected_revision
+                        && persisted.confirmed_by == command.owner_id
+                }
+                _ => false,
+            };
             return if confirmation_matches
+                && retake_matches
                 && invocation_matches
                 && existing.task_id == command.task_id
                 && existing.requested_by == Some(command.owner_id)
@@ -349,6 +366,7 @@ where
             &command.requested_capabilities,
             command.invocation_draft_id.is_some(),
             command.strict_completion_retry.is_some(),
+            command.score_improvement_retake.is_some(),
             self.formal_policy,
         )?;
         self.validate_strict_completion_retry(
@@ -356,6 +374,12 @@ where
             &task,
             &command.requested_capabilities,
             command.strict_completion_retry,
+        )
+        .await?;
+        self.validate_score_improvement_retake(
+            command.owner_id,
+            &task,
+            command.score_improvement_retake,
         )
         .await?;
         let (runtime_settings, runtime_settings_schema, provider_context) = self
@@ -401,6 +425,7 @@ where
             &command.requested_capabilities,
             verification_required,
             provider_state_exception,
+            command.score_improvement_retake.is_some(),
         ) {
             return Err(ExecutionRequestError::RemoteStateNotExecutable);
         }
@@ -447,6 +472,7 @@ where
                     schema: &runtime_settings_schema,
                 }),
                 strict_completion_retry: command.strict_completion_retry,
+                score_improvement_retake: command.score_improvement_retake,
                 expected_task_state: task.orchestration_state,
                 idempotency_scope: &scope,
                 idempotency_key: &command.idempotency_key,
@@ -480,6 +506,9 @@ where
             }
             ExecutionScheduleOutcome::StrictCompletionRetryConflict => {
                 Err(ExecutionRequestError::StrictCompletionRetryConflict)
+            }
+            ExecutionScheduleOutcome::ScoreImprovementRetakeConflict => {
+                Err(ExecutionRequestError::ScoreImprovementRetakeConflict)
             }
         }
     }
@@ -604,6 +633,31 @@ where
         }
     }
 
+    async fn validate_score_improvement_retake(
+        &self,
+        owner_id: UserId,
+        task: &Task,
+        confirmation: Option<ExecutionScoreImprovementRetakeRequest>,
+    ) -> Result<(), ExecutionRequestError> {
+        let Some(confirmation) = confirmation else {
+            return Ok(());
+        };
+        let record = self
+            .executions
+            .find_owned_score_improvement_workflow(owner_id, task.id)
+            .await?
+            .ok_or(ExecutionRequestError::ScoreImprovementRetakeConflict)?;
+        if task.orchestration_state == OrchestrationState::Succeeded
+            && record.workflow.state == ScoreImprovementState::Ready
+            && record.workflow.id == confirmation.workflow_id
+            && record.revision == confirmation.expected_revision
+        {
+            Ok(())
+        } else {
+            Err(ExecutionRequestError::ScoreImprovementRetakeConflict)
+        }
+    }
+
     async fn resolve_runtime_settings(
         &self,
         owner_id: UserId,
@@ -688,13 +742,16 @@ fn validate_task(
     requested_capabilities: &[TaskCapability],
     private_invocation_selected: bool,
     strict_completion_retry_confirmed: bool,
+    score_improvement_retake_confirmed: bool,
     formal_policy: FormalAssessmentPolicy,
 ) -> Result<(), ExecutionRequestError> {
     if !(matches!(
         task.orchestration_state,
         OrchestrationState::Ready | OrchestrationState::Failed
     ) || strict_completion_retry_confirmed
-        && task.orchestration_state == OrchestrationState::HumanRequired)
+        && task.orchestration_state == OrchestrationState::HumanRequired
+        || score_improvement_retake_confirmed
+            && task.orchestration_state == OrchestrationState::Succeeded)
     {
         return Err(ExecutionRequestError::TaskStateConflict);
     }
@@ -727,15 +784,17 @@ fn remote_state_is_executable(
     requested_capabilities: &[TaskCapability],
     verification_required: bool,
     provider_state_exception: bool,
+    score_improvement_retake_confirmed: bool,
 ) -> bool {
     matches!(
         task.remote_state,
         RemoteState::Pending | RemoteState::InProgress
-    ) || (requested_capabilities == [TaskCapability::DurationReport]
-        && matches!(
-            task.remote_state,
-            RemoteState::Completed | RemoteState::Unknown
-        ))
+    ) || (score_improvement_retake_confirmed && task.remote_state == RemoteState::Completed)
+        || (requested_capabilities == [TaskCapability::DurationReport]
+            && matches!(
+                task.remote_state,
+                RemoteState::Completed | RemoteState::Unknown
+            ))
         || (safe_verification_action(task, requested_capabilities, verification_required)
             && matches!(
                 task.remote_state,
@@ -961,6 +1020,8 @@ pub enum ExecutionRequestError {
     RuntimeSettingsConflict,
     #[error("the Strict Completion retry confirmation is missing, stale, or invalid")]
     StrictCompletionRetryConflict,
+    #[error("the Score Improvement retake confirmation is missing, stale, or invalid")]
+    ScoreImprovementRetakeConflict,
     #[error(transparent)]
     Assessment(#[from] AssessmentGuardError),
     #[error(transparent)]
@@ -1010,6 +1071,7 @@ mod tests {
             &[TaskCapability::DurationReport],
             false,
             false,
+            false,
         ));
         let resource = task(
             RemoteState::Completed,
@@ -1020,11 +1082,13 @@ mod tests {
             &[TaskCapability::ResourceExecution],
             false,
             false,
+            false,
         ));
         assert!(remote_state_is_executable(
             &resource,
             &[TaskCapability::ResourceExecution],
             true,
+            false,
             false,
         ));
         let submission = task(
@@ -1037,6 +1101,7 @@ mod tests {
         assert!(remote_state_is_executable(
             &submission,
             &[TaskCapability::SubmissionExecute],
+            false,
             false,
             false,
         ));
@@ -1053,12 +1118,14 @@ mod tests {
             &[TaskCapability::ResourceExecution],
             true,
             false,
+            false,
         ));
         assert!(remote_state_is_executable(
             &not_open,
             &[TaskCapability::ResourceExecution],
             true,
             true,
+            false,
         ));
 
         for remote_state in [RemoteState::Expired, RemoteState::Removed] {
@@ -1068,11 +1135,13 @@ mod tests {
                 &[TaskCapability::ResourceExecution],
                 true,
                 true,
+                false,
             ));
         }
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn task_validation_uses_only_the_explicit_action_selection() {
         let valid = task(
             RemoteState::Pending,
@@ -1086,6 +1155,7 @@ mod tests {
             validate_task(
                 &valid,
                 &[TaskCapability::ResourceExecution],
+                false,
                 false,
                 false,
                 FormalAssessmentPolicy::default(),
@@ -1106,6 +1176,7 @@ mod tests {
                 &[TaskCapability::ResourceExecution],
                 false,
                 false,
+                false,
                 FormalAssessmentPolicy::default(),
             )
             .is_ok()
@@ -1123,6 +1194,7 @@ mod tests {
             validate_task(
                 &multiple_actions,
                 &[TaskCapability::DurationReport],
+                false,
                 false,
                 false,
                 FormalAssessmentPolicy::default(),
@@ -1149,6 +1221,7 @@ mod tests {
                 ],
                 false,
                 false,
+                false,
                 FormalAssessmentPolicy::default(),
             ),
             Err(ExecutionRequestError::ExecutionVerificationUnavailable)
@@ -1162,6 +1235,7 @@ mod tests {
                 ],
                 true,
                 false,
+                false,
                 FormalAssessmentPolicy::default(),
             )
             .is_ok()
@@ -1171,6 +1245,7 @@ mod tests {
                 &submission,
                 &[TaskCapability::SubmissionExecute],
                 true,
+                false,
                 false,
                 FormalAssessmentPolicy::default(),
             ),

@@ -4,8 +4,9 @@ use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, CreditReservationState, Execution, ExecutionAttempt,
     ExecutionAttemptId, ExecutionId, ExecutionInvocationDraftId, ExecutionLogEvent,
     ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState,
-    ProviderAccountId, ProviderId, ScheduleId, StrictCompletionState, StrictCompletionWorkflow,
-    SubmissionAttemptReceipt, SubmissionDraft, TaskCapability, TaskId, Timestamp, UserId,
+    ProviderAccountId, ProviderId, ScheduleId, ScoreImprovementWorkflow, StrictCompletionState,
+    StrictCompletionWorkflow, SubmissionAttemptReceipt, SubmissionDraft, TaskCapability, TaskId,
+    Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
@@ -44,11 +45,12 @@ use crate::{
     ExecutionCapabilityStepState, ExecutionLogAppendRequest, ExecutionProgressUpdate,
     ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
     ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionStrictCompletionRetryConfirmation,
-    ExecutionStrictCompletionRetryRequest, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, StorageError, SubmissionDraftRepository,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
-    VerificationRecoveryStartRequest,
+    ExecutionScheduleOutcome, ExecutionScheduleRequest,
+    ExecutionScoreImprovementRetakeConfirmation, ExecutionScoreImprovementRetakeRequest,
+    ExecutionStrictCompletionRetryConfirmation, ExecutionStrictCompletionRetryRequest,
+    ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, StorageError,
+    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
+    SubmissionResultRepository, VerificationRecoveryStartRequest,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage, SqliteQuestionSnapshotRepository};
 
@@ -141,6 +143,12 @@ impl ExecutionRepository for SqliteExecutionRepository {
                 request.strict_completion_retry,
             )
             .await?;
+            let same_retake = persisted_score_retake_matches(
+                &mut transaction,
+                existing.id,
+                request.score_improvement_retake,
+            )
+            .await?;
             let same_invocation = persisted_invocation_draft_matches(
                 &mut transaction,
                 existing.id,
@@ -150,6 +158,7 @@ impl ExecutionRepository for SqliteExecutionRepository {
             transaction.commit().await?;
             return if same_request(&existing, request.execution)
                 && same_confirmation
+                && same_retake
                 && same_invocation
             {
                 Ok(ExecutionScheduleOutcome::Existing(existing))
@@ -171,6 +180,11 @@ impl ExecutionRepository for SqliteExecutionRepository {
         if !strict_completion_retry_is_valid(&mut transaction, &request).await? {
             transaction.rollback().await?;
             return Ok(ExecutionScheduleOutcome::StrictCompletionRetryConflict);
+        }
+
+        if !score_improvement_retake_is_valid(&mut transaction, &request).await? {
+            transaction.rollback().await?;
+            return Ok(ExecutionScheduleOutcome::ScoreImprovementRetakeConflict);
         }
 
         if let Some(resolution) = request.runtime_settings
@@ -245,6 +259,27 @@ impl ExecutionRepository for SqliteExecutionRepository {
                 execution
                     .requested_by
                     .expect("validated retry confirmation owner")
+                    .to_string(),
+            )
+            .bind(encode_timestamp(execution.created_at))
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        if let Some(confirmation) = request.score_improvement_retake {
+            begin_score_improvement_retake(&mut transaction, &request, confirmation).await?;
+            sqlx::query(
+                "INSERT INTO execution_score_improvement_retake_confirmations \
+                 (execution_id, workflow_id, workflow_revision, confirmed_by, confirmed_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(execution.id.to_string())
+            .bind(confirmation.workflow_id.to_string())
+            .bind(i64::from(confirmation.expected_revision))
+            .bind(
+                execution
+                    .requested_by
+                    .expect("validated retake owner")
                     .to_string(),
             )
             .bind(encode_timestamp(execution.created_at))
@@ -427,6 +462,13 @@ impl ExecutionRepository for SqliteExecutionRepository {
         execution_id: ExecutionId,
     ) -> Result<Option<ExecutionStrictCompletionRetryConfirmation>, StorageError> {
         find_strict_retry_confirmation(self.database.pool(), execution_id).await
+    }
+
+    async fn find_execution_score_improvement_retake_confirmation(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionScoreImprovementRetakeConfirmation>, StorageError> {
+        find_score_retake_confirmation(self.database.pool(), execution_id).await
     }
 
     async fn start_attempt(
@@ -3698,6 +3740,79 @@ async fn strict_completion_retry_is_valid(
     )
 }
 
+async fn score_improvement_retake_is_valid(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request: &ExecutionScheduleRequest<'_>,
+) -> Result<bool, StorageError> {
+    let Some(confirmation) = request.score_improvement_retake else {
+        return Ok(true);
+    };
+    let row: Option<(String, i64, String)> = sqlx::query_as(
+        "SELECT workflow_json, revision, owner_user_id FROM score_improvement_workflows \
+         WHERE id = ? AND task_id = ?",
+    )
+    .bind(confirmation.workflow_id.to_string())
+    .bind(request.execution.task_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((workflow_json, revision, owner_user_id)) = row else {
+        return Ok(false);
+    };
+    let workflow: ScoreImprovementWorkflow = serde_json::from_str(&workflow_json)?;
+    workflow.validate().map_err(|_| {
+        StorageError::InvalidData("score improvement workflow is invalid".to_owned())
+    })?;
+    Ok(workflow.id == confirmation.workflow_id
+        && workflow.binding.task_id == request.execution.task_id
+        && workflow.binding.owner_user_id.to_string() == owner_user_id
+        && request.execution.requested_by == Some(workflow.binding.owner_user_id)
+        && request.expected_task_state == OrchestrationState::Succeeded
+        && confirmation.expected_revision == revision_u32(revision)?
+        && workflow.state == asterism_domain::ScoreImprovementState::Ready)
+}
+
+async fn begin_score_improvement_retake(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request: &ExecutionScheduleRequest<'_>,
+    confirmation: ExecutionScoreImprovementRetakeRequest,
+) -> Result<(), StorageError> {
+    let row: (String, i64) = sqlx::query_as(
+        "SELECT workflow_json, revision FROM score_improvement_workflows WHERE id = ? AND task_id = ?",
+    )
+    .bind(confirmation.workflow_id.to_string())
+    .bind(request.execution.task_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let mut workflow: ScoreImprovementWorkflow = serde_json::from_str(&row.0)?;
+    workflow
+        .begin_retake(true, request.execution.created_at)
+        .map_err(|_| StorageError::InvalidData("score improvement retake is invalid".to_owned()))?;
+    let next_revision = confirmation
+        .expected_revision
+        .checked_add(1)
+        .ok_or_else(|| {
+            StorageError::InvalidData("score improvement revision overflow".to_owned())
+        })?;
+    let changed = sqlx::query(
+        "UPDATE score_improvement_workflows SET state = 'attempt_running', workflow_json = ?, \
+         revision = ?, updated_at = ?, finished_at = NULL WHERE id = ? AND revision = ?",
+    )
+    .bind(serde_json::to_string(&workflow)?)
+    .bind(i64::from(next_revision))
+    .bind(encode_timestamp(workflow.updated_at))
+    .bind(confirmation.workflow_id.to_string())
+    .bind(row.1)
+    .execute(&mut **transaction)
+    .await?;
+    if changed.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(
+            "score improvement workflow changed while scheduling".to_owned(),
+        ))
+    }
+}
+
 fn revision_u32(revision: i64) -> Result<u32, StorageError> {
     u32::try_from(revision).map_err(|_| {
         StorageError::InvalidData("strict completion workflow revision is invalid".to_owned())
@@ -3723,6 +3838,54 @@ async fn persisted_strict_retry_matches(
             && revision_u32(revision)? == requested.expected_revision),
         _ => Ok(false),
     }
+}
+
+async fn persisted_score_retake_matches(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    requested: Option<ExecutionScoreImprovementRetakeRequest>,
+) -> Result<bool, StorageError> {
+    let persisted: Option<(String, i64)> = sqlx::query_as(
+        "SELECT workflow_id, workflow_revision FROM execution_score_improvement_retake_confirmations \
+         WHERE execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    match (persisted, requested) {
+        (None, None) => Ok(true),
+        (Some((workflow_id, revision)), Some(requested)) => Ok(workflow_id
+            == requested.workflow_id.to_string()
+            && revision_u32(revision)? == requested.expected_revision),
+        _ => Ok(false),
+    }
+}
+
+async fn find_score_retake_confirmation(
+    pool: &sqlx::SqlitePool,
+    execution_id: ExecutionId,
+) -> Result<Option<ExecutionScoreImprovementRetakeConfirmation>, StorageError> {
+    let row: Option<(String, i64, String, String)> = sqlx::query_as(
+        "SELECT workflow_id, workflow_revision, confirmed_by, confirmed_at \
+         FROM execution_score_improvement_retake_confirmations WHERE execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(pool)
+    .await?;
+    row.map(|(workflow_id, revision, confirmed_by, confirmed_at)| {
+        Ok(ExecutionScoreImprovementRetakeConfirmation {
+            execution_id,
+            workflow_id: workflow_id.parse().map_err(|_| {
+                StorageError::InvalidData("score improvement workflow ID is invalid".to_owned())
+            })?,
+            workflow_revision: revision_u32(revision)?,
+            confirmed_by: confirmed_by.parse().map_err(|_| {
+                StorageError::InvalidData("score improvement retake owner is invalid".to_owned())
+            })?,
+            confirmed_at: decode_timestamp(&confirmed_at)?,
+        })
+    })
+    .transpose()
 }
 
 async fn find_strict_retry_confirmation(
@@ -5181,6 +5344,7 @@ mod tests {
             billing: None,
             runtime_settings: None,
             strict_completion_retry: None,
+            score_improvement_retake: None,
             expected_task_state: OrchestrationState::Ready,
             idempotency_scope: "user:test-owner",
             idempotency_key: "request-1",
@@ -7794,6 +7958,7 @@ mod tests {
             billing: None,
             runtime_settings: None,
             strict_completion_retry: None,
+            score_improvement_retake: None,
             expected_task_state: OrchestrationState::Ready,
             idempotency_scope: "user:test-owner",
             idempotency_key,
@@ -7818,6 +7983,7 @@ mod tests {
             billing: Some(ExecutionBillingReservation { quote, reservation }),
             runtime_settings: None,
             strict_completion_retry: None,
+            score_improvement_retake: None,
             expected_task_state: OrchestrationState::Ready,
             idempotency_scope: "user:test-owner",
             idempotency_key,

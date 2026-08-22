@@ -868,6 +868,7 @@ mod tests {
                         schema: &schema,
                     }),
                     strict_completion_retry: None,
+                    score_improvement_retake: None,
                     expected_task_state: OrchestrationState::Ready,
                     idempotency_scope: "user:test",
                     idempotency_key: "execution-one",
