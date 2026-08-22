@@ -5,7 +5,10 @@ use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use serde_json::{Value, json};
 use zeroize::Zeroize;
 
-use crate::{CidarenCryptoContext, decode_response_data};
+use crate::{
+    CidarenCryptoContext, decode_response_data,
+    protocol_observation::security_verification_required,
+};
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_MESSAGE_BYTES: usize = 2_048;
@@ -173,6 +176,10 @@ fn parse_root(
         )
     })?;
 
+    if let Some(error) = security_verification_required(code) {
+        return Err(error);
+    }
+
     if code == 20_004 {
         return Ok(CidarenAssessmentResponse::Receipt {
             kind: CidarenAssessmentReceiptKind::Completed,
@@ -255,6 +262,9 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
             root,
         )
     })?;
+    if let Some(error) = security_verification_required(code) {
+        return Err(error);
+    }
     if existing_word_selection_rejection(object, code, message.as_deref()) {
         return Ok(CidarenAssessmentResponse::Rejected {
             kind: CidarenAssessmentRejectionKind::ExistingWordSelection,
@@ -393,6 +403,8 @@ fn invalid_response(message: impl Into<String>) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use asterism_domain::HumanRequiredReason;
+
     use super::*;
 
     const START_ENVELOPE: &str =
@@ -534,6 +546,27 @@ mod tests {
                 .kind,
             ProviderErrorKind::Authentication
         );
+    }
+
+    #[test]
+    fn server_security_verification_requires_manual_intervention() {
+        let encoded = serde_json::to_vec(&serde_json::json!({
+            "code": 11003,
+            "msg": "synthetic security verification",
+        }))
+        .unwrap();
+        for error in [
+            parse_assessment_response(&encoded, None).unwrap_err(),
+            parse_word_selection_response(&encoded).unwrap_err(),
+        ] {
+            assert_eq!(error.kind, ProviderErrorKind::HumanRequired);
+            assert_eq!(error.provider_code.as_deref(), Some("11003"));
+            assert_eq!(
+                error.human_required_reason,
+                Some(HumanRequiredReason::ManualIntervention)
+            );
+            assert!(!error.message.contains("synthetic"));
+        }
     }
 
     #[test]
