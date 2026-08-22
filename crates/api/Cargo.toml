@@ -25,6 +25,7 @@ http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tokio-stream.workspace = true
@@ -33,7 +34,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-sqlx.workspace = true
 tokio.workspace = true
 tower.workspace = true
 

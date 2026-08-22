@@ -112,10 +112,19 @@ export function AnswerWorkflowPage() {
 
 function QuestionReview({ question, candidates, selected, resolutionState, onSelect, onClear, onCreated, taskId, snapshotId }: { question: Question; candidates: AnswerCandidateResponse[]; selected?: string; resolutionState?: string; onSelect: (candidateId: string) => void; onClear: () => void; onCreated: () => Promise<void>; taskId: string; snapshotId: string }) {
   return <Card><CardHeader><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">#{question.position + 1}</Badge><Badge variant="secondary">{question.kind}</Badge>{resolutionState ? <Badge variant={resolutionState === "selected" ? "success" : "warning"}>{resolutionState}</Badge> : null}</div><CardTitle className="whitespace-pre-wrap text-base leading-relaxed">{question.stem}</CardTitle></CardHeader><CardContent className="space-y-3">
+    {question.options.length ? <div className="space-y-2 rounded-lg border bg-muted/30 p-3"><p className="text-sm font-medium">题目选项与关系</p>{question.options.map((option) => <div key={option.id} className="rounded-md border bg-background p-3 text-sm"><div className="flex items-start gap-2"><code className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs">{option.id}</code><span className="whitespace-pre-wrap">{option.content || "（无文本内容）"}</span></div>{option.attachments.length ? <div className="mt-2 flex flex-wrap gap-2">{option.attachments.map((attachment, index) => <Badge key={`${attachment.kind}-${attachment.remote_id ?? index}`} variant="outline">{attachment.kind}{attachment.label ? ` · ${attachment.label}` : ""}</Badge>)}</div> : null}{hasVisibleMetadata(option.metadata_sanitized) ? <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">{JSON.stringify(option.metadata_sanitized, null, 2)}</pre> : null}</div>)}</div> : null}
+    {question.attachments.length ? <div className="flex flex-wrap gap-2">{question.attachments.map((attachment, index) => <Badge key={`${attachment.kind}-${attachment.remote_id ?? index}`} variant="outline">{attachment.kind}{attachment.label ? ` · ${attachment.label}` : ""}</Badge>)}</div> : null}
     {candidates.map((candidate) => <label key={candidate.id} className={`block cursor-pointer rounded-lg border p-3 ${selected === candidate.id ? "border-primary bg-primary/5" : ""}`}><div className="flex items-start gap-3"><input className="mt-1" type="radio" name={`answer-${question.id}`} checked={selected === candidate.id} onChange={() => onSelect(candidate.id)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap gap-2"><Badge variant="outline">{candidate.candidate.source}</Badge>{candidate.candidate.confidence == null ? null : <Badge variant="secondary">置信度 {candidate.candidate.confidence}</Badge>}<span className="font-mono text-xs text-muted-foreground">{shortId(candidate.id)}</span></div><pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">{JSON.stringify(candidate.candidate.answer, null, 2)}</pre>{candidate.candidate.explanation ? <p className="mt-2 text-sm text-muted-foreground">{candidate.candidate.explanation}</p> : null}</div></div></label>)}
     {!candidates.length ? <p className="text-sm text-muted-foreground">尚无候选证据。</p> : null}
     <div className="flex flex-wrap gap-2">{selected ? <Button size="sm" variant="outline" onClick={onClear}>不提交此题</Button> : null}<ManualCandidateForm questionId={question.id} taskId={taskId} snapshotId={snapshotId} onCreated={onCreated} /></div>
   </CardContent></Card>;
+}
+
+function hasVisibleMetadata(value: unknown) {
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
 }
 
 function QuestionGroupOverview({ groups, questions }: { groups: QuestionGroup[]; questions: Question[] }) {

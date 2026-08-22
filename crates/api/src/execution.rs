@@ -1,7 +1,8 @@
 use std::{future::pending, str::FromStr, time::Duration};
 
 use asterism_domain::{
-    Execution, ExecutionAttempt, ExecutionId, ExecutionLogEvent, ExecutionProgress, TaskId,
+    Execution, ExecutionAttempt, ExecutionId, ExecutionLogEvent, ExecutionProgress,
+    QuestionSnapshotId, TaskId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_storage::{ExecutionQueryRepository, SqliteExecutionRepository};
@@ -74,16 +75,19 @@ pub(super) async fn get_execution(
     let owner_id = auth.require_task_read()?;
     let execution_id = ExecutionId::from_str(&execution_id)
         .map_err(|_| ApiError::bad_request("invalid_execution_id", "execution ID is invalid"))?;
-    let detail = SqliteExecutionRepository::new(state.database)
+    let detail = SqliteExecutionRepository::new(state.database.clone())
         .find_owned_execution_detail(owner_id, execution_id)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("execution_not_found"))?;
+    let next_question_snapshot_id =
+        find_next_question_snapshot_id(&state.database, execution_id).await?;
     Ok(crate::auth::no_store(
         Json(ExecutionDetailResponse {
             execution: detail.execution,
             progress: detail.progress,
             attempts: detail.attempts,
+            next_question_snapshot_id,
         })
         .into_response(),
     ))
@@ -140,15 +144,18 @@ pub(super) async fn stream_execution(
     let owner_id = auth.require_task_read()?;
     let execution_id = ExecutionId::from_str(&execution_id)
         .map_err(|_| ApiError::bad_request("invalid_execution_id", "execution ID is invalid"))?;
-    let detail = SqliteExecutionRepository::new(state.database)
+    let detail = SqliteExecutionRepository::new(state.database.clone())
         .find_owned_execution_detail(owner_id, execution_id)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("execution_not_found"))?;
+    let next_question_snapshot_id =
+        find_next_question_snapshot_id(&state.database, execution_id).await?;
     let snapshot = ExecutionDetailResponse {
         execution: detail.execution,
         progress: detail.progress,
         attempts: detail.attempts,
+        next_question_snapshot_id,
     };
     let snapshot = Event::default()
         .event("snapshot")
@@ -238,6 +245,27 @@ struct ExecutionDetailResponse {
     execution: Execution,
     progress: Option<ExecutionProgress>,
     attempts: Vec<ExecutionAttempt>,
+    next_question_snapshot_id: Option<QuestionSnapshotId>,
+}
+
+async fn find_next_question_snapshot_id(
+    database: &asterism_storage::Database,
+    execution_id: ExecutionId,
+) -> Result<Option<QuestionSnapshotId>, ApiError> {
+    let value = sqlx::query_scalar::<_, String>(
+        "SELECT next_question_snapshot_id FROM question_session_transitions \
+         WHERE execution_id = ? ORDER BY transitioned_at DESC LIMIT 1",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    value
+        .map(|value| {
+            QuestionSnapshotId::from_str(&value)
+                .map_err(|_| ApiError::internal("stored next Question snapshot ID is invalid"))
+        })
+        .transpose()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]

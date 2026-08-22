@@ -1260,11 +1260,17 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         (
             "ExecutionDetailResponse",
             object(
-                &["execution", "progress", "attempts"],
+                &[
+                    "execution",
+                    "progress",
+                    "attempts",
+                    "next_question_snapshot_id",
+                ],
                 json!({
                     "execution": schema_ref("Execution"),
                     "progress": {"oneOf": [schema_ref("ExecutionProgress"), {"type": "null"}]},
-                    "attempts": {"type": "array", "items": schema_ref("ExecutionAttempt")}
+                    "attempts": {"type": "array", "items": schema_ref("ExecutionAttempt")},
+                    "next_question_snapshot_id": {"type": ["string", "null"], "format": "uuid", "description": "The immutable next Question snapshot materialized by a successful stepwise submission."}
                 }),
             ),
         ),
