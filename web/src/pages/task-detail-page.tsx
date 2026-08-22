@@ -95,7 +95,7 @@ export function TaskDetailPage() {
         ...(invocationDraftId.trim() ? { invocation_draft_id: invocationDraftId.trim() } : {}),
         ...(task.data?.assessment_class === "formal" && formalAssessmentConfirmed ? { formal_assessment_confirmation: true } : {}),
         ...(strictRetryRequired && completionWorkflows.data?.strict_completion ? { strict_completion_retry_confirmation: { workflow_id: completionWorkflows.data.strict_completion.workflow.id, expected_revision: completionWorkflows.data.strict_completion.revision } } : {}),
-        ...(scoreImprovementRetakeReady && completionWorkflows.data?.score_improvement ? { score_improvement_retake_confirmation: { workflow_id: completionWorkflows.data.score_improvement.workflow.id, expected_revision: completionWorkflows.data.score_improvement.revision } } : {}),
+        ...(scoreImprovementCanBind && completionWorkflows.data?.score_improvement ? { score_improvement_retake_confirmation: { workflow_id: completionWorkflows.data.score_improvement.workflow.id, expected_revision: completionWorkflows.data.score_improvement.revision } } : {}),
       },
     })),
     onSuccess: ({ execution }) => {
@@ -143,13 +143,14 @@ export function TaskDetailPage() {
   const strictRetryRequired = strictCompletion?.workflow.state === "active" && strictCompletion.workflow.attempts_started > 0 && (isFormalAssessment || requestedCapabilities.includes("submission_execute"));
   const scoreImprovement = completionWorkflows.data?.score_improvement;
   const scoreImprovementRetakeReady = scoreImprovement?.workflow.state === "ready" && task.data.orchestration_state === "succeeded";
+  const scoreImprovementCanBind = scoreImprovementRetakeReady && ["pending", "in_progress"].includes(task.data.remote_state);
   const policyBlocked = isFormalAssessment && !formalAssessmentConfirmed;
   const lifecyclePending = approve.isPending || cancel.isPending || delay.isPending || ignore.isPending;
   const canApprove = task.data.orchestration_state === "waiting_approval";
   const canCancel = ["waiting_approval", "scheduled", "credit_blocked", "human_required", "retry_waiting", "failed"].includes(task.data.orchestration_state);
   const canDelay = task.data.orchestration_state === "scheduled" && Boolean(delayedUntil) && new Date(delayedUntil).getTime() > Date.now();
   const canIgnore = ["discovered", "ready", "waiting_approval", "credit_blocked", "human_required", "failed"].includes(task.data.orchestration_state);
-  const canExecuteState = ["ready", "failed"].includes(task.data.orchestration_state) || (task.data.orchestration_state === "human_required" && strictRetryRequired) || scoreImprovementRetakeReady;
+  const canExecuteState = ["ready", "failed"].includes(task.data.orchestration_state) || (task.data.orchestration_state === "human_required" && strictRetryRequired) || scoreImprovementCanBind;
 
   return <PageShell title={task.data.title} description={`${task.data.source_type} · ${shortId(task.data.id)}`} actions={canManageSystem ? <Link className={buttonVariants({ variant: "outline" })} to={`/admin/runtime-settings?scope=task&target=${taskId}`}><Settings2 className="size-4" />任务运行设置</Link> : undefined}>
     {error ? <QueryError error={error} /> : null}
@@ -171,7 +172,7 @@ export function TaskDetailPage() {
       })}</div><p className="text-sm text-muted-foreground">所选范围会冻结到 Execution；Provider 不会自动执行任务声明的其他写入能力。</p></div> : null}
       {actionNotice ? <Alert><AlertTitle>Core Action 已提交</AlertTitle><AlertDescription>{actionNotice}</AlertDescription></Alert> : null}
       {isFormalAssessment && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评需要本次明确确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认由当前账号执行所选能力；该确认只随本次请求提交，默认仍为拒绝。</span></label></AlertDescription></Alert> : null}
-      {scoreImprovementRetakeReady ? <Alert><AlertTitle>本次执行将开始提分重试</AlertTitle><AlertDescription>Core 会把 workflow {shortId(scoreImprovement!.workflow.id)} 的 revision {scoreImprovement!.revision} 与 Execution 原子绑定并消耗一次重试；测评提交仍需选择新的快照和 Draft。</AlertDescription></Alert> : null}
+      {scoreImprovementRetakeReady ? <Alert><AlertTitle>{scoreImprovementCanBind ? "远端重做已就绪" : "先在远端创建新重做 Attempt"}</AlertTitle><AlertDescription>{scoreImprovementCanBind ? <>Core 会把 workflow {shortId(scoreImprovement!.workflow.id)} 的 revision {scoreImprovement!.revision} 与这次 Execution 原子绑定并消耗一次重试；测评提交仍需选择重做后的新快照和 Draft。</> : <>当前远端仍是 completed，Core 不会复用旧答卷。请用下方 BrowserBridge 打开结果页并明确点击“重做”，然后在平台账号页立即巡查；状态刷新为 pending/in_progress 后再读取新题目。</>}</AlertDescription></Alert> : null}
       {needsDraft ? <div className="max-w-xl space-y-2"><Label htmlFor="submission-draft">Submission Draft ID</Label><Input id="submission-draft" value={submissionDraftId} onChange={(event) => setSubmissionDraftId(event.target.value)} placeholder="测评任务必须绑定已审核的不可变 Draft" /></div> : null}
       {needsInvocation ? <div className="max-w-2xl space-y-3 rounded-lg border p-4">
         <div><p className="font-medium">Provider 私有执行输入</p><p className="text-sm text-muted-foreground">UAI 讨论、音频上传和复合口语会先生成加密的不可变 invocation draft，再交给 Core 调度。</p></div>
@@ -182,7 +183,7 @@ export function TaskDetailPage() {
         <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="outline" disabled={!invocationShapeSupported || prepareInvocation.isPending || (requestedCapabilities.includes("discussion") && !discussionContent.trim()) || (requestedCapabilities.includes("artifact_upload") && !artifactFile) || (needsDraft && !submissionDraftId.trim())} onClick={() => prepareInvocation.mutate()}>{prepareInvocation.isPending ? "正在准备…" : "生成私有执行 Draft"}</Button>{invocationDraftId ? <Badge variant="secondary">Draft {shortId(invocationDraftId)}</Badge> : null}</div>
       </div> : null}
       <div className="flex flex-wrap gap-2">
-        <Button disabled={!executable || requestedCapabilities.length === 0 || !canExecuteState || policyBlocked || execute.isPending || lifecyclePending || (needsDraft && !submissionDraftId.trim()) || (needsInvocation && !invocationDraftId.trim())} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : scoreImprovementRetakeReady ? "确认提分重试并执行" : "通过 Core 调度执行"}</Button>
+        <Button disabled={!executable || requestedCapabilities.length === 0 || !canExecuteState || policyBlocked || execute.isPending || lifecyclePending || (needsDraft && !submissionDraftId.trim()) || (needsInvocation && !invocationDraftId.trim())} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : scoreImprovementCanBind ? "绑定远端重做并执行" : "通过 Core 调度执行"}</Button>
         <Button variant="outline" disabled={!canApprove || lifecyclePending || execute.isPending} onClick={() => approve.mutate()}><CheckCircle2 className="size-4" />{approve.isPending ? "批准中…" : "批准"}</Button>
         <Button variant="outline" disabled={!canIgnore || lifecyclePending || execute.isPending} onClick={() => { if (window.confirm("忽略后 Asterism 不会自动处理此任务，确认继续？")) ignore.mutate(); }}><EyeOff className="size-4" />{ignore.isPending ? "忽略中…" : "忽略"}</Button>
         <Button variant="destructive" disabled={!canCancel || lifecyclePending || execute.isPending} onClick={() => { if (window.confirm("取消会撤销尚未领取的执行和积分预留，确认继续？")) cancel.mutate(); }}><Ban className="size-4" />{cancel.isPending ? "取消中…" : "取消"}</Button>

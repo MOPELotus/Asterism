@@ -78,7 +78,7 @@ export function AnswerWorkflowPage() {
       const strictCompletion = completionWorkflows.data?.strict_completion;
       const strictRetryRequired = strictCompletion?.workflow.state === "active" && strictCompletion.workflow.attempts_started > 0;
       const scoreImprovement = completionWorkflows.data?.score_improvement;
-      const scoreImprovementRetakeReady = scoreImprovement?.workflow.state === "ready" && task.data?.orchestration_state === "succeeded";
+      const scoreImprovementRetakeReady = scoreImprovement?.workflow.state === "ready" && task.data?.orchestration_state === "succeeded" && ["pending", "in_progress"].includes(task.data?.remote_state ?? "");
       return requireData(await executeTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": idempotencyKey.current }, body: { requested_capabilities: ["submission_execute"], submission_draft_id: draft.id, ...(task.data?.assessment_class === "formal" && formalAssessmentConfirmed ? { formal_assessment_confirmation: true } : {}), ...(strictRetryRequired && strictCompletion ? { strict_completion_retry_confirmation: { workflow_id: strictCompletion.workflow.id, expected_revision: strictCompletion.revision } } : {}), ...(scoreImprovementRetakeReady && scoreImprovement ? { score_improvement_retake_confirmation: { workflow_id: scoreImprovement.workflow.id, expected_revision: scoreImprovement.revision } } : {}) } }));
     },
     onSuccess: ({ execution }) => { idempotencyKey.current = crypto.randomUUID(); navigate(`/executions/${execution.id}`); },
@@ -104,7 +104,7 @@ export function AnswerWorkflowPage() {
   const strictCompletion = completionWorkflows.data?.strict_completion;
   const strictRetryRequired = strictCompletion?.workflow.state === "active" && strictCompletion.workflow.attempts_started > 0;
   const scoreImprovement = completionWorkflows.data?.score_improvement;
-  const scoreImprovementRetakeReady = scoreImprovement?.workflow.state === "ready" && task.data.orchestration_state === "succeeded";
+  const scoreImprovementRetakeReady = scoreImprovement?.workflow.state === "ready" && task.data.orchestration_state === "succeeded" && ["pending", "in_progress"].includes(task.data.remote_state);
 
   return <PageShell title="答案审核" description={`${task.data.title} · snapshot ${shortId(snapshotId)}`}>
     {error ? <QueryError error={error} /> : null}

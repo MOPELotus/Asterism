@@ -1599,7 +1599,7 @@ fn task_execute_path() -> Value {
                         "type": "object",
                         "required": ["workflow_id", "expected_revision"],
                         "additionalProperties": false,
-                        "description": "Explicitly starts one bounded Score Improvement retake and schedules this Execution atomically against the current workflow revision.",
+                        "description": "Binds an already-created fresh remote retake (rediscovered as pending or in_progress) to this Execution and consumes one bounded Score Improvement attempt atomically. It never reuses a completed attempt.",
                         "properties": {
                             "workflow_id": {"type": "string", "format": "uuid"},
                             "expected_revision": {"type": "integer", "format": "int64", "minimum": 1}
@@ -4240,6 +4240,17 @@ mod tests {
                 .unwrap()
             }
         };
+        let before_remote_retake = execute("score-retake-before-remote").await;
+        assert_eq!(before_remote_retake.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(before_remote_retake).await["error"]["code"],
+            "score_improvement_retake_conflict"
+        );
+        sqlx::query("UPDATE tasks SET remote_state = 'pending' WHERE id = ?")
+            .bind(task_id.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
         let scheduled = execute("score-retake").await;
         let scheduled_status = scheduled.status();
         let scheduled = response_json(scheduled).await;

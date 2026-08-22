@@ -425,7 +425,6 @@ where
             &command.requested_capabilities,
             verification_required,
             provider_state_exception,
-            command.score_improvement_retake.is_some(),
         ) {
             return Err(ExecutionRequestError::RemoteStateNotExecutable);
         }
@@ -648,6 +647,10 @@ where
             .await?
             .ok_or(ExecutionRequestError::ScoreImprovementRetakeConflict)?;
         if task.orchestration_state == OrchestrationState::Succeeded
+            && matches!(
+                task.remote_state,
+                RemoteState::Pending | RemoteState::InProgress
+            )
             && record.workflow.state == ScoreImprovementState::Ready
             && record.workflow.id == confirmation.workflow_id
             && record.revision == confirmation.expected_revision
@@ -784,17 +787,15 @@ fn remote_state_is_executable(
     requested_capabilities: &[TaskCapability],
     verification_required: bool,
     provider_state_exception: bool,
-    score_improvement_retake_confirmed: bool,
 ) -> bool {
     matches!(
         task.remote_state,
         RemoteState::Pending | RemoteState::InProgress
-    ) || (score_improvement_retake_confirmed && task.remote_state == RemoteState::Completed)
-        || (requested_capabilities == [TaskCapability::DurationReport]
-            && matches!(
-                task.remote_state,
-                RemoteState::Completed | RemoteState::Unknown
-            ))
+    ) || (requested_capabilities == [TaskCapability::DurationReport]
+        && matches!(
+            task.remote_state,
+            RemoteState::Completed | RemoteState::Unknown
+        ))
         || (safe_verification_action(task, requested_capabilities, verification_required)
             && matches!(
                 task.remote_state,
@@ -1071,7 +1072,6 @@ mod tests {
             &[TaskCapability::DurationReport],
             false,
             false,
-            false,
         ));
         let resource = task(
             RemoteState::Completed,
@@ -1082,13 +1082,11 @@ mod tests {
             &[TaskCapability::ResourceExecution],
             false,
             false,
-            false,
         ));
         assert!(remote_state_is_executable(
             &resource,
             &[TaskCapability::ResourceExecution],
             true,
-            false,
             false,
         ));
         let submission = task(
@@ -1101,7 +1099,6 @@ mod tests {
         assert!(remote_state_is_executable(
             &submission,
             &[TaskCapability::SubmissionExecute],
-            false,
             false,
             false,
         ));
@@ -1118,14 +1115,12 @@ mod tests {
             &[TaskCapability::ResourceExecution],
             true,
             false,
-            false,
         ));
         assert!(remote_state_is_executable(
             &not_open,
             &[TaskCapability::ResourceExecution],
             true,
             true,
-            false,
         ));
 
         for remote_state in [RemoteState::Expired, RemoteState::Removed] {
@@ -1135,7 +1130,6 @@ mod tests {
                 &[TaskCapability::ResourceExecution],
                 true,
                 true,
-                false,
             ));
         }
     }
