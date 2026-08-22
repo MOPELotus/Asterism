@@ -302,6 +302,7 @@ fn merge_courses(
                 )
             })?
             .to_owned();
+        existing.remote_status = study_course.remote_status.clone();
         existing.metadata_sanitized = serde_json::json!({
             "schema": "cidaren.course.v1",
             "course_id": course_id,
@@ -377,6 +378,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(courses.len(), 2);
+        let selected = courses
+            .iter()
+            .find(|course| course.remote_id == "course:course-a")
+            .unwrap();
+        assert_eq!(selected.remote_status.as_deref(), Some("35%"));
 
         let tasks = CidarenTaskInventory::try_new(transport.clone(), transport)
             .unwrap()

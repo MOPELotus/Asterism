@@ -55,12 +55,15 @@ struct StudyTaskSnapshot {
 /// unbounded data.
 pub fn parse_study_course(document: &CidarenStudyTaskDocument) -> ProviderResult<RemoteCourse> {
     let snapshot = parse_snapshot(document)?;
+    let remote_status = snapshot
+        .course_progress
+        .map(|progress| format!("{progress}%"));
     Ok(RemoteCourse {
         remote_id: format!("course:{}", snapshot.course_id),
         title: snapshot.course_name,
         term: None,
         teacher: None,
-        remote_status: None,
+        remote_status,
         metadata_sanitized: serde_json::json!({
             "schema": "cidaren.course.v1",
             "course_id": snapshot.course_id,
@@ -491,6 +494,7 @@ mod tests {
         let course = parse_study_course(&document).unwrap();
         assert_eq!(course.remote_id, "course:course-a");
         assert_eq!(course.title, "Synthetic Course A");
+        assert_eq!(course.remote_status.as_deref(), Some("35%"));
         assert_eq!(course.metadata_sanitized["study_progress"], 35);
 
         let tasks = parse_study_task_inventory(Some(&course), &document).unwrap();
