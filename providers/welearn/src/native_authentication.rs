@@ -23,7 +23,7 @@ use crate::{
     parse_course_inventory,
 };
 
-const PRELOGIN_URL: &str = "https://welearn.sflep.com/user/prelogin.aspx?loginret=https%3a%2f%2fwelearn.sflep.com%2fuser%2floginredirect.aspx";
+const PRELOGIN_URL: &str = "https://welearn.sflep.com/user/prelogin.aspx?loginret=http%3a%2f%2fwelearn.sflep.com%2fuser%2floginredirect.aspx";
 const LOGIN_URL: &str = "https://sso.sflep.com/idsvr/account/login";
 const LOGIN_ORIGIN: &str = "https://sso.sflep.com";
 const LOGIN_REFERER: &str = "https://sso.sflep.com/idsvr/login.html";
@@ -153,8 +153,7 @@ impl NativeWellearnAuthenticationTransport {
                         "WELearn authentication redirect is invalid",
                     )
                 })?;
-                validate_auth_url(&next)?;
-                current = next;
+                current = normalize_auth_redirect(next)?;
                 continue;
             }
             validate_auth_status(response.status(), response.headers())?;
@@ -447,6 +446,22 @@ fn validate_auth_url(url: &Url) -> ProviderResult<()> {
     Ok(())
 }
 
+fn normalize_auth_redirect(mut url: Url) -> ProviderResult<Url> {
+    if url.scheme() == "http"
+        && url.host_str() == Some("welearn.sflep.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/user/loginredirect.aspx"
+        && url.fragment().is_none()
+    {
+        url.set_scheme("https")
+            .map_err(|()| invalid_login_response())?;
+    }
+    validate_auth_url(&url)?;
+    Ok(url)
+}
+
 fn allowed_cookie_domain(domain: &str) -> bool {
     matches!(domain, "sflep.com" | "sso.sflep.com" | "welearn.sflep.com")
 }
@@ -619,7 +634,7 @@ mod tests {
                 .find(|(key, _)| key == "loginret")
                 .map(|(_, value)| value.into_owned())
                 .as_deref(),
-            Some("https://welearn.sflep.com/user/loginredirect.aspx")
+            Some("http://welearn.sflep.com/user/loginredirect.aspx")
         );
         assert!(validate_auth_url(&Url::parse(LOGIN_URL).unwrap()).is_ok());
         assert!(
@@ -632,6 +647,28 @@ mod tests {
         assert!(
             validate_auth_url(&Url::parse("https://user@sso.sflep.com/callback").unwrap()).is_err()
         );
+    }
+
+    #[test]
+    fn only_the_donor_login_return_redirect_is_upgraded_to_https() {
+        let upgraded = normalize_auth_redirect(
+            Url::parse("http://welearn.sflep.com/user/loginredirect.aspx?state=SAFE_STATE")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(upgraded.scheme(), "https");
+        assert_eq!(upgraded.host_str(), Some("welearn.sflep.com"));
+        assert_eq!(upgraded.path(), "/user/loginredirect.aspx");
+        assert_eq!(upgraded.query(), Some("state=SAFE_STATE"));
+
+        for rejected in [
+            "http://evil.example/user/loginredirect.aspx",
+            "http://welearn.sflep.com/user/other.aspx",
+            "http://user@welearn.sflep.com/user/loginredirect.aspx",
+            "http://welearn.sflep.com:8080/user/loginredirect.aspx",
+        ] {
+            assert!(normalize_auth_redirect(Url::parse(rejected).unwrap()).is_err());
+        }
     }
 
     #[test]
