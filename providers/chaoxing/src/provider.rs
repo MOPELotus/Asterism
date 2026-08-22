@@ -5,11 +5,12 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
-    ChaoxingAnswerResolve, ChaoxingAuthentication, ChaoxingBrowserBridge, ChaoxingCourseEnrollment,
-    ChaoxingCourseInventory, ChaoxingQuestionRead, ChaoxingResourceExecution,
-    ChaoxingSessionResolver, ChaoxingSignActivityRead, ChaoxingSubmissionBuild,
-    ChaoxingSubmissionExecute, ChaoxingSubmissionVerify, ChaoxingTaskDetail, ChaoxingTaskInventory,
-    ChaoxingTaskProgress, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
+    ChaoxingAnswerHistoryHarvest, ChaoxingAnswerResolve, ChaoxingAuthentication,
+    ChaoxingBrowserBridge, ChaoxingCourseEnrollment, ChaoxingCourseInventory, ChaoxingQuestionRead,
+    ChaoxingResourceExecution, ChaoxingSessionResolver, ChaoxingSignActivityRead,
+    ChaoxingSubmissionBuild, ChaoxingSubmissionExecute, ChaoxingSubmissionVerify,
+    ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
+    NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
     NativeChaoxingQrAuthenticationTransport, StoredChaoxingSessionResolver,
     metadata::development_metadata, runtime_settings::runtime_settings_schema,
 };
@@ -107,6 +108,9 @@ fn compose_development_provider(
         task_detail.clone(),
         inventory_transport.clone(),
     )?);
+    let answer_history_harvest = Arc::new(ChaoxingAnswerHistoryHarvest::try_new(
+        inventory_transport.clone(),
+    )?);
     let submission_build = Arc::new(ChaoxingSubmissionBuild::try_new()?);
     let submission_execute = Arc::new(ChaoxingSubmissionExecute::try_new(
         course_inventory.clone(),
@@ -134,7 +138,7 @@ fn compose_development_provider(
         submission_build: Some(submission_build),
         submission_execute: Some(submission_execute),
         submission_verify: Some(submission_verify),
-        answer_history_harvest: None,
+        answer_history_harvest: Some(answer_history_harvest),
         task_execution: Some(task_execution),
         browser_bridge: Some(browser_bridge),
     })
@@ -286,9 +290,9 @@ mod tests {
         );
         assert!(entry.submission_execute.is_some());
         assert!(entry.submission_verify.is_some());
-        assert!(entry.answer_history_harvest.is_none());
+        assert!(entry.answer_history_harvest.is_some());
         assert!(
-            !entry
+            entry
                 .metadata
                 .capabilities
                 .contains(&ProviderCapability::AnswerHistoryHarvest)

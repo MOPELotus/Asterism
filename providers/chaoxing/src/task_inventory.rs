@@ -1272,6 +1272,7 @@ mod tests {
                 ProviderCapability::SubmissionBuild,
                 ProviderCapability::SubmissionExecute,
                 ProviderCapability::SubmissionVerify,
+                ProviderCapability::AnswerHistoryHarvest,
                 ProviderCapability::BrowserBridge,
             ])
         );

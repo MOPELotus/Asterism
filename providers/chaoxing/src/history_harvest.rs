@@ -204,8 +204,8 @@ impl fmt::Debug for ChaoxingChapterWorkHistoryResultRequest {
 }
 
 /// Abstract read-only boundary for audited completed Chapter Work history.
-/// No Native implementation is claimed until a live BrowserBridge/Capture
-/// route can list and read `selectWorkQuestionYiPiYue` safely.
+/// The Native implementation rediscovers current completed card targets and
+/// reads only their bound `selectWorkQuestionYiPiYue` result pages.
 #[async_trait]
 pub trait ChaoxingAnswerHistoryTransport: Send + Sync {
     async fn list_completed_chapter_work(
@@ -221,9 +221,9 @@ pub trait ChaoxingAnswerHistoryTransport: Send + Sync {
     ) -> ProviderResult<ChaoxingChapterWorkVerificationDocument>;
 }
 
-/// Typed `AnswerHistoryHarvest` implementation for the audited Chapter Work
-/// result subset. It is intentionally absent from the development factory
-/// until a real read-only transport exists.
+/// Typed `AnswerHistoryHarvest` implementation for the audited current Chapter
+/// Work result subset. Older attempts remain outside the claim unless the
+/// remote account still exposes a distinct bound result identity.
 pub struct ChaoxingAnswerHistoryHarvest {
     metadata: ProviderMetadata,
     transport: Arc<dyn ChaoxingAnswerHistoryTransport>,

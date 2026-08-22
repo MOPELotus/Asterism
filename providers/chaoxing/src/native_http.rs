@@ -1,10 +1,10 @@
 use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc};
 
-use asterism_domain::{HumanRequiredReason, TaskId};
+use asterism_domain::{HumanRequiredReason, RemoteState, TaskId};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSink, ProviderContext,
-    ProviderCourseEnrollmentDraft, ProviderError, ProviderErrorKind, ProviderResult,
+    ProviderCourseEnrollmentDraft, ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse,
 };
 use asterism_secrets::SecretString;
 use async_trait::async_trait;
@@ -20,8 +20,10 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::{
-    ChaoxingAnswerResolutionTransport, ChaoxingChapterResourceDocument,
-    ChaoxingChapterResourceRequest, ChaoxingChapterWorkResultRequest,
+    ChaoxingAnswerHistoryTransport, ChaoxingAnswerResolutionTransport,
+    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
+    ChaoxingChapterWorkHistoryPage, ChaoxingChapterWorkHistoryRecord,
+    ChaoxingChapterWorkHistoryResultRequest, ChaoxingChapterWorkResultRequest,
     ChaoxingChapterWorkVerificationDocument, ChaoxingCourseEnrollmentTransport,
     ChaoxingCourseInventoryTransport, ChaoxingCourseInviteApiDocument,
     ChaoxingCourseInviteApiPreparation, ChaoxingCourseInvitePreviewDocument,
@@ -40,8 +42,8 @@ use crate::{
     exam_attempt::{
         ChaoxingExamStartCommand, ChaoxingExamStartOutcome, parse_exam_attempt, parse_exam_cover,
     },
-    parse_chapter_inventory, parse_course_inventory, parse_exam_submission_response,
-    parse_submission_receipt,
+    parse_chapter_inventory, parse_chapter_resource_inventory, parse_course_inventory,
+    parse_exam_submission_response, parse_submission_receipt,
     resource_execution::{
         ChaoxingImmediateResourceTransport, ChaoxingLiveStatus, ChaoxingLiveTransport,
         ChaoxingMediaReportOutcome, ChaoxingMediaReportRequest, ChaoxingVideoStatus,
@@ -113,6 +115,41 @@ const MAX_HTML_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_COURSE_FOLDERS: usize = 256;
 const MAX_COURSE_FOLDER_ID_BYTES: usize = 64;
 const MAX_WORK_DETAIL_REDIRECTS: usize = 3;
+const ANSWER_HISTORY_PAGE_SIZE: usize = 100;
+const MAX_ANSWER_HISTORY_RECORDS: usize = 10_000;
+
+#[derive(Clone, Copy)]
+struct ChapterWorkResultBinding<'a> {
+    remote_task: &'a str,
+    course: &'a str,
+    class: &'a str,
+    knowledge: &'a str,
+    expected_work_answer: Option<&'a str>,
+}
+
+impl<'a> From<&'a ChaoxingChapterWorkResultRequest> for ChapterWorkResultBinding<'a> {
+    fn from(request: &'a ChaoxingChapterWorkResultRequest) -> Self {
+        Self {
+            remote_task: request.remote_task_id(),
+            course: request.course_id(),
+            class: request.class_id(),
+            knowledge: request.knowledge_id(),
+            expected_work_answer: None,
+        }
+    }
+}
+
+impl<'a> From<&'a ChaoxingChapterWorkHistoryResultRequest> for ChapterWorkResultBinding<'a> {
+    fn from(request: &'a ChaoxingChapterWorkHistoryResultRequest) -> Self {
+        Self {
+            remote_task: request.remote_task_id(),
+            course: request.course_id(),
+            class: request.class_id(),
+            knowledge: request.knowledge_id(),
+            expected_work_answer: Some(request.work_answer_id()),
+        }
+    }
+}
 
 /// One short-lived Chaoxing Cookie header resolved through Core's secrets
 /// boundary. Its value is redacted and zeroized on drop.
@@ -1121,25 +1158,10 @@ impl NativeChaoxingInventoryTransport {
     async fn fetch_chapter_work_result_once(
         &self,
         session: &ChaoxingCookieSession,
-        request: &ChaoxingChapterWorkResultRequest,
+        request: ChapterWorkResultBinding<'_>,
     ) -> ProviderResult<ChaoxingChapterWorkVerificationDocument> {
-        let mut courses = BTreeMap::new();
-        for document in self.fetch_course_inventories_once(session).await? {
-            for course in parse_course_inventory(document.as_str())? {
-                match courses.get(&course.remote_id) {
-                    Some(previous) if previous == &course => {}
-                    Some(_) => {
-                        return Err(protocol_drift(
-                            "Chaoxing course folders disagree during result rediscovery",
-                        ));
-                    }
-                    None => {
-                        courses.insert(course.remote_id.clone(), course);
-                    }
-                }
-            }
-        }
-        let remote_course_id = format!("course:{}:{}", request.course_id(), request.class_id());
+        let courses = self.fetch_bound_courses_once(session).await?;
+        let remote_course_id = format!("course:{}:{}", request.course, request.class);
         let course = courses.get(&remote_course_id).ok_or_else(|| {
             ProviderError::new(
                 ProviderErrorKind::RemoteChanged,
@@ -1151,9 +1173,7 @@ impl NativeChaoxingInventoryTransport {
         let chapter_document = self.fetch_chapter_inventory_once(session, route).await?;
         let chapter_remote_id = format!(
             "chapter:{}:{}:{}",
-            request.course_id(),
-            request.class_id(),
-            request.knowledge_id()
+            request.course, request.class, request.knowledge
         );
         let chapter = parse_chapter_inventory(chapter_document.as_str(), &scope)?
             .into_iter()
@@ -1185,9 +1205,9 @@ impl NativeChaoxingInventoryTransport {
             let Some(candidate) = locate_chapter_work_result_target(
                 document.as_str(),
                 &scope,
-                request.knowledge_id(),
+                request.knowledge,
                 document.card_index(),
-                request.remote_task_id(),
+                request.remote_task,
             )?
             else {
                 continue;
@@ -1213,7 +1233,136 @@ impl NativeChaoxingInventoryTransport {
                 "Chaoxing Chapter Work no longer resolves to a completed result",
             ));
         }
+        if request
+            .expected_work_answer
+            .is_some_and(|expected| unique_query(&url, "workAnswerId").as_deref() != Some(expected))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Chapter Work attempt changed before history read",
+            ));
+        }
         ChaoxingChapterWorkVerificationDocument::try_new(result.into_string())
+    }
+
+    async fn fetch_bound_courses_once(
+        &self,
+        session: &ChaoxingCookieSession,
+    ) -> ProviderResult<BTreeMap<String, RemoteCourse>> {
+        let mut courses = BTreeMap::new();
+        for document in self.fetch_course_inventories_once(session).await? {
+            for course in parse_course_inventory(document.as_str())? {
+                match courses.get(&course.remote_id) {
+                    Some(previous) if previous == &course => {}
+                    Some(_) => {
+                        return Err(protocol_drift(
+                            "Chaoxing course folders disagree during rediscovery",
+                        ));
+                    }
+                    None => {
+                        courses.insert(course.remote_id.clone(), course);
+                    }
+                }
+            }
+        }
+        Ok(courses)
+    }
+
+    async fn list_chapter_work_history_once(
+        &self,
+        session: &ChaoxingCookieSession,
+    ) -> ProviderResult<Vec<ChaoxingChapterWorkHistoryRecord>> {
+        let courses = self.fetch_bound_courses_once(session).await?;
+        let mut records = BTreeMap::new();
+        for course in courses.values() {
+            let route = ChaoxingCourseRoute::from_remote_course(course)?;
+            let scope = route.parser_scope()?;
+            let chapter_document = self.fetch_chapter_inventory_once(session, route).await?;
+            let chapters = parse_chapter_inventory(chapter_document.as_str(), &scope)?;
+            let resource_requests = chapters
+                .iter()
+                .filter_map(|chapter| {
+                    ChaoxingChapterResourceRequest::try_from_available_chapter(chapter).transpose()
+                })
+                .collect::<ProviderResult<Vec<_>>>()?;
+            for requests in resource_requests.chunks(MAX_RESOURCE_CHAPTER_REQUESTS) {
+                let documents = self
+                    .fetch_chapter_resource_inventories_once(session, route, requests)
+                    .await?;
+                for document in documents {
+                    for task in parse_chapter_resource_inventory(
+                        document.as_str(),
+                        &scope,
+                        document.knowledge_id(),
+                        document.card_index(),
+                    )? {
+                        if task.remote_state != RemoteState::Completed
+                            || task
+                                .normalized
+                                .get("resource_kind")
+                                .and_then(serde_json::Value::as_str)
+                                != Some("chapter_work")
+                        {
+                            continue;
+                        }
+                        let target = locate_chapter_work_result_target(
+                            document.as_str(),
+                            &scope,
+                            document.knowledge_id(),
+                            document.card_index(),
+                            &task.remote_id,
+                        )?
+                        .ok_or_else(|| {
+                            protocol_drift(
+                                "Chaoxing completed Chapter Work has no bound result target",
+                            )
+                        })?;
+                        let request = requests
+                            .iter()
+                            .find(|request| request.knowledge_id() == document.knowledge_id())
+                            .ok_or_else(|| {
+                                protocol_drift(
+                                    "Chaoxing history card has no originating chapter request",
+                                )
+                            })?;
+                        let (url, _) = self
+                            .fetch_chapter_work_page(session, route, request, &target)
+                            .await?;
+                        if !is_chapter_work_result_url(&url) {
+                            return Err(ProviderError::new(
+                                ProviderErrorKind::RemoteChanged,
+                                "Chaoxing completed Chapter Work no longer has a result page",
+                            ));
+                        }
+                        let work_answer_id = unique_query(&url, "workAnswerId")
+                            .filter(|value| valid_route_component(value))
+                            .ok_or_else(|| {
+                                protocol_drift(
+                                    "Chaoxing Chapter Work result has no bound attempt identity",
+                                )
+                            })?;
+                        let record = ChaoxingChapterWorkHistoryRecord::try_new(
+                            &task.remote_id,
+                            &course.remote_id,
+                            &work_answer_id,
+                            None,
+                        )?;
+                        if records.insert(task.remote_id, record).is_some() {
+                            return Err(protocol_drift(
+                                "Chaoxing history scan returned a duplicate Chapter Work",
+                            ));
+                        }
+                        if records.len() > MAX_ANSWER_HISTORY_RECORDS {
+                            return Err(ProviderError::new(
+                                ProviderErrorKind::InvalidResponse,
+                                "Chaoxing answer history exceeds the size limit",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(records.into_values().collect())
     }
 
     async fn fetch_course_invite_direct_once(
@@ -1534,10 +1683,52 @@ impl ChaoxingAnswerResolutionTransport for NativeChaoxingInventoryTransport {
         request: &ChaoxingChapterWorkResultRequest,
     ) -> ProviderResult<ChaoxingChapterWorkVerificationDocument> {
         let (session, renewed) = self.session_for_operation(context).await?;
-        match self.fetch_chapter_work_result_once(&session, request).await {
+        match self
+            .fetch_chapter_work_result_once(&session, request.into())
+            .await
+        {
             Err(error) if should_renew_after(&error, renewed) => {
                 let session = self.sessions.renew_session(context).await?;
-                self.fetch_chapter_work_result_once(&session, request).await
+                self.fetch_chapter_work_result_once(&session, request.into())
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
+impl ChaoxingAnswerHistoryTransport for NativeChaoxingInventoryTransport {
+    async fn list_completed_chapter_work(
+        &self,
+        context: &ProviderContext,
+        page: u32,
+    ) -> ProviderResult<ChaoxingChapterWorkHistoryPage> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        let records = match self.list_chapter_work_history_once(&session).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.list_chapter_work_history_once(&session).await?
+            }
+            result => result?,
+        };
+        chapter_work_history_page(records, page)
+    }
+
+    async fn read_completed_chapter_work(
+        &self,
+        context: &ProviderContext,
+        request: &ChaoxingChapterWorkHistoryResultRequest,
+    ) -> ProviderResult<ChaoxingChapterWorkVerificationDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_chapter_work_result_once(&session, request.into())
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_chapter_work_result_once(&session, request.into())
+                    .await
             }
             result => result,
         }
@@ -2314,6 +2505,34 @@ fn valid_chapter_work_url(
 fn is_chapter_work_result_url(url: &Url) -> bool {
     url.path()
         .eq_ignore_ascii_case("/mooc-ans/work/selectWorkQuestionYiPiYue")
+}
+
+fn chapter_work_history_page(
+    records: Vec<ChaoxingChapterWorkHistoryRecord>,
+    page: u32,
+) -> ProviderResult<ChaoxingChapterWorkHistoryPage> {
+    let start = usize::try_from(page)
+        .ok()
+        .and_then(|page| page.checked_mul(ANSWER_HISTORY_PAGE_SIZE))
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing answer history cursor exceeds the size limit",
+            )
+        })?;
+    if start >= records.len() {
+        return ChaoxingChapterWorkHistoryPage::try_new(Vec::new(), None, true);
+    }
+    let end = start
+        .saturating_add(ANSWER_HISTORY_PAGE_SIZE)
+        .min(records.len());
+    let complete = end == records.len();
+    let next_page = (!complete).then(|| page.saturating_add(1));
+    ChaoxingChapterWorkHistoryPage::try_new(
+        records.into_iter().skip(start).take(end - start).collect(),
+        next_page,
+        complete,
+    )
 }
 
 fn valid_route_component(value: &str) -> bool {
