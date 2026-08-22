@@ -980,6 +980,11 @@ pub fn parse_chapter_work_answer_candidates(
                 ));
             }
             let answer = chapter_standard_answer(question, actual)?;
+            let answer_semantics = if question.kind == QuestionKind::ShortAnswer {
+                "reference_text"
+            } else {
+                "standard"
+            };
             let candidate = AnswerCandidate {
                 question_id: question.id,
                 source: AnswerSource::ProviderNative,
@@ -998,6 +1003,7 @@ pub fn parse_chapter_work_answer_candidates(
                     "schema": "chaoxing.chapter-work-result-answer.v1",
                     "remote_question_id": remote_id,
                     "result_route": "selectWorkQuestionYiPiYue",
+                    "answer_semantics": answer_semantics,
                 }),
             };
             candidate.validate().map_err(|_| {
@@ -1238,7 +1244,8 @@ fn parse_chapter_result_answers(
             ));
         }
         let text = Zeroizing::new(normalized_text(question.text()));
-        let Some(type_code @ ("0" | "1" | "2" | "3")) = chapter_result_type(text.as_str()) else {
+        let Some(type_code @ ("0" | "1" | "2" | "3" | "4")) = chapter_result_type(text.as_str())
+        else {
             return Ok(None);
         };
         if !text.contains(answer_label) {
@@ -1290,6 +1297,9 @@ fn chapter_standard_answer(
             )),
         },
         "2" if fill_blank_count(question) == Some(1) => {
+            Ok(NormalizedAnswer::Texts(vec![actual.value.clone()]))
+        }
+        "4" if question.kind == QuestionKind::ShortAnswer => {
             Ok(NormalizedAnswer::Texts(vec![actual.value.clone()]))
         }
         _ => Err(unsupported(
@@ -1937,7 +1947,7 @@ fn parse_labeled_visible_answer(
                 "Chaoxing Work result true/false answer is invalid",
             )),
         },
-        "2" => parse_visible_text_answer(value),
+        "2" | "4" => parse_visible_text_answer(value),
         _ => Err(unsupported(
             "Chaoxing Work result answer type is unsupported",
         )),
@@ -2146,6 +2156,8 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/work/chapter-history-result.html");
     const CHAPTER_HISTORY_FILL_RESULT: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/chapter-history-result-fill.html");
+    const CHAPTER_HISTORY_SHORT_RESULT: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/chapter-history-result-short.html");
     const EXAM_QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
     const EXAM_FILL_QUESTION: &str =
@@ -2938,6 +2950,46 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::UnsupportedTask
+        );
+    }
+
+    #[tokio::test]
+    async fn short_result_keeps_reference_text_semantics_explicit() {
+        let mut draft = chapter_draft().await;
+        draft.items[2].question.kind = QuestionKind::ShortAnswer;
+        draft.items[2].question.metadata_sanitized["provider_type_code"] = json!(4);
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        let result = ChaoxingChapterWorkVerificationDocument::try_new(
+            CHAPTER_HISTORY_SHORT_RESULT.to_owned(),
+        )
+        .unwrap();
+
+        let candidates = parse_chapter_work_answer_candidates(&result, &questions).unwrap();
+        assert_eq!(
+            candidates[2].answer,
+            NormalizedAnswer::Texts(vec!["合成参考文本".to_owned()])
+        );
+        assert_eq!(
+            candidates[2].provenance_sanitized["answer_semantics"],
+            "reference_text"
+        );
+
+        let evidence = parse_chapter_work_result_evidence(&result, &questions).unwrap();
+        assert_eq!(
+            evidence.questions()[2].submitted_answer(),
+            &NormalizedAnswer::Texts(vec!["合成作答文本".to_owned()])
+        );
+        assert_eq!(
+            evidence.questions()[2].official_answer(),
+            &NormalizedAnswer::Texts(vec!["合成参考文本".to_owned()])
+        );
+        assert_eq!(
+            evidence.questions()[2].judgement(),
+            ChaoxingChapterWorkAnswerJudgement::DiffersFromOfficial
         );
     }
 

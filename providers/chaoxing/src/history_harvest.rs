@@ -321,6 +321,16 @@ impl AnswerHistoryHarvestCapability for ChaoxingAnswerHistoryHarvest {
                     "result_route": "selectWorkQuestionYiPiYue",
                     "submitted_label": evidence.submitted_answer_label(),
                     "official_label": evidence.official_answer_label(),
+                    "answer_semantics": questions
+                        .iter()
+                        .find(|question| question.id == evidence.question_id())
+                        .map_or("standard", |question| {
+                            if question.kind == asterism_domain::QuestionKind::ShortAnswer {
+                                "reference_text"
+                            } else {
+                                "standard"
+                            }
+                        }),
                 }),
             })
             .collect::<Vec<_>>();
