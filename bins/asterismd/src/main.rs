@@ -35,7 +35,10 @@ use asterism_storage::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Parser;
-use tokio::{sync::watch, time::MissedTickBehavior};
+use tokio::{
+    sync::{Mutex, watch},
+    time::MissedTickBehavior,
+};
 use tracing_subscriber::EnvFilter;
 
 type DaemonScanWorker = ScanSchedulerWorker<
@@ -60,6 +63,7 @@ type DaemonAnswerHistoryWorker = AnswerHistoryHarvestWorker<
 >;
 
 type DaemonOutboxDispatcher = OutboxDispatcher<SqliteOutboxRepository, EventBus>;
+type BackgroundTickLock = Arc<Mutex<()>>;
 
 const SECRET_ACTIVE_KEY_ID_ENV: &str = "ASTERISM_SECRET_ACTIVE_KEY_ID";
 const SECRET_KEYS_ENV: &str = "ASTERISM_SECRET_KEYS";
@@ -195,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
     let providers = Arc::new(build_provider_registry(&config, secret_store.as_ref())?);
     let events = EventBus::new(LIVE_EVENT_CAPACITY);
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let background_tick_lock = Arc::new(Mutex::new(()));
     let mut api_state = ApiState::new(
         database.clone(),
         providers.clone(),
@@ -212,12 +217,17 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to bind the Asterism HTTP listener")?;
     tracing::info!(address = %config.server.bind, secret_store_configured, "asterismd started");
 
-    let outbox_dispatcher_handle =
-        start_outbox_dispatcher(&database, events, shutdown_receiver.clone())?;
+    let outbox_dispatcher_handle = start_outbox_dispatcher(
+        &database,
+        events,
+        background_tick_lock.clone(),
+        shutdown_receiver.clone(),
+    )?;
     let scan_scheduler_handle = start_scan_scheduler(
         &database,
         providers.clone(),
         &config,
+        background_tick_lock.clone(),
         shutdown_receiver.clone(),
     )?;
     let execution_scheduler_handle = start_execution_scheduler(
@@ -225,12 +235,14 @@ async fn main() -> anyhow::Result<()> {
         providers.clone(),
         execution_secret_store,
         &config,
+        background_tick_lock.clone(),
         shutdown_receiver.clone(),
     )?;
     let answer_history_handle = start_answer_history_worker(
         &database,
         providers.clone(),
         &config,
+        background_tick_lock.clone(),
         shutdown_receiver.clone(),
     )?;
     let browser_bridge_credential_handle = start_browser_bridge_credential_processor(
@@ -238,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         providers.clone(),
         browser_bridge_secret_store,
         &config,
+        background_tick_lock.clone(),
         shutdown_receiver.clone(),
     );
     let browser_bridge_workflow_handle = start_browser_bridge_workflow_processor(
@@ -245,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
         providers,
         browser_bridge_workflow_secret_store,
         &config,
+        background_tick_lock,
         shutdown_receiver,
     );
 
@@ -292,6 +306,7 @@ async fn main() -> anyhow::Result<()> {
 fn start_outbox_dispatcher(
     database: &Database,
     events: EventBus,
+    background_tick_lock: BackgroundTickLock,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let dispatcher = OutboxDispatcher::new(
@@ -308,6 +323,7 @@ fn start_outbox_dispatcher(
     Ok(tokio::spawn(run_outbox_dispatcher(
         dispatcher,
         OUTBOX_TICK_INTERVAL,
+        background_tick_lock,
         shutdown,
     )))
 }
@@ -494,6 +510,7 @@ fn start_scan_scheduler(
     database: &Database,
     providers: Arc<ProviderRegistry>,
     config: &Config,
+    background_tick_lock: BackgroundTickLock,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     let handle = if config.scheduler.enabled {
@@ -525,6 +542,7 @@ fn start_scan_scheduler(
         Some(tokio::spawn(run_scan_scheduler(
             worker,
             tick_interval,
+            background_tick_lock,
             shutdown,
         )))
     } else {
@@ -539,6 +557,7 @@ fn start_execution_scheduler(
     providers: Arc<ProviderRegistry>,
     secret_store: Option<SqliteSecretStore>,
     config: &Config,
+    background_tick_lock: BackgroundTickLock,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     let handle = if config.scheduler.enabled {
@@ -594,6 +613,7 @@ fn start_execution_scheduler(
             database.clone(),
             worker,
             tick_interval,
+            background_tick_lock,
             shutdown,
         )))
     } else {
@@ -606,6 +626,7 @@ fn start_answer_history_worker(
     database: &Database,
     providers: Arc<ProviderRegistry>,
     config: &Config,
+    background_tick_lock: BackgroundTickLock,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     let has_history_provider = providers
@@ -637,6 +658,7 @@ fn start_answer_history_worker(
     Ok(Some(tokio::spawn(run_answer_history_worker(
         worker,
         tick_interval,
+        background_tick_lock,
         shutdown,
     ))))
 }
@@ -646,6 +668,7 @@ fn start_browser_bridge_credential_processor(
     providers: Arc<ProviderRegistry>,
     secret_store: Option<SqliteSecretStore>,
     config: &Config,
+    background_tick_lock: BackgroundTickLock,
     shutdown: watch::Receiver<bool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let secret_store = secret_store?;
@@ -673,6 +696,7 @@ fn start_browser_bridge_credential_processor(
             max_delay_seconds: config.scheduler.retry_max_delay_seconds,
         },
         std::time::Duration::from_secs(config.scheduler.claim_ttl_seconds),
+        background_tick_lock,
         shutdown,
     )))
 }
@@ -683,6 +707,7 @@ async fn run_browser_bridge_credential_processor(
     secret_store: SqliteSecretStore,
     retry_policy: RetryPolicy,
     claim_ttl: std::time::Duration,
+    background_tick_lock: BackgroundTickLock,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(BROWSER_BRIDGE_CREDENTIAL_TICK_INTERVAL);
@@ -701,6 +726,7 @@ async fn run_browser_bridge_credential_processor(
         if !should_tick {
             continue;
         }
+        let _tick_guard = background_tick_lock.lock().await;
         let provider_ids = providers
             .metadata()
             .filter(|metadata| {
@@ -777,6 +803,7 @@ fn start_browser_bridge_workflow_processor(
     providers: Arc<ProviderRegistry>,
     secret_store: Option<SqliteSecretStore>,
     config: &Config,
+    background_tick_lock: BackgroundTickLock,
     shutdown: watch::Receiver<bool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let secret_store = secret_store?;
@@ -807,6 +834,7 @@ fn start_browser_bridge_workflow_processor(
             max_delay_seconds: config.scheduler.retry_max_delay_seconds,
         },
         std::time::Duration::from_secs(config.scheduler.claim_ttl_seconds),
+        background_tick_lock,
         shutdown,
     )))
 }
@@ -817,6 +845,7 @@ async fn run_browser_bridge_workflow_processor(
     secret_store: SqliteSecretStore,
     retry_policy: RetryPolicy,
     claim_ttl: std::time::Duration,
+    background_tick_lock: BackgroundTickLock,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(BROWSER_BRIDGE_CREDENTIAL_TICK_INTERVAL);
@@ -835,6 +864,7 @@ async fn run_browser_bridge_workflow_processor(
         if !should_tick {
             continue;
         }
+        let _tick_guard = background_tick_lock.lock().await;
         let provider_ids = providers
             .metadata()
             .filter(|metadata| {
@@ -912,6 +942,7 @@ async fn run_browser_bridge_workflow_processor(
 async fn run_scan_scheduler(
     worker: DaemonScanWorker,
     tick_interval: std::time::Duration,
+    background_tick_lock: BackgroundTickLock,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(tick_interval);
@@ -930,6 +961,7 @@ async fn run_scan_scheduler(
         if !should_tick {
             continue;
         }
+        let _tick_guard = background_tick_lock.lock().await;
         match worker.tick_once(chrono::Utc::now()).await {
             Ok(report) if report != ScanSchedulerTickReport::default() => {
                 tracing::info!(
@@ -953,6 +985,7 @@ async fn run_scan_scheduler(
 async fn run_answer_history_worker(
     worker: DaemonAnswerHistoryWorker,
     tick_interval: std::time::Duration,
+    background_tick_lock: BackgroundTickLock,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(tick_interval);
@@ -971,6 +1004,7 @@ async fn run_answer_history_worker(
         if !should_tick {
             continue;
         }
+        let _tick_guard = background_tick_lock.lock().await;
         match worker.tick_once(chrono::Utc::now()).await {
             Ok(report) if report != AnswerHistoryHarvestTickReport::default() => {
                 tracing::info!(
@@ -996,6 +1030,7 @@ async fn run_execution_scheduler(
     database: Database,
     worker: DaemonExecutionWorker,
     tick_interval: std::time::Duration,
+    background_tick_lock: BackgroundTickLock,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(tick_interval);
@@ -1014,6 +1049,7 @@ async fn run_execution_scheduler(
         if !should_tick {
             continue;
         }
+        let _tick_guard = background_tick_lock.lock().await;
         let now = chrono::Utc::now();
         match database.recover_stale_work(now).await {
             Ok(report) if report != RecoveryReport::default() => {
@@ -1058,6 +1094,7 @@ async fn run_execution_scheduler(
 async fn run_outbox_dispatcher(
     dispatcher: DaemonOutboxDispatcher,
     tick_interval: std::time::Duration,
+    background_tick_lock: BackgroundTickLock,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(tick_interval);
@@ -1076,6 +1113,7 @@ async fn run_outbox_dispatcher(
         if !should_tick {
             continue;
         }
+        let _tick_guard = background_tick_lock.lock().await;
         match dispatcher.dispatch_once(chrono::Utc::now()).await {
             Ok(report) if report != DispatchReport::default() => {
                 tracing::info!(
@@ -1111,13 +1149,19 @@ mod tests {
         database.migrate().await.unwrap();
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
         let providers = Arc::new(ProviderRegistry::default());
-        let outbox_handle =
-            start_outbox_dispatcher(&database, EventBus::new(8), shutdown_receiver.clone())
-                .unwrap();
+        let background_tick_lock = Arc::new(Mutex::new(()));
+        let outbox_handle = start_outbox_dispatcher(
+            &database,
+            EventBus::new(8),
+            background_tick_lock.clone(),
+            shutdown_receiver.clone(),
+        )
+        .unwrap();
         let scan_handle = start_scan_scheduler(
             &database,
             providers.clone(),
             &Config::default(),
+            background_tick_lock.clone(),
             shutdown_receiver.clone(),
         )
         .unwrap()
@@ -1127,6 +1171,7 @@ mod tests {
             providers,
             None,
             &Config::default(),
+            background_tick_lock,
             shutdown_receiver,
         )
         .unwrap()
@@ -1166,11 +1211,13 @@ mod tests {
         config.providers.enable_development_cidaren = true;
         let providers = Arc::new(build_provider_registry(&config, Some(&store)).unwrap());
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+        let background_tick_lock = Arc::new(Mutex::new(()));
         let handle = start_browser_bridge_credential_processor(
             &database,
             providers,
             Some(store),
             &config,
+            background_tick_lock,
             shutdown_receiver,
         )
         .expect("Cidaren declares a credential-terminal BrowserBridge result");
@@ -1200,11 +1247,13 @@ mod tests {
         config.providers.enable_development_uai = true;
         let providers = Arc::new(build_provider_registry(&config, Some(&store)).unwrap());
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+        let background_tick_lock = Arc::new(Mutex::new(()));
         let handle = start_browser_bridge_workflow_processor(
             &database,
             providers,
             Some(store),
             &config,
+            background_tick_lock,
             shutdown_receiver,
         )
         .expect("UAI declares intermediate and terminal BrowserBridge results");
