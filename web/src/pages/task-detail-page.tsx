@@ -4,7 +4,7 @@ import { Activity, Ban, CheckCircle2, Clock3, Copy, ExternalLink, EyeOff, FileQu
 import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { approveTask, cancelTask, createBrowserBridgeSession, delayTask, executeTask, getBrowserBridgeSession, getTask, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask, prepareExecutionInvocationDraft } from "@/api/generated/sdk.gen.ts";
+import { approveTask, cancelTask, createBrowserBridgeSession, delayTask, executeTask, getBrowserBridgeSession, getTask, getTaskCompletionWorkflows, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask, optInScoreImprovement, prepareExecutionInvocationDraft } from "@/api/generated/sdk.gen.ts";
 import type { BrowserBridgeCreateResponse } from "@/api/generated/types.gen.ts";
 import { requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
@@ -48,6 +48,7 @@ export function TaskDetailPage() {
   const invocationKey = useRef(crypto.randomUUID());
 
   const task = useQuery({ queryKey: ["tasks", taskId], enabled: Boolean(taskId), queryFn: async () => requireData(await getTask({ path: { task_id: taskId } })) });
+  const completionWorkflows = useQuery({ queryKey: ["tasks", taskId, "completion-workflows"], enabled: Boolean(taskId), retry: false, queryFn: async () => requireData(await getTaskCompletionWorkflows({ path: { task_id: taskId } })) });
   const detail = useQuery({ queryKey: ["tasks", taskId, "remote-detail"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskDetail({ path: { task_id: taskId } })) });
   const progress = useQuery({ queryKey: ["tasks", taskId, "progress"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskProgress({ path: { task_id: taskId } })) });
   const duration = useQuery({ queryKey: ["tasks", taskId, "duration"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskDuration({ path: { task_id: taskId } })) });
@@ -93,12 +94,17 @@ export function TaskDetailPage() {
         ...(requestedCapabilities.includes("submission_execute") && submissionDraftId.trim() ? { submission_draft_id: submissionDraftId.trim() } : {}),
         ...(invocationDraftId.trim() ? { invocation_draft_id: invocationDraftId.trim() } : {}),
         ...(task.data?.assessment_class === "formal" && formalAssessmentConfirmed ? { formal_assessment_confirmation: true } : {}),
+        ...(strictRetryRequired && completionWorkflows.data?.strict_completion ? { strict_completion_retry_confirmation: { workflow_id: completionWorkflows.data.strict_completion.workflow.id, expected_revision: completionWorkflows.data.strict_completion.revision } } : {}),
       },
     })),
     onSuccess: ({ execution }) => {
       idempotencyKey.current = crypto.randomUUID();
       navigate(`/executions/${execution.id}`);
     },
+  });
+  const scoreImprovementOptIn = useMutation({
+    mutationFn: async () => requireData(await optInScoreImprovement({ path: { task_id: taskId }, body: { explicitly_opted_in: true } })),
+    onSuccess: async () => { await completionWorkflows.refetch(); },
   });
   const refreshTask = async (message: string) => {
     setActionNotice(message);
@@ -122,7 +128,7 @@ export function TaskDetailPage() {
     onSuccess: async () => { ignoreKey.current = crypto.randomUUID(); await refreshTask("任务已忽略；远端任务未被修改。"); },
   });
 
-  const error = task.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? browserSnapshot.error ?? prepareInvocation.error ?? createBridge.error ?? execute.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
+  const error = task.error ?? completionWorkflows.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? browserSnapshot.error ?? prepareInvocation.error ?? createBridge.error ?? execute.error ?? scoreImprovementOptIn.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
   if (task.isLoading) return <PageShell title="任务详情" description="正在读取任务。"><TableSkeleton /></PageShell>;
   if (!task.data) return <PageShell title="任务详情" description="任务不存在或当前身份不可访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
@@ -132,13 +138,15 @@ export function TaskDetailPage() {
   const invocationShapeSupported = isSupportedUaiInvocationShape(requestedCapabilities);
   const executable = executableCapabilities.length > 0;
   const isFormalAssessment = task.data.assessment_class === "formal";
+  const strictCompletion = completionWorkflows.data?.strict_completion;
+  const strictRetryRequired = strictCompletion?.workflow.state === "active" && strictCompletion.workflow.attempts_started > 0 && (isFormalAssessment || requestedCapabilities.includes("submission_execute"));
   const policyBlocked = isFormalAssessment && !formalAssessmentConfirmed;
   const lifecyclePending = approve.isPending || cancel.isPending || delay.isPending || ignore.isPending;
   const canApprove = task.data.orchestration_state === "waiting_approval";
   const canCancel = ["waiting_approval", "scheduled", "credit_blocked", "human_required", "retry_waiting", "failed"].includes(task.data.orchestration_state);
   const canDelay = task.data.orchestration_state === "scheduled" && Boolean(delayedUntil) && new Date(delayedUntil).getTime() > Date.now();
   const canIgnore = ["discovered", "ready", "waiting_approval", "credit_blocked", "human_required", "failed"].includes(task.data.orchestration_state);
-  const canExecuteState = ["ready", "failed"].includes(task.data.orchestration_state);
+  const canExecuteState = ["ready", "failed"].includes(task.data.orchestration_state) || (task.data.orchestration_state === "human_required" && strictRetryRequired);
 
   return <PageShell title={task.data.title} description={`${task.data.source_type} · ${shortId(task.data.id)}`} actions={canManageSystem ? <Link className={buttonVariants({ variant: "outline" })} to={`/admin/runtime-settings?scope=task&target=${taskId}`}><Settings2 className="size-4" />任务运行设置</Link> : undefined}>
     {error ? <QueryError error={error} /> : null}
@@ -178,6 +186,11 @@ export function TaskDetailPage() {
       <div className="grid max-w-xl gap-2 sm:grid-cols-[1fr_auto] sm:items-end"><div className="space-y-2"><Label htmlFor="delayed-until">延迟至</Label><Input id="delayed-until" type="datetime-local" value={delayedUntil} onChange={(event) => setDelayedUntil(event.target.value)} /></div><Button variant="outline" disabled={!canDelay || lifecyclePending || execute.isPending} onClick={() => delay.mutate()}><Hourglass className="size-4" />{delay.isPending ? "延迟中…" : "延迟待执行任务"}</Button></div>
       {!executable ? <p className="text-sm text-muted-foreground">此任务未声明可执行 capability，只提供只读检查。</p> : null}
       {executable && !canExecuteState && !policyBlocked ? <p className="text-sm text-muted-foreground">当前编排状态不可直接执行；等待审批时先批准，已调度时可延迟或取消。</p> : null}
+    </CardContent></Card>
+
+    <Card><CardHeader><CardTitle>完成与重试</CardTitle></CardHeader><CardContent className="space-y-3">
+      {strictCompletion ? <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">Strict {strictCompletion.workflow.state}</Badge><Badge variant="secondary">已启动 {strictCompletion.workflow.attempts_started} 次</Badge>{strictCompletion.workflow.last_diagnosis ? <Badge variant="warning">{strictCompletion.workflow.last_diagnosis}</Badge> : null}{strictRetryRequired ? <Badge variant="warning">本次执行将确认重试 revision {strictCompletion.revision}</Badge> : null}</div> : <p className="text-sm text-muted-foreground">尚无 Strict Completion 工作流。</p>}
+      {completionWorkflows.data?.score_improvement ? <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">提分 {completionWorkflows.data.score_improvement.workflow.state}</Badge><Badge variant="secondary">已启动 {completionWorkflows.data.score_improvement.workflow.attempts_started} 次</Badge></div> : task.data.remote_state === "completed" ? <Button variant="outline" disabled={scoreImprovementOptIn.isPending} onClick={() => { if (window.confirm("这会显式创建一次受限提分工作流，但不会立即发起远端重考。确认继续？")) scoreImprovementOptIn.mutate(); }}>{scoreImprovementOptIn.isPending ? "创建中…" : "显式启用提分工作流"}</Button> : <p className="text-sm text-muted-foreground">任务完成并收集到精确结果证据后，可在这里显式启用受限提分。</p>}
     </CardContent></Card>
 
     {task.data.capabilities.includes("browser_bridge") ? <Card><CardHeader><CardTitle className="flex items-center gap-2"><MonitorUp className="size-5" />BrowserBridge</CardTitle></CardHeader><CardContent className="space-y-4">
