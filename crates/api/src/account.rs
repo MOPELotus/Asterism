@@ -1273,11 +1273,17 @@ fn map_scan_error(error: ProviderScanError) -> ApiError {
                     "the Provider is temporarily unavailable",
                 )
             }
+            ProviderErrorKind::HumanRequired => {
+                tracing::warn!(error = %provider_error, "Provider scan requires user action");
+                ApiError::conflict(
+                    "provider_action_required",
+                    "the Provider requires authentication or user action",
+                )
+            }
             ProviderErrorKind::Authentication
             | ProviderErrorKind::Authorization
             | ProviderErrorKind::RemoteChanged
-            | ProviderErrorKind::UnsupportedTask
-            | ProviderErrorKind::HumanRequired => ApiError::conflict(
+            | ProviderErrorKind::UnsupportedTask => ApiError::conflict(
                 "provider_action_required",
                 "the Provider requires authentication or user action",
             ),
