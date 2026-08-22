@@ -200,7 +200,7 @@ mod tests {
     }
 
     fn assert_registry_consistent(entry: ProviderEntry) {
-        assert!(entry.metadata.auth_methods.contains(&AuthMethod::QrCode));
+        assert_authentication_entry(&entry);
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.course_enrollment.is_some());
@@ -289,6 +289,25 @@ mod tests {
         assert!(
             registry
                 .get(&asterism_domain::ProviderId::new("chaoxing").unwrap())
+                .is_some()
+        );
+    }
+
+    fn assert_authentication_entry(entry: &ProviderEntry) {
+        assert!(entry.metadata.auth_methods.contains(&AuthMethod::QrCode));
+        assert!(
+            entry
+                .metadata
+                .auth_methods
+                .contains(&AuthMethod::AssistedSession)
+        );
+        assert_eq!(entry.metadata.capture_recipe_version, Some(1));
+        assert!(
+            entry
+                .authentication
+                .as_ref()
+                .unwrap()
+                .capture_recipe()
                 .is_some()
         );
     }

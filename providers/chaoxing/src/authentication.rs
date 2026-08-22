@@ -4,7 +4,8 @@ use aes::Aes128;
 use asterism_domain::{AuthMethod, HumanRequiredReason, SessionKind, WaitingUserState};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
-    AuthChallenge, AuthenticationCapability, CredentialReplacement, CredentialValidation,
+    AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureReadiness,
+    CaptureRecipe, CaptureValueSource, CredentialReplacement, CredentialValidation,
     ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
     ProviderInteractiveAuthBegin, ProviderInteractiveAuthPollOutcome, ProviderMetadata,
     ProviderResult, ResolvedProviderInteractiveAuthContinuation, SessionStatus,
@@ -38,6 +39,9 @@ pub(crate) const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
 const MAX_RESPONSE_COOKIES: usize = 128;
 const MAX_COOKIE_NAME_BYTES: usize = 256;
 const MAX_COOKIE_VALUE_BYTES: usize = 8 * 1_024;
+const CAPTURE_START_URL: &str = "https://i.chaoxing.com";
+const COURSE_LIST_ORIGIN: &str = "https://mooc2-ans.chaoxing.com";
+const COURSE_LIST_PATH: &str = "/mooc2-ans/visit/courselistdata";
 
 /// Provider-internal boundary for the native password exchange and Cookie
 /// validation requests.
@@ -127,6 +131,38 @@ pub struct ChaoxingAuthentication {
 }
 
 impl ChaoxingAuthentication {
+    fn capture_recipe() -> CaptureRecipe {
+        CaptureRecipe {
+            version: 1,
+            start_url: CAPTURE_START_URL.to_owned(),
+            navigation_origins: vec![
+                "https://i.chaoxing.com".to_owned(),
+                "https://passport2.chaoxing.com".to_owned(),
+                COURSE_LIST_ORIGIN.to_owned(),
+                "https://mooc1.chaoxing.com".to_owned(),
+                "https://mooc1-api.chaoxing.com".to_owned(),
+            ],
+            read_origins: vec![COURSE_LIST_ORIGIN.to_owned()],
+            poll_interval_millis: 500,
+            auth_method: AuthMethod::AssistedSession,
+            session_kind: SessionKind::Cookie,
+            readiness: CaptureReadiness::ResponseObserved {
+                origin: COURSE_LIST_ORIGIN.to_owned(),
+                method: "POST".to_owned(),
+                path_and_query: COURSE_LIST_PATH.to_owned(),
+                status: 200,
+                mime_type: "text/html".to_owned(),
+            },
+            outputs: vec![CaptureCredentialOutput {
+                purpose: SecretPurpose::ProviderCookie,
+                required: true,
+                sources: vec![CaptureValueSource::CookieHeader {
+                    origin: COURSE_LIST_ORIGIN.to_owned(),
+                }],
+            }],
+        }
+    }
+
     /// Creates the capability around native authentication and Core secret
     /// resolution boundaries.
     ///
@@ -199,6 +235,10 @@ impl ProviderIdentity for ChaoxingAuthentication {
 
 #[async_trait]
 impl AuthenticationCapability for ChaoxingAuthentication {
+    fn capture_recipe(&self) -> Option<CaptureRecipe> {
+        Some(Self::capture_recipe())
+    }
+
     fn supports_durable_interactive_authentication(&self) -> bool {
         self.qr_transport.is_some()
     }
@@ -217,14 +257,19 @@ impl AuthenticationCapability for ChaoxingAuthentication {
         })?;
         let waiting_for = match method {
             AuthMethod::Password => WaitingUserState::CredentialInput,
-            AuthMethod::ImportedCookie => WaitingUserState::SessionImport,
+            AuthMethod::ImportedCookie | AuthMethod::AssistedSession => {
+                WaitingUserState::SessionImport
+            }
             _ => return Err(unsupported_auth_method()),
         };
         Ok(AuthChallenge {
             session_id,
             method,
             waiting_for,
-            user_action: None,
+            user_action: (method == AuthMethod::AssistedSession).then(|| {
+                "在隔离浏览器中完成超星登录及验证码；进入课程页后 Capture 会提交当前 Cookie"
+                    .to_owned()
+            }),
             expires_at: None,
             external_oauth: None,
         })
@@ -366,6 +411,7 @@ impl AuthenticationCapability for ChaoxingAuthentication {
         match credential.auth_method {
             AuthMethod::Password => self.validate_password(credential).await,
             AuthMethod::ImportedCookie => self.validate_imported_cookie(credential).await,
+            AuthMethod::AssistedSession => self.validate_captured_cookie(credential).await,
             AuthMethod::QrCode
                 if credential.acquired_via == CredentialAcquisition::NativeProviderLogin =>
             {
@@ -459,6 +505,19 @@ impl ChaoxingAuthentication {
         Ok(CredentialValidation::accepted(valid_session(
             SessionKind::Cookie,
         )))
+    }
+
+    async fn validate_captured_cookie(
+        &self,
+        credential: &CredentialBundle,
+    ) -> ProviderResult<CredentialValidation> {
+        if !matches!(
+            credential.acquired_via,
+            CredentialAcquisition::CaptureTool | CredentialAcquisition::BrowserExtension
+        ) {
+            return Err(invalid_credential_shape());
+        }
+        self.validate_imported_cookie(credential).await
     }
 }
 
@@ -928,6 +987,57 @@ mod tests {
         assert_eq!(transport.validations.load(Ordering::SeqCst), 2);
     }
 
+    #[test]
+    fn assisted_login_capture_waits_for_the_authenticated_course_response() {
+        let authentication = ChaoxingAuthentication::try_new(
+            Arc::new(FixtureTransport {
+                exchanges: AtomicUsize::new(0),
+                validations: AtomicUsize::new(0),
+            }),
+            Arc::new(FixtureSessions),
+        )
+        .unwrap();
+        let recipe = authentication.capture_recipe().unwrap();
+        recipe.validate().unwrap();
+        assert_eq!(recipe.version, 1);
+        assert_eq!(recipe.auth_method, AuthMethod::AssistedSession);
+        assert_eq!(recipe.session_kind, SessionKind::Cookie);
+        assert_eq!(recipe.read_origins, [COURSE_LIST_ORIGIN]);
+        assert_eq!(
+            recipe.readiness,
+            CaptureReadiness::ResponseObserved {
+                origin: COURSE_LIST_ORIGIN.to_owned(),
+                method: "POST".to_owned(),
+                path_and_query: COURSE_LIST_PATH.to_owned(),
+                status: 200,
+                mime_type: "text/html".to_owned(),
+            }
+        );
+        assert_eq!(
+            recipe.outputs[0].sources,
+            [CaptureValueSource::CookieHeader {
+                origin: COURSE_LIST_ORIGIN.to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn assisted_capture_revalidates_the_cookie_before_accepting_it() {
+        let transport = Arc::new(FixtureTransport {
+            exchanges: AtomicUsize::new(0),
+            validations: AtomicUsize::new(0),
+        });
+        let authentication =
+            ChaoxingAuthentication::try_new(transport.clone(), Arc::new(FixtureSessions)).unwrap();
+        let validation = authentication
+            .validate_credential(&auth_context(), &captured_cookie_bundle())
+            .await
+            .unwrap();
+        assert_eq!(validation.status.kind, SessionKind::Cookie);
+        assert_eq!(transport.exchanges.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.validations.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn challenges_distinguish_password_from_session_import() {
         let authentication = ChaoxingAuthentication::try_new(
@@ -948,6 +1058,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(imported.waiting_for, WaitingUserState::SessionImport);
+        let assisted = authentication
+            .begin_authentication(&auth_context(), AuthMethod::AssistedSession)
+            .await
+            .unwrap();
+        assert_eq!(assisted.waiting_for, WaitingUserState::SessionImport);
+        assert!(assisted.user_action.is_some());
         assert!(
             authentication
                 .begin_authentication(&auth_context(), AuthMethod::QrCode)
@@ -1276,6 +1392,13 @@ mod tests {
             }],
             user_id_hint: None,
         }
+    }
+
+    fn captured_cookie_bundle() -> CredentialBundle {
+        let mut credential = cookie_bundle();
+        credential.auth_method = AuthMethod::AssistedSession;
+        credential.acquired_via = CredentialAcquisition::CaptureTool;
+        credential
     }
 
     fn auth_context() -> ProviderAuthContext {

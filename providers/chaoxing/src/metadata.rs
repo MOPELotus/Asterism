@@ -20,7 +20,7 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
         implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
-        capture_recipe_version: None,
+        capture_recipe_version: Some(1),
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
@@ -40,6 +40,7 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
             AuthMethod::Password,
             AuthMethod::ImportedCookie,
             AuthMethod::QrCode,
+            AuthMethod::AssistedSession,
         ]),
         session_kinds: BTreeSet::from([
             SessionKind::Cookie,
