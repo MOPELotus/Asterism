@@ -609,6 +609,10 @@ fn validate_login_response_head(response: &Response) -> ProviderResult<()> {
         let media_type = content_type.split(';').next().unwrap_or_default().trim();
         if !media_type.eq_ignore_ascii_case("application/json")
             && !media_type.eq_ignore_ascii_case("text/json")
+            // Chaoxing currently serves the JSON login envelope with this
+            // legacy content type. The bounded body is still parsed strictly
+            // as JSON below before any authentication result is accepted.
+            && !media_type.eq_ignore_ascii_case("text/html")
         {
             return Err(invalid_login_response());
         }
@@ -1337,7 +1341,7 @@ mod tests {
 
         let rejected = classify_login_response(response(
             StatusCode::OK,
-            &[("content-type", "application/json")],
+            &[("content-type", "text/html; charset=utf-8")],
             LOGIN_REJECTED.to_vec(),
         ))
         .await
