@@ -553,6 +553,63 @@ async fn stale_preview_fails_before_the_mutation_slot() {
 }
 
 #[tokio::test]
+async fn completed_attempts_cannot_reuse_an_old_draft_as_a_retake() {
+    let settings = runtime_settings_schema().resolve(None, None, None).unwrap();
+
+    let chapter_platform = Arc::new(FixturePlatform::default());
+    chapter_platform.submissions.store(1, Ordering::Relaxed);
+    let chapter_execute = ChaoxingSubmissionExecute::try_new(
+        Arc::new(FixtureCourses::new()),
+        chapter_platform.clone(),
+        chapter_platform.clone(),
+    )
+    .unwrap();
+    let chapter_error = chapter_execute
+        .execute_submission(
+            &context(),
+            "resource:100:200:4001:job-work",
+            &chapter_draft().await,
+            &settings,
+            &NoopEvents,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(chapter_error.kind, ProviderErrorKind::UnsupportedTask);
+    assert_eq!(chapter_platform.submissions.load(Ordering::Relaxed), 1);
+
+    let exam_platform = Arc::new(FixturePlatform::default());
+    exam_platform.exam_completed.store(true, Ordering::Relaxed);
+    let exam_execute = ChaoxingSubmissionExecute::try_new(
+        Arc::new(FixtureCourses::new()),
+        exam_platform.clone(),
+        exam_platform.clone(),
+    )
+    .unwrap();
+    let (draft, artifact) = exam_draft_and_artifact().await;
+    let encoded = artifact.encode().unwrap();
+    let digest = encoded.digest();
+    let value = encoded.into_secret_value();
+    let exam_error = exam_execute
+        .prepare_submission_operation(
+            &context(),
+            "exam:100:200:exam-1",
+            &draft,
+            ResolvedProviderQuestionSessionContinuation {
+                continuation_type: CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE,
+                continuation_digest: digest,
+                phase: CHAOXING_EXAM_QUESTIONS_READY_PHASE,
+                revision: 1,
+                value: &value,
+            },
+            &settings,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(exam_error.kind, ProviderErrorKind::RemoteChanged);
+    assert_eq!(exam_platform.exam_steps.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn exam_session_rotates_saves_then_verifies_the_terminal_inventory() {
     let context = context();
     let courses = Arc::new(FixtureCourses::new());
