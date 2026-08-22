@@ -90,6 +90,19 @@ impl SubmissionBuildCapability for CidarenSubmissionBuild {
                 "cidaren.answer-lifecycle.json.v1",
                 verify_fields(question, None),
             ),
+            (QuestionKind::FillBlank, NormalizedAnswer::Texts(values))
+                if question
+                    .metadata_sanitized
+                    .get("topic_mode")
+                    .and_then(Value::as_i64)
+                    == Some(73)
+                    && valid_multi_blank_answer(question, values) =>
+            {
+                (
+                    "cidaren.answer-lifecycle.json.v1",
+                    verify_fields(question, None),
+                )
+            }
             (QuestionKind::Matching, NormalizedAnswer::Pairs(pairs)) => {
                 validate_matching(question, pairs)?;
                 (
@@ -213,6 +226,29 @@ fn validate_matching(
         ));
     }
     Ok(())
+}
+
+fn valid_multi_blank_answer(question: &Question, values: &[String]) -> bool {
+    let Some(lengths) = question
+        .metadata_sanitized
+        .get("word_lengths")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    question
+        .metadata_sanitized
+        .get("answer_count")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        == Some(values.len())
+        && lengths.len() == values.len()
+        && values.iter().zip(lengths).all(|(value, length)| {
+            length
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                == Some(value.chars().count())
+        })
 }
 
 fn verify_fields(question: &Question, index: Option<usize>) -> Vec<SubmissionPayloadFieldPreview> {
@@ -374,6 +410,27 @@ mod tests {
         assert_eq!(preview.fields.len(), 6);
         assert_eq!(preview.fields[0].field_name, "verify_answer[0].answer");
         assert_eq!(preview.fields[3].field_name, "verify_answer[1].topic_code");
+    }
+
+    #[tokio::test]
+    async fn mode_73_preview_represents_one_verify_mutation() {
+        let capability = CidarenSubmissionBuild::try_new().unwrap();
+        let question = question(
+            QuestionKind::FillBlank,
+            Vec::new(),
+            &json!({"topic_mode": 73, "answer_count": 2, "word_lengths": [5, 4]}),
+        );
+        let selected = selected_answer(
+            &question,
+            NormalizedAnswer::Texts(vec!["alpha".to_owned(), "beta".to_owned()]),
+        );
+        let preview = capability
+            .build_submission_preview(&context(), "class-task:2002", &[question], &[selected])
+            .await
+            .unwrap();
+        assert_eq!(preview.format, "cidaren.answer-lifecycle.json.v1");
+        assert_eq!(preview.fields.len(), 4);
+        assert_eq!(preview.fields[0].field_name, "verify_answer.answer");
     }
 
     #[tokio::test]

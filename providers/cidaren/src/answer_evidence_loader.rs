@@ -147,7 +147,7 @@ fn candidate_words(
 ) -> ProviderResult<(Zeroizing<Vec<String>>, bool)> {
     let candidates = Zeroizing::new(match mode {
         11 | 15 | 16 | 21 | 22 => vec![prompt_word(question)?.to_owned()],
-        13 | 31 | 51..=54 => Vec::new(),
+        13 | 31 | 51..=54 | 73 => Vec::new(),
         17 | 18 | 32 => option_words(question, false)?,
         41..=44 => option_words(question, true)?,
         _ => {
@@ -440,6 +440,48 @@ mod tests {
                 .unwrap()
                 .answer,
             NormalizedAnswer::Texts(vec!["alpha".to_owned()])
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_73_uses_fresh_inventory_without_unneeded_word_info_calls() {
+        let transport = Arc::new(FixtureTransport {
+            prototype_calls: AtomicUsize::new(0),
+            evidence_calls: AtomicUsize::new(0),
+        });
+        let question = Question {
+            id: QuestionId::new(),
+            task_id: TaskId::new(),
+            remote_question_id: Some("question:multi-blank".to_owned()),
+            kind: QuestionKind::FillBlank,
+            stem: "Use {alp} with {be}".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: json!({
+                "schema": "cidaren.attempt-question.v1",
+                "topic_mode": 73,
+                "prompt_content": "Use {alp} with {be}",
+                "prompt_remark": "synthetic",
+                "answer_count": 2,
+                "word_lengths": [5, 4],
+            }),
+            position: 1,
+        };
+        let evidence = load_answer_evidence(
+            transport.as_ref(),
+            &provider_context(),
+            &answer_binding(),
+            &question,
+        )
+        .await
+        .unwrap();
+        assert_eq!(transport.prototype_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.evidence_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            resolve_answer_candidate(&question, &evidence)
+                .unwrap()
+                .answer,
+            NormalizedAnswer::Texts(vec!["alpha".to_owned(), "beta".to_owned()])
         );
     }
 

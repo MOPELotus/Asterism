@@ -347,6 +347,11 @@ pub fn resolve_answer_candidate(
             None => donor_third_choice(question, "donor-third-choice-fallback")?,
         },
         51..=54 => resolve_word_completion(question, evidence)?,
+        73 => (
+            resolve_multi_blank_words(question, evidence)?,
+            9_000,
+            "multi-blank-prefix-length",
+        ),
         _ => {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
@@ -619,6 +624,54 @@ fn resolve_word_completion(
         .ok_or_else(|| remote_changed("Cidaren current Task word list is empty"))
 }
 
+fn resolve_multi_blank_words(
+    question: &Question,
+    evidence: &CidarenAnswerEvidence,
+) -> ProviderResult<NormalizedAnswer> {
+    require_kind(question, QuestionKind::FillBlank)?;
+    let prompt = metadata_text(question, "prompt_content")?;
+    let prefixes = braced_words(prompt)?;
+    let lengths = question
+        .metadata_sanitized
+        .get("word_lengths")
+        .and_then(Value::as_array)
+        .ok_or_else(|| protocol_drift("Cidaren multi-blank Question has no word lengths"))?;
+    let answer_count = question
+        .metadata_sanitized
+        .get("answer_count")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| protocol_drift("Cidaren multi-blank Question has no answer count"))?;
+    if answer_count == 0 || prefixes.len() != answer_count || lengths.len() != answer_count {
+        return Err(protocol_drift(
+            "Cidaren multi-blank prompt and answer metadata disagree",
+        ));
+    }
+
+    let mut answers = Vec::with_capacity(answer_count);
+    for (prefix, length) in prefixes.into_iter().zip(lengths) {
+        let length = length
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0 && *value <= MAX_WORD_BYTES)
+            .ok_or_else(|| protocol_drift("Cidaren multi-blank word length is invalid"))?;
+        let prefix = prefix.to_lowercase();
+        let mut matches = evidence.word_list.iter().filter(|word| {
+            word.chars().count() == length && word.to_lowercase().starts_with(&prefix)
+        });
+        let answer = matches
+            .next()
+            .ok_or_else(|| remote_changed("Cidaren multi-blank evidence has no exact word"))?;
+        if matches.next().is_some() {
+            return Err(remote_changed(
+                "Cidaren multi-blank evidence is ambiguous for the current prompt",
+            ));
+        }
+        answers.push(answer.clone());
+    }
+    Ok(NormalizedAnswer::Texts(answers))
+}
+
 fn donor_stable_random_choice(
     question: &Question,
 ) -> ProviderResult<(NormalizedAnswer, u16, &'static str)> {
@@ -838,6 +891,41 @@ fn braced_word(value: &str) -> Option<&str> {
     (start < end).then(|| &value[start..end])
 }
 
+fn braced_words(value: &str) -> ProviderResult<Vec<&str>> {
+    let mut remainder = value;
+    let mut words = Vec::new();
+    while let Some(start) = remainder.find('{') {
+        if remainder[..start].contains('}') {
+            return Err(protocol_drift(
+                "Cidaren multi-blank prompt has an unmatched suffix",
+            ));
+        }
+        let after_start = &remainder[start + 1..];
+        let end = after_start
+            .find('}')
+            .ok_or_else(|| protocol_drift("Cidaren multi-blank prompt has an unclosed prefix"))?;
+        let word = &after_start[..end];
+        if word.is_empty()
+            || word.len() > MAX_WORD_BYTES
+            || !word
+                .chars()
+                .all(|character| character.is_alphanumeric() || character == '_')
+        {
+            return Err(protocol_drift(
+                "Cidaren multi-blank prompt has an invalid prefix",
+            ));
+        }
+        words.push(word);
+        remainder = &after_start[end + 1..];
+    }
+    if remainder.contains('}') {
+        return Err(protocol_drift(
+            "Cidaren multi-blank prompt has an unmatched suffix",
+        ));
+    }
+    Ok(words)
+}
+
 fn stripped_inflection(value: &str) -> Option<&str> {
     value
         .strip_suffix("ing")
@@ -1055,6 +1143,56 @@ mod tests {
                 .unwrap()
                 .answer,
             NormalizedAnswer::Texts(vec!["alpha".to_owned()])
+        );
+
+        let multi_blank = question(
+            73,
+            QuestionKind::FillBlank,
+            "Use {alp} with {be}",
+            None,
+            Vec::new(),
+            &json!({"answer_count": 2, "word_lengths": [5, 4]}),
+        );
+        let candidate = resolve_answer_candidate(&multi_blank, &evidence).unwrap();
+        assert_eq!(
+            candidate.answer,
+            NormalizedAnswer::Texts(vec!["alpha".to_owned(), "beta".to_owned()])
+        );
+        assert_eq!(
+            candidate.provenance_sanitized["strategy"],
+            "multi-blank-prefix-length"
+        );
+    }
+
+    #[test]
+    fn multi_blank_resolution_rejects_ambiguous_or_incomplete_evidence() {
+        let question = question(
+            73,
+            QuestionKind::FillBlank,
+            "Use {alp}",
+            None,
+            Vec::new(),
+            &json!({"answer_count": 1, "word_lengths": [5]}),
+        );
+        let ambiguous = CidarenAnswerEvidence::try_new(
+            vec!["alpha".to_owned(), "alphi".to_owned()],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_answer_candidate(&question, &ambiguous)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let incomplete =
+            CidarenAnswerEvidence::try_new(vec!["beta".to_owned()], Vec::new()).unwrap();
+        assert_eq!(
+            resolve_answer_candidate(&question, &incomplete)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
         );
     }
 

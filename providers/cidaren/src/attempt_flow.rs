@@ -1959,6 +1959,16 @@ fn wire_answers(
         (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) if values.len() == 1 => {
             Ok(VecDeque::from([CidarenWireAnswer::from_text(&values[0])?]))
         }
+        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values))
+            if question
+                .metadata_sanitized
+                .get("topic_mode")
+                .and_then(serde_json::Value::as_i64)
+                == Some(73)
+                && valid_multi_blank_answer(question, values) =>
+        {
+            Ok(VecDeque::from([CidarenWireAnswer::from_texts(values)?]))
+        }
         (QuestionKind::Matching, NormalizedAnswer::Pairs(pairs)) => {
             let relations = question
                 .metadata_sanitized
@@ -1999,6 +2009,29 @@ fn wire_answers(
             "Cidaren selected answer does not match the current Question",
         )),
     }
+}
+
+fn valid_multi_blank_answer(question: &Question, values: &[String]) -> bool {
+    let Some(lengths) = question
+        .metadata_sanitized
+        .get("word_lengths")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    question
+        .metadata_sanitized
+        .get("answer_count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        == Some(values.len())
+        && lengths.len() == values.len()
+        && values.iter().zip(lengths).all(|(value, length)| {
+            length
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                == Some(value.chars().count())
+        })
 }
 
 fn valid_donor_third_parent_fallback(question: &Question, answer_id: &str) -> bool {
@@ -3397,7 +3430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_mode_73_can_use_the_evidenced_skip_path() {
+    async fn mode_73_can_still_use_the_evidenced_skip_path() {
         let transport = Arc::new(FixtureTransport {
             responses: Mutex::new(VecDeque::from([
                 response(&mode_73_payload()),
@@ -3658,6 +3691,33 @@ mod tests {
 
         parsed.metadata_sanitized["topic_mode"] = json!(17);
         assert!(wire_answers(&parsed, &selected).is_err());
+    }
+
+    #[test]
+    fn mode_73_encodes_all_blanks_as_one_compact_json_string() {
+        let parsed = parse_attempt_question(&mode_73_payload(), "class-task:2002", 1)
+            .unwrap()
+            .to_question(TaskId::new())
+            .unwrap();
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: parsed.id,
+            answer: NormalizedAnswer::Texts(vec!["example".to_owned(), "to".to_owned()]),
+            source: AnswerSource::ProviderNative,
+            confidence: None,
+        };
+        let mut answers = wire_answers(&parsed, &selected).unwrap();
+        let CidarenWireAnswer::Text(answer) = answers.pop_front().unwrap() else {
+            panic!("expected text wire answer");
+        };
+        assert_eq!(answer.as_str(), r#"["example","to"]"#);
+        assert!(answers.is_empty());
+
+        let invalid = SelectedAnswer {
+            answer: NormalizedAnswer::Texts(vec!["wrong".to_owned(), "to".to_owned()]),
+            ..selected
+        };
+        assert!(wire_answers(&parsed, &invalid).is_err());
     }
 
     fn restore_materialization(

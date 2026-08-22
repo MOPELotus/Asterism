@@ -325,6 +325,29 @@ impl CidarenWireAnswer {
             .ok_or_else(|| invalid_input("Cidaren text answer is invalid"))
     }
 
+    /// Encodes a mode-73 multi-blank answer exactly as the donor protocol:
+    /// one compact JSON array carried inside the outer `answer` string.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidResponse` for empty, excessive, oversized or
+    /// control-bearing text values.
+    pub fn from_texts(values: &[String]) -> ProviderResult<Self> {
+        if values.is_empty()
+            || values.len() > 1_024
+            || values
+                .iter()
+                .any(|value| !valid_text(value, MAX_ANSWER_BYTES))
+        {
+            return Err(invalid_input("Cidaren multi-blank answer is invalid"));
+        }
+        let encoded = serde_json::to_string(values)
+            .map_err(|_| invalid_input("Cidaren multi-blank answer is invalid"))?;
+        valid_text(&encoded, MAX_ANSWER_BYTES)
+            .then(|| Self::Text(Zeroizing::new(encoded)))
+            .ok_or_else(|| invalid_input("Cidaren multi-blank answer is invalid"))
+    }
+
     fn json_value(&self) -> Value {
         match self {
             Self::Number(value) => Value::Number(Number::from(*value)),
@@ -854,8 +877,24 @@ mod tests {
 
         let text = CidarenWireAnswer::from_text("synthetic answer").unwrap();
         assert!(!format!("{text:?}").contains("synthetic"));
+        let multi =
+            CidarenWireAnswer::from_texts(&["alpha".to_owned(), "beta".to_owned()]).unwrap();
+        let verify =
+            build_verify_answer_request(&binding, "synthetic-topic", &multi, 1_710_000_000_000)
+                .unwrap();
+        assert_eq!(body(&verify)["answer"], json!(r#"["alpha","beta"]"#));
+        assert_eq!(
+            body(&verify)["sign"],
+            json!(format!(
+                "{:x}",
+                md5::compute(format!(
+                    "answer=[\"alpha\",\"beta\"]&timestamp=1710000000000&topic_code=synthetic-topic&version={VERIFY_VERSION}{SIGNING_SUFFIX}"
+                ))
+            ))
+        );
         assert!(CidarenWireAnswer::from_option_id("foreign").is_err());
         assert!(CidarenWireAnswer::from_text("").is_err());
+        assert!(CidarenWireAnswer::from_texts(&[]).is_err());
         assert!(
             build_submit_chose_word_request(&binding, &json!(["duplicate", "duplicate"]), 1)
                 .is_err()
