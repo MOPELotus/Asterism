@@ -99,6 +99,7 @@ export function AnswerWorkflowPage() {
   if (!snapshot.data || !task.data) return <PageShell title="答案审核" description="快照不存在或不属于当前任务。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
   const selectedCount = snapshot.data.questions.filter((question) => selections[question.id]).length;
+  const browserFallbackQuestions = snapshot.data.questions.filter((question) => ["matching", "ordering", "composite"].includes(question.kind));
   const canResolveProvider = task.data.capabilities.includes("answer_resolve");
   const canBuild = task.data.capabilities.includes("submission_build");
   const strictCompletion = completionWorkflows.data?.strict_completion;
@@ -109,6 +110,7 @@ export function AnswerWorkflowPage() {
   return <PageShell title="答案审核" description={`${task.data.title} · snapshot ${shortId(snapshotId)}`}>
     {error ? <QueryError error={error} /> : null}
     <Alert><FileCheck2 className="size-4" /><AlertTitle>不可变审核边界</AlertTitle><AlertDescription>候选来源不会自动成为提交答案。可以明确留下暂未支持或无可靠答案的题目；Core 会按完整快照和 Provider 覆盖率设置决定能否构建 Draft。</AlertDescription></Alert>
+    {browserFallbackQuestions.length ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>发现 {browserFallbackQuestions.length} 道长尾复杂题</AlertTitle><AlertDescription><p>Matching、Ordering、Composite 没有可靠 Native 编码时不会被猜测提交。若其余答案已达到当前覆盖率，可明确留空；否则请用同一任务的 BrowserBridge 在可见页面中人工完成。</p><Button className="mt-3" type="button" variant="outline" onClick={() => navigate(`/tasks/${taskId}`)}>返回任务并打开 BrowserBridge</Button></AlertDescription></Alert> : null}
     {snapshot.data.groups.length ? <QuestionGroupOverview groups={snapshot.data.groups} questions={snapshot.data.questions} /> : null}
     <Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle>候选证据</CardTitle><p className="mt-1 text-sm text-muted-foreground">采集于 {formatTimestamp(snapshot.data.captured_at)} · 已选择 {selectedCount}/{snapshot.data.questions.length}</p></div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={localImport.isPending} onClick={() => localImport.mutate()}><DatabaseZap className="size-4" />导入本地证据</Button>{canResolveProvider ? <Button variant="outline" disabled={providerResolve.isPending} onClick={() => providerResolve.mutate()}><Sparkles className="size-4" />Provider 解析</Button> : null}<Button variant="ghost" onClick={() => void refreshEvidence()}><RefreshCw className="size-4" />刷新</Button></div></CardHeader></Card>
 
