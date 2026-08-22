@@ -2,7 +2,7 @@ import { useList, usePermissions } from "@refinedev/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock, KeyRound, RefreshCw, Search } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 
 import {
   beginProviderAccountAuthSession,
@@ -26,7 +26,7 @@ import { QueryError, TableSkeleton } from "@/components/query-feedback.tsx";
 import { StateBadge } from "@/components/state-badge.tsx";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
-import { Button } from "@/components/ui/button.tsx";
+import { Button, buttonVariants } from "@/components/ui/button.tsx";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import { Label } from "@/components/ui/label.tsx";
@@ -37,6 +37,7 @@ const supportedInlineMethods: AuthMethod[] = ["password", "imported_cookie", "im
 
 export function ProviderAccountDetailPage() {
   const { accountId = "" } = useParams();
+  const [searchParams] = useSearchParams();
   const providers = useList<ProviderMetadata>({ resource: "providers", pagination: { pageSize: 100 } });
   const permissions = usePermissions<string[]>({});
   const canManageSystem = permissions.data?.includes("manage_system") ?? false;
@@ -61,8 +62,8 @@ export function ProviderAccountDetailPage() {
   const [interactive, setInteractive] = useState<AuthSessionBeginResponse | null>(null);
   const [oauthCallback, setOauthCallback] = useState("");
   const [capture, setCapture] = useState<AuthBootstrapCreateResponse | null>(null);
-  const [batchCourseId, setBatchCourseId] = useState("");
-  const [batchRemoteCourseId, setBatchRemoteCourseId] = useState("");
+  const [batchCourseId, setBatchCourseId] = useState(() => searchParams.get("courseId") ?? "");
+  const [batchRemoteCourseId, setBatchRemoteCourseId] = useState(() => searchParams.get("remoteCourseId") ?? "");
   const [batchRemoteTaskId, setBatchRemoteTaskId] = useState("");
   const [batchFlow, setBatchFlow] = useState<"fanyuchang_duration" | "auto_duration">("fanyuchang_duration");
   const [batchUnitIndices, setBatchUnitIndices] = useState("");
@@ -183,7 +184,7 @@ export function ProviderAccountDetailPage() {
   if (account.isLoading) return <PageShell title="平台账号" description="正在读取账号状态。"><TableSkeleton /></PageShell>;
   if (!account.data) return <PageShell title="平台账号" description="账号不存在或当前身份不可访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
-  return <PageShell title={account.data.display_name} description={`${account.data.provider_id} · ${account.data.tenant ?? "默认租户"}`} actions={<Button variant="outline" disabled={scan.isPending || account.data.auth_state.state !== "authenticated"} onClick={() => scan.mutate()}><Search className="size-4" />{scan.isPending ? "巡查中…" : "立即巡查"}</Button>}>
+  return <PageShell title={account.data.display_name} description={`${account.data.provider_id} · ${account.data.tenant ?? "默认租户"}`} actions={<div className="flex flex-wrap gap-2"><Link className={buttonVariants({ variant: "outline" })} to={`/courses?provider_account_id=${accountId}`}>查看课程</Link><Button variant="outline" disabled={scan.isPending || account.data.auth_state.state !== "authenticated"} onClick={() => scan.mutate()}><Search className="size-4" />{scan.isPending ? "巡查中…" : "立即巡查"}</Button></div>}>
     {error ? <QueryError error={error} /> : null}
     {scanReport ? <Alert><AlertTitle>巡查完成</AlertTitle><AlertDescription>{scanReport}</AlertDescription></Alert> : null}
     <div className="grid gap-4 sm:grid-cols-3">

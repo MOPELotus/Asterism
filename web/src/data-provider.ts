@@ -22,10 +22,12 @@ import {
   createProviderAccount,
   deleteProviderAccount,
   getExecution,
+  getCourse,
   getAdminUser,
   getProviderAccount,
   getTask,
   listExecutions,
+  listCourses,
   listAdminUsers,
   listProviderAccounts,
   listProviders,
@@ -59,6 +61,18 @@ export const dataProvider: DataProvider = {
       case "tasks": {
         const page = requireData(
           await listTasks({
+            query: {
+              limit,
+              offset,
+              provider_account_id: stringFilter(filters, "provider_account_id"),
+            },
+          }),
+        );
+        return { data: page.items as unknown as TData[], total: page.total };
+      }
+      case "courses": {
+        const page = requireData(
+          await listCourses({
             query: {
               limit,
               offset,
@@ -106,6 +120,10 @@ export const dataProvider: DataProvider = {
       case "tasks":
         return {
           data: requireData(await getTask({ path: { task_id: value } })) as unknown as TData,
+        };
+      case "courses":
+        return {
+          data: requireData(await getCourse({ path: { course_id: value } })) as unknown as TData,
         };
       case "executions": {
         const detail = requireData(

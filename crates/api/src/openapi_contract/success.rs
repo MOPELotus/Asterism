@@ -96,6 +96,8 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("putTaskRuntimeSettings", "ProviderRuntimeSettingsResponse"),
     ("listTasks", "TaskPageResponse"),
     ("getTask", "Task"),
+    ("listCourses", "CoursePageResponse"),
+    ("getCourse", "Course"),
     (
         "getTaskCompletionWorkflows",
         "TaskCompletionWorkflowsResponse",
@@ -1202,6 +1204,18 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             page_response("TaskAttemptHistoryEntry"),
         ),
         ("Course", course_schema()),
+        (
+            "CoursePageResponse",
+            object(
+                &["total", "limit", "offset", "items"],
+                json!({
+                    "total": unsigned_integer(),
+                    "limit": unsigned_integer(),
+                    "offset": unsigned_integer(),
+                    "items": {"type": "array", "items": schema_ref("Course")}
+                }),
+            ),
+        ),
         (
             "CourseRequiredProgress",
             object(

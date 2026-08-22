@@ -192,6 +192,8 @@ pub fn build_router(state: ApiState) -> Router {
             get(account::get_scan_schedule).put(account::configure_scan_schedule),
         )
         .merge(task_routes())
+        .route("/api/v1/courses", get(course::list_courses))
+        .route("/api/v1/courses/{course_id}", get(course::get_course))
         .route(
             "/api/v1/courses/{course_id}/progress",
             get(course::get_course_progress),
@@ -1250,6 +1252,14 @@ pub fn openapi_document() -> Value {
             "/api/v1/tasks/{task_id}/attempt-history".to_owned(),
             task_attempt_history_path(),
         );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert("/api/v1/courses".to_owned(), courses_path());
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert("/api/v1/courses/{course_id}".to_owned(), course_path());
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")
@@ -2349,6 +2359,28 @@ fn course_progress_path() -> Value {
             "403": {"description": "Task read permission is required"},
             "404": {"description": "Owner-scoped Course not found"}
         }
+    }})
+}
+
+fn courses_path() -> Value {
+    json!({"get": {
+        "operationId": "listCourses",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "provider_account_id", "in": "query", "schema": {"type": "string", "format": "uuid"}},
+            {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+            {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
+        ],
+        "responses": {"200": {"description": "Owner-scoped discovered Course page"}, "400": {"description": "Invalid filter or pagination"}, "401": {"description": "Authentication required"}}
+    }})
+}
+
+fn course_path() -> Value {
+    json!({"get": {
+        "operationId": "getCourse",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [{"name": "course_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+        "responses": {"200": {"description": "Owner-scoped discovered Course"}, "400": {"description": "Invalid Course ID"}, "401": {"description": "Authentication required"}, "404": {"description": "Course not found"}}
     }})
 }
 
@@ -5278,6 +5310,37 @@ mod tests {
                 .fetch_one(database.pool())
                 .await
                 .unwrap();
+        let courses = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/courses?provider_account_id={account_id}&limit=10&offset=0"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(courses.status(), StatusCode::OK);
+        assert_eq!(courses.headers()[header::CACHE_CONTROL], "no-store");
+        let courses = response_json(courses).await;
+        assert_eq!(courses["total"], 1);
+        assert_eq!(courses["items"][0]["id"], course_id);
+
+        let course = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/courses/{course_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(course.status(), StatusCode::OK);
+        assert_eq!(response_json(course).await["id"], course_id);
+
         let progress = app
             .clone()
             .oneshot(

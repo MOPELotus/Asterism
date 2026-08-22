@@ -19,13 +19,14 @@ export function TasksPage() {
         <Card><CardContent className="p-0">
           <Table>
             <TableHeader><TableRow>
-              <TableHead>任务</TableHead><TableHead>类型</TableHead><TableHead>远端状态</TableHead>
+              <TableHead>任务</TableHead><TableHead>课程</TableHead><TableHead>类型</TableHead><TableHead>远端状态</TableHead>
               <TableHead>编排状态</TableHead><TableHead>截止时间</TableHead><TableHead>更新时间</TableHead>
             </TableRow></TableHeader>
             <TableBody>
               {tasks.result.data?.map((task) => (
                 <TableRow key={task.id}>
                   <TableCell className="max-w-md"><Link className="block truncate font-medium text-primary hover:underline" to={`/tasks/${task.id}`}>{task.title}</Link><div className="font-mono text-xs text-muted-foreground">{shortId(task.id)}</div></TableCell>
+                  <TableCell>{task.course_id ? <Link className="font-mono text-xs text-primary hover:underline" to={`/courses/${task.course_id}`}>{shortId(task.course_id)}</Link> : "—"}</TableCell>
                   <TableCell>{task.source_type}</TableCell>
                   <TableCell><StateBadge state={task.remote_state} /></TableCell>
                   <TableCell><StateBadge state={task.orchestration_state} /></TableCell>
@@ -33,7 +34,7 @@ export function TasksPage() {
                   <TableCell>{formatTimestamp(task.updated_at)}</TableCell>
                 </TableRow>
               ))}
-              {!tasks.result.data?.length ? <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">暂无任务</TableCell></TableRow> : null}
+              {!tasks.result.data?.length ? <TableRow><TableCell colSpan={7} className="h-24 text-center text-muted-foreground">暂无任务</TableCell></TableRow> : null}
             </TableBody>
           </Table>
         </CardContent></Card>

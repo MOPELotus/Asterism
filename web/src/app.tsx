@@ -10,6 +10,8 @@ import { AppLayout } from "@/layouts/app-layout.tsx";
 import { LoginPage } from "@/pages/login-page.tsx";
 
 const CreditsPage = lazy(() => import("@/pages/credits-page.tsx").then((module) => ({ default: module.CreditsPage })));
+const CoursesPage = lazy(() => import("@/pages/courses-page.tsx").then((module) => ({ default: module.CoursesPage })));
+const CourseDetailPage = lazy(() => import("@/pages/course-detail-page.tsx").then((module) => ({ default: module.CourseDetailPage })));
 const AuditPage = lazy(() => import("@/pages/audit-page.tsx").then((module) => ({ default: module.AuditPage })));
 const DashboardPage = lazy(() => import("@/pages/dashboard-page.tsx").then((module) => ({ default: module.DashboardPage })));
 const ExecutionDetailPage = lazy(() => import("@/pages/execution-detail-page.tsx").then((module) => ({ default: module.ExecutionDetailPage })));
@@ -36,6 +38,7 @@ export function App() {
         resources={[
           { name: "providers", list: "/" },
           { name: "provider-accounts", list: "/provider-accounts", create: "/provider-accounts/create", show: "/provider-accounts/:id" },
+          { name: "courses", list: "/courses", show: "/courses/:id" },
           { name: "tasks", list: "/tasks", show: "/tasks/:id" },
           { name: "executions", list: "/executions", show: "/executions/:id" },
           { name: "admin-users", list: "/admin/users" },
@@ -64,6 +67,8 @@ export function App() {
             <Route path="provider-accounts" element={<ProviderAccountsPage />} />
             <Route path="provider-accounts/create" element={<ProviderAccountCreatePage />} />
             <Route path="provider-accounts/:accountId" element={<ProviderAccountDetailPage />} />
+            <Route path="courses" element={<CoursesPage />} />
+            <Route path="courses/:courseId" element={<CourseDetailPage />} />
             <Route path="tasks" element={<TasksPage />} />
             <Route path="tasks/:taskId" element={<TaskDetailPage />} />
             <Route path="tasks/:taskId/question-snapshots/:snapshotId" element={<AnswerWorkflowPage />} />

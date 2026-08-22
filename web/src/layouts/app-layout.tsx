@@ -1,6 +1,7 @@
 import { useGetIdentity, useLogout, usePermissions } from "@refinedev/core";
 import {
   Activity,
+  BookOpen,
   CreditCard,
   Gauge,
   ListTodo,
@@ -23,6 +24,7 @@ import { cn } from "@/lib/utils.ts";
 const primaryNavigation = [
   { to: "/", label: "概览", icon: Gauge, end: true },
   { to: "/provider-accounts", label: "平台账号", icon: PlugZap },
+  { to: "/courses", label: "课程", icon: BookOpen },
   { to: "/tasks", label: "任务", icon: ListTodo },
   { to: "/executions", label: "执行", icon: Activity },
   { to: "/credits", label: "点数", icon: CreditCard },
