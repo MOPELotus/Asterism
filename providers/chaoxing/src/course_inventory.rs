@@ -221,12 +221,62 @@ fn course_route_cpi(value: &str, course_id: &str, class_id: &str) -> ProviderRes
         || unique_query_value(&url, "courseid").as_deref() != Some(course_id)
         || unique_query_value(&url, "clazzid").as_deref() != Some(class_id)
     {
-        return Err(protocol_drift(
-            "Chaoxing course row contains an untrusted or mismatched route",
-        ));
+        return Err(course_route_mismatch(&url, course_id, class_id));
     }
     unique_query_value(&url, "cpi")
         .ok_or_else(|| protocol_drift("Chaoxing course row is missing a required route parameter"))
+}
+
+fn course_route_mismatch(url: &Url, course_id: &str, class_id: &str) -> ProviderError {
+    let mut query_keys = std::collections::BTreeSet::new();
+    let mut query_keys_truncated = false;
+    for (key, _) in url.query_pairs() {
+        let key = sanitized_query_key(key.as_ref());
+        if !query_keys.contains(&key) && query_keys.len() >= 32 {
+            query_keys_truncated = true;
+            break;
+        }
+        query_keys.insert(key);
+    }
+    let query_count = |key: &str| {
+        url.query_pairs()
+            .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+            .count()
+    };
+    let shape = serde_json::json!({
+        "scheme": url.scheme(),
+        "host": url.host_str(),
+        "path": url.path(),
+        "has_userinfo": !url.username().is_empty() || url.password().is_some(),
+        "has_port": url.port().is_some(),
+        "has_fragment": url.fragment().is_some(),
+        "query_keys": query_keys,
+        "query_keys_truncated": query_keys_truncated,
+        "course_id_count": query_count("courseid"),
+        "course_id_matches": unique_query_value(url, "courseid").as_deref() == Some(course_id),
+        "class_id_count": query_count("clazzid"),
+        "class_id_matches": unique_query_value(url, "clazzid").as_deref() == Some(class_id),
+        "cpi_count": query_count("cpi"),
+    });
+    ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        format!(
+            "Chaoxing course row contains an untrusted or mismatched route; safe_shape={shape}"
+        ),
+    )
+}
+
+fn sanitized_query_key(value: &str) -> String {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        value.to_ascii_lowercase()
+    } else {
+        "<invalid>".to_owned()
+    }
 }
 
 fn unique_query_value(url: &Url, key: &str) -> Option<String> {
@@ -350,6 +400,28 @@ mod tests {
             ),
         ] {
             assert!(parse_course_inventory(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn route_drift_reports_only_safe_shape_without_query_values() {
+        let drifted = COURSES.replacen(
+            "/mooc2-ans/mycourse/stu?courseid=100&amp;clazzid=200&amp;cpi=9300&amp;ut=s",
+            "/changed/course/entry?courseid=100&amp;clazzid=200&amp;cpi=PRIVATE_CPI&amp;enc=PRIVATE_ENC&amp;ut=s",
+            1,
+        );
+        let error = parse_course_inventory(&drifted).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        assert!(error.message.contains(r#""path":"/changed/course/entry""#));
+        assert!(
+            error
+                .message
+                .contains(r#""query_keys":["clazzid","courseid","cpi","enc","ut"]"#)
+        );
+        assert!(error.message.contains(r#""course_id_matches":true"#));
+        assert!(error.message.contains(r#""class_id_matches":true"#));
+        for private in ["PRIVATE_CPI", "PRIVATE_ENC", "9300"] {
+            assert!(!error.message.contains(private));
         }
     }
 
