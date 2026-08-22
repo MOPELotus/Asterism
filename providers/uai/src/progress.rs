@@ -745,7 +745,7 @@ mod tests {
         );
         assert!(
             parse_group_progress(
-                &PROGRESS.replacen("\"min_score_pct\": 60", "\"min_score_pct\": 101", 1),
+                &PROGRESS.replacen("\"min_score_pct\": 60", "\"min_score_pct\": 2147483648", 1,),
                 "unit-1",
                 "group-1",
             )
