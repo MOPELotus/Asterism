@@ -22,6 +22,8 @@ use crate::{
     protocol_observation::{error_with_protocol_observation, json_value_kind},
 };
 
+const WECHAT_OAUTH_USER_ACTION: &str = "请优先使用“拉起微信”进入微信。若系统未能打开微信，请复制授权链接，通过微信文件传输助手发送给自己，并在微信内点击打开；请勿直接在当前普通浏览器打开授权链接。授权完成后，请复制地址栏中以 https://app.vocabgo.com/student/ 开头的完整回调 URL，粘贴回 Asterism 并提交。";
+
 const MAX_TOKEN_BYTES: usize = 64 * 1_024;
 const MAX_VALIDATION_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_SELECTED_COURSE_ID_BYTES: usize = 256;
@@ -341,10 +343,8 @@ impl AuthenticationCapability for CidarenAuthentication {
             } else {
                 WaitingUserState::BrowserCallback
             },
-            user_action: (method != AuthMethod::ImportedToken).then(|| {
-                "Open the generated URL in WeChat, authorize, then return the final Cidaren callback URL"
-                    .to_owned()
-            }),
+            user_action: (method != AuthMethod::ImportedToken)
+                .then(|| WECHAT_OAUTH_USER_ACTION.to_owned()),
             expires_at: None,
             external_oauth,
         })
@@ -913,7 +913,16 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(challenge.waiting_for, WaitingUserState::BrowserCallback);
-            assert!(challenge.user_action.is_some());
+            assert_eq!(
+                challenge.user_action.as_deref(),
+                Some(WECHAT_OAUTH_USER_ACTION)
+            );
+            assert!(
+                challenge
+                    .user_action
+                    .as_deref()
+                    .is_some_and(|instruction| instruction.contains("请勿直接在当前普通浏览器打开"))
+            );
             let oauth = challenge.external_oauth.unwrap();
             assert!(oauth.validate());
             assert!(oauth.authorization_url.contains("open.weixin.qq.com"));
