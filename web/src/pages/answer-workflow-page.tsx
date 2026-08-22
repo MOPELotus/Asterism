@@ -32,6 +32,7 @@ export function AnswerWorkflowPage() {
   const navigate = useNavigate();
   const [selections, setSelections] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState<SubmissionDraft | null>(null);
+  const [formalAssessmentConfirmed, setFormalAssessmentConfirmed] = useState(false);
   const idempotencyKey = useRef(crypto.randomUUID());
 
   const task = useQuery({ queryKey: ["tasks", taskId], enabled: Boolean(taskId), queryFn: async () => requireData(await getTask({ path: { task_id: taskId } })) });
@@ -72,7 +73,7 @@ export function AnswerWorkflowPage() {
   const execute = useMutation({
     mutationFn: async () => {
       if (!draft) throw new Error("请先构建不可变 Submission Draft");
-      return requireData(await executeTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": idempotencyKey.current }, body: { requested_capabilities: ["submission_execute"], submission_draft_id: draft.id } }));
+      return requireData(await executeTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": idempotencyKey.current }, body: { requested_capabilities: ["submission_execute"], submission_draft_id: draft.id, ...(task.data?.assessment_class === "formal" && formalAssessmentConfirmed ? { formal_assessment_confirmation: true } : {}) } }));
     },
     onSuccess: ({ execution }) => { idempotencyKey.current = crypto.randomUUID(); navigate(`/executions/${execution.id}`); },
   });
@@ -104,7 +105,7 @@ export function AnswerWorkflowPage() {
     <div className="space-y-5">{snapshot.data.questions.map((question) => <QuestionReview key={question.id} question={question} candidates={groupedCandidates.get(question.id) ?? []} selected={selections[question.id]} resolutionState={resolution.data?.decisions.find((decision) => decision.question_id === question.id)?.status} onSelect={(candidateId) => { setDraft(null); setSelections((current) => ({ ...current, [question.id]: candidateId })); }} onClear={() => { setDraft(null); setSelections((current) => { const next = { ...current }; delete next[question.id]; return next; }); }} onCreated={refreshEvidence} taskId={taskId} snapshotId={snapshotId} />)}</div>
 
     <Card><CardHeader><CardTitle>Submission Draft</CardTitle></CardHeader><CardContent className="space-y-4">
-      {!draft ? <Button disabled={!canBuild || buildDraft.isPending || selectedCount === 0} onClick={() => buildDraft.mutate()}><FileCheck2 className="size-4" />{buildDraft.isPending ? "构建中…" : "按当前覆盖构建 Draft"}</Button> : <><div className="rounded-lg border p-4"><div className="flex flex-wrap gap-2"><Badge variant="outline">{draft.id}</Badge><Badge variant="secondary">{draft.items.length}/{draft.answer_coverage.total_question_count} 题</Badge><Badge variant="secondary">最低覆盖 {draft.answer_coverage.minimum_coverage_millis / 10}%</Badge><Badge variant="secondary">{draft.payload_preview.encoding}</Badge></div><pre className="mt-3 max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify(draft.payload_preview, null, 2)}</pre></div>{task.data.assessment_class === "routine" ? <Button disabled={execute.isPending} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : "提交 Draft 并执行"}</Button> : <Alert className="border-amber-300 bg-amber-50"><AlertTitle>正式任务仍被 Core 策略阻止</AlertTitle><AlertDescription>需要持久化审批契约后才能执行；WebUI 不会用本地确认绕过。</AlertDescription></Alert>}</>}
+      {!draft ? <Button disabled={!canBuild || buildDraft.isPending || selectedCount === 0} onClick={() => buildDraft.mutate()}><FileCheck2 className="size-4" />{buildDraft.isPending ? "构建中…" : "按当前覆盖构建 Draft"}</Button> : <><div className="rounded-lg border p-4"><div className="flex flex-wrap gap-2"><Badge variant="outline">{draft.id}</Badge><Badge variant="secondary">{draft.items.length}/{draft.answer_coverage.total_question_count} 题</Badge><Badge variant="secondary">最低覆盖 {draft.answer_coverage.minimum_coverage_millis / 10}%</Badge><Badge variant="secondary">{draft.payload_preview.encoding}</Badge></div><pre className="mt-3 max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify(draft.payload_preview, null, 2)}</pre></div>{task.data.assessment_class === "formal" ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评需要本次明确确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认提交这个已审核的不可变 Draft；未勾选时 Core 保持默认拒绝。</span></label></AlertDescription></Alert> : null}<Button disabled={execute.isPending || (task.data.assessment_class === "formal" && !formalAssessmentConfirmed)} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : "提交 Draft 并执行"}</Button></>}
       {!canBuild ? <p className="text-sm text-muted-foreground">此 Task 未声明 SubmissionBuild capability。</p> : null}
     </CardContent></Card>
   </PageShell>;

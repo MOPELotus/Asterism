@@ -565,7 +565,13 @@ fn start_execution_scheduler(
                         multiplier: config.scheduler.retry_multiplier,
                         max_delay_seconds: config.scheduler.retry_max_delay_seconds,
                     },
-                    formal_assessment_policy: FormalAssessmentPolicy::default(),
+                    // Scheduling a Formal assessment is denied by default at the public
+                    // request boundary. Once an explicitly confirmed Execution exists,
+                    // the daemon must be able to run the frozen request.
+                    formal_assessment_policy: FormalAssessmentPolicy {
+                        allow_execution: true,
+                        allow_submission: true,
+                    },
                 },
             },
         )

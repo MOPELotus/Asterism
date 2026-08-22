@@ -37,6 +37,7 @@ export function TaskDetailPage() {
   const [discussionContent, setDiscussionContent] = useState("");
   const [artifactFile, setArtifactFile] = useState<File>();
   const [browserSession, setBrowserSession] = useState<BrowserBridgeCreateResponse>();
+  const [formalAssessmentConfirmed, setFormalAssessmentConfirmed] = useState(false);
   const [delayedUntil, setDelayedUntil] = useState(() => new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString().slice(0, 16));
   const [actionNotice, setActionNotice] = useState<string>();
   const idempotencyKey = useRef(crypto.randomUUID());
@@ -91,6 +92,7 @@ export function TaskDetailPage() {
         requested_capabilities: requestedCapabilities,
         ...(requestedCapabilities.includes("submission_execute") && submissionDraftId.trim() ? { submission_draft_id: submissionDraftId.trim() } : {}),
         ...(invocationDraftId.trim() ? { invocation_draft_id: invocationDraftId.trim() } : {}),
+        ...(task.data?.assessment_class === "formal" && formalAssessmentConfirmed ? { formal_assessment_confirmation: true } : {}),
       },
     })),
     onSuccess: ({ execution }) => {
@@ -129,7 +131,8 @@ export function TaskDetailPage() {
   const needsInvocation = requestedCapabilities.some((capability) => ["discussion", "artifact_upload", "oral_submission"].includes(capability));
   const invocationShapeSupported = isSupportedUaiInvocationShape(requestedCapabilities);
   const executable = executableCapabilities.length > 0;
-  const policyBlocked = task.data.assessment_class === "formal";
+  const isFormalAssessment = task.data.assessment_class === "formal";
+  const policyBlocked = isFormalAssessment && !formalAssessmentConfirmed;
   const lifecyclePending = approve.isPending || cancel.isPending || delay.isPending || ignore.isPending;
   const canApprove = task.data.orchestration_state === "waiting_approval";
   const canCancel = ["waiting_approval", "scheduled", "credit_blocked", "human_required", "retry_waiting", "failed"].includes(task.data.orchestration_state);
@@ -156,7 +159,7 @@ export function TaskDetailPage() {
         })}>{capability}</Button>;
       })}</div><p className="text-sm text-muted-foreground">所选范围会冻结到 Execution；Provider 不会自动执行任务声明的其他写入能力。</p></div> : null}
       {actionNotice ? <Alert><AlertTitle>Core Action 已提交</AlertTitle><AlertDescription>{actionNotice}</AlertDescription></Alert> : null}
-      {policyBlocked && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评保护生效</AlertTitle><AlertDescription>批准只改变编排等待状态，不会授予正式测评的执行或提交权限；当前 Core 默认继续阻止远端写入。</AlertDescription></Alert> : null}
+      {isFormalAssessment && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评需要本次明确确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认由当前账号执行所选能力；该确认只随本次请求提交，默认仍为拒绝。</span></label></AlertDescription></Alert> : null}
       {needsDraft ? <div className="max-w-xl space-y-2"><Label htmlFor="submission-draft">Submission Draft ID</Label><Input id="submission-draft" value={submissionDraftId} onChange={(event) => setSubmissionDraftId(event.target.value)} placeholder="测评任务必须绑定已审核的不可变 Draft" /></div> : null}
       {needsInvocation ? <div className="max-w-2xl space-y-3 rounded-lg border p-4">
         <div><p className="font-medium">Provider 私有执行输入</p><p className="text-sm text-muted-foreground">UAI 讨论、音频上传和复合口语会先生成加密的不可变 invocation draft，再交给 Core 调度。</p></div>

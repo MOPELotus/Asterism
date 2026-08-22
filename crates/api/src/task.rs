@@ -883,6 +883,7 @@ pub(super) async fn execute_task(
             "the execution request body must be a valid JSON object",
         )
     })?;
+    let formal_assessment_confirmed = request.formal_assessment_confirmation.unwrap_or(false);
     let submission_draft_id = request
         .submission_draft_id
         .as_deref()
@@ -935,12 +936,14 @@ pub(super) async fn execute_task(
         SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
         SqliteQuestionSnapshotRepository::new(state.database),
         state.providers,
-        strict_completion_retry.map_or_else(FormalAssessmentPolicy::default, |_| {
+        if formal_assessment_confirmed || strict_completion_retry.is_some() {
             FormalAssessmentPolicy {
                 allow_execution: true,
                 allow_submission: true,
             }
-        }),
+        } else {
+            FormalAssessmentPolicy::default()
+        },
     );
     if let Some(store) = invocation_store {
         service = service.with_execution_invocation_drafts(Arc::new(store));
@@ -2194,6 +2197,7 @@ pub(super) struct ExecuteTaskRequest {
     requested_capabilities: Vec<TaskCapability>,
     submission_draft_id: Option<String>,
     invocation_draft_id: Option<String>,
+    formal_assessment_confirmation: Option<bool>,
     strict_completion_retry_confirmation: Option<StrictCompletionRetryConfirmationRequest>,
 }
 

@@ -1571,6 +1571,10 @@ fn task_execute_path() -> Value {
                     },
                     "submission_draft_id": {"type": "string", "format": "uuid", "description": "Required only for Tasks advertising submission_execute; binds this Execution to one immutable draft."},
                     "invocation_draft_id": {"type": "string", "format": "uuid", "description": "Claims one immutable encrypted Provider invocation draft for this Execution."},
+                    "formal_assessment_confirmation": {
+                        "type": "boolean",
+                        "description": "Explicit owner confirmation for this Formal assessment Execution. Omit or set false to keep the default deny policy."
+                    },
                     "strict_completion_retry_confirmation": {
                         "type": "object",
                         "required": ["workflow_id", "expected_revision"],
@@ -6996,6 +7000,33 @@ mod tests {
         let frozen_plan: Value = serde_json::from_str(&frozen_plan.1).unwrap();
         assert_eq!(frozen_plan["execution_id"], execution_id);
         assert_eq!(frozen_plan["task_id"], routine_task.to_string());
+    }
+
+    #[tokio::test]
+    async fn formal_execution_requires_and_accepts_explicit_owner_confirmation() {
+        let (app, _database, _events, cookie, _, _, formal_task, _) =
+            execution_action_fixture().await;
+        let response = app
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{formal_task}/execute"))
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "formal-first-confirmed")
+                    .header("idempotency-key", "formal-first-confirmed")
+                    .body(Body::from(
+                        r#"{"requested_capabilities":["resource_execution"],"formal_assessment_confirmation":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let response = response_json(response).await;
+        assert_eq!(response["created"], true);
+        assert_eq!(
+            response["execution"]["requested_capabilities"],
+            json!(["resource_execution"])
+        );
     }
 
     #[tokio::test]
