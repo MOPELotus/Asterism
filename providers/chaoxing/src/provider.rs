@@ -5,10 +5,10 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
-    ChaoxingAuthentication, ChaoxingCourseEnrollment, ChaoxingCourseInventory,
-    ChaoxingQuestionRead, ChaoxingResourceExecution, ChaoxingSessionResolver,
-    ChaoxingSubmissionBuild, ChaoxingSubmissionExecute, ChaoxingSubmissionVerify,
-    ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
+    ChaoxingAuthentication, ChaoxingBrowserBridge, ChaoxingCourseEnrollment,
+    ChaoxingCourseInventory, ChaoxingQuestionRead, ChaoxingResourceExecution,
+    ChaoxingSessionResolver, ChaoxingSubmissionBuild, ChaoxingSubmissionExecute,
+    ChaoxingSubmissionVerify, ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
     NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
     NativeChaoxingQrAuthenticationTransport, StoredChaoxingSessionResolver,
     metadata::development_metadata, runtime_settings::runtime_settings_schema,
@@ -96,6 +96,7 @@ fn compose_development_provider(
         task_detail.clone(),
         task_execution.clone(),
     )?);
+    let browser_bridge = Arc::new(ChaoxingBrowserBridge::try_new(task_detail.clone())?);
     let submission_build = Arc::new(ChaoxingSubmissionBuild::try_new()?);
     let submission_execute = Arc::new(ChaoxingSubmissionExecute::try_new(
         course_inventory.clone(),
@@ -125,7 +126,7 @@ fn compose_development_provider(
         submission_verify: Some(submission_verify),
         answer_history_harvest: None,
         task_execution: Some(task_execution),
-        browser_bridge: None,
+        browser_bridge: Some(browser_bridge),
     })
 }
 
@@ -210,6 +211,7 @@ mod tests {
         assert!(entry.question_parse.is_some());
         assert!(entry.submission_build.is_some());
         assert!(entry.task_execution.is_some());
+        assert!(entry.browser_bridge.is_some());
         assert!(
             entry
                 .metadata
@@ -223,6 +225,12 @@ mod tests {
                 .contains(&ProviderCapability::CourseEnrollment)
         );
         assert_execution_capabilities(&entry);
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::BrowserBridge)
+        );
         assert!(
             entry
                 .metadata

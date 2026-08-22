@@ -667,7 +667,20 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
         tasks.extend(
             parse_exam_tasks_with_details(self.transport.as_ref(), context, route, &exam).await?,
         );
+        advertise_browser_bridge(&mut tasks);
         Ok(tasks)
+    }
+}
+
+fn advertise_browser_bridge(tasks: &mut [RemoteTask]) {
+    for task in tasks {
+        if !task
+            .capabilities
+            .contains(&asterism_domain::TaskCapability::BrowserBridge)
+        {
+            task.capabilities
+                .push(asterism_domain::TaskCapability::BrowserBridge);
+        }
     }
 }
 
@@ -1203,7 +1216,10 @@ mod tests {
         assert_eq!(completed_exam.remote_state, RemoteState::Completed);
         assert_eq!(
             completed_exam.capabilities,
-            [asterism_domain::TaskCapability::ProgressRead]
+            [
+                asterism_domain::TaskCapability::ProgressRead,
+                asterism_domain::TaskCapability::BrowserBridge,
+            ]
         );
         assert_eq!(
             inventory.metadata().verification,
@@ -1225,9 +1241,9 @@ mod tests {
                 ProviderCapability::SubmissionBuild,
                 ProviderCapability::SubmissionExecute,
                 ProviderCapability::SubmissionVerify,
+                ProviderCapability::BrowserBridge,
             ])
         );
-        assert!(inventory.metadata().capture_recipe_version.is_none());
     }
 
     #[tokio::test]

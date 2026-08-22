@@ -6,6 +6,7 @@
 
 mod answer;
 mod authentication;
+mod browser_bridge;
 mod chapter_inventory;
 mod course_enrollment;
 mod course_inventory;
@@ -47,6 +48,7 @@ pub use answer::{
 pub use authentication::{
     ChaoxingAuthentication, ChaoxingAuthenticationTransport, NativeChaoxingAuthenticationTransport,
 };
+pub use browser_bridge::ChaoxingBrowserBridge;
 pub use chapter_inventory::parse_chapter_inventory;
 pub use course_enrollment::ChaoxingCourseEnrollment;
 pub use course_inventory::{

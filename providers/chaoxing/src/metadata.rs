@@ -35,6 +35,7 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::SubmissionVerify,
             ProviderCapability::ResourceExecution,
             ProviderCapability::ExecutionVerify,
+            ProviderCapability::BrowserBridge,
         ]),
         auth_methods: BTreeSet::from([
             AuthMethod::Password,
