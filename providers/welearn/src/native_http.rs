@@ -2206,7 +2206,9 @@ async fn read_inventory_response(
             ));
         }
     };
-    if looks_like_login_document(&document) {
+    let json_body = expected_content == ResponseContent::Json
+        && serde_json::from_str::<serde_json::Value>(&document).is_ok();
+    if !json_body && looks_like_login_document(&document) {
         let mut document = document;
         document.zeroize();
         return Err(ProviderError::new(
@@ -2216,7 +2218,7 @@ async fn read_inventory_response(
     }
     if let Err(error) = content_type_result {
         let compatible_body = match expected_content {
-            ResponseContent::Json => serde_json::from_str::<serde_json::Value>(&document).is_ok(),
+            ResponseContent::Json => json_body,
             ResponseContent::Cmi => document.contains(UNINITIALIZED_CMI_MARKER),
             ResponseContent::Html => false,
         };
@@ -3636,6 +3638,16 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+
+        let login_markers_in_json = fixture_response(
+            "text/html",
+            r#"{"message":"<script>/user/prelogin.aspx?loginret=x;top.loginSSO()</script>"}"#,
+        )
+        .await;
+        let document = read_inventory_response(login_markers_in_json, ResponseContent::Json)
+            .await
+            .unwrap();
+        assert!(crate::parse_course_inventory(document.as_str()).is_err());
     }
 
     async fn fixture_response(content_type: &'static str, body: &'static str) -> Response {
