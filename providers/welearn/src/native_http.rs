@@ -2519,7 +2519,29 @@ pub(crate) fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
     } else {
         ProviderErrorKind::InvalidResponse
     };
-    ProviderError::new(kind, "WELearn inventory HTTP request failed")
+    let shape = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_builder() {
+        "builder"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_status() {
+        "status"
+    } else {
+        "other"
+    };
+    ProviderError::new(
+        kind,
+        format!("WELearn inventory HTTP request failed (shape={shape})"),
+    )
 }
 
 fn oversized_response() -> ProviderError {
