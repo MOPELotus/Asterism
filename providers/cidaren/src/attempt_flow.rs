@@ -5,8 +5,8 @@ use std::{
 };
 
 use asterism_domain::{
-    NormalizedAnswer, ProviderId, Question, QuestionKind, SelectedAnswer, SubmissionReceipt,
-    TaskId, Timestamp,
+    NormalizedAnswer, ProviderId, Question, QuestionKind, RemoteState, SelectedAnswer,
+    SubmissionReceipt, TaskId, Timestamp,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderQuestionOperationArtifact,
@@ -633,6 +633,7 @@ impl CidarenAttemptFlow {
         word_selection: Option<CidarenWordSelectionPlan>,
     ) -> ProviderResult<Self> {
         validate_context(context)?;
+        reject_unsupported_retake(detail)?;
         let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
         if word_selection
             .as_ref()
@@ -679,6 +680,7 @@ impl CidarenAttemptFlow {
         fresh_word_selection: Option<CidarenWordSelectionPlan>,
     ) -> ProviderResult<Self> {
         validate_context(context)?;
+        reject_unsupported_retake(detail)?;
         let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
         let remote_attempt_task_id =
             binding.rebind_remote_attempt_task_id(artifact.remote_attempt_task_id())?;
@@ -735,6 +737,7 @@ impl CidarenAttemptFlow {
         selected: Option<&SelectedAnswer>,
     ) -> ProviderResult<Self> {
         validate_context(context)?;
+        reject_unsupported_retake(detail)?;
         let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
         let remote_attempt_task_id =
             binding.rebind_remote_attempt_task_id(artifact.remote_attempt_task_id())?;
@@ -1038,6 +1041,7 @@ impl CidarenAttemptFlow {
                 "Cidaren word-selection plan belongs to another Task",
             ));
         }
+        reject_unsupported_retake(detail)?;
         let binding = CidarenAssessmentBinding::from_fresh_detail(&self.remote_task_id, detail)?;
         self.remote_attempt_task_id =
             binding.rebind_remote_attempt_task_id(self.remote_attempt_task_id)?;
@@ -2159,6 +2163,16 @@ fn invalid_state(message: impl Into<String>) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidResponse, message)
 }
 
+fn reject_unsupported_retake(detail: &RemoteTaskDetail) -> ProviderResult<()> {
+    if detail.task.remote_state == RemoteState::Completed {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "Cidaren completed Tasks have no evidenced retake operation",
+        ));
+    }
+    Ok(())
+}
+
 fn internal(message: impl Into<String>) -> ProviderError {
     ProviderError::new(ProviderErrorKind::Internal, message)
 }
@@ -2291,6 +2305,44 @@ mod tests {
         assert_eq!(
             flow.issue_start(request_at()).unwrap_err().kind,
             ProviderErrorKind::Internal
+        );
+    }
+
+    #[test]
+    fn completed_task_cannot_open_or_restore_an_assessment_mutation_flow() {
+        let context = context();
+        let task_id = TaskId::new();
+        let flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail(), None)
+                .unwrap();
+        let continuation = flow.pre_question_continuation().unwrap().unwrap();
+        let digest = continuation.artifact().digest();
+        let (artifact, _, _, _) = continuation.into_parts();
+        let value = artifact.into_secret_value();
+        let artifact =
+            CidarenPreQuestionArtifact::decode_bound(&value, digest, task_id, "class-task:2002")
+                .unwrap();
+        let mut completed = detail();
+        completed.task.remote_state = RemoteState::Completed;
+
+        assert_eq!(
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &completed, None,)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::UnsupportedTask
+        );
+        assert_eq!(
+            CidarenAttemptFlow::restore_pre_question(
+                &context,
+                task_id,
+                "class-task:2002",
+                &completed,
+                artifact,
+                None,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::UnsupportedTask
         );
     }
 
