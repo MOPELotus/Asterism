@@ -275,7 +275,7 @@ fn parse_inventory(
             course_remote_id: Some(scope.course_remote.clone()),
             title,
             source_type,
-            assessment_class: AssessmentClass::Unknown,
+            assessment_class: assessment_class(source_type),
             remote_state,
             opens_at: None,
             due_at: None,
@@ -291,6 +291,14 @@ fn parse_inventory(
         });
     }
     Ok(tasks)
+}
+
+fn assessment_class(source_type: SourceType) -> AssessmentClass {
+    if source_type == SourceType::Exam {
+        AssessmentClass::Formal
+    } else {
+        AssessmentClass::Unknown
+    }
 }
 
 fn parse_exam_list_facts(
@@ -883,12 +891,12 @@ mod tests {
     }
 
     #[test]
-    fn exam_inventory_keeps_source_state_and_unknown_status_separate() {
+    fn exam_inventory_marks_formal_assessment_and_keeps_unknown_status_separate() {
         let tasks = parse_exam_inventory(EXAM_MIXED, &scope()).unwrap();
         assert_eq!(selected_exam_facts(&tasks), expected(EXAM_EXPECTED));
         assert!(tasks.iter().all(|task| {
             task.source_type == SourceType::Exam
-                && task.assessment_class == AssessmentClass::Unknown
+                && task.assessment_class == AssessmentClass::Formal
                 && task.fingerprint.starts_with("v1:")
                 && task.fingerprint.len() == 67
         }));
@@ -932,6 +940,7 @@ mod tests {
         let tasks = parse_work_inventory(WORK_MIXED, &scope()).unwrap();
         assert_eq!(selected_facts(&tasks), expected(WORK_EXPECTED));
         assert!(tasks.iter().all(|task| task.source_type == SourceType::Work
+            && task.assessment_class == AssessmentClass::Unknown
             && task.capabilities == [asterism_domain::TaskCapability::ProgressRead]));
     }
 

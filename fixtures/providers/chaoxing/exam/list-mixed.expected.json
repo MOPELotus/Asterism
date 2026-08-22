@@ -3,7 +3,7 @@
     "remote_id": "exam:100:200:exam-1",
     "title": "单元测验一",
     "source_type": "exam",
-    "assessment_class": "unknown",
+    "assessment_class": "formal",
     "remote_state": "pending",
     "score": null,
     "retake_available": false
@@ -12,7 +12,7 @@
     "remote_id": "exam:100:200:exam-2",
     "title": "单元测验二",
     "source_type": "exam",
-    "assessment_class": "unknown",
+    "assessment_class": "formal",
     "remote_state": "completed",
     "score": 82.5,
     "retake_available": true
@@ -21,7 +21,7 @@
     "remote_id": "exam:100:200:exam-3",
     "title": "单元测验三",
     "source_type": "exam",
-    "assessment_class": "unknown",
+    "assessment_class": "formal",
     "remote_state": "expired",
     "score": null,
     "retake_available": false
@@ -30,7 +30,7 @@
     "remote_id": "exam:100:200:exam-4",
     "title": "单元测验四",
     "source_type": "exam",
-    "assessment_class": "unknown",
+    "assessment_class": "formal",
     "remote_state": "not_open",
     "score": null,
     "retake_available": false
@@ -39,7 +39,7 @@
     "remote_id": "exam:100:200:exam-5",
     "title": "单元测验五",
     "source_type": "exam",
-    "assessment_class": "unknown",
+    "assessment_class": "formal",
     "remote_state": "unknown",
     "score": null,
     "retake_available": false
