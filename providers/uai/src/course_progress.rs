@@ -175,19 +175,7 @@ fn parse_unit_strategy(value: Option<&Value>) -> ProviderResult<UaiCourseUnitPro
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("UAI Course progress Unit has no strategies object"))?;
     let required = optional_boolean(strategy.get("required"), "required")?.unwrap_or(false);
-    let minimum_score_percent = strategy
-        .get("min_score_pct")
-        .map(|value| {
-            value
-                .as_u64()
-                .filter(|value| *value <= 100)
-                .and_then(|value| u8::try_from(value).ok())
-                .ok_or_else(|| {
-                    protocol_drift("UAI Course progress Unit minimum score percent is invalid")
-                })
-        })
-        .transpose()?
-        .unwrap_or(0);
+    let minimum_score_percent = optional_score_percent(strategy.get("min_score_pct"))?;
     let start = optional_epoch_seconds(strategy.get("start_time"), "start time")?.unwrap_or(0);
     let end = optional_epoch_seconds(strategy.get("end_time"), "end time")?.unwrap_or(0);
     let (opens_at, closes_at) = if start == 0 || end == 0 {
@@ -216,6 +204,26 @@ fn parse_unit_strategy(value: Option<&Value>) -> ProviderResult<UaiCourseUnitPro
         closes_at,
         statistic_mode_out,
     })
+}
+
+fn optional_score_percent(value: Option<&Value>) -> ProviderResult<u8> {
+    let parsed = match value {
+        None | Some(Value::Null) => return Ok(0),
+        Some(Value::Number(value)) => value.as_u64(),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            (!value.is_empty()
+                && value.len() <= 3
+                && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| value.parse::<u64>().ok())
+            .flatten()
+        }
+        _ => None,
+    };
+    parsed
+        .filter(|value| *value <= 100)
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| protocol_drift("UAI Course progress Unit minimum score percent is invalid"))
 }
 
 fn optional_boolean(value: Option<&Value>, label: &'static str) -> ProviderResult<Option<bool>> {
@@ -251,6 +259,8 @@ mod tests {
 
     const COURSE_PROGRESS: &str =
         include_str!("../../../fixtures/providers/uai/progress/course-mixed.json");
+    const SCORE_SHAPES: &str =
+        include_str!("../../../fixtures/providers/uai/progress/course-score-shapes.json");
 
     #[test]
     fn parser_binds_publish_version_units_and_strategies() {
@@ -279,6 +289,42 @@ mod tests {
                 .publish_version(),
             123_290
         );
+    }
+
+    #[test]
+    fn parser_accepts_bounded_score_shapes_without_guessing_invalid_values() {
+        let snapshot = parse_course_progress(SCORE_SHAPES).unwrap();
+        let expected = [
+            ("unit-missing", 0),
+            ("unit-null", 0),
+            ("unit-string-zero", 0),
+            ("unit-string-max", 100),
+            ("unit-number", 60),
+        ];
+        for (unit_id, minimum) in expected {
+            assert_eq!(snapshot.units()[unit_id].minimum_score_percent(), minimum);
+        }
+
+        for invalid in [
+            "-1",
+            "101",
+            "60.5",
+            "true",
+            "{}",
+            r#""-1""#,
+            r#""101""#,
+            r#""60.0""#,
+            r#""score""#,
+        ] {
+            let document = SCORE_SHAPES.replace(
+                r#""min_score_pct": 60"#,
+                &format!(r#""min_score_pct": {invalid}"#),
+            );
+            assert!(
+                parse_course_progress(&document).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 
     #[test]

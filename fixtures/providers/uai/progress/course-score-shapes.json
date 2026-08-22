@@ -1,0 +1,13 @@
+{
+  "code": 0,
+  "rt": {
+    "units": {
+      "unit-missing": { "strategies": {} },
+      "unit-null": { "strategies": { "min_score_pct": null } },
+      "unit-string-zero": { "strategies": { "min_score_pct": "0" } },
+      "unit-string-max": { "strategies": { "min_score_pct": "100" } },
+      "unit-number": { "strategies": { "min_score_pct": 60 } }
+    },
+    "publish_version": "123290"
+  }
+}

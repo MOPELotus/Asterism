@@ -515,17 +515,7 @@ fn progress_strategy(value: Option<&Value>) -> ProviderResult<ProgressStrategy> 
         .as_object()
         .ok_or_else(|| protocol_drift("UAI Group progress strategies is not an object"))?;
     let required = optional_boolean(strategy.get("required"), "required")?.unwrap_or(false);
-    let min_score_percent = strategy
-        .get("min_score_pct")
-        .map(|value| {
-            value
-                .as_u64()
-                .filter(|value| *value <= 100)
-                .and_then(|value| u8::try_from(value).ok())
-                .ok_or_else(|| protocol_drift("UAI Group minimum score percent is invalid"))
-        })
-        .transpose()?
-        .unwrap_or(0);
+    let min_score_percent = optional_score_percent(strategy.get("min_score_pct"))?;
     let start = optional_epoch_seconds(strategy.get("start_time"), "start time")?.unwrap_or(0);
     let end = optional_epoch_seconds(strategy.get("end_time"), "end time")?.unwrap_or(0);
     let (opens_at, closes_at) = if start == 0 || end == 0 {
@@ -556,6 +546,26 @@ fn progress_strategy(value: Option<&Value>) -> ProviderResult<ProgressStrategy> 
         closes_at,
         statistic_mode_out,
     })
+}
+
+fn optional_score_percent(value: Option<&Value>) -> ProviderResult<u8> {
+    let parsed = match value {
+        None | Some(Value::Null) => return Ok(0),
+        Some(Value::Number(value)) => value.as_u64(),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            (!value.is_empty()
+                && value.len() <= 3
+                && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| value.parse::<u64>().ok())
+            .flatten()
+        }
+        _ => None,
+    };
+    parsed
+        .filter(|value| *value <= 100)
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| protocol_drift("UAI Group minimum score percent is invalid"))
 }
 
 fn optional_boolean(value: Option<&Value>, label: &'static str) -> ProviderResult<Option<bool>> {
@@ -765,6 +775,48 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parser_accepts_optional_and_bounded_string_score_percent() {
+        for replacement in ["null", r#""0""#, r#""60""#, r#""100""#, "0", "100"] {
+            let document = PROGRESS.replacen(
+                "\"min_score_pct\": 60",
+                &format!("\"min_score_pct\": {replacement}"),
+                1,
+            );
+            let parsed = parse_group_progress(&document, "unit-1", "group-1").unwrap();
+            let expected = replacement.trim_matches('"').parse::<u8>().unwrap_or(0);
+            assert_eq!(parsed.min_score_percent(), expected);
+        }
+
+        let missing = PROGRESS.replacen("\"min_score_pct\": 60,", "", 1);
+        assert_eq!(
+            parse_group_progress(&missing, "unit-1", "group-1")
+                .unwrap()
+                .min_score_percent(),
+            0
+        );
+        for replacement in [
+            "-1",
+            "101",
+            "60.5",
+            "true",
+            "{}",
+            r#""-1""#,
+            r#""101""#,
+            r#""60.0""#,
+        ] {
+            let document = PROGRESS.replacen(
+                "\"min_score_pct\": 60",
+                &format!("\"min_score_pct\": {replacement}"),
+                1,
+            );
+            assert!(
+                parse_group_progress(&document, "unit-1", "group-1").is_err(),
+                "accepted {replacement}"
+            );
+        }
     }
 
     #[test]
