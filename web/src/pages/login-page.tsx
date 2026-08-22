@@ -21,7 +21,7 @@ export function LoginPage() {
   }
 
   return (
-    <main className="grid min-h-screen place-items-center bg-[radial-gradient(circle_at_top_left,oklch(0.9_0.06_183),transparent_42%)] p-4">
+    <main className="grid min-h-screen place-items-center bg-[radial-gradient(circle_at_top_left,oklch(0.91_0.055_245),transparent_42%)] p-4">
       <Card className="w-full max-w-md border-border/80 shadow-xl shadow-primary/5">
         <CardHeader className="space-y-4">
           <div className="grid size-12 place-items-center rounded-2xl bg-primary text-primary-foreground">
@@ -29,7 +29,7 @@ export function LoginPage() {
           </div>
           <div>
             <CardTitle className="text-2xl">登录 Asterism</CardTitle>
-            <CardDescription className="mt-1">使用服务端 Web Session 进入统一管理面。</CardDescription>
+            <CardDescription className="mt-1">使用本机服务端会话进入统一管理页面。</CardDescription>
           </div>
         </CardHeader>
         <CardContent>

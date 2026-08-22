@@ -4,20 +4,20 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: oklch(0.985 0.004 180);
-  --foreground: oklch(0.2 0.025 190);
+  --background: oklch(0.985 0.008 240);
+  --foreground: oklch(0.22 0.03 250);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.2 0.025 190);
-  --primary: oklch(0.47 0.105 183);
-  --primary-foreground: oklch(0.99 0.005 180);
-  --secondary: oklch(0.94 0.018 185);
-  --secondary-foreground: oklch(0.28 0.045 185);
-  --muted: oklch(0.955 0.009 190);
-  --muted-foreground: oklch(0.5 0.025 190);
+  --card-foreground: oklch(0.22 0.03 250);
+  --primary: oklch(0.62 0.15 245);
+  --primary-foreground: oklch(0.99 0.005 240);
+  --secondary: oklch(0.94 0.03 240);
+  --secondary-foreground: oklch(0.3 0.07 245);
+  --muted: oklch(0.955 0.014 240);
+  --muted-foreground: oklch(0.5 0.035 245);
   --destructive: oklch(0.58 0.22 27);
-  --border: oklch(0.9 0.012 190);
-  --input: oklch(0.88 0.015 190);
-  --ring: oklch(0.55 0.11 183);
+  --border: oklch(0.9 0.022 240);
+  --input: oklch(0.88 0.028 240);
+  --ring: oklch(0.65 0.14 245);
   --radius: 0.65rem;
 }
 

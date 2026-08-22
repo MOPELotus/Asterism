@@ -21,7 +21,7 @@ export function ProviderAccountsPage() {
         <Card><CardContent className="p-0">
           <Table>
             <TableHeader><TableRow>
-              <TableHead>显示名称</TableHead><TableHead>Provider</TableHead><TableHead>租户</TableHead>
+              <TableHead>显示名称</TableHead><TableHead>学习平台</TableHead>
               <TableHead>认证</TableHead><TableHead>凭据</TableHead><TableHead>更新时间</TableHead>
             </TableRow></TableHeader>
             <TableBody>
@@ -29,13 +29,12 @@ export function ProviderAccountsPage() {
                 <TableRow key={account.id}>
                   <TableCell><Link className="font-medium text-primary hover:underline" to={`/provider-accounts/${account.id}`}>{account.display_name}</Link><div className="font-mono text-xs text-muted-foreground">{shortId(account.id)}</div></TableCell>
                   <TableCell>{account.provider_id}</TableCell>
-                  <TableCell>{account.tenant ?? "—"}</TableCell>
                   <TableCell><StateBadge state={account.auth_state.state} /></TableCell>
                   <TableCell>{account.credential_count}</TableCell>
                   <TableCell>{formatTimestamp(account.updated_at)}</TableCell>
                 </TableRow>
               ))}
-              {!accounts.result.data?.length ? <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">暂无平台账号</TableCell></TableRow> : null}
+              {!accounts.result.data?.length ? <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">暂无平台账号</TableCell></TableRow> : null}
             </TableBody>
           </Table>
         </CardContent></Card>

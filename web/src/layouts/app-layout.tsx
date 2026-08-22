@@ -112,8 +112,8 @@ export function AppLayout() {
             <PanelLeft className="size-5" />
           </Button>
           <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="size-2 rounded-full bg-emerald-500" />
-            same-origin API
+            <span className="size-2 rounded-full bg-primary" />
+            本地服务已连接
           </div>
         </header>
         <main className="mx-auto max-w-screen-2xl p-4 sm:p-6 lg:p-8">
