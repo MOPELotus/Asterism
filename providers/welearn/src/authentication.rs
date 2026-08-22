@@ -553,12 +553,12 @@ pub fn classify_password_login_response(document: &[u8]) -> ProviderResult<Welle
     }
     let mut envelope: LoginEnvelope =
         serde_json::from_slice(document).map_err(|_| invalid_login_response())?;
-    if !envelope.extra_check.verification_token.is_empty() {
+    if envelope.has_verification_token() {
         return Err(classify_login_rejection(&envelope));
     }
     match envelope.code {
         Some(0) => {
-            let redirect = std::mem::take(&mut envelope.data);
+            let redirect = envelope.data.take().ok_or_else(invalid_login_response)?;
             validate_login_redirect(redirect)
         }
         Some(_) => Err(classify_login_rejection(&envelope)),
@@ -571,20 +571,30 @@ struct LoginEnvelope {
     #[serde(default)]
     code: Option<i64>,
     #[serde(default)]
-    data: String,
+    data: Option<String>,
     #[serde(default)]
     msg: String,
     #[serde(default)]
     message: String,
     #[serde(default, rename = "extraCheck")]
-    extra_check: LoginExtraCheck,
+    extra_check: Option<LoginExtraCheck>,
 }
 
 impl Drop for LoginEnvelope {
     fn drop(&mut self) {
-        self.data.zeroize();
+        if let Some(data) = &mut self.data {
+            data.zeroize();
+        }
         self.msg.zeroize();
         self.message.zeroize();
+    }
+}
+
+impl LoginEnvelope {
+    fn has_verification_token(&self) -> bool {
+        self.extra_check
+            .as_ref()
+            .is_some_and(|extra_check| !extra_check.verification_token.is_empty())
     }
 }
 
@@ -635,7 +645,7 @@ fn validate_login_redirect(mut value: String) -> ProviderResult<WellearnLoginRed
 }
 
 fn classify_login_rejection(envelope: &LoginEnvelope) -> ProviderError {
-    if !envelope.extra_check.verification_token.is_empty()
+    if envelope.has_verification_token()
         || contains_any_case_insensitive(
             [&envelope.msg, &envelope.message],
             &["短信", "手机", "二次验证", "sms", "verification code"],
@@ -690,6 +700,8 @@ mod tests {
         include_bytes!("../../../fixtures/providers/welearn/auth/password-success.json");
     const LOGIN_REJECTED: &[u8] =
         include_bytes!("../../../fixtures/providers/welearn/auth/password-rejected.json");
+    const LOGIN_REJECTED_NULLABLE: &[u8] =
+        include_bytes!("../../../fixtures/providers/welearn/auth/password-rejected-nullable.json");
     const LOGIN_CAPTCHA: &[u8] =
         include_bytes!("../../../fixtures/providers/welearn/auth/password-captcha.json");
     const LOGIN_SMS: &[u8] =
@@ -818,6 +830,10 @@ mod tests {
 
         let rejected = classify_password_login_response(LOGIN_REJECTED).unwrap_err();
         assert_eq!(rejected.kind, ProviderErrorKind::Authentication);
+
+        let nullable = classify_password_login_response(LOGIN_REJECTED_NULLABLE).unwrap_err();
+        assert_eq!(nullable.kind, ProviderErrorKind::Authentication);
+        assert!(!nullable.message.contains("synthetic account rejection"));
         assert!(!rejected.message.contains("synthetic account detail"));
 
         let captcha = classify_password_login_response(LOGIN_CAPTCHA).unwrap_err();
