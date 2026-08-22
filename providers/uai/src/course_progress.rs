@@ -209,7 +209,7 @@ fn parse_unit_strategy(value: Option<&Value>) -> ProviderResult<UaiCourseUnitPro
 fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
     let parsed = match value {
         None | Some(Value::Null) => return Ok(0),
-        Some(Value::Number(value)) => value.as_i64().and_then(|value| i32::try_from(value).ok()),
+        Some(Value::Number(value)) => number_as_i32(value),
         Some(Value::String(value)) => value.trim().parse::<i32>().ok(),
         _ => None,
     };
@@ -219,6 +219,20 @@ fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
             sanitized_json_shape(value)
         ))
     })
+}
+
+fn number_as_i32(value: &serde_json::Number) -> Option<i32> {
+    if let Some(value) = value.as_i64() {
+        return i32::try_from(value).ok();
+    }
+    let value = value.as_f64()?;
+    let integral = value.is_finite()
+        && value.fract() == 0.0
+        && value >= f64::from(i32::MIN)
+        && value <= f64::from(i32::MAX);
+    integral
+        .then(|| value.to_string().parse::<i32>().ok())
+        .flatten()
 }
 
 fn sanitized_json_shape(value: Option<&Value>) -> &'static str {
@@ -311,6 +325,7 @@ mod tests {
             ("unit-string-max", 100),
             ("unit-string-sentinel", -1),
             ("unit-number-sentinel", -1),
+            ("unit-number-integral-float", 60),
             ("unit-number", 60),
         ];
         for (unit_id, minimum) in expected {

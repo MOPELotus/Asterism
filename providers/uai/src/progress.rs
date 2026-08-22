@@ -551,7 +551,7 @@ fn progress_strategy(value: Option<&Value>) -> ProviderResult<ProgressStrategy> 
 fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
     let parsed = match value {
         None | Some(Value::Null) => return Ok(0),
-        Some(Value::Number(value)) => value.as_i64().and_then(|value| i32::try_from(value).ok()),
+        Some(Value::Number(value)) => number_as_i32(value),
         Some(Value::String(value)) => value.trim().parse::<i32>().ok(),
         _ => None,
     };
@@ -561,6 +561,20 @@ fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
             sanitized_json_shape(value)
         ))
     })
+}
+
+fn number_as_i32(value: &serde_json::Number) -> Option<i32> {
+    if let Some(value) = value.as_i64() {
+        return i32::try_from(value).ok();
+    }
+    let value = value.as_f64()?;
+    let integral = value.is_finite()
+        && value.fract() == 0.0
+        && value >= f64::from(i32::MIN)
+        && value <= f64::from(i32::MAX);
+    integral
+        .then(|| value.to_string().parse::<i32>().ok())
+        .flatten()
 }
 
 fn sanitized_json_shape(value: Option<&Value>) -> &'static str {
@@ -789,8 +803,18 @@ mod tests {
 
     #[test]
     fn parser_accepts_optional_and_bounded_string_score_percent() {
-        for replacement in [
-            "null", r#""-1""#, r#""0""#, r#""60""#, r#""100""#, "-1", "0", "100",
+        for (replacement, expected) in [
+            ("null", 0),
+            (r#""-1""#, -1),
+            (r#""0""#, 0),
+            (r#""60""#, 60),
+            (r#""100""#, 100),
+            ("-1", -1),
+            ("-1.0", -1),
+            ("0", 0),
+            ("0.0", 0),
+            ("60.0", 60),
+            ("100", 100),
         ] {
             let document = PROGRESS.replacen(
                 "\"min_score_pct\": 60",
@@ -798,7 +822,6 @@ mod tests {
                 1,
             );
             let parsed = parse_group_progress(&document, "unit-1", "group-1").unwrap();
-            let expected = replacement.trim_matches('"').parse::<i32>().unwrap_or(0);
             assert_eq!(parsed.min_score_percent(), expected);
         }
 
