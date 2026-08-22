@@ -986,9 +986,7 @@ fn extract_marg_object(html: &str) -> ProviderResult<Option<&str>> {
         cursor += 1;
         skip_ascii_whitespace(bytes, &mut cursor);
         if bytes.get(cursor) != Some(&b'{') {
-            return Err(protocol_drift(
-                "Chaoxing chapter card mArg does not start with an object",
-            ));
+            return Err(protocol_drift(marg_container_diagnostic(bytes, cursor)));
         }
         let end = matching_json_object_end(bytes, cursor)?;
         if found.replace(&html[cursor..end]).is_some() {
@@ -999,6 +997,22 @@ fn extract_marg_object(html: &str) -> ProviderResult<Option<&str>> {
         search_from = end;
     }
     Ok(found)
+}
+
+fn marg_container_diagnostic(bytes: &[u8], cursor: usize) -> &'static str {
+    match bytes.get(cursor) {
+        None | Some(b';') => "Chaoxing chapter card mArg uses an empty container",
+        Some(b'\"' | b'\'') => "Chaoxing chapter card mArg uses a string container",
+        Some(b'[') => "Chaoxing chapter card mArg uses an array container",
+        Some(b'n') => "Chaoxing chapter card mArg uses a null-like container",
+        Some(b'u') => "Chaoxing chapter card mArg uses an undefined-like container",
+        Some(b't' | b'f') => "Chaoxing chapter card mArg uses a boolean-like container",
+        Some(b'-' | b'0'..=b'9') => "Chaoxing chapter card mArg uses a numeric-like container",
+        Some(byte) if byte.is_ascii_alphabetic() || *byte == b'_' || *byte == b'$' => {
+            "Chaoxing chapter card mArg uses an identifier-like container"
+        }
+        Some(_) => "Chaoxing chapter card mArg uses an unknown non-object container",
+    }
 }
 
 fn matching_json_object_end(bytes: &[u8], start: usize) -> ProviderResult<usize> {
@@ -1341,6 +1355,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tasks[0].title, "视频 {导论}");
+    }
+
+    #[test]
+    fn marg_non_object_diagnostics_expose_only_the_container_class() {
+        for (document, expected) in [
+            (
+                "<script>mArg=\"PRIVATE_VALUE\";</script>",
+                "string container",
+            ),
+            ("<script>mArg=[];</script>", "array container"),
+            ("<script>mArg=null;</script>", "null-like container"),
+            (
+                "<script>mArg=PRIVATE_IDENTIFIER;</script>",
+                "identifier-like container",
+            ),
+        ] {
+            let error = extract_marg_object(document).unwrap_err();
+            assert!(error.message.contains(expected));
+            assert!(!error.message.contains("PRIVATE"));
+        }
     }
 
     #[test]
