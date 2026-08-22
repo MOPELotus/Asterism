@@ -23,7 +23,7 @@ use crate::{
     parse_course_inventory,
 };
 
-const PRELOGIN_URL: &str = "https://welearn.sflep.com/user/prelogin.aspx?loginret=http%3a%2f%2fwelearn.sflep.com%2fuser%2floginredirect.aspx";
+const PRELOGIN_URL: &str = "https://welearn.sflep.com/user/prelogin.aspx?loginret=https%3a%2f%2fwelearn.sflep.com%2fuser%2floginredirect.aspx";
 const LOGIN_URL: &str = "https://sso.sflep.com/idsvr/account/login";
 const LOGIN_ORIGIN: &str = "https://sso.sflep.com";
 const LOGIN_REFERER: &str = "https://sso.sflep.com/idsvr/login.html";
@@ -611,8 +611,23 @@ mod tests {
 
     #[test]
     fn redirects_accept_only_the_two_https_origins() {
-        assert!(validate_auth_url(&Url::parse(PRELOGIN_URL).unwrap()).is_ok());
+        let prelogin = Url::parse(PRELOGIN_URL).unwrap();
+        assert!(validate_auth_url(&prelogin).is_ok());
+        assert_eq!(
+            prelogin
+                .query_pairs()
+                .find(|(key, _)| key == "loginret")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("https://welearn.sflep.com/user/loginredirect.aspx")
+        );
         assert!(validate_auth_url(&Url::parse(LOGIN_URL).unwrap()).is_ok());
+        assert!(
+            validate_auth_url(
+                &Url::parse("http://welearn.sflep.com/user/loginredirect.aspx").unwrap()
+            )
+            .is_err()
+        );
         assert!(validate_auth_url(&Url::parse("https://evil.example/callback").unwrap()).is_err());
         assert!(
             validate_auth_url(&Url::parse("https://user@sso.sflep.com/callback").unwrap()).is_err()
