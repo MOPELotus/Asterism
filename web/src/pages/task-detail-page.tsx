@@ -4,7 +4,7 @@ import { Activity, Ban, CheckCircle2, Clock3, Copy, ExternalLink, EyeOff, FileQu
 import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { approveTask, cancelTask, createBrowserBridgeSession, delayTask, executeTask, getBrowserBridgeSession, getTask, getTaskCompletionWorkflows, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask, optInScoreImprovement, prepareExecutionInvocationDraft } from "@/api/generated/sdk.gen.ts";
+import { approveTask, cancelTask, createBrowserBridgeSession, delayTask, executeTask, getBrowserBridgeSession, getTask, getTaskCompletionWorkflows, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask, optInScoreImprovement, prepareExecutionInvocationDraft, scanProviderAccount } from "@/api/generated/sdk.gen.ts";
 import type { BrowserBridgeCreateResponse } from "@/api/generated/types.gen.ts";
 import { requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
@@ -107,6 +107,14 @@ export function TaskDetailPage() {
     mutationFn: async () => requireData(await optInScoreImprovement({ path: { task_id: taskId }, body: { explicitly_opted_in: true } })),
     onSuccess: async () => { await completionWorkflows.refetch(); },
   });
+  const scanAccount = useMutation({
+    mutationFn: async () => requireData(await scanProviderAccount({ path: { account_id: task.data!.provider_account_id } })),
+    onSuccess: async (report) => {
+      setActionNotice(`巡查完成：更新 ${report.tasks_updated}，新增 ${report.tasks_created}；正在刷新当前任务。`);
+      await queryClient.invalidateQueries({ queryKey: ["tasks", taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+  });
   const refreshTask = async (message: string) => {
     setActionNotice(message);
     await queryClient.invalidateQueries({ queryKey: ["tasks", taskId] });
@@ -129,7 +137,7 @@ export function TaskDetailPage() {
     onSuccess: async () => { ignoreKey.current = crypto.randomUUID(); await refreshTask("任务已忽略；远端任务未被修改。"); },
   });
 
-  const error = task.error ?? completionWorkflows.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? browserSnapshot.error ?? prepareInvocation.error ?? createBridge.error ?? execute.error ?? scoreImprovementOptIn.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
+  const error = task.error ?? completionWorkflows.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? browserSnapshot.error ?? prepareInvocation.error ?? createBridge.error ?? execute.error ?? scoreImprovementOptIn.error ?? scanAccount.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
   if (task.isLoading) return <PageShell title="任务详情" description="正在读取任务。"><TableSkeleton /></PageShell>;
   if (!task.data) return <PageShell title="任务详情" description="任务不存在或当前身份不可访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
@@ -172,7 +180,7 @@ export function TaskDetailPage() {
       })}</div><p className="text-sm text-muted-foreground">所选范围会冻结到 Execution；Provider 不会自动执行任务声明的其他写入能力。</p></div> : null}
       {actionNotice ? <Alert><AlertTitle>Core Action 已提交</AlertTitle><AlertDescription>{actionNotice}</AlertDescription></Alert> : null}
       {isFormalAssessment && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评需要本次明确确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认由当前账号执行所选能力；该确认只随本次请求提交，默认仍为拒绝。</span></label></AlertDescription></Alert> : null}
-      {scoreImprovementRetakeReady ? <Alert><AlertTitle>{scoreImprovementCanBind ? "远端重做已就绪" : "先在远端创建新重做 Attempt"}</AlertTitle><AlertDescription>{scoreImprovementCanBind ? <>Core 会把 workflow {shortId(scoreImprovement!.workflow.id)} 的 revision {scoreImprovement!.revision} 与这次 Execution 原子绑定并消耗一次重试；测评提交仍需选择重做后的新快照和 Draft。</> : <>当前远端仍是 completed，Core 不会复用旧答卷。请用下方 BrowserBridge 打开结果页并明确点击“重做”，然后在平台账号页立即巡查；状态刷新为 pending/in_progress 后再读取新题目。</>}</AlertDescription></Alert> : null}
+      {scoreImprovementRetakeReady ? <Alert><AlertTitle>{scoreImprovementCanBind ? "远端重做已就绪" : "先在远端创建新重做 Attempt"}</AlertTitle><AlertDescription>{scoreImprovementCanBind ? <>Core 会把 workflow {shortId(scoreImprovement!.workflow.id)} 的 revision {scoreImprovement!.revision} 与这次 Execution 原子绑定并消耗一次重试；测评提交仍需选择重做后的新快照和 Draft。</> : <><p>当前远端仍是 completed，Core 不会复用旧答卷。请用下方 BrowserBridge 打开结果页并明确点击“重做”，再立即巡查；状态刷新为 pending/in_progress 后读取新题目。</p><Button className="mt-3" type="button" variant="outline" disabled={scanAccount.isPending} onClick={() => scanAccount.mutate()}><RefreshCw className="size-4" />{scanAccount.isPending ? "巡查中…" : "已重做，立即巡查并刷新"}</Button></>}</AlertDescription></Alert> : null}
       {needsDraft ? <div className="max-w-xl space-y-2"><Label htmlFor="submission-draft">Submission Draft ID</Label><Input id="submission-draft" value={submissionDraftId} onChange={(event) => setSubmissionDraftId(event.target.value)} placeholder="测评任务必须绑定已审核的不可变 Draft" /></div> : null}
       {needsInvocation ? <div className="max-w-2xl space-y-3 rounded-lg border p-4">
         <div><p className="font-medium">Provider 私有执行输入</p><p className="text-sm text-muted-foreground">UAI 讨论、音频上传和复合口语会先生成加密的不可变 invocation draft，再交给 Core 调度。</p></div>
