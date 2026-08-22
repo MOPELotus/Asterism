@@ -67,7 +67,7 @@ pub struct UaiGroupProgressSnapshot {
     duration_raw: Option<u64>,
     tab_type: Option<String>,
     required: bool,
-    min_score_percent: u8,
+    min_score_percent: i32,
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
@@ -99,7 +99,7 @@ impl UaiGroupProgressSnapshot {
         self.required
     }
 
-    pub const fn min_score_percent(&self) -> u8 {
+    pub const fn min_score_percent(&self) -> i32 {
         self.min_score_percent
     }
 
@@ -152,7 +152,7 @@ pub struct UaiMicroProgressSnapshot {
     pass2: u8,
     perm: u8,
     required: bool,
-    min_score_percent: u8,
+    min_score_percent: i32,
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
@@ -175,7 +175,7 @@ impl UaiMicroProgressSnapshot {
         self.required
     }
 
-    pub const fn min_score_percent(&self) -> u8 {
+    pub const fn min_score_percent(&self) -> i32 {
         self.min_score_percent
     }
 
@@ -495,7 +495,7 @@ fn micro_progress_path(value: &str) -> ProviderResult<String> {
 
 struct ProgressStrategy {
     required: bool,
-    min_score_percent: u8,
+    min_score_percent: i32,
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
@@ -548,24 +548,34 @@ fn progress_strategy(value: Option<&Value>) -> ProviderResult<ProgressStrategy> 
     })
 }
 
-fn optional_score_percent(value: Option<&Value>) -> ProviderResult<u8> {
+fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
     let parsed = match value {
         None | Some(Value::Null) => return Ok(0),
-        Some(Value::Number(value)) => value.as_u64(),
-        Some(Value::String(value)) => {
-            let value = value.trim();
-            (!value.is_empty()
-                && value.len() <= 3
-                && value.bytes().all(|byte| byte.is_ascii_digit()))
-            .then(|| value.parse::<u64>().ok())
-            .flatten()
-        }
+        Some(Value::Number(value)) => value.as_i64().and_then(|value| i32::try_from(value).ok()),
+        Some(Value::String(value)) => value.trim().parse::<i32>().ok(),
         _ => None,
     };
-    parsed
-        .filter(|value| *value <= 100)
-        .and_then(|value| u8::try_from(value).ok())
-        .ok_or_else(|| protocol_drift("UAI Group minimum score percent is invalid"))
+    parsed.ok_or_else(|| {
+        protocol_drift(format!(
+            "UAI Group minimum score percent is invalid (shape={})",
+            sanitized_json_shape(value)
+        ))
+    })
+}
+
+fn sanitized_json_shape(value: Option<&Value>) -> &'static str {
+    match value {
+        None => "missing",
+        Some(Value::Null) => "null",
+        Some(Value::Bool(_)) => "boolean",
+        Some(Value::Number(value)) if value.is_i64() => "signed_integer",
+        Some(Value::Number(value)) if value.is_u64() => "unsigned_integer",
+        Some(Value::Number(_)) => "non_integer_number",
+        Some(Value::String(value)) if value.trim().is_empty() => "empty_string",
+        Some(Value::String(_)) => "string_non_i32",
+        Some(Value::Array(_)) => "array",
+        Some(Value::Object(_)) => "object",
+    }
 }
 
 fn optional_boolean(value: Option<&Value>, label: &'static str) -> ProviderResult<Option<bool>> {
@@ -779,14 +789,16 @@ mod tests {
 
     #[test]
     fn parser_accepts_optional_and_bounded_string_score_percent() {
-        for replacement in ["null", r#""0""#, r#""60""#, r#""100""#, "0", "100"] {
+        for replacement in [
+            "null", r#""-1""#, r#""0""#, r#""60""#, r#""100""#, "-1", "0", "100",
+        ] {
             let document = PROGRESS.replacen(
                 "\"min_score_pct\": 60",
                 &format!("\"min_score_pct\": {replacement}"),
                 1,
             );
             let parsed = parse_group_progress(&document, "unit-1", "group-1").unwrap();
-            let expected = replacement.trim_matches('"').parse::<u8>().unwrap_or(0);
+            let expected = replacement.trim_matches('"').parse::<i32>().unwrap_or(0);
             assert_eq!(parsed.min_score_percent(), expected);
         }
 
@@ -798,13 +810,12 @@ mod tests {
             0
         );
         for replacement in [
-            "-1",
-            "101",
+            "2147483648",
+            "-2147483649",
             "60.5",
             "true",
             "{}",
-            r#""-1""#,
-            r#""101""#,
+            r#""2147483648""#,
             r#""60.0""#,
         ] {
             let document = PROGRESS.replacen(

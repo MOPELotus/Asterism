@@ -51,7 +51,7 @@ impl Drop for UaiCourseProgressDocument {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UaiCourseUnitProgressStrategy {
     required: bool,
-    minimum_score_percent: u8,
+    minimum_score_percent: i32,
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
@@ -62,7 +62,7 @@ impl UaiCourseUnitProgressStrategy {
         self.required
     }
 
-    pub const fn minimum_score_percent(&self) -> u8 {
+    pub const fn minimum_score_percent(&self) -> i32 {
         self.minimum_score_percent
     }
 
@@ -206,24 +206,34 @@ fn parse_unit_strategy(value: Option<&Value>) -> ProviderResult<UaiCourseUnitPro
     })
 }
 
-fn optional_score_percent(value: Option<&Value>) -> ProviderResult<u8> {
+fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
     let parsed = match value {
         None | Some(Value::Null) => return Ok(0),
-        Some(Value::Number(value)) => value.as_u64(),
-        Some(Value::String(value)) => {
-            let value = value.trim();
-            (!value.is_empty()
-                && value.len() <= 3
-                && value.bytes().all(|byte| byte.is_ascii_digit()))
-            .then(|| value.parse::<u64>().ok())
-            .flatten()
-        }
+        Some(Value::Number(value)) => value.as_i64().and_then(|value| i32::try_from(value).ok()),
+        Some(Value::String(value)) => value.trim().parse::<i32>().ok(),
         _ => None,
     };
-    parsed
-        .filter(|value| *value <= 100)
-        .and_then(|value| u8::try_from(value).ok())
-        .ok_or_else(|| protocol_drift("UAI Course progress Unit minimum score percent is invalid"))
+    parsed.ok_or_else(|| {
+        protocol_drift(format!(
+            "UAI Course progress Unit minimum score percent is invalid (shape={})",
+            sanitized_json_shape(value)
+        ))
+    })
+}
+
+fn sanitized_json_shape(value: Option<&Value>) -> &'static str {
+    match value {
+        None => "missing",
+        Some(Value::Null) => "null",
+        Some(Value::Bool(_)) => "boolean",
+        Some(Value::Number(value)) if value.is_i64() => "signed_integer",
+        Some(Value::Number(value)) if value.is_u64() => "unsigned_integer",
+        Some(Value::Number(_)) => "non_integer_number",
+        Some(Value::String(value)) if value.trim().is_empty() => "empty_string",
+        Some(Value::String(_)) => "string_non_i32",
+        Some(Value::Array(_)) => "array",
+        Some(Value::Object(_)) => "object",
+    }
 }
 
 fn optional_boolean(value: Option<&Value>, label: &'static str) -> ProviderResult<Option<bool>> {
@@ -299,6 +309,8 @@ mod tests {
             ("unit-null", 0),
             ("unit-string-zero", 0),
             ("unit-string-max", 100),
+            ("unit-string-sentinel", -1),
+            ("unit-number-sentinel", -1),
             ("unit-number", 60),
         ];
         for (unit_id, minimum) in expected {
@@ -306,13 +318,12 @@ mod tests {
         }
 
         for invalid in [
-            "-1",
-            "101",
+            "2147483648",
+            "-2147483649",
             "60.5",
             "true",
             "{}",
-            r#""-1""#,
-            r#""101""#,
+            r#""2147483648""#,
             r#""60.0""#,
             r#""score""#,
         ] {
@@ -339,7 +350,8 @@ mod tests {
         );
         assert!(
             parse_course_progress(
-                &COURSE_PROGRESS.replace(r#""min_score_pct": 60"#, r#""min_score_pct": 101"#)
+                &COURSE_PROGRESS
+                    .replace(r#""min_score_pct": 60"#, r#""min_score_pct": 2147483648"#,)
             )
             .is_err()
         );

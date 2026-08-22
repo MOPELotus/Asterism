@@ -6,6 +6,8 @@
       "unit-null": { "strategies": { "min_score_pct": null } },
       "unit-string-zero": { "strategies": { "min_score_pct": "0" } },
       "unit-string-max": { "strategies": { "min_score_pct": "100" } },
+      "unit-string-sentinel": { "strategies": { "min_score_pct": "-1" } },
+      "unit-number-sentinel": { "strategies": { "min_score_pct": -1 } },
       "unit-number": { "strategies": { "min_score_pct": 60 } }
     },
     "publish_version": "123290"
