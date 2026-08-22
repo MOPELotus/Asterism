@@ -38,7 +38,7 @@ export function ensureSuccess(result: ApiResult<unknown>): void {
     throw new AsterismApiError(
       result.response?.status ?? 0,
       error.code,
-      error.message,
+      localizedApiMessage(error.code, error.message),
     );
   }
   if (result.response && !result.response.ok) {
@@ -48,6 +48,17 @@ export function ensureSuccess(result: ApiResult<unknown>): void {
       `Asterism API 返回 HTTP ${result.response.status}`,
     );
   }
+}
+
+function localizedApiMessage(code: string, fallback: string): string {
+  const messages: Record<string, string> = {
+    provider_authentication_invalid: "平台登录响应发生变化，当前版本暂时无法识别。请稍后重试；若仍失败，无需反复输入凭据。",
+    provider_inventory_invalid: "平台返回的课程或任务结构发生变化，当前巡查无法安全继续。账号凭据仍然有效。",
+    provider_credential_rejected: "平台拒绝了当前账号或密码，请核对后重试。",
+    provider_action_required: "平台要求完成验证码、扫码或其他人工操作，请按照认证区域的提示继续。",
+    provider_unavailable: "平台服务当前不可用，请稍后重试。",
+  };
+  return messages[code] ?? fallback;
 }
 
 function isErrorResponse(value: unknown): value is ErrorResponse {
