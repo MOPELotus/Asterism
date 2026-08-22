@@ -277,7 +277,16 @@ fn optional_epoch_seconds(
 ) -> ProviderResult<Option<i64>> {
     value
         .map(|value| {
-            value.as_i64().filter(|value| *value >= 0).ok_or_else(|| {
+            let parsed = value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+                .or_else(|| {
+                    let number = value.as_f64()?;
+                    (number.is_finite() && number.fract() == 0.0 && number >= 0.0)
+                        .then(|| format!("{number:.0}").parse::<i64>().ok())
+                        .flatten()
+                });
+            parsed.filter(|value| *value >= 0).ok_or_else(|| {
                 protocol_drift(format!("UAI Course progress Unit {label} is invalid"))
             })
         })
