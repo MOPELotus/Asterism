@@ -33,9 +33,11 @@ mod discussion_state;
 mod duration;
 mod encrypted;
 mod inventory_capabilities;
+mod invocation_input;
 mod metadata;
 mod native_authentication;
 mod native_http;
+mod private_invocation;
 mod progress;
 mod provider;
 mod question;
@@ -54,6 +56,7 @@ mod upload_binding;
 mod upload_final_plan;
 mod upload_grant_state;
 mod upload_input_state;
+mod upload_invocation_sequence;
 mod upload_object_state;
 mod upload_recovery;
 mod upload_sequence;
@@ -179,6 +182,11 @@ pub use duration::{
 pub use inventory_capabilities::{
     UaiCourseInventory, UaiCourseInventoryTransport, UaiInventoryDocument, UaiTaskInventory,
     UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+};
+pub use invocation_input::{
+    UAI_ARTIFACT_UPLOAD_INPUT_TYPE, UAI_COMPOUND_ORAL_INPUT_TYPE, UAI_DISCUSSION_REPLY_INPUT_TYPE,
+    encode_artifact_upload_input, encode_compound_oral_authorization,
+    encode_discussion_reply_input,
 };
 pub use metadata::development_metadata;
 pub use native_authentication::NativeUaiAuthenticationTransport;

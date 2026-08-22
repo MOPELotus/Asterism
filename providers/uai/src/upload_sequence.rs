@@ -780,6 +780,19 @@ impl UaiUploadFinalSubmissionOutcome {
         }
     }
 
+    pub(crate) const fn request_digest(&self) -> [u8; 32] {
+        match self {
+            Self::Accepted { request_digest, .. }
+            | Self::RetryableRejected { request_digest, .. } => *request_digest,
+        }
+    }
+
+    pub(crate) const fn kind(&self) -> UaiUploadFinalSubmissionKind {
+        match self {
+            Self::Accepted { kind, .. } | Self::RetryableRejected { kind, .. } => *kind,
+        }
+    }
+
     pub const fn retry_code(&self) -> Option<UaiUploadFinalRetryCode> {
         match self {
             Self::Accepted { .. } => None,
@@ -801,7 +814,7 @@ impl UaiUploadFinalSubmissionOutcome {
         }
     }
 
-    fn matches(
+    pub(crate) fn matches(
         &self,
         ordinal: u32,
         kind: UaiUploadFinalSubmissionKind,

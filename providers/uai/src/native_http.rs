@@ -7,8 +7,9 @@ use std::{
 use asterism_domain::SubmissionReceipt;
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
-    ExecutionEventSink, PreparedProviderSubmissionOperation, ProviderContext, ProviderError,
-    ProviderErrorKind, ProviderResult, ProviderSubmissionStepOutcome, RemoteCourse,
+    ExecutionEventSink, ExecutionMutationSink, PreparedProviderSubmissionOperation,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderResult,
+    ProviderSubmissionStepOutcome, RemoteCourse,
 };
 use asterism_secrets::SecretString;
 use async_trait::async_trait;
@@ -23,19 +24,23 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     UaiAggregateProgressDocument, UaiAggregateProgressTransport, UaiAnswerDocument,
-    UaiAnswerDocuments, UaiAnswerTransport, UaiCompoundOralSubmission, UaiCompoundOralTransport,
-    UaiCompoundOralVerification, UaiCompoundUploadSubmission, UaiCompoundUploadTransport,
+    UaiAnswerDocuments, UaiAnswerTransport, UaiCompoundOralSubmission,
+    UaiCompoundOralSubmissionOutcome, UaiCompoundOralSubmissionRequest,
+    UaiCompoundOralSubmissionSequence, UaiCompoundOralTransport, UaiCompoundOralVerification,
+    UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest, UaiCompoundUploadTransport,
     UaiCompoundUploadVerification, UaiCourseInventoryTransport, UaiCoursePolicyDocument,
     UaiCoursePolicyTransport, UaiCourseProgressDocument, UaiDiscussionBinding,
     UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult, UaiDiscussionEmptySubmission,
-    UaiDiscussionMutationOutcome, UaiDiscussionReplyDraft, UaiDiscussionReplyPage,
-    UaiDiscussionTransport, UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument,
-    UaiJwtSession, UaiOralEmptySubmission, UaiPresetCompletionResult, UaiPresetCompletionTransport,
+    UaiDiscussionMutationOutcome, UaiDiscussionMutationSequence, UaiDiscussionReplyDraft,
+    UaiDiscussionReplyPage, UaiDiscussionReplyReadbackGate, UaiDiscussionTransport,
+    UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument, UaiJwtSession,
+    UaiOralEmptySubmission, UaiPresetCompletionResult, UaiPresetCompletionTransport,
     UaiPresetEmptySubmission, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
     UaiQuestionTransport, UaiSessionResolver, UaiSubjectiveEmptySubmission, UaiSubmissionPlan,
-    UaiSubmissionResponseDocument, UaiSubmissionTransport, UaiTaskInventoryDocuments,
-    UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent,
-    UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification, UaiUploadedArtifact,
+    UaiSubmissionRequest, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact,
+    UaiUploadFinalSubmissionOutcome, UaiUploadGrant, UaiUploadIntent, UaiUploadSubmission,
+    UaiUploadSubmissionRequest, UaiUploadTransport, UaiUploadVerification, UaiUploadedArtifact,
     UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_compound_oral_submission_request, build_compound_upload_submission_request,
@@ -50,10 +55,12 @@ use crate::{
     parse_course_progress, parse_discussion_binding, parse_discussion_reply_page,
     parse_discussion_topic, parse_group_progress, parse_submission_receipt, parse_task_inventory,
     parse_upload_grant_bound, parse_upload_object_result, parse_upload_verification,
+    private_invocation::UaiPrivateInvocationTransport,
     progress::validate_progress_route_binding,
     submission_execute::{bind_submission_request_body, valid_submission_version},
     submission_verify::validate_verification_course_binding,
     task_inventory::parse_task_tree_unit_ids,
+    upload_invocation_sequence::UaiUploadInvocationSequence,
     user_identity::parse_user_identity,
 };
 
@@ -94,6 +101,7 @@ enum EmptyAnswerSubmission<'a> {
 }
 
 /// Native, non-redirecting UAI read and submission transport.
+#[derive(Clone)]
 pub struct NativeUaiInventoryTransport {
     client: Client,
     sessions: Arc<dyn UaiSessionResolver>,
@@ -971,7 +979,7 @@ impl NativeUaiInventoryTransport {
         &self,
         session: &UaiJwtSession,
         draft: &UaiDiscussionReplyDraft,
-    ) -> ProviderResult<SubmissionReceipt> {
+    ) -> ProviderResult<UaiDiscussionMutationOutcome> {
         let body = build_discussion_reply_request(draft)?;
         let mut document = self
             .send_discussion_post_with_session(
@@ -984,7 +992,7 @@ impl NativeUaiInventoryTransport {
             .await?;
         let receipt = draft.classify_reply_mutation_response(&document);
         document.zeroize();
-        receipt.map(UaiDiscussionMutationOutcome::into_legacy_result)
+        receipt
     }
 
     async fn request_upload_grant_with_session(
@@ -1075,6 +1083,233 @@ impl NativeUaiInventoryTransport {
             .and_then(|result| UaiUploadedArtifact::from_object_result(grant, &multipart, &result));
         document.zeroize();
         uploaded
+    }
+
+    async fn materialize_upload_submission_request_with_session(
+        &self,
+        session: &UaiJwtSession,
+        submission: &UaiUploadSubmission,
+    ) -> ProviderResult<(UaiUploadSubmissionRequest, String)> {
+        let course_resource_id = required_remote_component(
+            Some(&Value::String(submission.course_resource_id().to_owned())),
+            "upload submission Course-resource ID",
+        )?;
+        let unit_id = required_remote_component(
+            Some(&Value::String(submission.unit_id().to_owned())),
+            "upload submission Unit ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&Value::String(submission.group_id().to_owned())),
+            "upload submission Group ID",
+        )?;
+        if submission.remote_task_id() != format!("group:{course_resource_id}:{unit_id}:{group_id}")
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI upload submission hierarchy is foreign to its Task",
+            ));
+        }
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let progress = self
+            .fetch_progress_for_route_with_session(session, route.course_instance_id(), &unit_id)
+            .await?;
+        validate_answer_submission_progress_target(
+            progress.as_str(),
+            &unit_id,
+            &group_id,
+            Utc::now(),
+        )?;
+        let request = build_upload_submission_request(
+            submission,
+            route.course_instance_id(),
+            session.expose_open_id(),
+        )?;
+        Ok((request, route.course_instance_id().to_owned()))
+    }
+
+    async fn materialize_compound_upload_request_with_session(
+        &self,
+        session: &UaiJwtSession,
+        submission: &UaiCompoundUploadSubmission,
+    ) -> ProviderResult<(UaiCompoundUploadSubmissionRequest, String)> {
+        let course_resource_id = required_remote_component(
+            Some(&Value::String(submission.course_resource_id().to_owned())),
+            "compound upload Course-resource ID",
+        )?;
+        let unit_id = required_remote_component(
+            Some(&Value::String(submission.unit_id().to_owned())),
+            "compound upload Unit ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&Value::String(submission.group_id().to_owned())),
+            "compound upload Group ID",
+        )?;
+        if submission.remote_task_id() != format!("group:{course_resource_id}:{unit_id}:{group_id}")
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI compound upload hierarchy is foreign to its Task",
+            ));
+        }
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let progress = self
+            .fetch_progress_for_route_with_session(session, route.course_instance_id(), &unit_id)
+            .await?;
+        validate_answer_submission_progress_target(
+            progress.as_str(),
+            &unit_id,
+            &group_id,
+            Utc::now(),
+        )?;
+        let request = build_compound_upload_submission_request(
+            submission,
+            route.course_instance_id(),
+            session.expose_open_id(),
+        )?;
+        Ok((request, route.course_instance_id().to_owned()))
+    }
+
+    async fn materialize_compound_oral_request_with_session(
+        &self,
+        session: &UaiJwtSession,
+        submission: &UaiCompoundOralSubmission,
+    ) -> ProviderResult<(UaiCompoundOralSubmissionRequest, String)> {
+        let course_resource_id = required_remote_component(
+            Some(&Value::String(submission.course_resource_id().to_owned())),
+            "compound oral Course-resource ID",
+        )?;
+        let unit_id = required_remote_component(
+            Some(&Value::String(submission.unit_id().to_owned())),
+            "compound oral Unit ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&Value::String(submission.group_id().to_owned())),
+            "compound oral Group ID",
+        )?;
+        if submission.remote_task_id() != format!("group:{course_resource_id}:{unit_id}:{group_id}")
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI compound oral hierarchy is foreign to its Task",
+            ));
+        }
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let progress = self
+            .fetch_progress_for_route_with_session(session, route.course_instance_id(), &unit_id)
+            .await?;
+        validate_answer_submission_progress_target(
+            progress.as_str(),
+            &unit_id,
+            &group_id,
+            Utc::now(),
+        )?;
+        let request = build_compound_oral_submission_request(
+            submission,
+            route.course_instance_id(),
+            session.expose_open_id(),
+        )?;
+        Ok((request, route.course_instance_id().to_owned()))
+    }
+
+    async fn materialize_discussion_completion_request_with_session(
+        &self,
+        session: &UaiJwtSession,
+        plan: &UaiDiscussionCompletionPlan,
+    ) -> ProviderResult<(UaiSubmissionRequest, String)> {
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(plan.course_resource_id())?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(
+            plan.course_resource_id().to_owned(),
+            detail.as_str(),
+        )?;
+        let progress = self
+            .fetch_progress_for_route_with_session(
+                session,
+                route.course_instance_id(),
+                plan.unit_id(),
+            )
+            .await?;
+        if validate_empty_completion_progress_target(
+            progress.as_str(),
+            plan.unit_id(),
+            plan.group_id(),
+            EmptyCompletionPreflight::Discussion,
+        )? {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI discussion completed concurrently before its second mutation",
+            ));
+        }
+        let body = build_empty_completion_body(
+            route.course_instance_id(),
+            session.expose_open_id(),
+            plan.group_id(),
+            None,
+        )?;
+        Ok((
+            bind_submission_request_body(body)?,
+            route.course_instance_id().to_owned(),
+        ))
+    }
+
+    async fn send_prepared_submission_with_session(
+        &self,
+        session: &UaiJwtSession,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> ProviderResult<String> {
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .post(url)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, content_type)
+            .headers(ucontent_session_headers(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        read_json_response(response, ResponseRoute::Submission).await
     }
 
     async fn submit_uploaded_artifact_with_session(
@@ -2092,6 +2327,7 @@ impl UaiDiscussionTransport for NativeUaiInventoryTransport {
             }
             result => result,
         }
+        .map(UaiDiscussionMutationOutcome::into_legacy_result)
     }
 
     async fn complete_verified_discussion(
@@ -2263,6 +2499,367 @@ impl UaiCompoundOralTransport for NativeUaiInventoryTransport {
             }
             result => result,
         }
+    }
+}
+
+#[async_trait]
+impl UaiPrivateInvocationTransport for NativeUaiInventoryTransport {
+    async fn materialize_single_upload_request(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiUploadSubmission,
+    ) -> ProviderResult<UaiUploadSubmissionRequest> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .materialize_upload_submission_request_with_session(&session, submission)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.materialize_upload_submission_request_with_session(&session, submission)
+                    .await
+            }
+            result => result,
+        }
+        .map(|(request, _)| request)
+    }
+
+    async fn upload_artifact_durable(
+        &self,
+        context: &ProviderContext,
+        grant: &UaiUploadGrant,
+        artifact: &UaiUploadArtifact,
+        sequence: &UaiUploadInvocationSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<UaiUploadedArtifact> {
+        let (_session, _renewed) = self.session_for_operation(context).await?;
+        let multipart = build_upload_multipart(grant, artifact)?;
+        sequence
+            .issue_object(multipart.request_digest(), sink)
+            .await?;
+        self.upload_artifact_with_session(grant, artifact).await
+    }
+
+    async fn submit_single_upload_durable(
+        &self,
+        context: &ProviderContext,
+        attempt: u32,
+        submission: &UaiUploadSubmission,
+        sequence: &UaiUploadInvocationSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<(UaiUploadSubmissionRequest, UaiUploadFinalSubmissionOutcome)> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        let prepared = match self
+            .materialize_upload_submission_request_with_session(&session, submission)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                let prepared = self
+                    .materialize_upload_submission_request_with_session(&session, submission)
+                    .await?;
+                return self
+                    .issue_and_send_single_upload(
+                        &session, attempt, submission, sequence, sink, prepared,
+                    )
+                    .await;
+            }
+            result => result?,
+        };
+        self.issue_and_send_single_upload(&session, attempt, submission, sequence, sink, prepared)
+            .await
+    }
+
+    async fn materialize_compound_upload_request(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiCompoundUploadSubmission,
+    ) -> ProviderResult<UaiCompoundUploadSubmissionRequest> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .materialize_compound_upload_request_with_session(&session, submission)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.materialize_compound_upload_request_with_session(&session, submission)
+                    .await
+            }
+            result => result,
+        }
+        .map(|(request, _)| request)
+    }
+
+    async fn submit_compound_upload_durable(
+        &self,
+        context: &ProviderContext,
+        attempt: u32,
+        submission: &UaiCompoundUploadSubmission,
+        sequence: &UaiUploadInvocationSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<(
+        UaiCompoundUploadSubmissionRequest,
+        UaiUploadFinalSubmissionOutcome,
+    )> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        let prepared = match self
+            .materialize_compound_upload_request_with_session(&session, submission)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                let prepared = self
+                    .materialize_compound_upload_request_with_session(&session, submission)
+                    .await?;
+                return self
+                    .issue_and_send_compound_upload(
+                        &session, attempt, submission, sequence, sink, prepared,
+                    )
+                    .await;
+            }
+            result => result?,
+        };
+        self.issue_and_send_compound_upload(&session, attempt, submission, sequence, sink, prepared)
+            .await
+    }
+
+    async fn materialize_compound_oral_request(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiCompoundOralSubmission,
+    ) -> ProviderResult<UaiCompoundOralSubmissionRequest> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .materialize_compound_oral_request_with_session(&session, submission)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.materialize_compound_oral_request_with_session(&session, submission)
+                    .await
+            }
+            result => result,
+        }
+        .map(|(request, _)| request)
+    }
+
+    async fn submit_compound_oral_durable(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiCompoundOralSubmission,
+        expected_request_digest: [u8; 32],
+        sequence: &UaiCompoundOralSubmissionSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<(
+        UaiCompoundOralSubmissionRequest,
+        UaiCompoundOralSubmissionOutcome,
+    )> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        let prepared = match self
+            .materialize_compound_oral_request_with_session(&session, submission)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                let prepared = self
+                    .materialize_compound_oral_request_with_session(&session, submission)
+                    .await?;
+                return self
+                    .issue_and_send_compound_oral(
+                        &session,
+                        expected_request_digest,
+                        sequence,
+                        sink,
+                        prepared,
+                        submission.group_id(),
+                    )
+                    .await;
+            }
+            result => result?,
+        };
+        self.issue_and_send_compound_oral(
+            &session,
+            expected_request_digest,
+            sequence,
+            sink,
+            prepared,
+            submission.group_id(),
+        )
+        .await
+    }
+
+    async fn submit_discussion_reply_durable(
+        &self,
+        context: &ProviderContext,
+        draft: &UaiDiscussionReplyDraft,
+        sequence: &UaiDiscussionMutationSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<UaiDiscussionMutationOutcome> {
+        let (session, _) = self.session_for_operation(context).await?;
+        let body = build_discussion_reply_request(draft)?;
+        sequence.issue_reply(draft, sink).await?;
+        let mut document = self
+            .send_discussion_post_with_session(
+                &session,
+                discussion_reply_mutation_url()?,
+                body.as_str(),
+                ResponseRoute::DiscussionReplyMutation,
+                true,
+            )
+            .await?;
+        let outcome = draft.classify_reply_mutation_response(&document);
+        document.zeroize();
+        outcome
+    }
+
+    async fn submit_discussion_completion_durable(
+        &self,
+        context: &ProviderContext,
+        plan: &UaiDiscussionCompletionPlan,
+        gate: &UaiDiscussionReplyReadbackGate,
+        sequence: &UaiDiscussionMutationSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<UaiDiscussionMutationOutcome> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        let prepared = match self
+            .materialize_discussion_completion_request_with_session(&session, plan)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                let prepared = self
+                    .materialize_discussion_completion_request_with_session(&session, plan)
+                    .await?;
+                return self
+                    .issue_and_send_discussion_completion(
+                        &session, plan, gate, sequence, sink, prepared,
+                    )
+                    .await;
+            }
+            result => result?,
+        };
+        self.issue_and_send_discussion_completion(&session, plan, gate, sequence, sink, prepared)
+            .await
+    }
+}
+
+impl NativeUaiInventoryTransport {
+    async fn issue_and_send_single_upload(
+        &self,
+        session: &UaiJwtSession,
+        attempt: u32,
+        submission: &UaiUploadSubmission,
+        sequence: &UaiUploadInvocationSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+        prepared: (UaiUploadSubmissionRequest, String),
+    ) -> ProviderResult<(UaiUploadSubmissionRequest, UaiUploadFinalSubmissionOutcome)> {
+        let (request, course_instance_id) = prepared;
+        sequence
+            .issue_final(attempt, request.request_digest(), sink)
+            .await?;
+        let document = self
+            .send_prepared_submission_with_session(
+                session,
+                request.expose_url(),
+                request.content_type(),
+                request.expose_body().as_bytes(),
+            )
+            .await?;
+        let outcome = request.classify_final_response(
+            attempt,
+            &document,
+            &course_instance_id,
+            submission.group_id(),
+        )?;
+        Ok((request, outcome))
+    }
+
+    async fn issue_and_send_compound_upload(
+        &self,
+        session: &UaiJwtSession,
+        attempt: u32,
+        submission: &UaiCompoundUploadSubmission,
+        sequence: &UaiUploadInvocationSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+        prepared: (UaiCompoundUploadSubmissionRequest, String),
+    ) -> ProviderResult<(
+        UaiCompoundUploadSubmissionRequest,
+        UaiUploadFinalSubmissionOutcome,
+    )> {
+        let (request, course_instance_id) = prepared;
+        sequence
+            .issue_final(attempt, request.request_digest(), sink)
+            .await?;
+        let document = self
+            .send_prepared_submission_with_session(
+                session,
+                request.expose_url(),
+                request.content_type(),
+                request.expose_body().as_bytes(),
+            )
+            .await?;
+        let outcome = request.classify_final_response(
+            attempt,
+            &document,
+            &course_instance_id,
+            submission.group_id(),
+        )?;
+        Ok((request, outcome))
+    }
+
+    async fn issue_and_send_compound_oral(
+        &self,
+        session: &UaiJwtSession,
+        expected_request_digest: [u8; 32],
+        sequence: &UaiCompoundOralSubmissionSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+        prepared: (UaiCompoundOralSubmissionRequest, String),
+        group_id: &str,
+    ) -> ProviderResult<(
+        UaiCompoundOralSubmissionRequest,
+        UaiCompoundOralSubmissionOutcome,
+    )> {
+        let (request, course_instance_id) = prepared;
+        if request.request_digest() != expected_request_digest {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI compound oral request changed before issue",
+            ));
+        }
+        sequence.issue(&request, sink).await?;
+        let document = self
+            .send_prepared_submission_with_session(
+                session,
+                request.expose_url(),
+                request.content_type(),
+                request.expose_body().as_bytes(),
+            )
+            .await?;
+        let outcome =
+            request.classify_compound_oral_response(&document, &course_instance_id, group_id)?;
+        Ok((request, outcome))
+    }
+
+    async fn issue_and_send_discussion_completion(
+        &self,
+        session: &UaiJwtSession,
+        plan: &UaiDiscussionCompletionPlan,
+        gate: &UaiDiscussionReplyReadbackGate,
+        sequence: &UaiDiscussionMutationSequence,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+        prepared: (UaiSubmissionRequest, String),
+    ) -> ProviderResult<UaiDiscussionMutationOutcome> {
+        let (request, course_instance_id) = prepared;
+        sequence.issue_completion(plan, gate, sink).await?;
+        let document = self
+            .send_prepared_submission_with_session(
+                session,
+                request.expose_url(),
+                request.content_type(),
+                request.expose_body().as_bytes(),
+            )
+            .await?;
+        plan.classify_completion_mutation_response(&document, &course_instance_id)
     }
 }
 

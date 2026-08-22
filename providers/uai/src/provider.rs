@@ -12,7 +12,9 @@ use crate::{
     UaiResourceExecution, UaiSessionResolver, UaiSubmissionBuild, UaiSubmissionExecute,
     UaiSubmissionTransport, UaiSubmissionVerify, UaiTaskDetail, UaiTaskDuration, UaiTaskInventory,
     UaiTaskInventoryTransport, UaiTaskProgress, UaiVerificationTransport,
-    metadata::development_metadata, runtime_settings::runtime_settings_schema,
+    metadata::development_metadata,
+    private_invocation::{UaiPrivateInvocation, UaiPrivateInvocationTransport},
+    runtime_settings::runtime_settings_schema,
 };
 
 /// Injected read and mutation boundaries used by the UAI Development entry.
@@ -32,6 +34,7 @@ pub struct UaiSubmissionTransports {
     preset: Arc<dyn UaiPresetCompletionTransport>,
     execute: Arc<dyn UaiSubmissionTransport>,
     verify: Arc<dyn UaiVerificationTransport>,
+    private_invocation: Option<Arc<dyn UaiPrivateInvocationTransport>>,
 }
 
 impl UaiSubmissionTransports {
@@ -44,7 +47,17 @@ impl UaiSubmissionTransports {
             preset,
             execute,
             verify,
+            private_invocation: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_private_invocation(
+        mut self,
+        transport: Arc<dyn UaiPrivateInvocationTransport>,
+    ) -> Self {
+        self.private_invocation = Some(transport);
+        self
     }
 }
 
@@ -122,6 +135,7 @@ pub fn build_development_provider(
         task_detail.clone(),
         transports.question,
     )?);
+    let private_answers = transports.answer.clone();
     let answer_resolve = Arc::new(UaiAnswerResolve::try_new(
         task_detail.clone(),
         transports.answer,
@@ -135,11 +149,24 @@ pub fn build_development_provider(
         task_detail.clone(),
         transports.submission.verify,
     )?);
-    let resource_execution = Arc::new(UaiResourceExecution::try_new(
-        task_detail.clone(),
-        task_progress.clone(),
-        transports.submission.preset,
-    )?);
+    let resource_execution = Arc::new(match transports.submission.private_invocation {
+        Some(private_transport) => UaiResourceExecution::try_new_with_private_invocation(
+            task_detail.clone(),
+            task_progress.clone(),
+            transports.submission.preset,
+            Arc::new(UaiPrivateInvocation::new(
+                task_detail.clone(),
+                task_progress.clone(),
+                private_answers,
+                private_transport,
+            )),
+        )?,
+        None => UaiResourceExecution::try_new(
+            task_detail.clone(),
+            task_progress.clone(),
+            transports.submission.preset,
+        )?,
+    });
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: runtime_settings_schema(),
@@ -189,7 +216,8 @@ pub fn build_development_provider_with_native_inventory(
             inventory.clone(),
             inventory.clone(),
             inventory.clone(),
-            UaiSubmissionTransports::new(inventory.clone(), inventory.clone(), inventory),
+            UaiSubmissionTransports::new(inventory.clone(), inventory.clone(), inventory.clone())
+                .with_private_invocation(inventory),
         ),
     )
 }
@@ -366,6 +394,9 @@ mod tests {
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,
+            ProviderCapability::Discussion,
+            ProviderCapability::ArtifactUpload,
+            ProviderCapability::OralSubmission,
             ProviderCapability::BrowserBridge,
         ] {
             assert!(entry.metadata.capabilities.contains(&capability));

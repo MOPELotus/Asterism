@@ -4,15 +4,19 @@ use asterism_domain::{
     CompletionDiagnosis, RemoteState, SubmissionReceipt, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
-    ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
-    ProviderErrorKind, ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, ProviderRuntimeSettingsSchema, ResolvedProviderRuntimeSettings,
-    TaskDetailCapability, TaskExecutionCapability, TaskProgressCapability,
+    ExecutionEventSink, ExecutionInvocationPreparationRequest,
+    ExecutionMutationSequenceRecoverySnapshot, ExecutionOutcome, ExecutionRecoveryOutcome,
+    ExecutionRequest, PreparedProviderExecutionInvocation, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderExecutionLog, ProviderExecutionPrivateInput, ProviderIdentity,
+    ProviderMetadata, ProviderProgress, ProviderResult, ProviderRuntimeSettingsSchema,
+    ResolvedProviderRuntimeSettings, TaskDetailCapability, TaskExecutionCapability,
+    TaskProgressCapability,
 };
 use async_trait::async_trait;
 
 use crate::{
     metadata::development_metadata,
+    private_invocation::UaiPrivateInvocation,
     runtime_settings::{DISCUSSION_EMPTY_MODE_KEY, PRESET_EMPTY_MODE_KEY, runtime_settings_schema},
     submission_execute::valid_submission_version,
 };
@@ -334,6 +338,7 @@ pub struct UaiResourceExecution {
     details: Arc<dyn TaskDetailCapability>,
     progress: Arc<dyn TaskProgressCapability>,
     transport: Arc<dyn UaiPresetCompletionTransport>,
+    private_invocation: Option<Arc<UaiPrivateInvocation>>,
 }
 
 impl UaiResourceExecution {
@@ -353,7 +358,19 @@ impl UaiResourceExecution {
             details,
             progress,
             transport,
+            private_invocation: None,
         })
+    }
+
+    pub(crate) fn try_new_with_private_invocation(
+        details: Arc<dyn TaskDetailCapability>,
+        progress: Arc<dyn TaskProgressCapability>,
+        transport: Arc<dyn UaiPresetCompletionTransport>,
+        private_invocation: Arc<UaiPrivateInvocation>,
+    ) -> ProviderResult<Self> {
+        let mut capability = Self::try_new(details, progress, transport)?;
+        capability.private_invocation = Some(private_invocation);
+        Ok(capability)
     }
 
     async fn submit_subjective_empty(
@@ -509,6 +526,10 @@ impl fmt::Debug for UaiResourceExecution {
             .field("details", &"configured")
             .field("progress", &"configured")
             .field("transport", &"configured")
+            .field(
+                "private_invocation",
+                &self.private_invocation.as_ref().map(|_| "configured"),
+            )
             .finish()
     }
 }
@@ -521,8 +542,49 @@ impl ProviderIdentity for UaiResourceExecution {
 
 #[async_trait]
 impl TaskExecutionCapability for UaiResourceExecution {
+    fn execution_plan(
+        &self,
+        requested_capabilities: &[TaskCapability],
+    ) -> ProviderResult<Vec<TaskCapability>> {
+        match requested_capabilities {
+            [
+                TaskCapability::ResourceExecution
+                | TaskCapability::Discussion
+                | TaskCapability::ArtifactUpload,
+            ]
+            | [
+                TaskCapability::SubmissionExecute,
+                TaskCapability::ArtifactUpload | TaskCapability::OralSubmission,
+            ] => Ok(requested_capabilities.to_vec()),
+            _ => Err(unsupported(
+                "UAI execution capability selection is unsupported",
+            )),
+        }
+    }
+
+    fn execution_call_plan(
+        &self,
+        requested_capabilities: &[TaskCapability],
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Vec<Vec<TaskCapability>>> {
+        self.execution_plan(requested_capabilities)
+            .map(|plan| vec![plan])
+    }
+
     fn requires_execution_verification(&self, requested_capabilities: &[TaskCapability]) -> bool {
-        requested_capabilities == [TaskCapability::ResourceExecution]
+        self.execution_plan(requested_capabilities).is_ok()
+    }
+
+    async fn prepare_private_invocation(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionInvocationPreparationRequest<'_>,
+    ) -> ProviderResult<PreparedProviderExecutionInvocation> {
+        self.private_invocation
+            .as_ref()
+            .ok_or_else(|| unsupported("UAI private invocation transport is not configured"))?
+            .prepare(context, request)
+            .await
     }
 
     async fn execute(
@@ -669,6 +731,47 @@ impl TaskExecutionCapability for UaiResourceExecution {
                 "verification": FRESH_PROGRESS_VERIFICATION,
             }),
         })
+    }
+
+    async fn execute_private_invocation(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        private_input: &ProviderExecutionPrivateInput,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        self.private_invocation
+            .as_ref()
+            .ok_or_else(|| unsupported("UAI private invocation transport is not configured"))?
+            .execute(context, request, private_input, events)
+            .await
+    }
+
+    async fn verify_private_invocation(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        private_input: &ProviderExecutionPrivateInput,
+    ) -> ProviderResult<ExecutionOutcome> {
+        self.private_invocation
+            .as_ref()
+            .ok_or_else(|| unsupported("UAI private invocation transport is not configured"))?
+            .verify(context, request, private_input)
+            .await
+    }
+
+    async fn verify_private_invocation_recovery(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        private_input: &ProviderExecutionPrivateInput,
+        mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        self.private_invocation
+            .as_ref()
+            .ok_or_else(|| unsupported("UAI private invocation transport is not configured"))?
+            .recover(context, request, private_input, mutation_sequence)
+            .await
     }
 
     fn completion_diagnosis(
@@ -1760,6 +1863,56 @@ mod tests {
         outcome.remote_state = RemoteState::Completed;
         outcome.verified = true;
         assert_eq!(execution.completion_diagnosis(&request(), &outcome), None);
+    }
+
+    #[test]
+    fn private_invocation_plans_preserve_only_the_four_audited_atomic_shapes() {
+        let execution = UaiResourceExecution::try_new(
+            Arc::new(FixtureDetail {
+                task_types: vec!["discussion".to_owned()],
+            }),
+            fixture_progress(RemoteState::Unknown),
+            Arc::new(FixtureTransport::default()),
+        )
+        .unwrap();
+        let settings = runtime_settings_schema().resolve(None, None, None).unwrap();
+        let supported = [
+            vec![TaskCapability::Discussion],
+            vec![TaskCapability::ArtifactUpload],
+            vec![
+                TaskCapability::SubmissionExecute,
+                TaskCapability::ArtifactUpload,
+            ],
+            vec![
+                TaskCapability::SubmissionExecute,
+                TaskCapability::OralSubmission,
+            ],
+        ];
+        for capabilities in supported {
+            assert_eq!(
+                execution.execution_plan(&capabilities).unwrap(),
+                capabilities
+            );
+            assert_eq!(
+                execution
+                    .execution_call_plan(&capabilities, &settings)
+                    .unwrap(),
+                vec![capabilities.clone()]
+            );
+            assert!(execution.requires_execution_verification(&capabilities));
+        }
+
+        for unsupported in [
+            vec![TaskCapability::OralSubmission],
+            vec![
+                TaskCapability::ArtifactUpload,
+                TaskCapability::SubmissionExecute,
+            ],
+            vec![TaskCapability::Discussion, TaskCapability::ArtifactUpload],
+        ] {
+            assert!(execution.execution_plan(&unsupported).is_err());
+            assert!(!execution.requires_execution_verification(&unsupported));
+        }
     }
 
     fn fixture_progress(remote_state: RemoteState) -> Arc<FixtureProgress> {

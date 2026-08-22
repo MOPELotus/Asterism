@@ -478,6 +478,15 @@ fn build_task(
             TaskCapability::SubmissionVerify,
         ]);
     }
+    if task_types == ["discussion"] && question_count == Some(1) {
+        capabilities.push(TaskCapability::Discussion);
+    }
+    if task_types == ["multiFileUpload"] || task_types == ["multichoice", "multiFileUpload"] {
+        capabilities.push(TaskCapability::ArtifactUpload);
+    }
+    if task_types == ["basic-scoop-content", "oral-sentence"] {
+        capabilities.push(TaskCapability::OralSubmission);
+    }
     let remote_id = format!("group:{}:{}:{group_id}", binding.resource_id, unit.id);
     let normalized = serde_json::json!({
         "schema": "uai.group-task.v1",
@@ -690,6 +699,11 @@ mod tests {
             tasks[0].normalized["task_types"],
             serde_json::json!(["multiFileUpload"])
         );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ArtifactUpload)
+        );
 
         let compound = TREE.replace(
             r#"\"base\":\"rich-text-read\",\"question_num\":1"#,
@@ -699,6 +713,56 @@ mod tests {
         assert_eq!(
             tasks[0].normalized["task_types"],
             serde_json::json!(["multichoice", "multiFileUpload"])
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ArtifactUpload)
+        );
+    }
+
+    #[test]
+    fn private_invocation_capabilities_are_exact_shape_gated() {
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let context = parse_course_context(&course, DETAIL).unwrap();
+
+        let discussion = TREE.replace("rich-text-read", "discussion");
+        let tasks = parse_task_inventory(&course, &context, &discussion).unwrap();
+        assert!(tasks[0].capabilities.contains(&TaskCapability::Discussion));
+        let discussion_count_drift = discussion.replace(
+            r#"\"base\":\"discussion\",\"question_num\":1"#,
+            r#"\"base\":\"discussion\",\"question_num\":2"#,
+        );
+        let tasks = parse_task_inventory(&course, &context, &discussion_count_drift).unwrap();
+        assert!(!tasks[0].capabilities.contains(&TaskCapability::Discussion));
+
+        let reversed_upload = TREE.replace(
+            r#"\"base\":\"rich-text-read\",\"question_num\":1"#,
+            r#"\"base\":\"multiFileUpload,multichoice\",\"question_num\":2"#,
+        );
+        let tasks = parse_task_inventory(&course, &context, &reversed_upload).unwrap();
+        assert!(
+            !tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ArtifactUpload)
+        );
+
+        let compound_oral = TREE.replace(
+            r#"\"base\":\"rich-text-read\",\"question_num\":1"#,
+            r#"\"base\":\"basic-scoop-content,oral-sentence\",\"question_num\":2"#,
+        );
+        let tasks = parse_task_inventory(&course, &context, &compound_oral).unwrap();
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::OralSubmission)
+        );
+        let single_oral = TREE.replace("rich-text-read", "oral-sentence");
+        let tasks = parse_task_inventory(&course, &context, &single_oral).unwrap();
+        assert!(
+            !tasks[0]
+                .capabilities
+                .contains(&TaskCapability::OralSubmission)
         );
     }
 

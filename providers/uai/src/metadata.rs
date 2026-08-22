@@ -41,6 +41,9 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,
+            ProviderCapability::Discussion,
+            ProviderCapability::ArtifactUpload,
+            ProviderCapability::OralSubmission,
             ProviderCapability::BrowserBridge,
         ]),
         auth_methods: BTreeSet::from([
@@ -83,6 +86,9 @@ mod tests {
                 ProviderCapability::SubmissionBuild,
                 ProviderCapability::SubmissionExecute,
                 ProviderCapability::SubmissionVerify,
+                ProviderCapability::Discussion,
+                ProviderCapability::ArtifactUpload,
+                ProviderCapability::OralSubmission,
                 ProviderCapability::BrowserBridge,
             ])
         );
