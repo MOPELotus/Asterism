@@ -48,10 +48,10 @@ impl Drop for UaiCourseProgressDocument {
 }
 
 /// Sanitized Course-level strategy facts for one exact Unit.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UaiCourseUnitProgressStrategy {
     required: bool,
-    minimum_score_percent: i32,
+    minimum_score_percent: f64,
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
@@ -62,7 +62,7 @@ impl UaiCourseUnitProgressStrategy {
         self.required
     }
 
-    pub const fn minimum_score_percent(&self) -> i32 {
+    pub const fn minimum_score_percent(&self) -> f64 {
         self.minimum_score_percent
     }
 
@@ -81,7 +81,7 @@ impl UaiCourseUnitProgressStrategy {
 
 /// Sanitized current Course progress facts used to bind inventory and submit
 /// protocol versions independently of the Course tree.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UaiCourseProgressSnapshot {
     publish_version: u64,
     units: BTreeMap<String, UaiCourseUnitProgressStrategy>,
@@ -206,11 +206,11 @@ fn parse_unit_strategy(value: Option<&Value>) -> ProviderResult<UaiCourseUnitPro
     })
 }
 
-fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
+fn optional_score_percent(value: Option<&Value>) -> ProviderResult<f64> {
     let parsed = match value {
-        None | Some(Value::Null) => return Ok(0),
-        Some(Value::Number(value)) => number_as_i32(value),
-        Some(Value::String(value)) => value.trim().parse::<i32>().ok(),
+        None | Some(Value::Null) => return Ok(0.0),
+        Some(Value::Number(value)) => number_as_percent(value),
+        Some(Value::String(value)) => value.trim().parse::<i32>().ok().map(f64::from),
         _ => None,
     };
     parsed.ok_or_else(|| {
@@ -221,18 +221,21 @@ fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
     })
 }
 
-fn number_as_i32(value: &serde_json::Number) -> Option<i32> {
+fn number_as_percent(value: &serde_json::Number) -> Option<f64> {
     if let Some(value) = value.as_i64() {
-        return i32::try_from(value).ok();
+        return i32::try_from(value).ok().map(f64::from);
     }
     let value = value.as_f64()?;
-    let integral = value.is_finite()
-        && value.fract() == 0.0
-        && value >= f64::from(i32::MIN)
-        && value <= f64::from(i32::MAX);
-    integral
-        .then(|| value.to_string().parse::<i32>().ok())
-        .flatten()
+    if !value.is_finite() {
+        return None;
+    }
+    if value < 0.0 && value.fract() == 0.0 && value >= f64::from(i32::MIN) {
+        return Some(value);
+    }
+    if (0.0..=1.0).contains(&value) {
+        return Some(value * 100.0);
+    }
+    (value > 1.0 && value <= 100.0).then_some(value)
 }
 
 fn sanitized_json_shape(value: Option<&Value>) -> &'static str {
@@ -242,11 +245,19 @@ fn sanitized_json_shape(value: Option<&Value>) -> &'static str {
         Some(Value::Bool(_)) => "boolean",
         Some(Value::Number(value)) if value.is_i64() => "signed_integer",
         Some(Value::Number(value)) if value.is_u64() => "unsigned_integer",
-        Some(Value::Number(_)) => "non_integer_number",
+        Some(Value::Number(value)) => fractional_number_shape(value),
         Some(Value::String(value)) if value.trim().is_empty() => "empty_string",
         Some(Value::String(_)) => "string_non_i32",
         Some(Value::Array(_)) => "array",
         Some(Value::Object(_)) => "object",
+    }
+}
+
+fn fractional_number_shape(value: &serde_json::Number) -> &'static str {
+    match value.as_f64() {
+        Some(value) if value > 0.0 && value < 1.0 => "fraction_0_to_1",
+        Some(value) if value > 1.0 && value <= 100.0 => "fraction_1_to_100",
+        _ => "fraction_other",
     }
 }
 
@@ -278,6 +289,7 @@ fn invalid_course_progress_response(message: impl Into<String>) -> ProviderError
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -293,7 +305,7 @@ mod tests {
         assert_eq!(snapshot.units().len(), 1);
         let strategy = &snapshot.units()["unit-1"];
         assert!(strategy.required());
-        assert_eq!(strategy.minimum_score_percent(), 60);
+        assert_eq!(strategy.minimum_score_percent(), 60.0);
         assert!(!strategy.statistic_mode_out());
         assert_eq!(strategy.opens_at().unwrap().timestamp(), 1_785_542_400);
         assert_eq!(strategy.closes_at().unwrap().timestamp(), 1_790_812_800);
@@ -319,14 +331,16 @@ mod tests {
     fn parser_accepts_bounded_score_shapes_without_guessing_invalid_values() {
         let snapshot = parse_course_progress(SCORE_SHAPES).unwrap();
         let expected = [
-            ("unit-missing", 0),
-            ("unit-null", 0),
-            ("unit-string-zero", 0),
-            ("unit-string-max", 100),
-            ("unit-string-sentinel", -1),
-            ("unit-number-sentinel", -1),
-            ("unit-number-integral-float", 60),
-            ("unit-number", 60),
+            ("unit-missing", 0.0),
+            ("unit-null", 0.0),
+            ("unit-string-zero", 0.0),
+            ("unit-string-max", 100.0),
+            ("unit-string-sentinel", -1.0),
+            ("unit-number-sentinel", -1.0),
+            ("unit-number-integral-float", 60.0),
+            ("unit-number-ratio", 60.0),
+            ("unit-number-fractional-percent", 60.5),
+            ("unit-number", 60.0),
         ];
         for (unit_id, minimum) in expected {
             assert_eq!(snapshot.units()[unit_id].minimum_score_percent(), minimum);
@@ -335,7 +349,8 @@ mod tests {
         for invalid in [
             "2147483648",
             "-2147483649",
-            "60.5",
+            "-1.5",
+            "100.5",
             "true",
             "{}",
             r#""2147483648""#,

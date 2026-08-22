@@ -59,7 +59,7 @@ impl Drop for UaiProgressDocument {
 }
 
 /// Sanitized raw Group-state facts. `duration_raw` intentionally has no unit.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UaiGroupProgressSnapshot {
     pass: u8,
     pass2: u8,
@@ -67,7 +67,7 @@ pub struct UaiGroupProgressSnapshot {
     duration_raw: Option<u64>,
     tab_type: Option<String>,
     required: bool,
-    min_score_percent: i32,
+    min_score_percent: f64,
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
@@ -99,7 +99,7 @@ impl UaiGroupProgressSnapshot {
         self.required
     }
 
-    pub const fn min_score_percent(&self) -> i32 {
+    pub const fn min_score_percent(&self) -> f64 {
         self.min_score_percent
     }
 
@@ -146,13 +146,13 @@ impl UaiGroupProgressSnapshot {
 }
 
 /// Sanitized Micro-level progress and strategy facts from one per-Unit read.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UaiMicroProgressSnapshot {
     pass: u8,
     pass2: u8,
     perm: u8,
     required: bool,
-    min_score_percent: i32,
+    min_score_percent: f64,
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
@@ -175,7 +175,7 @@ impl UaiMicroProgressSnapshot {
         self.required
     }
 
-    pub const fn min_score_percent(&self) -> i32 {
+    pub const fn min_score_percent(&self) -> f64 {
         self.min_score_percent
     }
 
@@ -495,7 +495,7 @@ fn micro_progress_path(value: &str) -> ProviderResult<String> {
 
 struct ProgressStrategy {
     required: bool,
-    min_score_percent: i32,
+    min_score_percent: f64,
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
@@ -505,7 +505,7 @@ fn progress_strategy(value: Option<&Value>) -> ProviderResult<ProgressStrategy> 
     let Some(strategy) = value else {
         return Ok(ProgressStrategy {
             required: false,
-            min_score_percent: 0,
+            min_score_percent: 0.0,
             opens_at: None,
             closes_at: None,
             statistic_mode_out: false,
@@ -548,11 +548,11 @@ fn progress_strategy(value: Option<&Value>) -> ProviderResult<ProgressStrategy> 
     })
 }
 
-fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
+fn optional_score_percent(value: Option<&Value>) -> ProviderResult<f64> {
     let parsed = match value {
-        None | Some(Value::Null) => return Ok(0),
-        Some(Value::Number(value)) => number_as_i32(value),
-        Some(Value::String(value)) => value.trim().parse::<i32>().ok(),
+        None | Some(Value::Null) => return Ok(0.0),
+        Some(Value::Number(value)) => number_as_percent(value),
+        Some(Value::String(value)) => value.trim().parse::<i32>().ok().map(f64::from),
         _ => None,
     };
     parsed.ok_or_else(|| {
@@ -563,18 +563,21 @@ fn optional_score_percent(value: Option<&Value>) -> ProviderResult<i32> {
     })
 }
 
-fn number_as_i32(value: &serde_json::Number) -> Option<i32> {
+fn number_as_percent(value: &serde_json::Number) -> Option<f64> {
     if let Some(value) = value.as_i64() {
-        return i32::try_from(value).ok();
+        return i32::try_from(value).ok().map(f64::from);
     }
     let value = value.as_f64()?;
-    let integral = value.is_finite()
-        && value.fract() == 0.0
-        && value >= f64::from(i32::MIN)
-        && value <= f64::from(i32::MAX);
-    integral
-        .then(|| value.to_string().parse::<i32>().ok())
-        .flatten()
+    if !value.is_finite() {
+        return None;
+    }
+    if value < 0.0 && value.fract() == 0.0 && value >= f64::from(i32::MIN) {
+        return Some(value);
+    }
+    if (0.0..=1.0).contains(&value) {
+        return Some(value * 100.0);
+    }
+    (value > 1.0 && value <= 100.0).then_some(value)
 }
 
 fn sanitized_json_shape(value: Option<&Value>) -> &'static str {
@@ -584,11 +587,19 @@ fn sanitized_json_shape(value: Option<&Value>) -> &'static str {
         Some(Value::Bool(_)) => "boolean",
         Some(Value::Number(value)) if value.is_i64() => "signed_integer",
         Some(Value::Number(value)) if value.is_u64() => "unsigned_integer",
-        Some(Value::Number(_)) => "non_integer_number",
+        Some(Value::Number(value)) => fractional_number_shape(value),
         Some(Value::String(value)) if value.trim().is_empty() => "empty_string",
         Some(Value::String(_)) => "string_non_i32",
         Some(Value::Array(_)) => "array",
         Some(Value::Object(_)) => "object",
+    }
+}
+
+fn fractional_number_shape(value: &serde_json::Number) -> &'static str {
+    match value.as_f64() {
+        Some(value) if value > 0.0 && value < 1.0 => "fraction_0_to_1",
+        Some(value) if value > 1.0 && value <= 100.0 => "fraction_1_to_100",
+        _ => "fraction_other",
     }
 }
 
@@ -689,6 +700,7 @@ fn invalid_progress_response(message: impl Into<String>) -> ProviderError {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use asterism_domain::{ProviderAccountId, ProviderId, SecretId};
 
@@ -720,7 +732,7 @@ mod tests {
         assert_eq!(completed.duration_raw(), Some(17));
         assert_eq!(completed.tab_type(), Some("text"));
         assert!(completed.required());
-        assert_eq!(completed.min_score_percent(), 60);
+        assert_eq!(completed.min_score_percent(), 60.0);
         assert!(!completed.statistic_mode_out());
         assert_eq!(completed.publish_version(), Some(123_290));
         assert_eq!(completed.opens_at().unwrap().timestamp(), 1_785_542_400);
@@ -804,17 +816,19 @@ mod tests {
     #[test]
     fn parser_accepts_optional_and_bounded_string_score_percent() {
         for (replacement, expected) in [
-            ("null", 0),
-            (r#""-1""#, -1),
-            (r#""0""#, 0),
-            (r#""60""#, 60),
-            (r#""100""#, 100),
-            ("-1", -1),
-            ("-1.0", -1),
-            ("0", 0),
-            ("0.0", 0),
-            ("60.0", 60),
-            ("100", 100),
+            ("null", 0.0),
+            (r#""-1""#, -1.0),
+            (r#""0""#, 0.0),
+            (r#""60""#, 60.0),
+            (r#""100""#, 100.0),
+            ("-1", -1.0),
+            ("-1.0", -1.0),
+            ("0", 0.0),
+            ("0.0", 0.0),
+            ("0.6", 60.0),
+            ("60.0", 60.0),
+            ("60.5", 60.5),
+            ("100", 100.0),
         ] {
             let document = PROGRESS.replacen(
                 "\"min_score_pct\": 60",
@@ -830,12 +844,13 @@ mod tests {
             parse_group_progress(&missing, "unit-1", "group-1")
                 .unwrap()
                 .min_score_percent(),
-            0
+            0.0
         );
         for replacement in [
             "2147483648",
             "-2147483649",
-            "60.5",
+            "-1.5",
+            "100.5",
             "true",
             "{}",
             r#""2147483648""#,
@@ -892,7 +907,7 @@ mod tests {
         assert_eq!(micro.perm(), 1);
         assert!(!micro.is_completed());
         assert!(micro.required());
-        assert_eq!(micro.min_score_percent(), 60);
+        assert_eq!(micro.min_score_percent(), 60.0);
         assert!(!micro.statistic_mode_out());
         assert_eq!(micro.opens_at().unwrap().timestamp(), 1_785_542_400);
         assert_eq!(micro.closes_at().unwrap().timestamp(), 1_790_812_800);

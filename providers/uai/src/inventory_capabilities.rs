@@ -332,7 +332,7 @@ mod tests {
         assert!(tasks[0].opens_at.is_some());
         assert!(tasks[0].closes_at.is_some());
         assert_eq!(tasks[0].normalized["strategy"]["required"], true);
-        assert_eq!(tasks[0].normalized["strategy"]["min_score_percent"], 60);
+        assert_eq!(tasks[0].normalized["strategy"]["min_score_percent"], 60.0);
         assert_eq!(
             tasks[0].normalized["strategy"]["opens_at"],
             "2026-08-01T00:00:00Z"
@@ -344,7 +344,7 @@ mod tests {
         );
         assert_eq!(
             tasks[0].normalized["course_unit_strategy"]["min_score_percent"],
-            60
+            60.0
         );
         assert_eq!(tasks[1].normalized["strategy"]["required"], false);
         assert!(tasks[1].opens_at.is_none());
