@@ -20,7 +20,7 @@ export function CourseDetailPage() {
   if (course.isLoading) return <PageShell title="课程详情" description="正在读取课程。"><TableSkeleton /></PageShell>;
   if (!course.data) return <PageShell title="课程详情" description="课程不存在或当前身份不可访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
   const isWelearn = account.data?.provider_id === "welearn";
-  const accountHref = isWelearn ? `/provider-accounts/${course.data.provider_account_id}?courseId=${encodeURIComponent(course.data.id)}&remoteCourseId=${encodeURIComponent(course.data.remote_id)}` : `/provider-accounts/${course.data.provider_account_id}`;
+  const accountHref = isWelearn ? `/provider-accounts/${course.data.provider_account_id}?courseId=${encodeURIComponent(course.data.id)}` : `/provider-accounts/${course.data.provider_account_id}`;
   return <PageShell title={course.data.title} description={`${course.data.term ?? "未标注学期"} · ${course.data.teacher ?? "未标注教师"}`} actions={<Link className={buttonVariants({ variant: "outline" })} to={accountHref}><ExternalLink className="size-4" />{isWelearn ? "预填 WELearn 批执行" : "查看平台账号"}</Link>}>
     {error ? <QueryError error={error} /> : null}
     <div className="grid gap-4 md:grid-cols-3"><Summary label="本地 Course UUID" value={course.data.id} /><Summary label="规范化远端 Course ID" value={course.data.remote_id} /><Summary label="最近发现" value={formatTimestamp(course.data.last_seen_at)} /></div>
