@@ -68,7 +68,7 @@ impl TaskProgressCapability for ChaoxingTaskProgress {
         if module == "resource" {
             return self.resource.read_progress(context, remote_task_id).await;
         }
-        if !matches!(module, "chapter" | "work" | "exam") {
+        if !matches!(module, "chapter" | "work" | "exam" | "sign") {
             return Err(protocol_drift(
                 "Chaoxing progress received an unsupported task identity",
             ));

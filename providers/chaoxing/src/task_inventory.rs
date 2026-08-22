@@ -14,7 +14,7 @@ use reqwest::Url;
 use zeroize::Zeroize;
 
 use crate::{
-    ChaoxingCourseScope,
+    ChaoxingCourseScope, ChaoxingSignActivityRead,
     inventory::{
         ChaoxingExamFacts, apply_exam_detail_facts, apply_work_detail_state,
         parse_exam_detail_facts, parse_exam_inventory_entries, parse_work_inventory_entries,
@@ -533,6 +533,7 @@ pub trait ChaoxingInventoryTransport: Send + Sync {
 pub struct ChaoxingTaskInventory {
     metadata: ProviderMetadata,
     transport: Arc<dyn ChaoxingInventoryTransport>,
+    sign_activity: Option<Arc<ChaoxingSignActivityRead>>,
 }
 
 impl ChaoxingTaskInventory {
@@ -545,6 +546,24 @@ impl ChaoxingTaskInventory {
         Ok(Self {
             metadata: development_metadata()?,
             transport,
+            sign_activity: None,
+        })
+    }
+
+    /// Enables the audited activity-list and detail reads in the same
+    /// course-scoped Task inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if the compile-time Provider ID is invalid.
+    pub fn try_new_with_sign_activity(
+        transport: Arc<dyn ChaoxingInventoryTransport>,
+        sign_activity: Arc<ChaoxingSignActivityRead>,
+    ) -> ProviderResult<Self> {
+        Ok(Self {
+            metadata: development_metadata()?,
+            transport,
+            sign_activity: Some(sign_activity),
         })
     }
 }
@@ -555,6 +574,10 @@ impl fmt::Debug for ChaoxingTaskInventory {
             .debug_struct("ChaoxingTaskInventory")
             .field("metadata", &self.metadata)
             .field("transport", &"configured")
+            .field(
+                "sign_activity",
+                &self.sign_activity.as_ref().map(|_| "configured"),
+            )
             .finish()
     }
 }
@@ -667,6 +690,9 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
         tasks.extend(
             parse_exam_tasks_with_details(self.transport.as_ref(), context, route, &exam).await?,
         );
+        if let Some(sign_activity) = &self.sign_activity {
+            tasks.extend(sign_activity.list_course_tasks(context, course).await?);
+        }
         advertise_browser_bridge(&mut tasks);
         Ok(tasks)
     }

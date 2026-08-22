@@ -1,8 +1,9 @@
 use std::{collections::HashSet, fmt, sync::Arc};
 
+use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
-    ProviderResult, RemoteCourse,
+    ProviderResult, RemoteCourse, RemoteTask,
 };
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
@@ -374,6 +375,27 @@ impl ChaoxingSignActivityRead {
         parse_sign_activity_list(&document, &route.parser_scope()?)
     }
 
+    /// Exposes every freshly rebound sign-in activity as a normal Task which
+    /// can be opened through the visible `BrowserBridge`. Status codes remain
+    /// raw because current donors disagree on their completion meaning.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when list/detail evidence changes during the scan.
+    pub async fn list_course_tasks(
+        &self,
+        context: &ProviderContext,
+        course: &RemoteCourse,
+    ) -> ProviderResult<Vec<RemoteTask>> {
+        let activities = self.list_course(context, course).await?;
+        let mut tasks = Vec::with_capacity(activities.len());
+        for activity in activities {
+            let detail = self.read_detail(context, course, &activity).await?;
+            tasks.push(activity.to_remote_task(&detail)?);
+        }
+        Ok(tasks)
+    }
+
     /// Reads one exact activity detail after rebinding it to a fresh course.
     ///
     /// The returned detail is structural evidence only. It does not prove that
@@ -410,6 +432,68 @@ impl ChaoxingSignActivityRead {
             ));
         }
         Ok(())
+    }
+}
+
+impl ChaoxingSignActivity {
+    fn to_remote_task(&self, detail: &ChaoxingSignDetail) -> ProviderResult<RemoteTask> {
+        if detail.remote_id != self.remote_id
+            || detail.discovery_fingerprint != self.fingerprint
+            || detail.variant != self.variant
+        {
+            return Err(remote_changed(
+                "Chaoxing sign-in detail changed before Task materialization",
+            ));
+        }
+        let variant = variant_label(detail.variant);
+        let normalized = json!({
+            "schema": "chaoxing.sign-task.v1",
+            "module": "sign",
+            "course_id": self.course_id,
+            "class_id": self.class_id,
+            "activity_id": self.activity_id,
+            "variant": variant,
+            "provider_status": detail.provider_status,
+            "user_status": self.user_status,
+            "start_time_millis": detail.start_time_millis,
+            "end_time_millis": detail.end_time_millis,
+            "photo_required": self.if_photo,
+            "refreshes_qr_code": detail.refreshes_qr_code,
+            "detail_fingerprint": detail.fingerprint,
+        });
+        Ok(RemoteTask {
+            remote_id: self.remote_id.clone(),
+            course_remote_id: Some(self.remote_course_id.clone()),
+            title: self.display_label.clone(),
+            source_type: SourceType::Other,
+            assessment_class: AssessmentClass::Routine,
+            remote_state: RemoteState::Unknown,
+            opens_at: None,
+            due_at: None,
+            closes_at: None,
+            capabilities: vec![TaskCapability::ProgressRead, TaskCapability::BrowserBridge],
+            fingerprint: digest_json(&normalized)?,
+            normalized,
+            raw_sanitized: json!({
+                "variant": variant,
+                "provider_status": detail.provider_status,
+                "user_status": self.user_status,
+                "start_time_millis": detail.start_time_millis,
+                "end_time_millis": detail.end_time_millis,
+            }),
+        })
+    }
+}
+
+const fn variant_label(variant: ChaoxingSignVariant) -> &'static str {
+    match variant {
+        ChaoxingSignVariant::Normal => "normal",
+        ChaoxingSignVariant::QrCode => "qr_code",
+        ChaoxingSignVariant::Gesture => "gesture",
+        ChaoxingSignVariant::Location => "location",
+        ChaoxingSignVariant::Photo => "photo",
+        ChaoxingSignVariant::AmbiguousCodeOrPhoto => "ambiguous_code_or_photo",
+        ChaoxingSignVariant::Unknown(_) => "unknown",
     }
 }
 
@@ -1045,6 +1129,15 @@ mod tests {
         assert_eq!(detail.end_time_millis(), activity.end_time_millis());
         assert_eq!(detail.refreshes_qr_code(), Some(false));
         assert_eq!(detail.fingerprint().len(), 64);
+        let task = activity.to_remote_task(&detail).unwrap();
+        assert_eq!(task.remote_id, "sign:1001:2001:7001");
+        assert_eq!(task.source_type, SourceType::Other);
+        assert_eq!(task.remote_state, RemoteState::Unknown);
+        assert_eq!(
+            task.capabilities,
+            [TaskCapability::ProgressRead, TaskCapability::BrowserBridge]
+        );
+        assert_eq!(task.normalized["variant"], "normal");
     }
 
     #[test]

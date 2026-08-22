@@ -118,7 +118,7 @@ impl<'a> ChaoxingTaskIdentity<'a> {
         let course_id = fields.next().unwrap_or_default();
         let class_id = fields.next().unwrap_or_default();
         let task_component = fields.next().unwrap_or_default();
-        if !matches!(module, "chapter" | "resource" | "work" | "exam")
+        if !matches!(module, "chapter" | "resource" | "work" | "exam" | "sign")
             || !valid_component(course_id)
             || !valid_component(class_id)
             || task_component.is_empty()

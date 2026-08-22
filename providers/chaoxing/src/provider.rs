@@ -7,9 +7,9 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 use crate::{
     ChaoxingAuthentication, ChaoxingBrowserBridge, ChaoxingCourseEnrollment,
     ChaoxingCourseInventory, ChaoxingQuestionRead, ChaoxingResourceExecution,
-    ChaoxingSessionResolver, ChaoxingSubmissionBuild, ChaoxingSubmissionExecute,
-    ChaoxingSubmissionVerify, ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
-    NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
+    ChaoxingSessionResolver, ChaoxingSignActivityRead, ChaoxingSubmissionBuild,
+    ChaoxingSubmissionExecute, ChaoxingSubmissionVerify, ChaoxingTaskDetail, ChaoxingTaskInventory,
+    ChaoxingTaskProgress, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
     NativeChaoxingQrAuthenticationTransport, StoredChaoxingSessionResolver,
     metadata::development_metadata, runtime_settings::runtime_settings_schema,
 };
@@ -75,7 +75,13 @@ fn compose_development_provider(
         course_inventory.clone(),
         inventory_transport.clone(),
     )?);
-    let task_inventory = Arc::new(ChaoxingTaskInventory::try_new(inventory_transport.clone())?);
+    let sign_activity = Arc::new(ChaoxingSignActivityRead::try_new(
+        inventory_transport.clone(),
+    )?);
+    let task_inventory = Arc::new(ChaoxingTaskInventory::try_new_with_sign_activity(
+        inventory_transport.clone(),
+        sign_activity,
+    )?);
     let task_detail = Arc::new(ChaoxingTaskDetail::try_new(
         course_inventory.clone(),
         task_inventory.clone(),
