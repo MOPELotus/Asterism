@@ -5336,6 +5336,20 @@ pub trait BrowserBridgeCapability: ProviderIdentity {
         remote_task_id: &str,
     ) -> ProviderResult<BrowserSessionSpec>;
 
+    /// Builds the first durable command for a freshly bound helper runtime.
+    /// Providers without a multi-command workflow remain fail-closed.
+    async fn begin_browser_bridge_workflow(
+        &self,
+        _context: &ProviderContext,
+        _settings: &ResolvedProviderRuntimeSettings,
+        _request: BrowserBridgeWorkflowStartRequest,
+    ) -> ProviderResult<BrowserBridgeWorkflowStart> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not expose a BrowserBridge workflow start",
+        ))
+    }
+
     /// Classifies one Provider-namespaced result type without parsing result
     /// bytes. Unknown types remain outside terminal credential orchestration.
     fn browser_bridge_result_disposition(
@@ -5389,6 +5403,65 @@ pub trait BrowserBridgeCapability: ProviderIdentity {
             crate::ProviderErrorKind::UnsupportedTask,
             "Provider does not accept BrowserBridge workflow results",
         ))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeWorkflowStartRequest {
+    pub remote_task_id: String,
+    pub session_id: asterism_domain::BrowserBridgeSessionId,
+    pub runtime_binding: BrowserBridgeRuntimeBinding,
+    pub runtime_profile_digest: [u8; 32],
+    pub issued_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeWorkflowStart {
+    pub exchange: BrowserBridgeExchange,
+    pub command_artifact: SecretValue,
+    pub workflow_plan: BrowserBridgeWorkflowPlanArtifact,
+    pub runtime_state: BrowserBridgeWorkflowRuntimeState,
+}
+
+impl BrowserBridgeWorkflowStart {
+    /// # Errors
+    ///
+    /// Rejects a non-initial, unbound or internally inconsistent workflow.
+    pub fn validate(&self, request: &BrowserBridgeWorkflowStartRequest) -> ProviderResult<()> {
+        let command_digest: [u8; 32] = Sha256::digest(self.command_artifact.expose_secret()).into();
+        if request.remote_task_id.is_empty()
+            || request.runtime_profile_digest == [0; 32]
+            || request.runtime_binding.validate().is_err()
+            || request.runtime_binding.session_id != request.session_id
+            || request.runtime_binding.bound_at > request.issued_at
+            || self.exchange.validate().is_err()
+            || self.exchange.state != BrowserBridgeExchangeState::Issued
+            || self.exchange.session_id != request.session_id
+            || self.exchange.sequence != 1
+            || self.exchange.issued_at != request.issued_at
+            || self.command_artifact.expose_secret().is_empty()
+            || self.command_artifact.expose_secret().len() > 256 * 1_024
+            || self.exchange.command_digest != command_digest
+        {
+            return Err(browser_bridge_workflow_error());
+        }
+        self.runtime_state.validate_for_exchange(&self.exchange)
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        BrowserBridgeExchange,
+        SecretValue,
+        BrowserBridgeWorkflowPlanArtifact,
+        BrowserBridgeWorkflowRuntimeState,
+    ) {
+        (
+            self.exchange,
+            self.command_artifact,
+            self.workflow_plan,
+            self.runtime_state,
+        )
     }
 }
 

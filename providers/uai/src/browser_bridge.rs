@@ -8,7 +8,8 @@ use asterism_domain::{
 use asterism_provider_api::{
     BrowserBridgeCapability, BrowserBridgeResultDisposition, BrowserBridgeWorkflowNextCommand,
     BrowserBridgeWorkflowResult, BrowserBridgeWorkflowResultRequest,
-    BrowserBridgeWorkflowRuntimeState, BrowserSessionSpec, CourseInventoryCapability,
+    BrowserBridgeWorkflowRuntimeState, BrowserBridgeWorkflowStart,
+    BrowserBridgeWorkflowStartRequest, BrowserSessionSpec, CourseInventoryCapability,
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
     ProviderResult, RemoteProgress, RemoteTaskDetail, TaskDetailCapability,
     TaskInventoryCapability,
@@ -5295,6 +5296,98 @@ impl BrowserBridgeCapability for UaiBrowserBridge {
         Ok(spec)
     }
 
+    async fn begin_browser_bridge_workflow(
+        &self,
+        context: &ProviderContext,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        request: BrowserBridgeWorkflowStartRequest,
+    ) -> ProviderResult<BrowserBridgeWorkflowStart> {
+        validate_context(context, &self.metadata)?;
+        let validation_request = request.clone();
+        let workflow = self.workflow.as_ref().ok_or_else(workflow_core_gap)?;
+        let expected_course_id = workflow_course_remote_id(&request.remote_task_id)?;
+        let courses = workflow.courses.list_courses(context).await?;
+        let mut matching = courses
+            .into_iter()
+            .filter(|course| course.remote_id == expected_course_id);
+        let course = matching.next().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI BrowserBridge workflow Course disappeared before start",
+            )
+        })?;
+        if matching.next().is_some() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI BrowserBridge workflow Course inventory is ambiguous",
+            ));
+        }
+        let tasks = workflow.tasks.list_tasks(context, Some(&course)).await?;
+        let preflight = crate::build_course_residence_batch_plan(&course, &tasks, settings, 0)?;
+        let start_ordinal = preflight
+            .micros()
+            .iter()
+            .find(|micro| {
+                micro
+                    .tasks()
+                    .iter()
+                    .any(|task| task.remote_task_id() == request.remote_task_id)
+            })
+            .map(crate::UaiCourseResidenceMicro::ordinal)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::RemoteChanged,
+                    "UAI BrowserBridge workflow Task disappeared from fresh Course membership",
+                )
+            })?;
+        let batch =
+            crate::build_course_residence_batch_plan(&course, &tasks, settings, start_ordinal)?;
+        let child = crate::build_course_residence_child_plan(
+            &course,
+            &tasks,
+            settings,
+            request.runtime_profile_digest,
+            &request.remote_task_id,
+            start_ordinal,
+        )?;
+        let plan = self
+            .residence_plan(context, &request.remote_task_id, settings)
+            .await?;
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &request.session_id.to_string(),
+            &request.runtime_binding.observed_origin,
+            &request.runtime_binding.frame_id,
+        )?;
+        let command = UaiBrowserCommandEnvelope::scan_menu(&plan, &binding, 1)?;
+        let cursor = UaiBrowserResidenceCursor::begin(&batch, &plan, &command)?;
+        let handoff = self
+            .issue_cursor_exchange(
+                context,
+                &request.remote_task_id,
+                settings,
+                &batch,
+                request.session_id,
+                &cursor,
+                command,
+                request.issued_at,
+            )
+            .await?
+            .into_persistence_handoff()?;
+        let (_, exchange, command_artifact, state_metadata, state_artifact) = handoff.into_parts();
+        let start = BrowserBridgeWorkflowStart {
+            exchange,
+            command_artifact,
+            workflow_plan: child.to_browser_workflow_plan_artifact()?,
+            runtime_state: BrowserBridgeWorkflowRuntimeState {
+                metadata: state_metadata,
+                artifact: state_artifact,
+            },
+        };
+        start.validate(&validation_request)?;
+        Ok(start)
+    }
+
     fn browser_bridge_result_disposition(
         &self,
         result_type: &str,
@@ -5725,6 +5818,46 @@ mod tests {
         assert!(!first.isolation_key.contains("group-1"));
         assert!(!first.start_url.contains("token"));
         assert!(!first.start_url.contains("openid"));
+    }
+
+    #[tokio::test]
+    async fn bound_runtime_starts_with_a_persistable_sequence_one_cursor() {
+        let bridge = workflow_browser_bridge();
+        let context = provider_context();
+        let session_id = BrowserBridgeSessionId::new();
+        let bound_at = chrono::Utc::now();
+        let request = BrowserBridgeWorkflowStartRequest {
+            remote_task_id: "group:2001:unit-z:group-z".to_owned(),
+            session_id,
+            runtime_binding: asterism_domain::BrowserBridgeRuntimeBinding {
+                session_id,
+                observed_origin: UCONTENT_ORIGIN.to_owned(),
+                frame_id: "top-frame:1".to_owned(),
+                bound_at,
+            },
+            runtime_profile_digest: [7; 32],
+            issued_at: bound_at,
+        };
+        let started = bridge
+            .begin_browser_bridge_workflow(
+                &context,
+                &browser_runtime_settings(false),
+                request.clone(),
+            )
+            .await
+            .unwrap();
+
+        started.validate(&request).unwrap();
+        assert_eq!(started.exchange.sequence, 1);
+        assert_eq!(started.exchange.session_id, session_id);
+        assert_eq!(
+            started.runtime_state.metadata.state_type,
+            UAI_BROWSER_CURSOR_STATE_TYPE
+        );
+        assert_eq!(
+            started.workflow_plan.artifact_type(),
+            crate::UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE
+        );
     }
 
     #[tokio::test]

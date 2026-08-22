@@ -1,25 +1,32 @@
 use std::{fmt, net::SocketAddr, str::FromStr};
 
 use asterism_domain::{
-    BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding, BrowserBridgeSession,
-    BrowserBridgeSessionError, BrowserBridgeSessionId, BrowserBridgeSessionState, ProviderId,
-    TaskId, Timestamp,
+    AuthState, BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
+    BrowserBridgeSession, BrowserBridgeSessionError, BrowserBridgeSessionId,
+    BrowserBridgeSessionState, ProviderId, TaskId, Timestamp,
 };
 use asterism_engine::{
     BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandDispatchService,
-    BrowserBridgeHelperSessionError, BrowserBridgeHelperSessionService,
-    BrowserBridgeResultArtifactService, BrowserBridgeResultReceiveRequest,
-    BrowserBridgeRuntimeBindRequest, BrowserBridgeSessionAccessRequest,
+    BrowserBridgeCommandIssueRequest, BrowserBridgeCommandService, BrowserBridgeHelperSessionError,
+    BrowserBridgeHelperSessionService, BrowserBridgeResultArtifactService,
+    BrowserBridgeResultReceiveRequest, BrowserBridgeRuntimeBindRequest,
+    BrowserBridgeRuntimeStateIssue, BrowserBridgeSessionAccessRequest,
     BrowserBridgeSessionCancelRequest, BrowserBridgeSessionClaimRequest,
-    BrowserBridgeSessionCreateRequest, ProviderTaskBrowserSessionService,
+    BrowserBridgeSessionCreateRequest, BrowserBridgeWorkflowContextIssue,
+    BrowserBridgeWorkflowPlanIssue, ProviderTaskBrowserSessionService,
     ReadTaskBrowserSessionCommand,
 };
-use asterism_provider_api::BrowserSessionSpec;
+use asterism_provider_api::{
+    BrowserBridgeWorkflowStartRequest, BrowserSessionSpec, ProviderContext, ProviderError,
+    ProviderErrorKind,
+};
 use asterism_secrets::{SecretAccess, SecretActor, SecretString, SecretValue};
 use asterism_storage::{
     BrowserBridgeCommandDispatchRecord, BrowserBridgeResultArtifactRecord,
-    BrowserBridgeRuntimeBindingRecord, SqliteBrowserBridgeSessionRepository,
-    SqliteProviderAccountRepository, SqliteTaskQueryRepository,
+    BrowserBridgeRuntimeBindingRecord, ProviderAccountRuntimeRepository,
+    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
+    SqliteBrowserBridgeSessionRepository, SqliteProviderAccountRepository,
+    SqliteProviderRuntimeSettingsRepository, SqliteTaskQueryRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -203,6 +210,15 @@ pub(super) async fn bind_browser_bridge_runtime(
     let session_id = parse_session_id(&session_id)?;
     let access_token =
         bridge_authorization(&headers).ok_or_else(ApiError::invalid_browser_bridge_token)?;
+    let bind_token = SecretString::new(access_token.expose_secret().to_owned());
+    let snapshot = bridge_service(&state)?
+        .authenticate_access(BrowserBridgeSessionAccessRequest {
+            session_id,
+            access_token,
+            authenticated_at: Utc::now(),
+        })
+        .await
+        .map_err(map_bridge_error)?;
     let record = bridge_service(&state)?
         .bind_runtime(BrowserBridgeRuntimeBindRequest {
             binding: BrowserBridgeRuntimeBinding {
@@ -211,7 +227,7 @@ pub(super) async fn bind_browser_bridge_runtime(
                 frame_id: request.frame_id,
                 bound_at: Utc::now(),
             },
-            access_token,
+            access_token: bind_token,
             correlation_id: request_id(&headers)?.to_owned(),
         })
         .await
@@ -229,6 +245,28 @@ pub(super) async fn bind_browser_bridge_runtime(
             ));
         }
     };
+    let provider_has_durable_workflow = state
+        .providers
+        .get(&snapshot.session.provider_id)
+        .and_then(|entry| entry.browser_bridge.as_ref())
+        .is_some_and(|capability| {
+            !capability
+                .browser_bridge_intermediate_result_types()
+                .is_empty()
+                || !capability
+                    .browser_bridge_execution_result_types()
+                    .is_empty()
+        });
+    if !duplicate && provider_has_durable_workflow {
+        issue_initial_browser_workflow(
+            &state,
+            &snapshot.session,
+            &snapshot.spec,
+            &binding,
+            &headers,
+        )
+        .await?;
+    }
     Ok(crate::auth::no_store(
         Json(BrowserBridgeRuntimeBindingResponse {
             session_id: binding.session_id,
@@ -239,6 +277,142 @@ pub(super) async fn bind_browser_bridge_runtime(
         })
         .into_response(),
     ))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the 0.1.0 BrowserBridge start keeps the direct Task, account, settings and artifact wiring visible"
+)]
+async fn issue_initial_browser_workflow(
+    state: &ApiState,
+    session: &BrowserBridgeSession,
+    spec: &BrowserSessionSpec,
+    binding: &BrowserBridgeRuntimeBinding,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let task = SqliteTaskQueryRepository::new(state.database.clone())
+        .find_owned_task(session.owner_user_id, session.task_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("task_not_found"))?;
+    let account = SqliteProviderAccountRepository::new(state.database.clone())
+        .find_runtime_provider_account(session.provider_account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|account| {
+            account.owner_id == session.owner_user_id
+                && account.id == task.provider_account_id
+                && account.provider_id == session.provider_id
+                && account.auth_state == AuthState::Authenticated
+        })
+        .ok_or_else(|| {
+            ApiError::conflict(
+                "browser_bridge_account_changed",
+                "the BrowserBridge account binding changed before runtime start",
+            )
+        })?;
+    let entry = state.providers.get(&account.provider_id).ok_or_else(|| {
+        ApiError::conflict(
+            "provider_not_registered",
+            "the BrowserBridge Provider is not registered",
+        )
+    })?;
+    if entry.metadata.implementation_version != session.provider_version {
+        return Err(ApiError::conflict(
+            "browser_bridge_provider_changed",
+            "the BrowserBridge Provider version changed before runtime start",
+        ));
+    }
+    let capability = entry.browser_bridge.as_ref().ok_or_else(|| {
+        ApiError::conflict(
+            "task_browser_bridge_unavailable",
+            "the Provider cannot start BrowserBridge for this task",
+        )
+    })?;
+    let settings = SqliteProviderRuntimeSettingsRepository::new(state.database.clone());
+    let provider_patch = settings
+        .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::Provider {
+            provider_id: account.provider_id.clone(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let account_patch = settings
+        .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::ProviderAccount {
+            provider_id: account.provider_id.clone(),
+            provider_account_id: account.id,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let task_patch = settings
+        .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::Task {
+            provider_id: account.provider_id.clone(),
+            provider_account_id: account.id,
+            task_id: task.id,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let (resolved_settings, _) = entry
+        .runtime_settings
+        .resolve_with_sources(
+            provider_patch.as_ref().map(|record| &record.patch),
+            account_patch.as_ref().map(|record| &record.patch),
+            task_patch.as_ref().map(|record| &record.patch),
+        )
+        .map_err(|_| {
+            ApiError::conflict(
+                "provider_runtime_settings_invalid",
+                "the Provider runtime settings cannot start BrowserBridge",
+            )
+        })?;
+    let issued_at = Utc::now();
+    let start_request = BrowserBridgeWorkflowStartRequest {
+        remote_task_id: task.remote_id,
+        session_id: session.id,
+        runtime_binding: binding.clone(),
+        runtime_profile_digest: spec.digest().map_err(ApiError::internal)?,
+        issued_at,
+    };
+    let start = capability
+        .begin_browser_bridge_workflow(
+            &ProviderContext {
+                provider_id: account.provider_id.clone(),
+                account_id: account.id,
+                credential_refs: account.credential_refs,
+                correlation_id: request_id(headers)?.to_owned(),
+            },
+            &resolved_settings,
+            start_request.clone(),
+        )
+        .await
+        .map_err(map_workflow_start_provider_error)?;
+    start
+        .validate(&start_request)
+        .map_err(map_workflow_start_provider_error)?;
+    let (exchange, command_artifact, workflow_plan, runtime_state) = start.into_parts();
+    let (artifact_type, _, artifact) = workflow_plan.into_parts();
+    BrowserBridgeCommandService::new(bridge_artifact_repository(
+        state,
+        account.provider_id.clone(),
+    )?)
+    .issue(BrowserBridgeCommandIssueRequest {
+        exchange,
+        command_artifact,
+        runtime_state: Some(BrowserBridgeRuntimeStateIssue {
+            metadata: runtime_state.metadata,
+            state_artifact: runtime_state.artifact,
+        }),
+        workflow_context: Some(BrowserBridgeWorkflowContextIssue {
+            runtime_settings: resolved_settings,
+            workflow_plan: Some(BrowserBridgeWorkflowPlanIssue {
+                artifact_type,
+                artifact,
+            }),
+        }),
+        access: bridge_secret_access(headers, "issue initial BrowserBridge workflow command")?,
+    })
+    .await
+    .map_err(map_command_service_error)?;
+    Ok(())
 }
 
 pub(super) async fn dispatch_browser_bridge_command(
@@ -543,6 +717,43 @@ fn map_command_service_error(error: asterism_engine::BrowserBridgeCommandService
         error @ asterism_engine::BrowserBridgeCommandServiceError::SecretStore(_) => {
             ApiError::internal(error)
         }
+    }
+}
+
+fn map_workflow_start_provider_error(error: ProviderError) -> ApiError {
+    match error.kind {
+        ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+            error.retry_after_seconds.unwrap_or(60).clamp(1, 86_400),
+        ),
+        ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+            tracing::warn!(%error, "Provider BrowserBridge workflow start is unavailable");
+            ApiError::service_unavailable(
+                "provider_unavailable",
+                "the Provider is temporarily unavailable",
+            )
+        }
+        ProviderErrorKind::Authentication
+        | ProviderErrorKind::Authorization
+        | ProviderErrorKind::HumanRequired => ApiError::conflict(
+            "provider_action_required",
+            "the Provider requires authentication or user action",
+        ),
+        ProviderErrorKind::RemoteChanged => ApiError::conflict(
+            "task_remote_changed",
+            "the remote task no longer matches the BrowserBridge workflow",
+        ),
+        ProviderErrorKind::UnsupportedTask => ApiError::conflict(
+            "task_browser_bridge_unavailable",
+            "the Provider cannot start BrowserBridge for this task",
+        ),
+        ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+            tracing::warn!(%error, "Provider returned an invalid BrowserBridge workflow start");
+            ApiError::bad_gateway(
+                "provider_browser_workflow_invalid",
+                "the Provider returned an invalid BrowserBridge workflow start",
+            )
+        }
+        ProviderErrorKind::Internal => ApiError::internal(error),
     }
 }
 
