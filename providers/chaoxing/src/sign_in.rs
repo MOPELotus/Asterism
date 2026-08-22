@@ -381,19 +381,17 @@ impl ChaoxingSignActivityRead {
     ///
     /// # Errors
     ///
-    /// Returns a typed error when list/detail evidence changes during the scan.
+    /// Returns a typed error when the list evidence cannot be materialized.
     pub async fn list_course_tasks(
         &self,
         context: &ProviderContext,
         course: &RemoteCourse,
     ) -> ProviderResult<Vec<RemoteTask>> {
-        let activities = self.list_course(context, course).await?;
-        let mut tasks = Vec::with_capacity(activities.len());
-        for activity in activities {
-            let detail = self.read_detail(context, course, &activity).await?;
-            tasks.push(activity.to_remote_task(&detail)?);
-        }
-        Ok(tasks)
+        self.list_course(context, course)
+            .await?
+            .iter()
+            .map(ChaoxingSignActivity::to_remote_task)
+            .collect()
     }
 
     /// Reads one exact activity detail after rebinding it to a fresh course.
@@ -436,16 +434,8 @@ impl ChaoxingSignActivityRead {
 }
 
 impl ChaoxingSignActivity {
-    fn to_remote_task(&self, detail: &ChaoxingSignDetail) -> ProviderResult<RemoteTask> {
-        if detail.remote_id != self.remote_id
-            || detail.discovery_fingerprint != self.fingerprint
-            || detail.variant != self.variant
-        {
-            return Err(remote_changed(
-                "Chaoxing sign-in detail changed before Task materialization",
-            ));
-        }
-        let variant = variant_label(detail.variant);
+    fn to_remote_task(&self) -> ProviderResult<RemoteTask> {
+        let variant = variant_label(self.variant);
         let normalized = json!({
             "schema": "chaoxing.sign-task.v1",
             "module": "sign",
@@ -453,13 +443,12 @@ impl ChaoxingSignActivity {
             "class_id": self.class_id,
             "activity_id": self.activity_id,
             "variant": variant,
-            "provider_status": detail.provider_status,
+            "provider_status": self.provider_status,
             "user_status": self.user_status,
-            "start_time_millis": detail.start_time_millis,
-            "end_time_millis": detail.end_time_millis,
+            "start_time_millis": self.start_time_millis,
+            "end_time_millis": self.end_time_millis,
             "photo_required": self.if_photo,
-            "refreshes_qr_code": detail.refreshes_qr_code,
-            "detail_fingerprint": detail.fingerprint,
+            "discovery_fingerprint": self.fingerprint,
         });
         Ok(RemoteTask {
             remote_id: self.remote_id.clone(),
@@ -476,10 +465,10 @@ impl ChaoxingSignActivity {
             normalized,
             raw_sanitized: json!({
                 "variant": variant,
-                "provider_status": detail.provider_status,
+                "provider_status": self.provider_status,
                 "user_status": self.user_status,
-                "start_time_millis": detail.start_time_millis,
-                "end_time_millis": detail.end_time_millis,
+                "start_time_millis": self.start_time_millis,
+                "end_time_millis": self.end_time_millis,
             }),
         })
     }
@@ -1071,6 +1060,15 @@ mod tests {
         assert_eq!(activities[5].provider_status(), 2);
         assert_eq!(activities[5].user_status(), None);
         assert_eq!(activities[0].fingerprint().len(), 64);
+        let task = activities[0].to_remote_task().unwrap();
+        assert_eq!(task.remote_id, "sign:1001:2001:7001");
+        assert_eq!(task.source_type, SourceType::Other);
+        assert_eq!(task.remote_state, RemoteState::Unknown);
+        assert_eq!(
+            task.capabilities,
+            [TaskCapability::ProgressRead, TaskCapability::BrowserBridge]
+        );
+        assert_eq!(task.normalized["variant"], "normal");
     }
 
     #[tokio::test]
@@ -1129,15 +1127,6 @@ mod tests {
         assert_eq!(detail.end_time_millis(), activity.end_time_millis());
         assert_eq!(detail.refreshes_qr_code(), Some(false));
         assert_eq!(detail.fingerprint().len(), 64);
-        let task = activity.to_remote_task(&detail).unwrap();
-        assert_eq!(task.remote_id, "sign:1001:2001:7001");
-        assert_eq!(task.source_type, SourceType::Other);
-        assert_eq!(task.remote_state, RemoteState::Unknown);
-        assert_eq!(
-            task.capabilities,
-            [TaskCapability::ProgressRead, TaskCapability::BrowserBridge]
-        );
-        assert_eq!(task.normalized["variant"], "normal");
     }
 
     #[test]
