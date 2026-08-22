@@ -4,16 +4,16 @@ import { Link } from "react-router";
 import type { Task } from "@/api/generated/types.gen.ts";
 import { PageShell } from "@/components/page-shell.tsx";
 import { QueryError, TableSkeleton } from "@/components/query-feedback.tsx";
-import { StateBadge } from "@/components/state-badge.tsx";
 import { Card, CardContent } from "@/components/ui/card.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx";
-import { formatTimestamp, shortId } from "@/lib/format.ts";
+import { formatTimestamp } from "@/lib/format.ts";
+import { remoteStateLabel, taskTypeLabels } from "@/lib/learning-display.ts";
 
 export function TasksPage() {
   const tasks = useList<Task>({ resource: "tasks", pagination: { pageSize: 100 } });
 
   return (
-    <PageShell title="任务" description="汇总所有 Provider 发现的标准化学习任务。">
+    <PageShell title="任务" description="全部学习平台账号已同步的课程任务。">
       {tasks.query.error ? <QueryError error={tasks.query.error} /> : null}
       {tasks.query.isLoading ? <TableSkeleton /> : (
         <Card><CardContent className="p-0">
@@ -25,11 +25,11 @@ export function TasksPage() {
             <TableBody>
               {tasks.result.data?.map((task) => (
                 <TableRow key={task.id}>
-                  <TableCell className="max-w-md"><Link className="block truncate font-medium text-primary hover:underline" to={`/tasks/${task.id}`}>{task.title}</Link><div className="font-mono text-xs text-muted-foreground">{shortId(task.id)}</div></TableCell>
-                  <TableCell>{task.course_id ? <Link className="font-mono text-xs text-primary hover:underline" to={`/courses/${task.course_id}`}>{shortId(task.course_id)}</Link> : "—"}</TableCell>
-                  <TableCell>{task.source_type}</TableCell>
-                  <TableCell><StateBadge state={task.remote_state} /></TableCell>
-                  <TableCell><StateBadge state={task.orchestration_state} /></TableCell>
+                  <TableCell className="max-w-md"><Link className="block truncate font-medium text-primary hover:underline" to={`/tasks/${task.id}`}>{task.title}</Link></TableCell>
+                  <TableCell>{task.course_id ? <Link className="text-primary hover:underline" to={`/courses/${task.course_id}`}>查看课程</Link> : "—"}</TableCell>
+                  <TableCell>{taskTypeLabels[task.source_type]}</TableCell>
+                  <TableCell>{remoteStateLabel(task.remote_state)}</TableCell>
+                  <TableCell>{task.orchestration_state === "succeeded" ? "执行完成" : task.orchestration_state === "running" || task.orchestration_state === "scheduled" ? "执行中" : "尚未执行"}</TableCell>
                   <TableCell>{formatTimestamp(task.due_at)}</TableCell>
                   <TableCell>{formatTimestamp(task.updated_at)}</TableCell>
                 </TableRow>

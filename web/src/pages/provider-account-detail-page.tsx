@@ -1,6 +1,6 @@
 import { useList, usePermissions } from "@refinedev/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarClock, Copy, KeyRound, RefreshCw, Search, Trash2 } from "lucide-react";
+import { BookOpen, CalendarClock, ChevronRight, Copy, KeyRound, RefreshCw, Search, Trash2 } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
@@ -32,6 +32,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card.t
 import { Input } from "@/components/ui/input.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import { formatTimestamp } from "@/lib/format.ts";
+import { groupTasks, providerName, remoteStateLabel, taskActionLabel, taskTypeLabels } from "@/lib/learning-display.ts";
 
 const selectClassName = "h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-50";
 const supportedInlineMethods: AuthMethod[] = ["password", "imported_cookie", "imported_token"];
@@ -173,6 +174,7 @@ export function ProviderAccountDetailPage() {
     mutationFn: async () => requireData(await scanProviderAccount({ path: { account_id: accountId } })),
     onSuccess: (report) => {
       setScanReport(`课程 ${report.courses_seen}，新任务 ${report.tasks_created}，更新 ${report.tasks_updated}，未变 ${report.tasks_unchanged}`);
+      void queryClient.invalidateQueries({ queryKey: ["courses"] });
       void queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
   });
@@ -200,13 +202,12 @@ export function ProviderAccountDetailPage() {
   if (account.isLoading) return <PageShell title="平台账号" description="正在读取账号状态。"><TableSkeleton /></PageShell>;
   if (!account.data) return <PageShell title="平台账号" description="账号不存在或当前身份不可访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
-  return <PageShell title={account.data.display_name} description={account.data.provider_id} actions={<div className="flex flex-wrap gap-2"><Link className={buttonVariants({ variant: "outline" })} to={`/courses?provider_account_id=${accountId}`}>查看课程</Link><Button variant="outline" disabled={scan.isPending || account.data.auth_state.state !== "authenticated"} onClick={() => scan.mutate()}><Search className="size-4" />{scan.isPending ? "巡查中…" : "立即巡查"}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}><Trash2 className="size-4" />{remove.isPending ? "删除中…" : "删除账号"}</Button></div>}>
+  return <PageShell title={account.data.display_name} description={providerName(account.data.provider_id)} actions={<div className="flex flex-wrap gap-2"><Button variant="outline" disabled={scan.isPending || account.data.auth_state.state !== "authenticated"} onClick={() => scan.mutate()}><Search className="size-4" />{scan.isPending ? "正在同步…" : "同步课程与任务"}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}><Trash2 className="size-4" />{remove.isPending ? "删除中…" : "删除账号"}</Button></div>}>
     {error ? <QueryError error={error} /> : null}
     {scanReport ? <Alert><AlertTitle>巡查完成</AlertTitle><AlertDescription>{scanReport}</AlertDescription></Alert> : null}
-    <div className="grid gap-4 sm:grid-cols-3">
-      <Summary label="认证状态"><StateBadge state={account.data.auth_state.state} /></Summary>
-      <Summary label="凭据数量">{account.data.credential_count}</Summary>
-      <Summary label="更新时间">{formatTimestamp(account.data.updated_at)}</Summary>
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Summary label="登录状态"><StateBadge state={account.data.auth_state.state} /></Summary>
+      <Summary label="最近同步">{formatTimestamp(account.data.updated_at)}</Summary>
     </div>
 
     <Card><CardHeader><CardTitle className="flex items-center gap-2"><KeyRound className="size-5" />平台认证</CardTitle></CardHeader><CardContent className="space-y-4">
@@ -222,6 +223,19 @@ export function ProviderAccountDetailPage() {
         </form>
       )}
       {interactive ? <div className="space-y-3 rounded-lg border p-4"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{authMethodLabel(interactive.session.method)}</Badge><StateBadge state={interactive.session.state.state} /><Badge variant="secondary">{waitingForLabel(interactive.challenge.waiting_for)}</Badge></div><p className="text-sm">{interactiveInstructions(account.data.provider_id, interactive.challenge.waiting_for)}</p>{interactive.challenge.external_oauth?.authorization_url ? <div className="space-y-2"><Label>微信授权链接</Label><pre className="overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 text-xs">{interactive.challenge.external_oauth.authorization_url}</pre><Button variant="outline" onClick={() => navigator.clipboard.writeText(interactive.challenge.external_oauth!.authorization_url)}><Copy className="size-4" />复制授权链接</Button><p className="text-sm text-muted-foreground">复制后发送到微信“文件传输助手”，并在微信内打开。Asterism 不会在当前浏览器中自动打开该地址。</p></div> : null}{interactive.challenge.waiting_for === "browser_callback" ? <div className="space-y-2"><Label htmlFor="oauth-callback">授权完成后的最终跳转地址</Label><Input id="oauth-callback" value={oauthCallback} onChange={(event) => setOauthCallback(event.target.value)} placeholder="请完整粘贴以 https:// 开头的最终地址" /><p className="text-sm text-muted-foreground">在微信中完成授权后，复制最终打开页面的完整地址并粘贴到这里，不要只复制验证码或其中一段参数。</p><Button disabled={completeOauth.isPending || !oauthCallback.trim()} onClick={() => completeOauth.mutate()}>{completeOauth.isPending ? "提交中…" : "提交地址并保存认证"}</Button></div> : null}<Button variant="outline" disabled={pollInteractive.isPending} onClick={() => pollInteractive.mutate()}><RefreshCw className="size-4" />{pollInteractive.isPending ? "检查中…" : "检查认证进度"}</Button></div> : null}
+    </CardContent></Card>
+
+    <Card><CardHeader><CardTitle className="flex items-center gap-2"><BookOpen className="size-5" />课程与任务</CardTitle></CardHeader><CardContent className="space-y-4">
+      {courses.query.isLoading || tasks.query.isLoading ? <TableSkeleton /> : courses.result.data?.length ? courses.result.data.map((course) => {
+        const courseTasks = (tasks.result.data ?? []).filter((task) => task.course_id === course.id);
+        return <div key={course.id} className="rounded-xl border bg-card">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
+            <div><Link className="font-semibold text-primary hover:underline" to={`/courses/${course.id}`}>{course.title}</Link><p className="mt-1 text-sm text-muted-foreground">{[course.term, course.teacher].filter(Boolean).join(" · ") || `${courseTasks.length} 个任务`}</p></div>
+            <Link className={buttonVariants({ variant: "outline", size: "sm" })} to={`/courses/${course.id}`}>选择任务<ChevronRight className="size-4" /></Link>
+          </div>
+          {courseTasks.length ? <div className="space-y-4 p-4">{groupTasks(courseTasks).map(([type, grouped]) => <section key={type}><div className="mb-2 flex items-center gap-2"><h3 className="text-sm font-medium">{taskTypeLabels[type]}</h3><Badge variant="secondary">{grouped.length}</Badge></div><div className="divide-y rounded-lg border">{grouped.map((task) => <div key={task.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm"><div className="min-w-0"><Link className="block truncate font-medium hover:text-primary" to={`/tasks/${task.id}`}>{task.title}</Link><span className="text-xs text-muted-foreground">{remoteStateLabel(task.remote_state)}</span></div><Link className="shrink-0 text-xs font-medium text-primary hover:underline" to={`/tasks/${task.id}`}>{taskActionLabel(task)}</Link></div>)}</div></section>)}</div> : <p className="p-4 text-sm text-muted-foreground">这门课程尚未发现任务，请重新同步。</p>}
+        </div>;
+      }) : <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">尚未读取到课程。登录成功后点击“同步课程与任务”。</p>}
     </CardContent></Card>
 
     {method === "assisted_session" && captureRecipes.data?.items.length ? <Card><CardHeader><CardTitle>本地认证辅助</CardTitle></CardHeader><CardContent className="space-y-4"><p className="text-sm text-muted-foreground">仅当平台登录依赖微信内页面、浏览器会话或动态加密信息时使用。点击下方按钮创建一次性配对，然后在本机认证辅助程序中输入配对令牌；令牌只用于本次认证，完成或过期后立即失效。</p>{capture ? <div className="space-y-3 rounded-lg border p-4"><div className="flex flex-wrap items-center gap-2"><StateBadge state={capture.session.state} /><Badge variant="outline">流程版本 {capture.session.required_recipe_version}</Badge><Badge variant="secondary">{capture.session.id}</Badge></div><div className="space-y-2"><Label>一次性配对令牌</Label><pre className="overflow-auto rounded-md bg-muted p-3 text-xs">{capture.pairing_token}</pre><Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(capture.pairing_token)}><Copy className="size-4" />复制令牌</Button></div><p className="break-all text-sm">认证入口：{captureRecipes.data.items.find((recipe) => recipe.version === capture.session.required_recipe_version)?.start_url}</p><Button variant="outline" disabled={refreshCapture.isPending} onClick={() => refreshCapture.mutate()}><RefreshCw className="size-4" />{refreshCapture.isPending ? "刷新中…" : "检查辅助认证状态"}</Button></div> : <Button disabled={startCapture.isPending} onClick={() => startCapture.mutate()}>{startCapture.isPending ? "创建中…" : "创建一次性配对"}</Button>}</CardContent></Card> : null}

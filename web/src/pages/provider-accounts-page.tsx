@@ -9,32 +9,32 @@ import { StateBadge } from "@/components/state-badge.tsx";
 import { Card, CardContent } from "@/components/ui/card.tsx";
 import { buttonVariants } from "@/components/ui/button.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx";
-import { formatTimestamp, shortId } from "@/lib/format.ts";
+import { formatTimestamp } from "@/lib/format.ts";
+import { providerName } from "@/lib/learning-display.ts";
 
 export function ProviderAccountsPage() {
   const accounts = useList<ProviderAccountResponse>({ resource: "provider-accounts", pagination: { pageSize: 100 } });
 
   return (
-    <PageShell title="平台账号" description="管理当前身份可见的平台账号与认证状态。" actions={<Link className={buttonVariants({ variant: "default" })} to="/provider-accounts/create"><Plus className="size-4" />添加账号</Link>}>
+    <PageShell title="学习平台" description="选择账号后查看该账号的课程、任务和完成情况。" actions={<Link className={buttonVariants({ variant: "default" })} to="/provider-accounts/create"><Plus className="size-4" />添加账号</Link>}>
       {accounts.query.error ? <QueryError error={accounts.query.error} /> : null}
       {accounts.query.isLoading ? <TableSkeleton /> : (
         <Card><CardContent className="p-0">
           <Table>
             <TableHeader><TableRow>
-              <TableHead>显示名称</TableHead><TableHead>学习平台</TableHead>
-              <TableHead>认证</TableHead><TableHead>凭据</TableHead><TableHead>更新时间</TableHead>
+              <TableHead>账号</TableHead><TableHead>学习平台</TableHead>
+              <TableHead>登录状态</TableHead><TableHead>最近更新</TableHead>
             </TableRow></TableHeader>
             <TableBody>
               {accounts.result.data?.map((account) => (
                 <TableRow key={account.id}>
-                  <TableCell><Link className="font-medium text-primary hover:underline" to={`/provider-accounts/${account.id}`}>{account.display_name}</Link><div className="font-mono text-xs text-muted-foreground">{shortId(account.id)}</div></TableCell>
-                  <TableCell>{account.provider_id}</TableCell>
+                  <TableCell><Link className="font-medium text-primary hover:underline" to={`/provider-accounts/${account.id}`}>{account.display_name}</Link></TableCell>
+                  <TableCell>{providerName(account.provider_id)}</TableCell>
                   <TableCell><StateBadge state={account.auth_state.state} /></TableCell>
-                  <TableCell>{account.credential_count}</TableCell>
                   <TableCell>{formatTimestamp(account.updated_at)}</TableCell>
                 </TableRow>
               ))}
-              {!accounts.result.data?.length ? <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">暂无平台账号</TableCell></TableRow> : null}
+              {!accounts.result.data?.length ? <TableRow><TableCell colSpan={4} className="h-24 text-center text-muted-foreground">还没有添加学习平台账号</TableCell></TableRow> : null}
             </TableBody>
           </Table>
         </CardContent></Card>
