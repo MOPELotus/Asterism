@@ -1,0 +1,14 @@
+{
+  "name": "asterism-plugin",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Thin Miao-Yunzai/TRSS-Yunzai adapter for Asterism",
+  "scripts": {
+    "check": "node --check index.js && node --check apps/asterism.js && node --check model/client.js && node --check model/config.js && node --check model/policy.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

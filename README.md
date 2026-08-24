@@ -187,7 +187,11 @@ WebUI 使用从 Asterism OpenAPI 自动生成的 TypeScript Client。修改 API 
 
 ## QQ 机器人交互
 
-QQ 机器人交互部分基于 [MOPELotus/Miao-Yunzai](https://github.com/MOPELotus/Miao-Yunzai) 进行适配。Asterism-Plugin/Yunzai 作为公共交付面的薄适配层，通过 Asterism HTTP API 调用 Core，不在机器人插件中重复实现 Provider 业务逻辑。
+QQ 机器人交互部分基于 [MOPELotus/Miao-Yunzai](https://github.com/MOPELotus/Miao-Yunzai)
+进行适配。当前薄插件位于
+[`integrations/yunzai-plugin`](integrations/yunzai-plugin)，通过 owner-bound Service Token
+调用 Asterism HTTP API，不在机器人插件中重复实现 Provider 业务逻辑。它已在当前 fork
+HEAD `f9c5dbc1` 完成入口加载和真实只读 API 冒烟；安装、权限与命令见插件 README。
 
 ## SecretStore 与开发 Provider
 
