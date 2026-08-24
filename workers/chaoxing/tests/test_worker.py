@@ -77,6 +77,10 @@ class WorkReadParamsTests(unittest.TestCase):
     def test_inventory_text_uses_nonempty_fallback(self):
         self.assertEqual(WORKER.clean_inventory_text("\n\t", 512, "fallback"), "fallback")
 
+    def test_homework_answer_record_is_learner_side_complete(self):
+        self.assertEqual(WORKER.homework_inventory_state("主观题", "answer-42"), "completed")
+        self.assertEqual(WORKER.homework_inventory_state("主观题", "0"), "pending")
+
     def test_reviewed_ordering_question_uses_existing_shared_kind(self):
         rows = WORKER.parse_completed_work_result(
             '<div class="singleQuesId"><div class="Zy_TItle">【排序题】Arrange</div>'

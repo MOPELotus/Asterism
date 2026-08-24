@@ -32,7 +32,17 @@ export function CourseDetailPage() {
     queryFn: () => loadCourseTasks(courseId, isChaoxing, taskPage),
   });
   const progress = useQuery({ queryKey: ["courses", courseId, "progress"], enabled: Boolean(courseId), retry: false, queryFn: async () => requireData(await getCourseProgress({ path: { course_id: courseId } })) });
-  const courseTasks = useMemo(() => (tasks.data?.items ?? []).filter((task) => task.remote_state !== "removed"), [tasks.data?.items]);
+  const courseTasks = useMemo(() => {
+    const visible = (tasks.data?.items ?? []).filter((task) => task.remote_state !== "removed");
+    if (!isChaoxing) return visible;
+    return visible.map((task, index) => ({ task, index })).sort((left, right) => {
+      if (left.task.source_type !== "chapter" || right.task.source_type !== "chapter") {
+        return left.index - right.index;
+      }
+      return left.task.title.localeCompare(right.task.title, "zh-CN", { numeric: true })
+        || left.task.id.localeCompare(right.task.id);
+    }).map(({ task }) => task);
+  }, [isChaoxing, tasks.data?.items]);
   const directTasks = useMemo(
     () => courseTasks.filter((task) => selectableTask(task, account.data?.provider_id, readOnly)),
     [account.data?.provider_id, courseTasks, readOnly],

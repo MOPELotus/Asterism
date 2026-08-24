@@ -196,6 +196,19 @@ def clean_inventory_text(value: Any, maximum_bytes: int, fallback: str) -> str:
     return fallback
 
 
+def homework_inventory_state(text: str, answer_id: str) -> str:
+    # A non-zero answerId is Chaoxing's durable learner submission record.
+    # Subjective work can keep waiting for teacher grading indefinitely, but it
+    # is already complete from the learner's perspective.
+    if (answer_id and answer_id != "0") or "已完成" in text:
+        return "completed"
+    if any(marker in text for marker in ("待批阅", "未批阅", "已交", "已提交")):
+        return "completed"
+    if any(marker in text for marker in ("已过期", "已截止", "已结束", "已关闭")):
+        return "expired"
+    return "pending"
+
+
 def include_completed_cards(module):
     decode_module = sys.modules.get("api.decode")
     original = getattr(decode_module, "_process_attachment_cards", None)
@@ -579,14 +592,7 @@ def inventory(module, payload, events, redactor):
                         absolute_route = parsed_route._replace(path=target_path).geturl()
                     label = " ".join(str(item.get("aria-label") or "").split())
                     text = label or " ".join(item.get_text(" ", strip=True).split())
-                    if "已完成" in text:
-                        state = "completed"
-                    elif any(marker in text for marker in ("待批阅", "未批阅", "已交", "已提交")):
-                        state = "submitted"
-                    elif any(marker in text for marker in ("已过期", "已截止", "已结束", "已关闭")):
-                        state = "expired"
-                    else:
-                        state = "pending"
+                    state = homework_inventory_state(text, answer_id)
                     title_node = item.select_one(".workTit, .overHidden2, h3, p")
                     title = (label.split(";")[0] if label else
                              title_node.get_text(" ", strip=True) if title_node else text)
@@ -1319,6 +1325,20 @@ def questions(module, payload, events, redactor):
                 f"functions={','.join(function_signatures)}, "
                 f"query_keys={','.join(endpoint_query_keys)})",
             )
+        homework_answer_id = str(homework.get("answer_id") or "")
+        result_markers = {
+            "answer_record_present": bool(homework_answer_id and homework_answer_id != "0"),
+            "graded_result_present": "selectWorkQuestionYiPiYue" in response.text,
+            "my_answer_present": "我的答案" in response.text,
+            "awaiting_review_present": any(
+                marker in response.text for marker in ("等待教师批阅", "待批阅")
+            ),
+        }
+        for row in rows:
+            native_shape = row.get("native_shape")
+            native_shape = dict(native_shape) if isinstance(native_shape, Mapping) else {}
+            native_shape["homework_result"] = result_markers
+            row["native_shape"] = native_shape
         from urllib.parse import urlsplit
         return {
             "questions": rows,
@@ -1615,7 +1635,10 @@ def run_course_homework(bot, module, payload, native, events, redactor):
         response = session.get(route)
     text = " ".join(response.text.split())
     list_text = str(homework.get("list_text") or "")
-    if any(marker in list_text for marker in ("已完成", "等待教师批阅", "待批阅", "已交")) or any(
+    answer_id = str(homework.get("answer_id") or "")
+    if (answer_id and answer_id != "0") or any(
+        marker in list_text for marker in ("已完成", "等待教师批阅", "待批阅", "已交")
+    ) or any(
         marker in text for marker in ("提交成功", "等待教师批阅", "selectWorkQuestionYiPiYue")
     ):
         return {
