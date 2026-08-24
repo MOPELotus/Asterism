@@ -16,13 +16,15 @@ mod openapi_contract;
 mod rate_limit;
 mod runtime_settings;
 mod task;
+mod uai_worker;
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use asterism_domain::ProviderId;
 use asterism_events::EventBus;
 use asterism_provider_api::{CaptureRecipe, ProviderMetadata, ProviderRegistry};
 use asterism_storage::{Database, SqliteSecretStore};
+use asterism_uai_worker_client::UaiWorkerClient;
 use axum::{
     Extension, Json, Router,
     extract::{DefaultBodyLimit, Path, State},
@@ -55,6 +57,7 @@ pub struct ApiState {
     bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter,
     bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter,
     browser_bridge_claim_rate_limiter: rate_limit::LoginRateLimiter,
+    provider_workers: BTreeMap<String, UaiWorkerClient>,
 }
 
 impl ApiState {
@@ -76,6 +79,7 @@ impl ApiState {
             bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
             bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter::default(),
             browser_bridge_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
+            provider_workers: BTreeMap::new(),
         }
     }
 
@@ -96,6 +100,23 @@ impl ApiState {
         self.stream_shutdown = Some(shutdown);
         self
     }
+
+    #[must_use]
+    pub fn with_uai_worker(mut self, worker: UaiWorkerClient) -> Self {
+        self.provider_workers.insert("uai".to_owned(), worker);
+        self
+    }
+
+    /// Adds one configured 0.0.1 upstream-backed Provider worker.
+    #[must_use]
+    pub fn with_provider_worker(
+        mut self,
+        provider: impl Into<String>,
+        worker: UaiWorkerClient,
+    ) -> Self {
+        self.provider_workers.insert(provider.into(), worker);
+        self
+    }
 }
 
 #[allow(
@@ -107,6 +128,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/auth/session", get(auth::current_identity))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/providers", get(list_providers))
+        .route("/api/v1/providers/{provider}/worker/health", get(uai_worker::health))
         .route(
             "/api/v1/providers/{provider_id}/capture-recipes",
             get(list_provider_capture_recipes),
@@ -532,6 +554,26 @@ pub fn openapi_document() -> Value {
                 "responses": {"204": {"description": "Web session revoked"}, "400": {"description": "Not a Web session"}, "401": {"description": "Authentication required"}}
             }},
             "/api/v1/providers": {"get": {"operationId": "listProviders", "security": [{"cookieAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Registered provider metadata"}}}},
+            "/api/v1/providers/uai/worker/health": {"get": {
+                "operationId": "getUaiWorkerHealth",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "responses": {
+                    "200": {"description": "Pinned UAI upstream worker is available"},
+                    "503": {"description": "UAI upstream worker is not configured or unavailable"}
+                }
+            }},
+            "/api/v1/providers/chaoxing/worker/health": {"get": {
+                "operationId": "getChaoxingWorkerHealth", "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "responses": {"200": {"description": "Pinned Chaoxing upstream worker is available"}, "503": {"description": "Worker is not configured or unavailable"}}
+            }},
+            "/api/v1/providers/welearn/worker/health": {"get": {
+                "operationId": "getWelearnWorkerHealth", "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "responses": {"200": {"description": "Pinned WELearn upstream worker is available"}, "503": {"description": "Worker is not configured or unavailable"}}
+            }},
+            "/api/v1/providers/cidaren/worker/health": {"get": {
+                "operationId": "getCidarenWorkerHealth", "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "responses": {"200": {"description": "Pinned Cidaren upstream worker is available"}, "503": {"description": "Worker is not configured or unavailable"}}
+            }},
             "/api/v1/providers/{provider_id}/capture-recipes": {"get": {
                 "operationId": "listProviderCaptureRecipes",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -2799,6 +2841,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         net::SocketAddr,
+        path::{Path, PathBuf},
         str::FromStr,
         time::Duration,
     };
@@ -2844,6 +2887,7 @@ mod tests {
         SqliteExecutionRepository, SqliteProtocolObservationRepository,
         SqliteQuestionSnapshotRepository, SubmissionDraftRepository, SubmissionResultRepository,
     };
+    use asterism_uai_worker_client::UaiWorkerHealth;
     use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
@@ -3333,6 +3377,29 @@ mod tests {
         test_app(false, None).await.0
     }
 
+    fn workspace_path(relative: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative)
+    }
+
+    async fn uai_worker_test_router() -> Router {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let worker = UaiWorkerClient::new(
+            "python",
+            workspace_path("workers/uai/worker.py"),
+            workspace_path("workers/uai/tests/fixtures/fake_upstream.py"),
+        )
+        .with_source_metadata(workspace_path(
+            "workers/uai/tests/fixtures/fake_SOURCE.json",
+        ));
+        build_router(
+            ApiState::new(database, Arc::new(ProviderRegistry::default()), 3600, false)
+                .with_uai_worker(worker),
+        )
+    }
+
     async fn bootstrap(app: &Router) -> Response {
         app.clone()
             .oneshot(
@@ -3554,6 +3621,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn uai_worker_health_is_protected_and_reports_the_pinned_source() {
+        let app = uai_worker_test_router().await;
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/providers/uai/worker/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/providers/uai/worker/health")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let health: UaiWorkerHealth =
+            serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(health.status, "ok");
+        assert_eq!(health.source.revision, "fixture-revision");
+    }
+
+    #[tokio::test]
+    async fn uai_worker_health_reports_unconfigured_without_affecting_service_health() {
+        let app = test_router().await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/providers/uai/worker/health")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error: ErrorResponse =
+            serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(error.error.code, "uai_worker_not_configured");
+
+        let service_health = app
+            .oneshot(
+                Request::get("/api/v1/system/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(service_health.status(), StatusCode::OK);
     }
 
     #[tokio::test]

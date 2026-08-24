@@ -1,0 +1,13 @@
+[
+  {
+    "name": "SocialSisterYi/CxKitty",
+    "repository": "https://github.com/SocialSisterYi/CxKitty",
+    "revision": "1589eac9c07c4bab71f79d762b45210643dd537d",
+    "files": {
+      "cxapi/api.py": "ad550b2a34f72a614330309c0c8596e7cb98f0bccf31278a3ab972db138f34bb",
+      "cxapi/classes.py": "a33166b9cda508a79ea67caebe53afbe2bd253717ba758ba80eb6315d3d989bc",
+      "cxapi/exam.py": "8b273c1294991346aca9997e349968a2e2ebab24182d14af7d8253c77d3e0bbc"
+    },
+    "capabilities": ["course_exam_inventory", "course_exam_questions", "course_exam_submit"]
+  }
+]

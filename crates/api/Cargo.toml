@@ -17,6 +17,7 @@ asterism-provider-welearn = { path = "../../providers/welearn" }
 asterism-scheduler = { path = "../scheduler" }
 asterism-secrets = { path = "../secrets" }
 asterism-storage = { path = "../storage" }
+asterism-uai-worker-client = { path = "../../workers/uai/client-rs" }
 axum.workspace = true
 bytes.workspace = true
 chrono.workspace = true

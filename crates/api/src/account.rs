@@ -1259,43 +1259,46 @@ fn map_scan_error(error: ProviderScanError) -> ApiError {
             "provider_account_not_authenticated",
             "the Provider account must be authenticated before scanning",
         ),
-        ProviderScanError::Provider(provider_error) => match provider_error.kind {
-            ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
-                provider_error
-                    .retry_after_seconds
-                    .unwrap_or(60)
-                    .clamp(1, 86_400),
-            ),
-            ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
-                tracing::warn!(error = %provider_error, "Provider scan is temporarily unavailable");
-                ApiError::service_unavailable(
-                    "provider_unavailable",
-                    "the Provider is temporarily unavailable",
-                )
-            }
-            ProviderErrorKind::HumanRequired => {
-                tracing::warn!(error = %provider_error, "Provider scan requires user action");
-                ApiError::conflict(
+        ProviderScanError::Provider(provider_error) => {
+            tracing::warn!(error = %provider_error, "Provider scan failed");
+            match provider_error.kind {
+                ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+                    provider_error
+                        .retry_after_seconds
+                        .unwrap_or(60)
+                        .clamp(1, 86_400),
+                ),
+                ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+                    tracing::warn!(error = %provider_error, "Provider scan is temporarily unavailable");
+                    ApiError::service_unavailable(
+                        "provider_unavailable",
+                        "the Provider is temporarily unavailable",
+                    )
+                }
+                ProviderErrorKind::HumanRequired => {
+                    tracing::warn!(error = %provider_error, "Provider scan requires user action");
+                    ApiError::conflict(
+                        "provider_action_required",
+                        "the Provider requires authentication or user action",
+                    )
+                }
+                ProviderErrorKind::Authentication
+                | ProviderErrorKind::Authorization
+                | ProviderErrorKind::RemoteChanged
+                | ProviderErrorKind::UnsupportedTask => ApiError::conflict(
                     "provider_action_required",
                     "the Provider requires authentication or user action",
-                )
+                ),
+                ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+                    tracing::warn!(error = %provider_error, "Provider returned invalid scan inventory");
+                    ApiError::bad_gateway(
+                        "provider_inventory_invalid",
+                        "the Provider returned inconsistent inventory",
+                    )
+                }
+                ProviderErrorKind::Internal => ApiError::internal(provider_error),
             }
-            ProviderErrorKind::Authentication
-            | ProviderErrorKind::Authorization
-            | ProviderErrorKind::RemoteChanged
-            | ProviderErrorKind::UnsupportedTask => ApiError::conflict(
-                "provider_action_required",
-                "the Provider requires authentication or user action",
-            ),
-            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
-                tracing::warn!(error = %provider_error, "Provider returned invalid scan inventory");
-                ApiError::bad_gateway(
-                    "provider_inventory_invalid",
-                    "the Provider returned inconsistent inventory",
-                )
-            }
-            ProviderErrorKind::Internal => ApiError::internal(provider_error),
-        },
+        }
         ProviderScanError::CourseScopeMismatch { .. }
         | ProviderScanError::UnadvertisedTaskCapability { .. }
         | ProviderScanError::InvalidProtocolObservation => {

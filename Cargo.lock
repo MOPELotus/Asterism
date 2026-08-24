@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-api"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asterism-auth",
  "asterism-domain",
@@ -165,6 +165,7 @@ dependencies = [
  "asterism-scheduler",
  "asterism-secrets",
  "asterism-storage",
+ "asterism-uai-worker-client",
  "async-trait",
  "axum",
  "bytes",
@@ -185,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-auth"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "argon2",
  "asterism-domain",
@@ -198,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-capture"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "asterism-domain",
@@ -224,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-config"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -233,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-domain"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "serde",
@@ -245,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-engine"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asterism-auth",
  "asterism-domain",
@@ -267,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-events"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asterism-domain",
  "chrono",
@@ -279,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-networking"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -288,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-provider-api"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asterism-domain",
  "asterism-secrets",
@@ -304,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-provider-chaoxing"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes 0.9.2",
  "asterism-domain",
@@ -329,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-provider-cidaren"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes-gcm",
  "asterism-domain",
@@ -354,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-provider-uai"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes 0.9.2",
  "asterism-domain",
@@ -375,8 +376,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "asterism-provider-upstream-worker"
+version = "0.0.1"
+dependencies = [
+ "asterism-domain",
+ "asterism-provider-api",
+ "asterism-secrets",
+ "asterism-uai-worker-client",
+ "async-trait",
+ "chrono",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "asterism-provider-welearn"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asterism-domain",
  "asterism-networking",
@@ -395,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-scheduler"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asterism-domain",
  "chrono",
@@ -405,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-secrets"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asterism-domain",
  "async-trait",
@@ -417,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "asterism-storage"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asterism-auth",
  "asterism-domain",
@@ -438,8 +454,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asterism-uai-worker-client"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "asterismctl"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "asterism-domain",
@@ -456,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "asterismd"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "asterism-api",
@@ -469,10 +496,12 @@ dependencies = [
  "asterism-provider-chaoxing",
  "asterism-provider-cidaren",
  "asterism-provider-uai",
+ "asterism-provider-upstream-worker",
  "asterism-provider-welearn",
  "asterism-scheduler",
  "asterism-secrets",
  "asterism-storage",
+ "asterism-uai-worker-client",
  "axum",
  "base64",
  "chrono",

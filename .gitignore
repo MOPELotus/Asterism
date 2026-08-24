@@ -7,6 +7,7 @@
 /.agents/
 /.codex/
 /.codex-docs/
+/.audit_tmp/
 /docs/
 /research/
 
@@ -15,6 +16,7 @@
 *.db
 *.db-shm
 *.db-wal
+/chaoxing.log
 .env
 .env.*
 !.env.example

@@ -33,6 +33,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
         "BrowserBridgeResultReceiptResponse",
     ),
     ("listProviders", "ProviderMetadataListResponse"),
+    ("getUaiWorkerHealth", "UaiWorkerHealth"),
+    ("getChaoxingWorkerHealth", "UaiWorkerHealth"),
+    ("getWelearnWorkerHealth", "UaiWorkerHealth"),
+    ("getCidarenWorkerHealth", "UaiWorkerHealth"),
     ("listProviderCaptureRecipes", "CaptureRecipeListResponse"),
     ("listProviderAccounts", "ProviderAccountListResponse"),
     ("createProviderAccount", "ProviderAccountResponse"),
@@ -444,6 +448,26 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         (
             "ProviderMetadataListResponse",
             list_response("ProviderMetadata"),
+        ),
+        (
+            "UaiWorkerHealth",
+            object(
+                &["status", "source", "python", "operations"],
+                json!({
+                    "status": string(),
+                    "source": object(
+                        &["name", "revision", "license", "entrypoint_sha256"],
+                        json!({
+                            "name": string(),
+                            "revision": string(),
+                            "license": string(),
+                            "entrypoint_sha256": string()
+                        })
+                    ),
+                    "python": string(),
+                    "operations": {"type": "array", "items": string()}
+                }),
+            ),
         ),
         ("AuthState", auth_state_schema()),
         ("AccountHealth", account_health_schema()),

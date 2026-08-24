@@ -19,10 +19,12 @@ asterism-provider-chaoxing = { path = "../../providers/chaoxing" }
 asterism-provider-cidaren = { path = "../../providers/cidaren" }
 asterism-provider-uai = { path = "../../providers/uai" }
 asterism-provider-welearn = { path = "../../providers/welearn" }
+asterism-provider-upstream-worker = { path = "../../providers/upstream-worker" }
 asterism-provider-api = { path = "../../crates/provider-api" }
 asterism-scheduler = { path = "../../crates/scheduler" }
 asterism-secrets = { path = "../../crates/secrets" }
 asterism-storage = { path = "../../crates/storage" }
+asterism-uai-worker-client = { path = "../../workers/uai/client-rs" }
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true

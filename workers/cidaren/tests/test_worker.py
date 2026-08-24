@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import importlib.util
+import pathlib
+import types
+import unittest
+
+
+WORKER_PATH = pathlib.Path(__file__).resolve().parents[1] / "worker.py"
+SPEC = importlib.util.spec_from_file_location("asterism_cidaren_worker", WORKER_PATH)
+assert SPEC and SPEC.loader
+WORKER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(WORKER)
+
+
+class Events:
+    def __init__(self):
+        self.values = []
+
+    def emit(self, event_type, **payload):
+        self.values.append((event_type, payload))
+
+
+def session_modules(*, runner=None):
+    request_header = types.SimpleNamespace(set_token=lambda _token: None)
+    decoder = types.SimpleNamespace(clear_crypto_document=lambda: None)
+    return [None, request_header, None, None, decoder, None, runner]
+
+
+class InventoryTests(unittest.TestCase):
+    def test_inventory_reads_donor_task_list_and_records_shapes(self):
+        modules = session_modules()
+
+        def get_all_unit(public):
+            public.all_unit = {"task_list": [{
+                "list_id": "unit-1", "task_id": 11, "task_name": "Unit 1", "progress": 100,
+            }]}
+
+        def get_class_task(public, _page):
+            public.class_task.append({"records": [{
+                "task_id": 22, "release_id": 33, "task_name": "Class test",
+                "task_type": 2, "progress": 40,
+            }]})
+            public.task_total_count = 1
+
+        modules[2] = types.SimpleNamespace(get_all_unit=get_all_unit)
+        modules[3] = types.SimpleNamespace(get_class_task=get_class_task)
+        result = WORKER.tasks(
+            modules,
+            {"session": {"token": "secret"}, "course": {"course_id": "course-1"}},
+            Events(),
+            WORKER.Redactor(["secret"]),
+        )
+
+        self.assertEqual([row["remote_id"] for row in result["tasks"]], ["unit:unit-1", "class:22"])
+        self.assertEqual(result["tasks"][0]["state"], "completed")
+        self.assertEqual(result["tasks"][1]["progress_percent"], 40)
+        self.assertIn("run", result["tasks"][1]["capabilities"])
+        self.assertEqual(result["tasks"][1]["native"]["task"]["course_id"], "course-1")
+
+
+class ExecutionTests(unittest.TestCase):
+    def test_run_delegates_class_task_to_headless_donor_runner(self):
+        seen = {}
+
+        class Runner:
+            def __init__(self, root, *, progress, log):
+                seen["root"] = pathlib.Path(root)
+                seen["progress"] = progress
+                seen["log"] = log
+                self.public = types.SimpleNamespace(course_id=None)
+
+            def run_class_task(self, task):
+                seen["task"] = task
+                seen["progress"](2, 5, "答题中")
+                return {"complete": True, "score": 100}
+
+        modules = session_modules(runner=types.SimpleNamespace(HeadlessTaskRunner=Runner))
+        events = Events()
+        result = WORKER.execute_task(
+            modules,
+            {
+                "session": {"token": "secret"},
+                "task": {"native": {"task_family": "class", "course_id": "course-1",
+                                      "task": {"task_id": 22, "task_type": 2}}},
+            },
+            pathlib.Path("C:/repo/api/login.py"),
+            events,
+            WORKER.Redactor(["secret"]),
+        )
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["remote_state"], "completed")
+        self.assertEqual(seen["task"]["task_id"], 22)
+        self.assertIn(("progress", {"current": 2, "total": 5, "message": "答题中"}), events.values)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Context;
 use asterism_api::{ApiState, build_router};
@@ -22,6 +27,7 @@ use asterism_provider_api::{ProviderCapability, ProviderRegistry};
 use asterism_provider_chaoxing::build_development_provider_with_renewal;
 use asterism_provider_cidaren::build_development_provider_with_stored_session as build_cidaren_with_stored_session;
 use asterism_provider_uai::build_development_provider_with_renewal as build_uai_with_renewal;
+use asterism_provider_upstream_worker::{UpstreamWorkerProvider, WorkerAuthProfile};
 use asterism_provider_welearn::build_development_provider_with_renewal as build_welearn_with_renewal;
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
@@ -33,6 +39,7 @@ use asterism_storage::{
     SqliteProviderCredentialResolver, SqliteProviderScanRepository, SqliteSchedulerRepository,
     SqliteSecretStore, SqliteTaskQueryRepository,
 };
+use asterism_uai_worker_client::UaiWorkerClient;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Parser;
 use tokio::{
@@ -153,6 +160,71 @@ struct Arguments {
     /// Expose the unverified Cidaren Provider for local validation only.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     enable_development_cidaren: Option<bool>,
+
+    /// Pinned Chaoxing donor checkout used by the 0.0.1 worker.
+    #[arg(long, env = "ASTERISM_CHAOXING_WORKER_UPSTREAM")]
+    chaoxing_worker_upstream: Option<PathBuf>,
+
+    /// Pinned CxKitty checkout used for Chaoxing course Exam inventory/execution.
+    #[arg(long, env = "ASTERISM_CHAOXING_AUXILIARY_UPSTREAM")]
+    chaoxing_auxiliary_upstream: Option<PathBuf>,
+
+    /// Chromium-compatible browser used for Chaoxing's audited DOM fallback.
+    #[arg(long, env = "ASTERISM_CHAOXING_BROWSER_EXECUTABLE")]
+    chaoxing_browser_executable: Option<PathBuf>,
+
+    /// Pinned `WELearn` donor entrypoint used by the 0.0.1 worker.
+    #[arg(long, env = "ASTERISM_WELEARN_WORKER_UPSTREAM")]
+    welearn_worker_upstream: Option<PathBuf>,
+
+    /// Pinned Cidaren donor checkout used by the 0.0.1 worker.
+    #[arg(
+        long,
+        env = "ASTERISM_CIDAREN_WORKER_UPSTREAM",
+        default_value = "upstreams/cidaren"
+    )]
+    cidaren_worker_upstream: Option<PathBuf>,
+
+    /// Pinned upstream UAI Python entrypoint used by the 0.0.1 worker.
+    #[arg(long, env = "ASTERISM_UAI_WORKER_UPSTREAM")]
+    uai_worker_upstream: Option<PathBuf>,
+
+    /// Pinned UnipusAIAutoPlayer checkout used for UAI page-residence duration.
+    #[arg(long, env = "ASTERISM_UAI_BROWSER_UPSTREAM")]
+    uai_browser_upstream: Option<PathBuf>,
+
+    /// Chromium-compatible browser used by the upstream UAI userscript worker.
+    #[arg(long, env = "ASTERISM_UAI_BROWSER_EXECUTABLE")]
+    uai_browser_executable: Option<PathBuf>,
+
+    /// Python executable used for the 0.0.1 UAI worker.
+    #[arg(long, env = "ASTERISM_UAI_WORKER_PYTHON", default_value = "python")]
+    uai_worker_python: PathBuf,
+
+    /// Asterism's thin UAI Python adapter entrypoint.
+    #[arg(
+        long,
+        env = "ASTERISM_UAI_WORKER_ADAPTER",
+        default_value = "workers/uai/worker.py"
+    )]
+    uai_worker_adapter: PathBuf,
+
+    /// Metadata containing the allowed UAI donor revision and entrypoint hash.
+    #[arg(
+        long,
+        env = "ASTERISM_UAI_WORKER_SOURCE_METADATA",
+        default_value = "workers/uai/SOURCE.json"
+    )]
+    uai_worker_source_metadata: PathBuf,
+
+    /// Hard timeout for one UAI worker operation.
+    #[arg(
+        long,
+        env = "ASTERISM_UAI_WORKER_TIMEOUT_SECONDS",
+        default_value_t = 600,
+        value_parser = clap::value_parser!(u64).range(1..=7200)
+    )]
+    uai_worker_timeout_seconds: u64,
 }
 
 #[tokio::main]
@@ -167,7 +239,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = load_config(Arguments::parse())?;
+    let arguments = Arguments::parse();
+    let provider_workers = build_provider_worker_clients(&arguments);
+    let config = load_config(arguments)?;
 
     let database = Database::connect(&config.database.url)
         .await
@@ -196,7 +270,11 @@ async fn main() -> anyhow::Result<()> {
     let execution_secret_store = secret_store.clone();
     let browser_bridge_secret_store = secret_store.clone();
     let browser_bridge_workflow_secret_store = secret_store.clone();
-    let providers = Arc::new(build_provider_registry(&config, secret_store.as_ref())?);
+    let providers = Arc::new(build_provider_registry(
+        &config,
+        secret_store.as_ref(),
+        &provider_workers,
+    )?);
     let events = EventBus::new(LIVE_EVENT_CAPACITY);
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let background_tick_lock = Arc::new(Mutex::new(()));
@@ -210,6 +288,20 @@ async fn main() -> anyhow::Result<()> {
     .with_stream_shutdown(shutdown_receiver.clone());
     if let Some(secret_store) = secret_store.clone() {
         api_state = api_state.with_secret_store(secret_store);
+    }
+    for (provider, worker) in provider_workers {
+        match worker.health().await {
+            Ok(health) => tracing::info!(
+                %provider,
+                revision = %health.source.revision,
+                python = %health.python,
+                "upstream Provider worker configured"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, %provider, "configured upstream Provider worker is unavailable");
+            }
+        }
+        api_state = api_state.with_provider_worker(provider, worker);
     }
     let app = build_router(api_state);
     let listener = tokio::net::TcpListener::bind(config.server.bind)
@@ -371,6 +463,88 @@ fn load_config(arguments: Arguments) -> anyhow::Result<Config> {
         .context("failed to load Asterism configuration")
 }
 
+fn worker_client(
+    arguments: &Arguments,
+    upstream: &Path,
+    adapter: impl Into<PathBuf>,
+    source: impl Into<PathBuf>,
+    protocol: &str,
+) -> UaiWorkerClient {
+    UaiWorkerClient::new(
+        arguments.uai_worker_python.clone(),
+        adapter,
+        upstream.to_path_buf(),
+    )
+    .with_source_metadata(source)
+    .with_protocol(protocol)
+    .with_timeout(std::time::Duration::from_secs(
+        arguments.uai_worker_timeout_seconds,
+    ))
+}
+
+fn build_provider_worker_clients(arguments: &Arguments) -> Vec<(String, UaiWorkerClient)> {
+    let mut workers = Vec::new();
+    if let Some(upstream) = &arguments.chaoxing_worker_upstream {
+        let mut client = worker_client(
+            arguments,
+            upstream,
+            "workers/chaoxing/worker.py",
+            "workers/chaoxing/SOURCE.json",
+            "asterism.chaoxing.worker.v1",
+        );
+        if let Some(auxiliary) = &arguments.chaoxing_auxiliary_upstream {
+            client =
+                client.with_path_environment("ASTERISM_CHAOXING_AUXILIARY_UPSTREAM", auxiliary);
+        }
+        if let Some(browser) = &arguments.chaoxing_browser_executable {
+            client = client.with_path_environment("ASTERISM_CHAOXING_BROWSER_EXECUTABLE", browser);
+        }
+        workers.push(("chaoxing".to_owned(), client));
+    }
+    if let Some(upstream) = &arguments.welearn_worker_upstream {
+        workers.push((
+            "welearn".to_owned(),
+            worker_client(
+                arguments,
+                upstream,
+                "workers/welearn/worker.py",
+                "workers/welearn/SOURCE.json",
+                "asterism.welearn.worker.v1",
+            ),
+        ));
+    }
+    if let Some(upstream) = &arguments.uai_worker_upstream {
+        let mut client = worker_client(
+            arguments,
+            upstream,
+            arguments.uai_worker_adapter.clone(),
+            arguments.uai_worker_source_metadata.clone(),
+            "asterism.uai.worker.v1",
+        );
+        if let Some(browser_upstream) = &arguments.uai_browser_upstream {
+            client =
+                client.with_path_environment("ASTERISM_UAI_BROWSER_UPSTREAM", browser_upstream);
+        }
+        if let Some(browser) = &arguments.uai_browser_executable {
+            client = client.with_path_environment("ASTERISM_UAI_BROWSER_EXECUTABLE", browser);
+        }
+        workers.push(("uai".to_owned(), client));
+    }
+    if let Some(upstream) = &arguments.cidaren_worker_upstream {
+        workers.push((
+            "cidaren".to_owned(),
+            worker_client(
+                arguments,
+                upstream,
+                "workers/cidaren/worker.py",
+                "workers/cidaren/SOURCE.json",
+                "asterism.cidaren.worker.v1",
+            ),
+        ));
+    }
+    workers
+}
+
 fn load_secret_keyring_from_process() -> anyhow::Result<Option<Arc<SecretKeyring>>> {
     let active_key_id = std::env::var(SECRET_ACTIVE_KEY_ID_ENV).ok();
     let encoded_keys = std::env::var(SECRET_KEYS_ENV).ok().map(SecretString::new);
@@ -413,21 +587,46 @@ fn load_secret_keyring(
     Ok(Some(Arc::new(keyring)))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "keeps old and upstream-worker Provider selection explicit during the 0.0.1 transition"
+)]
 fn build_provider_registry(
     config: &Config,
     secret_store: Option<&SqliteSecretStore>,
+    provider_workers: &[(String, UaiWorkerClient)],
 ) -> anyhow::Result<ProviderRegistry> {
     let mut registry = ProviderRegistry::default();
     if !config.providers.enable_development_chaoxing
         && !config.providers.enable_development_welearn
         && !config.providers.enable_development_uai
         && !config.providers.enable_development_cidaren
+        && provider_workers.is_empty()
     {
         return Ok(registry);
     }
     let secret_store = secret_store
         .context("enabled development Providers require a configured SecretStore keyring")?;
-    if config.providers.enable_development_chaoxing {
+    if let Some((_, worker)) = provider_workers
+        .iter()
+        .find(|(provider, _)| provider == "chaoxing")
+    {
+        let provider_id = ProviderId::new("chaoxing")
+            .map_err(|_| anyhow::anyhow!("invalid Chaoxing Provider ID"))?;
+        let runtime = Arc::new(SqliteProviderCredentialResolver::new(
+            secret_store.clone(),
+            provider_id.clone(),
+        ));
+        registry
+            .register(UpstreamWorkerProvider::entry(
+                provider_id,
+                "Chaoxing",
+                worker.clone(),
+                runtime,
+                WorkerAuthProfile::PasswordAndCookie,
+            ))
+            .context("failed to register the Chaoxing upstream worker Provider")?;
+    } else if config.providers.enable_development_chaoxing {
         let provider_id = ProviderId::new("chaoxing")
             .map_err(|_| anyhow::anyhow!("the compile-time Chaoxing Provider ID is invalid"))?;
         let runtime = Arc::new(SqliteProviderCredentialResolver::new(
@@ -446,7 +645,26 @@ fn build_provider_registry(
             "unverified development Provider explicitly enabled"
         );
     }
-    if config.providers.enable_development_welearn {
+    if let Some((_, worker)) = provider_workers
+        .iter()
+        .find(|(provider, _)| provider == "welearn")
+    {
+        let provider_id = ProviderId::new("welearn")
+            .map_err(|_| anyhow::anyhow!("invalid WELearn Provider ID"))?;
+        let runtime = Arc::new(SqliteProviderCredentialResolver::new(
+            secret_store.clone(),
+            provider_id.clone(),
+        ));
+        registry
+            .register(UpstreamWorkerProvider::entry(
+                provider_id,
+                "WELearn",
+                worker.clone(),
+                runtime,
+                WorkerAuthProfile::PasswordAndCookie,
+            ))
+            .context("failed to register the WELearn upstream worker Provider")?;
+    } else if config.providers.enable_development_welearn {
         let provider_id = ProviderId::new("welearn")
             .map_err(|_| anyhow::anyhow!("the compile-time WELearn Provider ID is invalid"))?;
         let runtime = Arc::new(SqliteProviderCredentialResolver::new(
@@ -465,7 +683,26 @@ fn build_provider_registry(
             "unverified development Provider explicitly enabled"
         );
     }
-    if config.providers.enable_development_uai {
+    if let Some((_, worker)) = provider_workers
+        .iter()
+        .find(|(provider, _)| provider == "uai")
+    {
+        let provider_id =
+            ProviderId::new("uai").map_err(|_| anyhow::anyhow!("invalid UAI Provider ID"))?;
+        let runtime = Arc::new(SqliteProviderCredentialResolver::new(
+            secret_store.clone(),
+            provider_id.clone(),
+        ));
+        registry
+            .register(UpstreamWorkerProvider::entry(
+                provider_id,
+                "UAI",
+                worker.clone(),
+                runtime,
+                WorkerAuthProfile::Password,
+            ))
+            .context("failed to register the UAI upstream worker Provider")?;
+    } else if config.providers.enable_development_uai {
         let provider_id = ProviderId::new("uai")
             .map_err(|_| anyhow::anyhow!("the compile-time UAI Provider ID is invalid"))?;
         let runtime = Arc::new(SqliteProviderCredentialResolver::new(
@@ -484,7 +721,26 @@ fn build_provider_registry(
             "unverified development Provider explicitly enabled"
         );
     }
-    if config.providers.enable_development_cidaren {
+    if let Some((_, worker)) = provider_workers
+        .iter()
+        .find(|(provider, _)| provider == "cidaren")
+    {
+        let provider_id = ProviderId::new("cidaren")
+            .map_err(|_| anyhow::anyhow!("invalid Cidaren Provider ID"))?;
+        let runtime = Arc::new(SqliteProviderCredentialResolver::new(
+            secret_store.clone(),
+            provider_id.clone(),
+        ));
+        registry
+            .register(UpstreamWorkerProvider::entry(
+                provider_id,
+                "Cidaren",
+                worker.clone(),
+                runtime,
+                WorkerAuthProfile::ExternalOauthComposite,
+            ))
+            .context("failed to register the Cidaren upstream worker Provider")?;
+    } else if config.providers.enable_development_cidaren {
         let provider_id = ProviderId::new("cidaren")
             .map_err(|_| anyhow::anyhow!("the compile-time Cidaren Provider ID is invalid"))?;
         let runtime = Arc::new(SqliteProviderCredentialResolver::new(
@@ -1209,7 +1465,7 @@ mod tests {
         let store = SqliteSecretStore::new(database.clone(), keyring);
         let mut config = Config::default();
         config.providers.enable_development_cidaren = true;
-        let providers = Arc::new(build_provider_registry(&config, Some(&store)).unwrap());
+        let providers = Arc::new(build_provider_registry(&config, Some(&store), &[]).unwrap());
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
         let background_tick_lock = Arc::new(Mutex::new(()));
         let handle = start_browser_bridge_credential_processor(
@@ -1245,7 +1501,7 @@ mod tests {
         let store = SqliteSecretStore::new(database.clone(), keyring);
         let mut config = Config::default();
         config.providers.enable_development_uai = true;
-        let providers = Arc::new(build_provider_registry(&config, Some(&store)).unwrap());
+        let providers = Arc::new(build_provider_registry(&config, Some(&store), &[]).unwrap());
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
         let background_tick_lock = Arc::new(Mutex::new(()));
         let handle = start_browser_bridge_workflow_processor(
@@ -1322,21 +1578,21 @@ mod tests {
 
     #[tokio::test]
     async fn development_provider_registration_is_explicit_and_requires_secrets() {
-        let default_registry = build_provider_registry(&Config::default(), None).unwrap();
+        let default_registry = build_provider_registry(&Config::default(), None, &[]).unwrap();
         assert!(default_registry.is_empty());
 
         let mut config = Config::default();
         config.providers.enable_development_chaoxing = true;
-        assert!(build_provider_registry(&config, None).is_err());
+        assert!(build_provider_registry(&config, None, &[]).is_err());
         config = Config::default();
         config.providers.enable_development_welearn = true;
-        assert!(build_provider_registry(&config, None).is_err());
+        assert!(build_provider_registry(&config, None, &[]).is_err());
         config = Config::default();
         config.providers.enable_development_uai = true;
-        assert!(build_provider_registry(&config, None).is_err());
+        assert!(build_provider_registry(&config, None, &[]).is_err());
         config = Config::default();
         config.providers.enable_development_cidaren = true;
-        assert!(build_provider_registry(&config, None).is_err());
+        assert!(build_provider_registry(&config, None, &[]).is_err());
 
         let database = Database::connect("sqlite::memory:").await.unwrap();
         let keyring = load_secret_keyring(
@@ -1352,7 +1608,7 @@ mod tests {
 
         config = Config::default();
         config.providers.enable_development_uai = true;
-        let uai_only = build_provider_registry(&config, Some(&store)).unwrap();
+        let uai_only = build_provider_registry(&config, Some(&store), &[]).unwrap();
         assert!(
             uai_only
                 .get(&ProviderId::new("chaoxing").unwrap())
@@ -1366,7 +1622,7 @@ mod tests {
         config.providers.enable_development_welearn = true;
         config.providers.enable_development_uai = true;
         config.providers.enable_development_cidaren = true;
-        let registry = build_provider_registry(&config, Some(&store)).unwrap();
+        let registry = build_provider_registry(&config, Some(&store), &[]).unwrap();
         let provider = registry.get(&ProviderId::new("chaoxing").unwrap()).unwrap();
         assert_eq!(
             provider.metadata.verification,

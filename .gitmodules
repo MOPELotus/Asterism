@@ -1,0 +1,3 @@
+[submodule "upstreams/cidaren"]
+	path = upstreams/cidaren
+	url = https://github.com/MOPELotus/Easy_Cidaren_Backend.git

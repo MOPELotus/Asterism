@@ -1,0 +1,23 @@
+[package]
+name = "asterism-provider-upstream-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asterism-domain = { path = "../../crates/domain" }
+asterism-provider-api = { path = "../../crates/provider-api" }
+asterism-secrets = { path = "../../crates/secrets" }
+asterism-uai-worker-client = { path = "../../workers/uai/client-rs" }
+async-trait.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

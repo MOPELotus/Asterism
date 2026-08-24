@@ -1,0 +1,9 @@
+{
+  "name": "MOPELotus/Easy_Cidaren_Backend",
+  "repository": "https://github.com/MOPELotus/Easy_Cidaren_Backend",
+  "revision": "dd41afd531745c6415f2f176e5fbcd87638a70be",
+  "entrypoint": "api/login.py",
+  "entrypoint_sha256": "be438cb4587bcf010e03c4169d0c334cd672102639ff1af75bd8f7544392ca91",
+  "license": "GPL-3.0",
+  "adapter_protocol": "asterism.cidaren.worker.v1"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "fixture/fake",
+  "repository": "https://example.invalid/fake",
+  "revision": "fixture-revision",
+  "entrypoint": "fake_upstream.py",
+  "entrypoint_sha256": "2a3efd1c6bed9dd1acca316859b362d16a50ede40bf5da3d516c35e0bf1919de",
+  "license": "Apache-2.0",
+  "adapter_protocol": "asterism.uai.worker.v1"
+}

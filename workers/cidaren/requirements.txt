@@ -1,0 +1,4 @@
+Requests>=2.32.2
+Brotli>=1.1.0
+cryptography>=42.0.0
+spacy>=3.8.7,<4

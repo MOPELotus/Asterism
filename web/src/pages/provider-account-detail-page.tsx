@@ -152,6 +152,8 @@ export function ProviderAccountDetailPage() {
   const createBatch = useMutation({
     mutationFn: async () => {
       if (!selectedBatchCourse || !selectedBatchTasks.length) throw new Error("请先巡查账号，并选择一门已发现学习任务的课程");
+      const firstTask = selectedBatchTasks[0];
+      if (!firstTask) throw new Error("当前课程没有可执行任务");
       const expectedChildCount = selectedBatchTasks.length;
       const duration = batchFlow === "fanyuchang_duration"
         ? { kind: "per_child_seconds" as const, target_seconds: Array.from({ length: expectedChildCount }, () => Number(batchPerTaskSeconds)) }
@@ -161,7 +163,7 @@ export function ProviderAccountDetailPage() {
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: {
           course_remote_id: selectedBatchCourse.remote_id,
-          expected_remote_task_id: selectedBatchTasks[0].remote_id,
+          expected_remote_task_id: firstTask.remote_id,
           flow: batchFlow,
           expected_child_count: expectedChildCount,
           duration,

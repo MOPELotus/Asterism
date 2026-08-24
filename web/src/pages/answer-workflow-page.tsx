@@ -12,6 +12,7 @@ import {
   getTaskQuestionSnapshot,
   importLocalAnswerCandidates,
   listAnswerCandidates,
+  prepareExecutionInvocationDraft,
   resolveAnswerCandidates,
   resolveProviderAnswerCandidates,
 } from "@/api/generated/sdk.gen.ts";
@@ -35,6 +36,7 @@ export function AnswerWorkflowPage() {
   const [draft, setDraft] = useState<SubmissionDraft | null>(null);
   const [formalAssessmentConfirmed, setFormalAssessmentConfirmed] = useState(false);
   const idempotencyKey = useRef(crypto.randomUUID());
+  const invocationKey = useRef(crypto.randomUUID());
 
   const task = useQuery({ queryKey: ["tasks", taskId], enabled: Boolean(taskId), queryFn: async () => requireData(await getTask({ path: { task_id: taskId } })) });
   const completionWorkflows = useQuery({ queryKey: ["tasks", taskId, "completion-workflows"], enabled: Boolean(taskId), retry: false, queryFn: async () => requireData(await getTaskCompletionWorkflows({ path: { task_id: taskId } })) });
@@ -93,8 +95,50 @@ export function AnswerWorkflowPage() {
     }
     return result;
   }, [candidates.data]);
+  const selectedCandidates = useMemo(() => new Map(
+    (candidates.data?.candidates ?? []).map((candidate) => [candidate.id, candidate]),
+  ), [candidates.data]);
+  const executeChaoxing = useMutation({
+    mutationFn: async () => {
+      if (!snapshot.data) throw new Error("题目快照尚未加载");
+      const answers = snapshot.data.questions.map((question) => {
+        const remoteId = question.remote_question_id;
+        const selectedId = selections[question.id];
+        const candidate = selectedId ? selectedCandidates.get(selectedId) : undefined;
+        if (!remoteId || !candidate) throw new Error("Chaoxing 执行要求每道当前题目都有明确审核答案");
+        return {
+          remote_id: remoteId,
+          value: chaoxingWorkerAnswer(question, candidate.candidate.answer),
+        };
+      });
+      const invocation = requireData(await prepareExecutionInvocationDraft({
+        path: { task_id: taskId },
+        headers: {
+          "Idempotency-Key": invocationKey.current,
+          "x-asterism-invocation-input-type": "chaoxing.worker.answers.v1",
+          "x-asterism-requested-capabilities": "resource_execution",
+        },
+        body: new Blob([JSON.stringify({ answers })], { type: "application/octet-stream" }),
+      }));
+      const result = requireData(await executeTask({
+        path: { task_id: taskId },
+        headers: { "Idempotency-Key": idempotencyKey.current },
+        body: {
+          requested_capabilities: ["resource_execution"],
+          invocation_draft_id: invocation.draft_id,
+          ...(task.data?.assessment_class === "formal" && formalAssessmentConfirmed ? { formal_assessment_confirmation: true } : {}),
+        },
+      }));
+      return result;
+    },
+    onSuccess: ({ execution }) => {
+      invocationKey.current = crypto.randomUUID();
+      idempotencyKey.current = crypto.randomUUID();
+      navigate(`/executions/${execution.id}`);
+    },
+  });
 
-  const error = task.error ?? completionWorkflows.error ?? snapshot.error ?? candidates.error ?? resolution.error ?? providerResolve.error ?? localImport.error ?? buildDraft.error ?? execute.error;
+  const error = task.error ?? completionWorkflows.error ?? snapshot.error ?? candidates.error ?? resolution.error ?? providerResolve.error ?? localImport.error ?? buildDraft.error ?? execute.error ?? executeChaoxing.error;
   if (snapshot.isLoading || task.isLoading) return <PageShell title="答案审核" description="正在读取不可变题目快照。"><TableSkeleton /></PageShell>;
   if (!snapshot.data || !task.data) return <PageShell title="答案审核" description="快照不存在或不属于当前任务。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
@@ -102,6 +146,7 @@ export function AnswerWorkflowPage() {
   const browserFallbackQuestions = snapshot.data.questions.filter((question) => ["matching", "ordering", "composite"].includes(question.kind));
   const canResolveProvider = task.data.capabilities.includes("answer_resolve");
   const canBuild = task.data.capabilities.includes("submission_build");
+  const isChaoxingWorkerFlow = snapshot.data.provider_id === "chaoxing" && task.data.capabilities.includes("resource_execution");
   const strictCompletion = completionWorkflows.data?.strict_completion;
   const strictRetryRequired = strictCompletion?.workflow.state === "active" && strictCompletion.workflow.attempts_started > 0;
   const scoreImprovement = completionWorkflows.data?.score_improvement;
@@ -117,10 +162,36 @@ export function AnswerWorkflowPage() {
     <div className="space-y-5">{snapshot.data.questions.map((question) => <QuestionReview key={question.id} question={question} candidates={groupedCandidates.get(question.id) ?? []} selected={selections[question.id]} resolutionState={resolution.data?.decisions.find((decision) => decision.question_id === question.id)?.status} onSelect={(candidateId) => { setDraft(null); setSelections((current) => ({ ...current, [question.id]: candidateId })); }} onClear={() => { setDraft(null); setSelections((current) => { const next = { ...current }; delete next[question.id]; return next; }); }} onCreated={refreshEvidence} taskId={taskId} snapshotId={snapshotId} />)}</div>
 
     <Card><CardHeader><CardTitle>Submission Draft</CardTitle></CardHeader><CardContent className="space-y-4">
+      {isChaoxingWorkerFlow ? <><Alert><AlertTitle>Chaoxing 上游执行</AlertTitle><AlertDescription>Asterism 会把当前逐题选中的答案作为加密私有调用输入交回 Worker；章节作业、课程独立作业和 Exam 仍由各自 donor 的原始编码与提交顺序执行。</AlertDescription></Alert>{task.data.assessment_class === "formal" ? <label className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/30"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认执行当前已审核答案；该确认仅用于本次请求。</span></label> : null}<Button disabled={executeChaoxing.isPending || selectedCount !== snapshot.data.questions.length || (task.data.assessment_class === "formal" && !formalAssessmentConfirmed)} onClick={() => executeChaoxing.mutate()}><Play className="size-4" />{executeChaoxing.isPending ? "正在准备并调度…" : "按已审核答案执行"}</Button>{selectedCount !== snapshot.data.questions.length ? <p className="text-sm text-muted-foreground">需要明确选择全部 {snapshot.data.questions.length} 道题的候选答案后才能交给上游。</p> : null}</> : null}
       {!draft ? <Button disabled={!canBuild || buildDraft.isPending || selectedCount === 0} onClick={() => buildDraft.mutate()}><FileCheck2 className="size-4" />{buildDraft.isPending ? "构建中…" : "按当前覆盖构建 Draft"}</Button> : <><div className="rounded-lg border p-4"><div className="flex flex-wrap gap-2"><Badge variant="outline">{draft.id}</Badge><Badge variant="secondary">{draft.items.length}/{draft.answer_coverage.total_question_count} 题</Badge><Badge variant="secondary">最低覆盖 {draft.answer_coverage.minimum_coverage_millis / 10}%</Badge><Badge variant="secondary">{draft.payload_preview.encoding}</Badge></div><pre className="mt-3 max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify(draft.payload_preview, null, 2)}</pre></div>{strictRetryRequired ? <Alert><AlertTitle>Strict Completion 重试</AlertTitle><AlertDescription>本次将使用 workflow {shortId(strictCompletion!.workflow.id)} 的当前 revision {strictCompletion!.revision} 明确确认重试；提交仍要求这份新 Draft。</AlertDescription></Alert> : null}{scoreImprovementRetakeReady ? <Alert><AlertTitle>提分重试</AlertTitle><AlertDescription>本次将把这份新 Draft 与 workflow {shortId(scoreImprovement!.workflow.id)} revision {scoreImprovement!.revision} 原子绑定并开始一次重考。</AlertDescription></Alert> : null}{task.data.assessment_class === "formal" ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评需要本次明确确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认提交这个已审核的不可变 Draft；未勾选时 Core 保持默认拒绝。</span></label></AlertDescription></Alert> : null}<Button disabled={execute.isPending || (task.data.assessment_class === "formal" && !formalAssessmentConfirmed)} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : scoreImprovementRetakeReady ? "确认提分重试并执行" : strictRetryRequired ? "确认重试并执行" : "提交 Draft 并执行"}</Button></>}
-      {!canBuild ? <p className="text-sm text-muted-foreground">此 Task 未声明 SubmissionBuild capability。</p> : null}
+      {!canBuild && !isChaoxingWorkerFlow ? <p className="text-sm text-muted-foreground">此 Task 未声明 SubmissionBuild capability。</p> : null}
     </CardContent></Card>
   </PageShell>;
+}
+
+function chaoxingWorkerAnswer(question: Question, answer: NormalizedAnswer): unknown {
+  switch (answer.type) {
+    case "selections":
+      if (!answer.value.length) throw new Error("选择题答案为空");
+      return question.kind === "single_choice" ? answer.value[0] : answer.value;
+    case "texts":
+      if (!answer.value.length) throw new Error("文本答案为空");
+      return question.kind === "fill_blank" ? answer.value : answer.value.length === 1 ? answer.value[0] : answer.value;
+    case "boolean":
+      return answer.value;
+    case "ordering":
+      if (!answer.value.length) throw new Error("排序答案为空");
+      return answer.value;
+    case "pairs":
+      if (!answer.value.length) throw new Error("配对答案为空");
+      return Object.fromEntries(answer.value.map((pair) => [pair.left, pair.right]));
+    case "composite":
+      if (!answer.value.length) throw new Error("复合答案为空");
+      return answer.value.map((item) => chaoxingWorkerAnswer(question, item));
+    case "skip":
+    case "unknown":
+      throw new Error("未知或跳过答案不能交给 Chaoxing 上游执行");
+  }
 }
 
 function QuestionReview({ question, candidates, selected, resolutionState, onSelect, onClear, onCreated, taskId, snapshotId }: { question: Question; candidates: AnswerCandidateResponse[]; selected?: string; resolutionState?: string; onSelect: (candidateId: string) => void; onClear: () => void; onCreated: () => Promise<void>; taskId: string; snapshotId: string }) {

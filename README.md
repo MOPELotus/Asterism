@@ -26,6 +26,11 @@ Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。�
 
 ## Provider 路线
 
+当前 `0.0.1` 分支采用 upstream-first 路线：Asterism 保留 WebUI、账号、课程/任务、
+题库、调度、Job 与日志控制面，四个平台的执行则通过薄 Worker 调用已审计 donor，
+不要求把 donor 的协议和状态机重新移植为 Rust。完整约束见
+[`docs/0.0.1/README.md`](docs/0.0.1/README.md)。
+
 | 批次 | Provider | 状态 |
 |---|---|---|
 | 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中 |
@@ -80,9 +85,26 @@ SQLite 由应用直接管理，无需单独安装数据库服务。
 克隆并构建：
 
 ```bash
-git clone https://github.com/MOPELotus/Asterism.git
+git clone --recurse-submodules --branch 0.0.1 https://github.com/MOPELotus/Asterism.git
 cd Asterism
 cargo build --workspace
+```
+
+已有 checkout 先同步 donor：
+
+```bash
+git submodule update --init --recursive
+```
+
+四个平台 Worker 使用 Python donor。建议建立同一个隔离环境并安装各 Worker 声明的
+依赖；服务端用户负责部署，WebUI/QQ 用户不需要自行 clone donor：
+
+```powershell
+py -m venv .venv-workers
+.\.venv-workers\Scripts\python.exe -m pip install -r workers\chaoxing\requirements.txt
+.\.venv-workers\Scripts\python.exe -m pip install -r workers\welearn\requirements.txt
+.\.venv-workers\Scripts\python.exe -m pip install -r workers\uai\requirements.txt
+.\.venv-workers\Scripts\python.exe -m pip install -r workers\cidaren\requirements.txt
 ```
 
 复制示例配置并启动服务：
