@@ -12,7 +12,7 @@ export function providerName(providerId: string): string {
 }
 
 export const taskTypeLabels: Record<Task["source_type"], string> = {
-  chapter: "章节学习",
+  chapter: "章节目录",
   work: "作业",
   exam: "考试",
   resource: "课程资源",

@@ -38,7 +38,8 @@ impl SqliteTaskQueryRepository {
         let total: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM tasks AS task \
              INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
-             WHERE account.owner_user_id = ? AND task.course_id = ?",
+             WHERE account.owner_user_id = ? AND task.course_id = ? \
+               AND task.remote_state != 'removed'",
         )
         .bind(owner_id.to_string())
         .bind(&course_id)
@@ -53,6 +54,7 @@ impl SqliteTaskQueryRepository {
              FROM tasks AS task \
              INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
              WHERE account.owner_user_id = ? AND task.course_id = ? \
+               AND task.remote_state != 'removed' \
              ORDER BY task.updated_at DESC, task.id DESC LIMIT ? OFFSET ?",
         )
         .bind(owner_id.to_string())
@@ -90,6 +92,7 @@ impl TaskQueryRepository for SqliteTaskQueryRepository {
             "SELECT COUNT(*) FROM tasks AS task \
              INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
              WHERE account.owner_user_id = ? \
+               AND task.remote_state != 'removed' \
                AND (? IS NULL OR task.provider_account_id = ?)",
         )
         .bind(owner_id.to_string())
@@ -106,6 +109,7 @@ impl TaskQueryRepository for SqliteTaskQueryRepository {
              FROM tasks AS task \
              INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
              WHERE account.owner_user_id = ? \
+               AND task.remote_state != 'removed' \
                AND (? IS NULL OR task.provider_account_id = ?) \
              ORDER BY task.updated_at DESC, task.id DESC LIMIT ? OFFSET ?",
         )
@@ -288,6 +292,12 @@ mod tests {
         let first = insert_task(&database, account, "first", 1).await;
         let second = insert_task(&database, second_account, "second", 2).await;
         let other = insert_task(&database, other_account, "other", 3).await;
+        let removed = insert_task(&database, account, "removed", 4).await;
+        sqlx::query("UPDATE tasks SET remote_state = 'removed' WHERE id = ?")
+            .bind(removed.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
         let course = insert_course(&database, account, "course-alpha").await;
         attach_task_to_course(&database, first, course).await;
         let repository = SqliteTaskQueryRepository::new(database);

@@ -115,10 +115,133 @@ impl ProviderScanRepository for SqliteProviderScanRepository {
         for scanned in &batch.tasks {
             ingest_task(&mut transaction, batch, scanned, &courses, &mut report).await?;
         }
+        retire_missing_course_tasks(&mut transaction, batch, &courses, &mut report).await?;
         insert_scan_audit(&mut transaction, batch, &report).await?;
         transaction.commit().await?;
         Ok(report)
     }
+}
+
+async fn retire_missing_course_tasks(
+    transaction: &mut Transaction<'_, Sqlite>,
+    batch: &ProviderScanBatch,
+    scanned_courses: &BTreeMap<String, CourseId>,
+    report: &mut ProviderScanReport,
+) -> Result<(), StorageError> {
+    let course_ids = scanned_courses.values().copied().collect::<BTreeSet<_>>();
+    if course_ids.is_empty() {
+        return Ok(());
+    }
+    let mut observed = BTreeSet::new();
+    for task in &batch.tasks {
+        let Some(course_remote_id) = task.course_remote_id.as_ref() else {
+            continue;
+        };
+        let Some(course_id) = scanned_courses.get(course_remote_id) else {
+            continue;
+        };
+        observed.insert((
+            *course_id,
+            enum_name(task.source_type)?,
+            task.remote_id.clone(),
+        ));
+    }
+    let rows = sqlx::query(
+        "SELECT id, provider_account_id, course_id, remote_id, remote_fingerprint, source_type, \
+                assessment_class, title, remote_state, orchestration_state, opens_at, due_at, \
+                closes_at, discovered_at, updated_at, latest_snapshot_id, capabilities_json \
+         FROM tasks WHERE provider_account_id = ? AND course_id IS NOT NULL \
+           AND remote_state != 'removed'",
+    )
+    .bind(batch.provider_account_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    for row in rows {
+        let mut task = decode_task(&row)?;
+        let Some(course_id) = task.course_id else {
+            continue;
+        };
+        let source_type = enum_name(task.source_type)?;
+        if !course_ids.contains(&course_id)
+            || observed.contains(&(course_id, source_type, task.remote_id.clone()))
+        {
+            continue;
+        }
+        let fingerprint: String = row.try_get("remote_fingerprint")?;
+        let previous_snapshot_id = task.latest_snapshot_id;
+        let (normalized, remote_raw_sanitized) =
+            load_snapshot_payload(transaction, previous_snapshot_id).await?;
+        let snapshot_id = TaskSnapshotId::new();
+        task.remote_state = RemoteState::Removed;
+        task.updated_at = batch.observed_at;
+        task.latest_snapshot_id = Some(snapshot_id);
+        update_task(transaction, &task, &fingerprint).await?;
+        let scanned = ScannedTask {
+            remote_id: task.remote_id.clone(),
+            course_remote_id: None,
+            fingerprint,
+            source_type: task.source_type,
+            assessment_class: task.assessment_class,
+            title: task.title.clone(),
+            remote_state: RemoteState::Removed,
+            opens_at: task.opens_at,
+            due_at: task.due_at,
+            closes_at: task.closes_at,
+            capabilities: task.capabilities.clone(),
+            normalized,
+            remote_raw_sanitized,
+        };
+        let changes = vec![TaskDiffKind::Removed];
+        insert_snapshot_and_diff(
+            transaction,
+            batch,
+            &scanned,
+            &task,
+            snapshot_id,
+            previous_snapshot_id,
+            &changes,
+        )
+        .await?;
+        enqueue_in_transaction(
+            transaction,
+            &EventEnvelope::at(
+                &batch.correlation_id,
+                DomainEvent::TaskChanged {
+                    task_id: task.id,
+                    changes: changes.clone(),
+                },
+                batch.observed_at,
+            ),
+        )
+        .await?;
+        report.tasks_updated += 1;
+        report.task_changes.push(TaskScanChange {
+            task_id: task.id,
+            changes,
+        });
+    }
+    Ok(())
+}
+
+async fn load_snapshot_payload(
+    transaction: &mut Transaction<'_, Sqlite>,
+    snapshot_id: Option<TaskSnapshotId>,
+) -> Result<(Value, Value), StorageError> {
+    let Some(snapshot_id) = snapshot_id else {
+        return Ok((serde_json::json!({}), serde_json::json!({})));
+    };
+    let row = sqlx::query(
+        "SELECT normalized_json, remote_raw_sanitized_json \
+         FROM task_snapshots WHERE id = ?",
+    )
+    .bind(snapshot_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(|| StorageError::InvalidData("task latest snapshot does not exist".to_owned()))?;
+    Ok((
+        serde_json::from_str(row.try_get("normalized_json")?)?,
+        serde_json::from_str(row.try_get("remote_raw_sanitized_json")?)?,
+    ))
 }
 
 async fn insert_scan_audit(
@@ -726,6 +849,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((tasks, courses), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn full_course_scan_retires_tasks_that_disappeared_from_inventory() {
+        let (database, account_id) = setup().await;
+        let repository = SqliteProviderScanRepository::new(database.clone());
+        let now = Utc::now();
+        repository
+            .ingest_scan(&scan(account_id, now))
+            .await
+            .unwrap();
+        let mut empty = scan(account_id, now + chrono::Duration::minutes(1));
+        empty.tasks.clear();
+
+        let retired = repository.ingest_scan(&empty).await.unwrap();
+        assert_eq!(retired.tasks_updated, 1);
+        assert_eq!(retired.task_changes.len(), 1);
+        assert_eq!(retired.task_changes[0].changes, [TaskDiffKind::Removed]);
+        let state: String = sqlx::query_scalar("SELECT remote_state FROM tasks")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(state, "removed");
+
+        let unchanged = repository.ingest_scan(&empty).await.unwrap();
+        assert_eq!(unchanged.tasks_updated, 0);
+        assert!(unchanged.task_changes.is_empty());
     }
 
     #[tokio::test]

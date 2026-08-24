@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import sys
+import threading
 from types import ModuleType
 from typing import Any, Mapping
 
@@ -430,24 +431,39 @@ def inventory(module, payload, events, redactor):
     for point in points:
         with capture_output(events, redactor):
             jobs, job_info = bot.get_job_list(course, point)
-        for index, job in enumerate(jobs):
-            native_id = str(job.get("jobid") or job.get("id") or index)
-            remote_id = f'{point["id"]}:{native_id}'
-            if remote_id in seen_remote_ids:
-                module._asterism_card_diagnostics["duplicate_task_remote_ids"] = (
-                    module._asterism_card_diagnostics.get("duplicate_task_remote_ids", 0) + 1
-                )
-                continue
-            seen_remote_ids.add(remote_id)
-            raw_title = job.get("name") or job.get("title") or point.get("title")
-            tasks.append({"remote_id": remote_id,
-                          "title": clean_inventory_text(raw_title, 512, f"Chaoxing task {remote_id}"),
-                          "state": "completed" if job.get("_asterism_is_passed") or point.get("has_finished") else "pending",
-                          "source_type": "work" if job.get("type") == "workid" else "chapter",
-                          "capabilities": (["questions", "run"] if job.get("type") == "workid"
-                                           else ["run"] if job.get("type") in ("video", "document", "read")
-                                           else []),
-                          "native": {"course": course, "point": point, "job": job, "job_info": job_info}})
+        remote_id = f'knowledge:{point["id"]}'
+        if remote_id in seen_remote_ids:
+            module._asterism_card_diagnostics["duplicate_task_remote_ids"] = (
+                module._asterism_card_diagnostics.get("duplicate_task_remote_ids", 0) + 1
+            )
+            continue
+        seen_remote_ids.add(remote_id)
+        work_items = [job for job in jobs if job.get("type") == "workid"]
+        completed = bool(point.get("has_finished")) or bool(
+            jobs and all(job.get("_asterism_is_passed") for job in jobs)
+        )
+        not_open = bool(point.get("need_unlock") or job_info.get("notOpen"))
+        capabilities = ["run"]
+        if work_items:
+            capabilities.insert(0, "questions")
+        tasks.append({
+            "remote_id": remote_id,
+            "title": clean_inventory_text(
+                point.get("title"), 512, f"Chaoxing knowledge point {point['id']}"
+            ),
+            "state": "completed" if completed else "not_open" if not_open else "pending",
+            "source_type": "chapter",
+            "capabilities": capabilities,
+            "native": {
+                "route_kind": "knowledge_point",
+                "course": course,
+                "point": point,
+                "jobs": [
+                    {"job": job, "job_info": job_info, "job_index": index}
+                    for index, job in enumerate(jobs)
+                ],
+            },
+        })
 
     exam_count = 0
     auxiliary = cxkitty_for(payload, events, redactor)
@@ -1122,6 +1138,54 @@ def questions(module, payload, events, redactor):
             },
             "session": {"cookies": exam.session.ck_dump()},
         }
+    if native.get("route_kind") == "knowledge_point":
+        course = dict(require_mapping(native.get("course"), "task.native.course"))
+        point = dict(require_mapping(native.get("point"), "task.native.point"))
+        children = native.get("jobs")
+        if not isinstance(children, list):
+            raise WorkerFailure("request_invalid", "task.native.jobs must be an array")
+        rows = []
+        for fallback_index, child_value in enumerate(children):
+            child = require_mapping(child_value, "task.native.jobs item")
+            job = dict(require_mapping(child.get("job"), "task.native.jobs item.job"))
+            if job.get("type") != "workid":
+                continue
+            job_info = dict(require_mapping(
+                child.get("job_info"), "task.native.jobs item.job_info"
+            ))
+            job_key = knowledge_job_key(job, int(child.get("job_index", fallback_index)))
+            child_payload = dict(payload)
+            child_payload["task"] = {
+                "remote_id": task.get("remote_id"),
+                "native": {
+                    "course": course,
+                    "point": point,
+                    "job": job,
+                    "job_info": job_info,
+                },
+            }
+            child_result = questions(module, child_payload, events, redactor)
+            for question in child_result.get("questions", []):
+                row = dict(require_mapping(question, "knowledge-point question"))
+                provider_question_id = require_text(
+                    row.get("remote_id"), "knowledge-point question.remote_id"
+                )
+                row["remote_id"] = f"{job_key}:{provider_question_id}"
+                row["position"] = len(rows) + 1
+                native_shape = row.get("native_shape")
+                native_shape = dict(native_shape) if isinstance(native_shape, Mapping) else {}
+                native_shape.update({
+                    "knowledge_point_id": str(point.get("id", "")),
+                    "knowledge_job_id": job_key,
+                    "provider_question_id": provider_question_id,
+                })
+                row["native_shape"] = native_shape
+                rows.append(row)
+        return {
+            "questions": rows,
+            "scan_source": "Chaoxing knowledge point work cards",
+            "session": {"cookies": cookies(module.SessionManager.get_session())},
+        }
     if native.get("route_kind") == "course_homework":
         homework = require_mapping(native.get("homework"), "task.native.homework")
         route = require_text(homework.get("route"), "task.native.homework.route")
@@ -1330,6 +1394,12 @@ def _provided_answers(value: Any) -> dict[str, Any]:
             raise WorkerFailure("request_invalid", "payload.answers contains duplicate question IDs")
         answers[remote_id] = row.get("value")
     return answers
+
+
+def knowledge_job_key(job: Mapping[str, Any], fallback_index: int) -> str:
+    value = (job.get("_asterism_card_identity") or job.get("jobid")
+             or job.get("id") or f"job-{fallback_index + 1}")
+    return clean_inventory_text(value, 160, f"job-{fallback_index + 1}")
 
 
 def fill_cxkitty_answer(question, value):
@@ -1606,6 +1676,86 @@ def run_course_homework(bot, module, payload, native, events, redactor):
     }
 
 
+def run_knowledge_point(bot, module, payload, native, events, redactor):
+    """Keep the donor's public unit of work: one knowledge point."""
+    course = dict(require_mapping(native.get("course"), "task.native.course"))
+    point = dict(require_mapping(native.get("point"), "task.native.point"))
+    if point.get("has_finished"):
+        return {
+            "remote_state": "completed", "verified": True,
+            "result": {"task_type": "knowledge_point", "already_completed": True},
+            "session": {"cookies": cookies(module.SessionManager.get_session())},
+        }
+    if point.get("need_unlock"):
+        raise WorkerFailure("task_not_open", "Chaoxing knowledge point is locked")
+    children = native.get("jobs")
+    if not isinstance(children, list):
+        raise WorkerFailure("request_invalid", "task.native.jobs must be an array")
+    supplied_answers = _provided_answers(payload.get("answers"))
+    processed = 0
+    skipped_answer_jobs = 0
+    skipped_unsupported_jobs = 0
+    if not children:
+        with capture_output(events, redactor):
+            result = bot.study_emptypage(course, point)
+        if result.is_failure():
+            raise WorkerFailure("execution_failed", "upstream rejected empty knowledge point")
+        processed = 1
+    for fallback_index, child_value in enumerate(children):
+        child = require_mapping(child_value, "task.native.jobs item")
+        job = dict(require_mapping(child.get("job"), "task.native.jobs item.job"))
+        if job.get("_asterism_is_passed"):
+            continue
+        job_type = str(job.get("type", ""))
+        if job_type not in ("video", "document", "read", "workid", "live"):
+            skipped_unsupported_jobs += 1
+            continue
+        job_info = dict(require_mapping(
+            child.get("job_info"), "task.native.jobs item.job_info"
+        ))
+        job_key = knowledge_job_key(job, int(child.get("job_index", fallback_index)))
+        child_answers = []
+        prefix = f"{job_key}:"
+        for remote_id, value in supplied_answers.items():
+            if remote_id.startswith(prefix):
+                child_answers.append({"remote_id": remote_id[len(prefix):], "value": value})
+        if job_type == "workid" and not child_answers:
+            skipped_answer_jobs += 1
+            continue
+        child_payload = dict(payload)
+        child_payload["answers"] = child_answers
+        child_payload["task"] = {
+            "remote_id": require_mapping(payload.get("task"), "payload.task").get("remote_id"),
+            "native": {
+                "course": course,
+                "point": point,
+                "job": job,
+                "job_info": job_info,
+            },
+        }
+        run_task(module, child_payload, events, redactor)
+        processed += 1
+
+    with capture_output(events, redactor):
+        fresh_points = bot.get_course_point(
+            course["courseId"], course["clazzId"], course["cpi"]
+        ).get("points", [])
+    fresh = next((row for row in fresh_points if str(row.get("id")) == str(point.get("id"))), None)
+    verified = bool(fresh and fresh.get("has_finished"))
+    return {
+        "remote_state": "completed" if verified else "in_progress",
+        "verified": verified,
+        "result": {
+            "task_type": "knowledge_point",
+            "processed_jobs": processed,
+            "skipped_answer_jobs": skipped_answer_jobs,
+            "skipped_unsupported_jobs": skipped_unsupported_jobs,
+            "fresh_completion_observed": verified,
+        },
+        "session": {"cookies": cookies(module.SessionManager.get_session())},
+    }
+
+
 def run_task(module, payload, events, redactor):
     """Run one chapter attachment through Samueli's original task methods."""
     bot = bot_for(module, payload)
@@ -1615,6 +1765,8 @@ def run_task(module, payload, events, redactor):
         return run_course_exam(payload, native, events, redactor)
     if native.get("route_kind") == "course_homework":
         return run_course_homework(bot, module, payload, native, events, redactor)
+    if native.get("route_kind") == "knowledge_point":
+        return run_knowledge_point(bot, module, payload, native, events, redactor)
     course = dict(require_mapping(native.get("course"), "task.native.course"))
     point = dict(require_mapping(native.get("point"), "task.native.point"))
     job = dict(require_mapping(native.get("job"), "task.native.job"))
@@ -1650,6 +1802,27 @@ def run_task(module, payload, events, redactor):
 
             module.random_answer = refuse_random_answer
             result = bot.study_work(course, job, job_info)
+        elif job_type == "live":
+            live_module = importlib.import_module("api.live")
+            live_process_module = importlib.import_module("api.live_process")
+            defaults = {
+                "userid": bot.get_uid(),
+                "clazzId": course.get("clazzId"),
+                "knowledgeid": job_info.get("knowledgeid"),
+            }
+            live = live_module.Live(
+                attachment=job,
+                defaults=defaults,
+                course_id=course.get("courseId"),
+            )
+            thread = threading.Thread(
+                target=live_process_module.LiveProcessor.run_live,
+                args=(live, speed),
+                daemon=True,
+            )
+            thread.start()
+            thread.join()
+            result = module.StudyResult.SUCCESS
         else:
             raise WorkerFailure("task_unsupported", f"Samueli does not execute task type {job_type!r}")
     if result.is_failure():

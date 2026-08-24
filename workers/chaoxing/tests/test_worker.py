@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import types
 import unittest
+from unittest import mock
 
 
 WORKER_PATH = pathlib.Path(__file__).resolve().parents[1] / "worker.py"
@@ -13,6 +15,58 @@ SPEC.loader.exec_module(WORKER)
 
 
 class WorkReadParamsTests(unittest.TestCase):
+    def test_inventory_keeps_one_selectable_task_per_knowledge_point(self):
+        class Cookies:
+            def get_dict(self):
+                return {"sid": "redacted"}
+
+        class Session:
+            cookies = Cookies()
+
+            def get(self, *_args, **_kwargs):
+                raise RuntimeError("homework list unavailable in fixture")
+
+        session = Session()
+        module = types.SimpleNamespace(
+            SessionManager=types.SimpleNamespace(get_session=lambda: session),
+            _asterism_card_diagnostics={},
+        )
+        bot = types.SimpleNamespace(
+            get_course_point=lambda *_args: {
+                "points": [{
+                    "id": "point-1", "title": "1.1 Knowledge point",
+                    "has_finished": False, "need_unlock": False,
+                }]
+            },
+            get_job_list=lambda *_args: ([
+                {"type": "video", "jobid": "video-1"},
+                {"type": "workid", "jobid": "work-1"},
+            ], {"knowledgeid": "point-1"}),
+        )
+        payload = {
+            "session": {"cookies": {"sid": "redacted"}},
+            "course": {"courseId": "course-1", "clazzId": "class-1", "cpi": "cpi-1"},
+        }
+
+        with mock.patch.object(WORKER, "bot_for", return_value=bot), \
+             mock.patch.object(WORKER, "include_completed_cards"), \
+             mock.patch.object(WORKER, "cxkitty_for", return_value=None):
+            result = WORKER.inventory(
+                module,
+                payload,
+                types.SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+                WORKER.Redactor(),
+            )
+
+        self.assertEqual(len(result["tasks"]), 1)
+        task = result["tasks"][0]
+        self.assertEqual(task["remote_id"], "knowledge:point-1")
+        self.assertEqual(task["title"], "1.1 Knowledge point")
+        self.assertEqual(task["source_type"], "chapter")
+        self.assertEqual(task["capabilities"], ["questions", "run"])
+        self.assertEqual(task["native"]["route_kind"], "knowledge_point")
+        self.assertEqual(len(task["native"]["jobs"]), 2)
+
     def test_inventory_text_is_trimmed_control_free_and_utf8_bounded(self):
         cleaned = WORKER.clean_inventory_text("  第一行\n第二行\t" + "课" * 300, 32, "fallback")
 

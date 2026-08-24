@@ -624,7 +624,10 @@ impl UpstreamWorkerProvider {
                     term: optional_string(row, "term"),
                     teacher: optional_string(row, "teacher"),
                     remote_status: optional_string(row, "remote_status"),
-                    metadata_sanitized: json!({"worker_backed": true}),
+                    metadata_sanitized: json!({
+                        "worker_backed": true,
+                        "read_only": row.get("read_only").and_then(Value::as_bool).unwrap_or(false),
+                    }),
                     route_context: ProviderRouteContext::try_from_pairs([(
                         "worker.native".to_owned(),
                         route,
@@ -705,7 +708,10 @@ impl UpstreamWorkerProvider {
                     capabilities,
                     fingerprint: fingerprint(&self.metadata.id, &remote_id, &native),
                     normalized: json!({}),
-                    raw_sanitized: json!({"worker_backed": true}),
+                    raw_sanitized: json!({
+                        "worker_backed": true,
+                        "read_only": row.get("read_only").and_then(Value::as_bool).unwrap_or(false),
+                    }),
                 };
                 Ok((task, native))
             })
