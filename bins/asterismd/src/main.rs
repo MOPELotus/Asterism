@@ -618,10 +618,11 @@ fn build_provider_registry(
             provider_id.clone(),
         ));
         registry
-            .register(UpstreamWorkerProvider::entry(
+            .register(UpstreamWorkerProvider::entry_with_renewal(
                 provider_id,
                 "Chaoxing",
                 worker.clone(),
+                runtime.clone(),
                 runtime,
                 WorkerAuthProfile::PasswordAndCookie,
             ))
@@ -656,10 +657,11 @@ fn build_provider_registry(
             provider_id.clone(),
         ));
         registry
-            .register(UpstreamWorkerProvider::entry(
+            .register(UpstreamWorkerProvider::entry_with_renewal(
                 provider_id,
                 "WELearn",
                 worker.clone(),
+                runtime.clone(),
                 runtime,
                 WorkerAuthProfile::PasswordAndCookie,
             ))
@@ -694,10 +696,11 @@ fn build_provider_registry(
             provider_id.clone(),
         ));
         registry
-            .register(UpstreamWorkerProvider::entry(
+            .register(UpstreamWorkerProvider::entry_with_renewal(
                 provider_id,
                 "UAI",
                 worker.clone(),
+                runtime.clone(),
                 runtime,
                 WorkerAuthProfile::Password,
             ))

@@ -1,7 +1,7 @@
 use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
-    AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, Execution,
+    AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, CourseId, Execution,
     ExecutionAttempt, ExecutionInvocationDraftId, NormalizedAnswer, ProviderAccountId, ProviderId,
     Question, QuestionGroup, QuestionId, QuestionSnapshotId, RemoteState, ScoreImprovementWorkflow,
     ScoreImprovementWorkflowId, StrictCompletionWorkflow, StrictCompletionWorkflowId,
@@ -81,6 +81,20 @@ pub(super) async fn list_tasks(
         .as_deref()
         .map(parse_provider_account_id)
         .transpose()?;
+    let course_id = query
+        .course_id
+        .as_deref()
+        .map(|value| {
+            CourseId::from_str(value)
+                .map_err(|_| ApiError::bad_request("invalid_course_id", "course ID is invalid"))
+        })
+        .transpose()?;
+    if provider_account_id.is_some() && course_id.is_some() {
+        return Err(ApiError::bad_request(
+            "ambiguous_task_scope",
+            "filter tasks by either provider_account_id or course_id",
+        ));
+    }
     let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE);
     let offset = query.offset.unwrap_or_default();
     if limit == 0 || limit > MAX_PAGE_SIZE || offset > MAX_OFFSET {
@@ -89,10 +103,17 @@ pub(super) async fn list_tasks(
             "task limit must be 1-200 and offset must not exceed 1000000",
         ));
     }
-    let page = SqliteTaskQueryRepository::new(state.database)
-        .list_owned_tasks(owner_id, provider_account_id, limit, offset)
-        .await
-        .map_err(ApiError::internal)?;
+    let repository = SqliteTaskQueryRepository::new(state.database);
+    let page = if let Some(course_id) = course_id {
+        repository
+            .list_owned_course_tasks(owner_id, course_id, limit, offset)
+            .await
+    } else {
+        repository
+            .list_owned_tasks(owner_id, provider_account_id, limit, offset)
+            .await
+    }
+    .map_err(ApiError::internal)?;
     Ok(crate::auth::no_store(
         Json(TaskPageResponse {
             total: page.total,
@@ -1995,6 +2016,7 @@ fn map_submission_draft_build_error(error: SubmissionDraftBuildError) -> ApiErro
 #[serde(deny_unknown_fields)]
 pub(super) struct TaskListQuery {
     provider_account_id: Option<String>,
+    course_id: Option<String>,
     limit: Option<u32>,
     offset: Option<u64>,
 }

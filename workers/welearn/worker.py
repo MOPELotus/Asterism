@@ -80,7 +80,11 @@ def courses(module, payload, events, redactor):
 def course_context(module, course):
     cid = str(course["cid"])
     url = f"https://welearn.sflep.com/student/course_info.aspx?cid={cid}"
-    text = module.session.get(url, headers={"Referer": "https://welearn.sflep.com/student/index.aspx"}, timeout=15).text
+    text = retry_read(lambda: module.session.get(
+        url,
+        headers={"Referer": "https://welearn.sflep.com/student/index.aspx"},
+        timeout=15,
+    )).text
     uid_match, class_match = re.search(r'"uid":(.*?),', text), re.search(r'"classid":"(.*?)"', text)
     if not uid_match or not class_match: raise WorkerFailure("course_shape_mismatch", "uid/classid were absent")
     return cid, uid_match.group(1), class_match.group(1), url
@@ -90,13 +94,17 @@ def tasks(module, payload, events, redactor):
     restore(module, payload.get("session")); course = require_mapping(payload.get("course"), "payload.course")
     with capture_output(events, redactor):
         cid, uid, classid, course_url = course_context(module, course)
-        units = module.session.post("https://welearn.sflep.com/ajax/StudyStat.aspx",
-            data={"action": "courseunits", "cid": cid, "uid": uid}, headers={"Referer": course_url}, timeout=15).json().get("info", [])
+        units = retry_read(lambda: module.session.post(
+            "https://welearn.sflep.com/ajax/StudyStat.aspx",
+            data={"action": "courseunits", "cid": cid, "uid": uid},
+            headers={"Referer": course_url}, timeout=15,
+        )).json().get("info", [])
         result = []
         for unit_index, unit in enumerate(units):
-            items = module.session.get(
+            items = retry_read(lambda: module.session.get(
                 f"https://welearn.sflep.com/ajax/StudyStat.aspx?action=scoLeaves&cid={cid}&uid={uid}&unitidx={unit_index}&classid={classid}",
-                headers={"Referer": course_url}, timeout=15).json().get("info", [])
+                headers={"Referer": course_url}, timeout=15,
+            )).json().get("info", [])
             for item in items:
                 if isinstance(item, Mapping):
                     result.append({"remote_id": str(item.get("id")), "title": str(item.get("location") or item.get("name") or item.get("id")),

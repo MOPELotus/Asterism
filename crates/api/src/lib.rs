@@ -905,6 +905,7 @@ pub fn openapi_document() -> Value {
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
                 "parameters": [
                     {"name": "provider_account_id", "in": "query", "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "course_id", "in": "query", "schema": {"type": "string", "format": "uuid"}},
                     {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
                     {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
                 ],
@@ -6436,18 +6437,31 @@ mod tests {
         let account = to_bytes(account.into_body(), 16 * 1024).await.unwrap();
         let account: Value = serde_json::from_slice(&account).unwrap();
         let account_id = account["id"].as_str().unwrap();
+        let course_id = asterism_domain::CourseId::new();
         let task_id = asterism_domain::TaskId::new();
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
         sqlx::query(
+            "INSERT INTO courses \
+             (id, provider_account_id, remote_id, title, metadata_json, last_seen_at) \
+             VALUES (?, ?, 'remote-course', 'course', '{}', ?)",
+        )
+        .bind(course_id.to_string())
+        .bind(account_id)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO tasks \
-             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+             (id, provider_account_id, course_id, remote_id, remote_fingerprint, source_type, \
               assessment_class, title, remote_state, orchestration_state, discovered_at, \
               updated_at, capabilities_json) \
-             VALUES (?, ?, 'remote-task', 'fingerprint', 'exam', 'routine', 'weekly check', \
+             VALUES (?, ?, ?, 'remote-task', 'fingerprint', 'exam', 'routine', 'weekly check', \
                      'pending', 'ready', ?, ?, '[\"progress_read\"]')",
         )
         .bind(task_id.to_string())
         .bind(account_id)
+        .bind(course_id.to_string())
         .bind(&now)
         .bind(&now)
         .execute(database.pool())
@@ -6475,6 +6489,40 @@ mod tests {
         assert_eq!(listed["items"][0]["source_type"], "exam");
         assert_eq!(listed["items"][0]["assessment_class"], "routine");
         assert!(listed["items"][0].get("remote_fingerprint").is_none());
+
+        let course_listed = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks?course_id={course_id}&limit=1&offset=0"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(course_listed.status(), StatusCode::OK);
+        let course_listed = to_bytes(course_listed.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let course_listed: Value = serde_json::from_slice(&course_listed).unwrap();
+        assert_eq!(course_listed["total"], 1);
+        assert_eq!(course_listed["items"][0]["id"], task_id.to_string());
+
+        let ambiguous = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks?provider_account_id={account_id}&course_id={course_id}"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ambiguous.status(), StatusCode::BAD_REQUEST);
 
         let fetched = app
             .clone()

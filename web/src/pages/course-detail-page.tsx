@@ -22,11 +22,12 @@ export function CourseDetailPage() {
   const { courseId = "" } = useParams();
   const [selected, setSelected] = useState<string[]>([]);
   const [startedCount, setStartedCount] = useState<number>();
+  const [taskPage, setTaskPage] = useState(1);
   const course = useQuery({ queryKey: ["courses", courseId], enabled: Boolean(courseId), queryFn: async () => requireData(await getCourse({ path: { course_id: courseId } })) });
   const account = useQuery({ queryKey: ["provider-accounts", course.data?.provider_account_id], enabled: Boolean(course.data?.provider_account_id), queryFn: async () => requireData(await getProviderAccount({ path: { account_id: course.data!.provider_account_id } })) });
-  const tasks = useList<Task>({ resource: "tasks", pagination: { pageSize: 500 }, filters: course.data?.provider_account_id ? [{ field: "provider_account_id", operator: "eq", value: course.data.provider_account_id }] : undefined });
+  const tasks = useList<Task>({ resource: "tasks", pagination: { currentPage: taskPage, pageSize: 200 }, filters: [{ field: "course_id", operator: "eq", value: courseId }] });
   const progress = useQuery({ queryKey: ["courses", courseId, "progress"], enabled: Boolean(courseId), retry: false, queryFn: async () => requireData(await getCourseProgress({ path: { course_id: courseId } })) });
-  const courseTasks = useMemo(() => (tasks.result.data ?? []).filter((task) => task.course_id === courseId), [courseId, tasks.result.data]);
+  const courseTasks = useMemo(() => tasks.result.data ?? [], [tasks.result.data]);
   const directTasks = useMemo(() => courseTasks.filter((task) => directCapability(task) && task.remote_state !== "completed" && task.assessment_class !== "formal"), [courseTasks]);
   const startSelected = useMutation({
     mutationFn: async () => {
@@ -50,8 +51,8 @@ export function CourseDetailPage() {
     {error ? <QueryError error={error} /> : null}
     {startedCount ? <Alert><AlertTitle>已开始执行</AlertTitle><AlertDescription>{startedCount} 个任务已加入执行队列，可在“执行记录”中查看进度。</AlertDescription></Alert> : null}
     <div className="grid gap-4 sm:grid-cols-3">
-      <Summary label="全部任务" value={`${allTasks.length} 个`} />
-      <Summary label="待完成" value={`${allTasks.filter((task) => task.remote_state !== "completed").length} 个`} />
+      <Summary label="全部任务" value={`${progress.data?.progress.total_task_count ?? tasks.result.total ?? 0} 个`} />
+      <Summary label="待完成" value={`${progress.data?.progress.remaining_task_count ?? allTasks.filter((task) => task.remote_state !== "completed").length} 个`} />
       <Summary label="最近同步" value={formatTimestamp(course.data.last_seen_at)} />
     </div>
     {progress.data ? <Card><CardHeader><CardTitle>课程进度</CardTitle></CardHeader><CardContent className="flex flex-wrap gap-2"><Badge variant="secondary">剩余 {progress.data.progress.remaining_task_count}</Badge><Badge variant="secondary">需要人工处理 {progress.data.progress.human_required_task_count}</Badge>{progress.data.progress.duration ? <Badge variant="outline">学习 {Math.round(progress.data.progress.duration.observed_seconds / 60)} 分钟</Badge> : null}</CardContent></Card> : null}
@@ -64,7 +65,7 @@ export function CourseDetailPage() {
           <div className="min-w-0 flex-1"><Link className="block truncate font-medium hover:text-primary" to={`/tasks/${task.id}`}>{task.title}</Link><p className="text-xs text-muted-foreground">{remoteStateLabel(task.remote_state)}{task.due_at ? ` · 截止 ${formatTimestamp(task.due_at)}` : ""}</p></div>
           <Link className={buttonVariants({ variant: task.remote_state === "completed" ? "outline" : "default", size: "sm" })} to={`/tasks/${task.id}`}>{taskActionLabel(task)}<ChevronRight className="size-4" /></Link>
         </div>;
-      })}</div></section>)}</div> : <p className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">尚未发现任务，请返回账号页面重新同步。</p>}
+      })}</div></section>)}{(tasks.result.total ?? 0) > 200 ? <div className="flex items-center justify-between border-t pt-4"><span className="text-sm text-muted-foreground">第 {taskPage} / {Math.ceil((tasks.result.total ?? 0) / 200)} 页</span><div className="flex gap-2"><Button variant="outline" disabled={taskPage <= 1} onClick={() => { setSelected([]); setTaskPage((page) => Math.max(1, page - 1)); }}>上一页</Button><Button variant="outline" disabled={taskPage >= Math.ceil((tasks.result.total ?? 0) / 200)} onClick={() => { setSelected([]); setTaskPage((page) => page + 1); }}>下一页</Button></div></div> : null}</div> : <p className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">尚未发现任务，请返回账号页面重新同步。</p>}
     </CardContent></Card>
   </PageShell>;
 }

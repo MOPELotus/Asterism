@@ -24,7 +24,8 @@ use asterism_provider_api::{
     SessionStatus, TaskExecutionCapability, TaskInventoryCapability, VerificationLevel,
 };
 use asterism_secrets::{
-    CredentialBundle, CredentialField, ProviderCredentialResolution, ProviderCredentialResolver,
+    CredentialAcquisition, CredentialBundle, CredentialField, ProviderCredentialRenewal,
+    ProviderCredentialRenewer, ProviderCredentialResolution, ProviderCredentialResolver,
     ResolvedProviderCredential, SecretPurpose, SecretStoreError, SecretString, SecretValue,
 };
 use asterism_uai_worker_client::{UaiWorkerClient, UaiWorkerClientError};
@@ -48,9 +49,11 @@ pub struct UpstreamWorkerProvider {
     metadata: ProviderMetadata,
     client: UaiWorkerClient,
     credentials: Arc<dyn ProviderCredentialResolver>,
+    credential_renewer: Option<Arc<dyn ProviderCredentialRenewer>>,
     auth_profile: WorkerAuthProfile,
     authentication_delegate: Option<Arc<dyn AuthenticationCapability>>,
     task_routes: Arc<RwLock<HashMap<(String, String), Value>>>,
+    request_sessions: Arc<RwLock<HashMap<(String, String), Value>>>,
 }
 
 impl std::fmt::Debug for UpstreamWorkerProvider {
@@ -60,12 +63,14 @@ impl std::fmt::Debug for UpstreamWorkerProvider {
             .field("metadata", &self.metadata)
             .field("client", &self.client)
             .field("credentials", &"configured")
+            .field("credential_renewer", &self.credential_renewer.is_some())
             .field("auth_profile", &self.auth_profile)
             .field(
                 "authentication_delegate",
                 &self.authentication_delegate.is_some(),
             )
             .field("task_routes", &"in-memory Provider-private cache")
+            .field("request_sessions", &"bounded in-request session cache")
             .finish()
     }
 }
@@ -84,6 +89,28 @@ impl UpstreamWorkerProvider {
             display_name,
             client,
             credentials,
+            None,
+            auth_profile,
+            None,
+        )
+    }
+
+    /// Builds a worker-backed Provider which can atomically persist a session
+    /// refreshed from the account's saved username and password.
+    pub fn entry_with_renewal(
+        provider_id: asterism_domain::ProviderId,
+        display_name: impl Into<String>,
+        client: UaiWorkerClient,
+        credentials: Arc<dyn ProviderCredentialResolver>,
+        credential_renewer: Arc<dyn ProviderCredentialRenewer>,
+        auth_profile: WorkerAuthProfile,
+    ) -> ProviderEntry {
+        Self::entry_inner(
+            provider_id,
+            display_name,
+            client,
+            credentials,
+            Some(credential_renewer),
             auth_profile,
             None,
         )
@@ -104,6 +131,7 @@ impl UpstreamWorkerProvider {
             display_name,
             client,
             credentials,
+            None,
             auth_profile,
             Some(authentication_delegate),
         )
@@ -114,6 +142,7 @@ impl UpstreamWorkerProvider {
         display_name: impl Into<String>,
         client: UaiWorkerClient,
         credentials: Arc<dyn ProviderCredentialResolver>,
+        credential_renewer: Option<Arc<dyn ProviderCredentialRenewer>>,
         auth_profile: WorkerAuthProfile,
         authentication_delegate: Option<Arc<dyn AuthenticationCapability>>,
     ) -> ProviderEntry {
@@ -195,9 +224,11 @@ impl UpstreamWorkerProvider {
             metadata: metadata.clone(),
             client,
             credentials,
+            credential_renewer,
             auth_profile,
             authentication_delegate,
             task_routes: Arc::new(RwLock::new(HashMap::new())),
+            request_sessions: Arc::new(RwLock::new(HashMap::new())),
         });
         let runtime_settings = worker_runtime_settings_schema(&metadata.id);
         ProviderEntry {
@@ -278,49 +309,84 @@ impl UpstreamWorkerProvider {
     }
 
     async fn session(&self, context: &ProviderContext) -> ProviderResult<Value> {
+        if let Some(session) = self.cached_request_session(context)? {
+            return Ok(session);
+        }
         let authenticated = match self.auth_profile {
             WorkerAuthProfile::PasswordAndCookie => {
                 let cookie = self
                     .resolve(context, vec![SecretPurpose::ProviderCookie])
                     .await;
+                let had_cookie = cookie.is_ok();
                 if let Ok(cookie) = cookie {
                     let credentials = json!({
                         "cookie": resolved_text(&cookie, SecretPurpose::ProviderCookie)?
                     });
                     if let Ok(session) = self.authenticate_session(credentials).await {
+                        self.cache_request_session(context, &session)?;
                         return Ok(session);
                     }
                 }
-                let fields = self
-                    .resolve(
-                        context,
-                        vec![
-                            SecretPurpose::ProviderUsername,
-                            SecretPurpose::ProviderPassword,
-                        ],
-                    )
+                let purposes = if had_cookie {
+                    vec![
+                        SecretPurpose::ProviderUsername,
+                        SecretPurpose::ProviderPassword,
+                        SecretPurpose::ProviderCookie,
+                    ]
+                } else {
+                    vec![
+                        SecretPurpose::ProviderUsername,
+                        SecretPurpose::ProviderPassword,
+                    ]
+                };
+                let fields = self.resolve(context, purposes).await?;
+                let username = resolved_text(&fields, SecretPurpose::ProviderUsername)?.to_owned();
+                let password = resolved_text(&fields, SecretPurpose::ProviderPassword)?.to_owned();
+                let session = self
+                    .authenticate_session(json!({
+                        "username": username,
+                        "password": password,
+                    }))
                     .await?;
-                self.authenticate_session(json!({
-                    "username": resolved_text(&fields, SecretPurpose::ProviderUsername)?,
-                    "password": resolved_text(&fields, SecretPurpose::ProviderPassword)?,
-                }))
-                .await
+                self.persist_password_session(context, &fields, &username, &password, &session)
+                    .await?;
+                Ok(session)
             }
             WorkerAuthProfile::Password => {
-                let fields = self
+                let fields = match self
                     .resolve(
                         context,
                         vec![
                             SecretPurpose::ProviderUsername,
                             SecretPurpose::ProviderPassword,
+                            SecretPurpose::ProviderCompositeSession,
                         ],
                     )
+                    .await
+                {
+                    Ok(fields) => fields,
+                    Err(_) => {
+                        self.resolve(
+                            context,
+                            vec![
+                                SecretPurpose::ProviderUsername,
+                                SecretPurpose::ProviderPassword,
+                            ],
+                        )
+                        .await?
+                    }
+                };
+                let username = resolved_text(&fields, SecretPurpose::ProviderUsername)?.to_owned();
+                let password = resolved_text(&fields, SecretPurpose::ProviderPassword)?.to_owned();
+                let session = self
+                    .authenticate_session(json!({
+                        "username": username,
+                        "password": password,
+                    }))
                     .await?;
-                self.authenticate_session(json!({
-                    "username": resolved_text(&fields, SecretPurpose::ProviderUsername)?,
-                    "password": resolved_text(&fields, SecretPurpose::ProviderPassword)?,
-                }))
-                .await
+                self.persist_password_session(context, &fields, &username, &password, &session)
+                    .await?;
+                Ok(session)
             }
             WorkerAuthProfile::ImportedToken => {
                 let fields = self
@@ -351,7 +417,125 @@ impl UpstreamWorkerProvider {
                 .await
             }
         };
-        authenticated
+        let authenticated = authenticated?;
+        self.cache_request_session(context, &authenticated)?;
+        Ok(authenticated)
+    }
+
+    fn cached_request_session(&self, context: &ProviderContext) -> ProviderResult<Option<Value>> {
+        self.request_sessions
+            .read()
+            .map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "worker request-session cache is unavailable",
+                )
+            })
+            .map(|sessions| {
+                sessions
+                    .get(&(
+                        context.account_id.to_string(),
+                        context.correlation_id.clone(),
+                    ))
+                    .cloned()
+            })
+    }
+
+    fn cache_request_session(
+        &self,
+        context: &ProviderContext,
+        session: &Value,
+    ) -> ProviderResult<()> {
+        let mut sessions = self.request_sessions.write().map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "worker request-session cache is unavailable",
+            )
+        })?;
+        if sessions.len() >= 128 {
+            sessions.clear();
+        }
+        sessions.insert(
+            (
+                context.account_id.to_string(),
+                context.correlation_id.clone(),
+            ),
+            session.clone(),
+        );
+        Ok(())
+    }
+
+    async fn persist_password_session(
+        &self,
+        context: &ProviderContext,
+        resolved: &[ResolvedProviderCredential],
+        username: &str,
+        password: &str,
+        session: &Value,
+    ) -> ProviderResult<()> {
+        let Some(renewer) = &self.credential_renewer else {
+            return Ok(());
+        };
+        let session_field = match self.auth_profile {
+            WorkerAuthProfile::PasswordAndCookie => CredentialField {
+                purpose: SecretPurpose::ProviderCookie,
+                value: SecretValue::new(cookie_header_from_session(session)?.into_bytes()),
+            },
+            WorkerAuthProfile::Password => CredentialField {
+                purpose: SecretPurpose::ProviderCompositeSession,
+                value: SecretValue::new(serde_json::to_vec(session).map_err(|_| {
+                    ProviderError::new(
+                        ProviderErrorKind::InvalidResponse,
+                        "worker session could not be persisted",
+                    )
+                })?),
+            },
+            WorkerAuthProfile::ImportedToken | WorkerAuthProfile::ExternalOauthComposite => {
+                return Ok(());
+            }
+        };
+        let bundle = CredentialBundle {
+            provider_id: self.metadata.id.clone(),
+            tenant: None,
+            auth_method: AuthMethod::Password,
+            acquired_via: CredentialAcquisition::NativeProviderLogin,
+            captured_at: chrono::Utc::now(),
+            expires_at: None,
+            session_kind: SessionKind::Composite,
+            fields: vec![
+                CredentialField {
+                    purpose: SecretPurpose::ProviderUsername,
+                    value: SecretValue::new(username.as_bytes().to_vec()),
+                },
+                CredentialField {
+                    purpose: SecretPurpose::ProviderPassword,
+                    value: SecretValue::new(password.as_bytes().to_vec()),
+                },
+                session_field,
+            ],
+            user_id_hint: None,
+        };
+        renewer
+            .renew_provider_credentials(ProviderCredentialRenewal {
+                provider_account_id: context.account_id,
+                expected_credentials: resolved
+                    .iter()
+                    .map(|field| field.credential.clone())
+                    .collect(),
+                bundle,
+                correlation_id: context.correlation_id.clone(),
+            })
+            .await
+            .map_err(|error| {
+                let kind = match error {
+                    SecretStoreError::NotFound
+                    | SecretStoreError::Unauthorized
+                    | SecretStoreError::AccountMismatch => ProviderErrorKind::Authentication,
+                    _ => ProviderErrorKind::Internal,
+                };
+                ProviderError::new(kind, format!("worker credential renewal failed: {error}"))
+            })?;
+        Ok(())
     }
 
     async fn resolve(
@@ -741,31 +925,90 @@ impl AuthenticationCapability for UpstreamWorkerProvider {
                 "worker login returned no session",
             )
         })?;
-        let session_bytes = serde_json::to_vec(&session).map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::InvalidResponse,
-                "worker session is invalid",
-            )
-        })?;
         let account_hint = result
             .pointer("/account/display_name")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let replacement = match credential.auth_method {
+            AuthMethod::Password => {
+                let session_field = match self.auth_profile {
+                    WorkerAuthProfile::PasswordAndCookie => CredentialField {
+                        purpose: SecretPurpose::ProviderCookie,
+                        value: SecretValue::new(cookie_header_from_session(&session)?.into_bytes()),
+                    },
+                    WorkerAuthProfile::Password => CredentialField {
+                        purpose: SecretPurpose::ProviderCompositeSession,
+                        value: SecretValue::new(serde_json::to_vec(&session).map_err(|_| {
+                            ProviderError::new(
+                                ProviderErrorKind::InvalidResponse,
+                                "worker session is invalid",
+                            )
+                        })?),
+                    },
+                    WorkerAuthProfile::ImportedToken
+                    | WorkerAuthProfile::ExternalOauthComposite => {
+                        return Err(ProviderError::new(
+                            ProviderErrorKind::Authentication,
+                            "worker password authentication profile is invalid",
+                        ));
+                    }
+                };
+                CredentialReplacement {
+                    session_kind: SessionKind::Composite,
+                    fields: vec![
+                        CredentialField {
+                            purpose: SecretPurpose::ProviderUsername,
+                            value: SecretValue::new(
+                                field_text(credential, SecretPurpose::ProviderUsername)?
+                                    .as_bytes()
+                                    .to_vec(),
+                            ),
+                        },
+                        CredentialField {
+                            purpose: SecretPurpose::ProviderPassword,
+                            value: SecretValue::new(
+                                field_text(credential, SecretPurpose::ProviderPassword)?
+                                    .as_bytes()
+                                    .to_vec(),
+                            ),
+                        },
+                        session_field,
+                    ],
+                }
+            }
+            AuthMethod::ImportedCookie => CredentialReplacement {
+                session_kind: SessionKind::Cookie,
+                fields: vec![CredentialField {
+                    purpose: SecretPurpose::ProviderCookie,
+                    value: SecretValue::new(
+                        field_text(credential, SecretPurpose::ProviderCookie)?
+                            .as_bytes()
+                            .to_vec(),
+                    ),
+                }],
+            },
+            AuthMethod::ImportedToken => CredentialReplacement {
+                session_kind: SessionKind::BearerToken,
+                fields: vec![CredentialField {
+                    purpose: SecretPurpose::ProviderAccessToken,
+                    value: SecretValue::new(
+                        field_text(credential, SecretPurpose::ProviderAccessToken)?
+                            .as_bytes()
+                            .to_vec(),
+                    ),
+                }],
+            },
+            _ => unreachable!("unsupported authentication methods returned above"),
+        };
         let _ = context;
         Ok(CredentialValidation {
             status: SessionStatus {
                 valid: true,
-                kind: SessionKind::Composite,
+                kind: replacement.session_kind,
                 expires_at: None,
                 account_hint,
             },
-            replacement: Some(CredentialReplacement {
-                session_kind: SessionKind::Composite,
-                fields: vec![CredentialField {
-                    purpose: SecretPurpose::ProviderCompositeSession,
-                    value: SecretValue::new(session_bytes),
-                }],
-            }),
+            replacement: Some(replacement),
         })
     }
 
@@ -1705,6 +1948,41 @@ fn resolved_json(
     })
 }
 
+fn cookie_header_from_session(session: &Value) -> ProviderResult<String> {
+    let cookies = session
+        .get("cookies")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "worker password login returned no Cookie jar",
+            )
+        })?;
+    let mut pairs = cookies
+        .iter()
+        .map(|(name, value)| {
+            value
+                .as_str()
+                .filter(|value| !name.is_empty() && !value.is_empty())
+                .map(|value| format!("{name}={value}"))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "worker password login returned an invalid Cookie jar",
+            )
+        })?;
+    if pairs.is_empty() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "worker password login returned an empty Cookie jar",
+        ));
+    }
+    pairs.sort_unstable();
+    Ok(pairs.join("; "))
+}
+
 fn required_string(value: &Value, key: &str) -> ProviderResult<String> {
     value
         .get(key)
@@ -1955,18 +2233,28 @@ fn map_secret_error(error: &SecretStoreError) -> ProviderError {
         | SecretStoreError::AccountMismatch => ProviderErrorKind::Authentication,
         _ => ProviderErrorKind::Internal,
     };
-    ProviderError::new(kind, "worker credential resolution failed")
+    ProviderError::new(kind, format!("worker credential storage failed: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
-    use asterism_domain::{ProviderAccountId, ProviderId};
+    use asterism_domain::{
+        ProviderAccountId, ProviderId, SecretId, SessionKind, Timestamp, UserId,
+    };
     use asterism_provider_api::ProviderRegistry;
     use asterism_secrets::{
-        CredentialAcquisition, ProviderCredentialResolution, ResolvedProviderCredential,
-        SecretStoreError,
+        CredentialAcquisition, ProviderCredential, ProviderCredentialRenewal,
+        ProviderCredentialRenewer, ProviderCredentialResolution, ResolvedProviderCredential,
+        SecretRef, SecretStoreError,
     };
 
     use super::*;
@@ -1981,6 +2269,105 @@ mod tests {
             _request: ProviderCredentialResolution,
         ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
             Err(SecretStoreError::NotFound)
+        }
+    }
+
+    #[derive(Debug)]
+    struct RenewingCredentials {
+        account_id: ProviderAccountId,
+        owner_id: UserId,
+        fields: Vec<(SecretId, SecretPurpose, &'static [u8])>,
+        renewal: Mutex<Option<(usize, HashSet<SecretPurpose>)>>,
+        renewed: AtomicBool,
+    }
+
+    impl RenewingCredentials {
+        fn uai(account_id: ProviderAccountId) -> Self {
+            Self {
+                account_id,
+                owner_id: UserId::new(),
+                fields: vec![
+                    (
+                        SecretId::new(),
+                        SecretPurpose::ProviderUsername,
+                        b"fixture-user",
+                    ),
+                    (
+                        SecretId::new(),
+                        SecretPurpose::ProviderPassword,
+                        b"fixture-password",
+                    ),
+                    (
+                        SecretId::new(),
+                        SecretPurpose::ProviderCompositeSession,
+                        br#"{"open_id":"stale","authorization":"stale","cookies":[]}"#,
+                    ),
+                ],
+                renewal: Mutex::new(None),
+                renewed: AtomicBool::new(false),
+            }
+        }
+
+        fn credential_refs(&self) -> Vec<SecretId> {
+            self.fields.iter().map(|(id, _, _)| *id).collect()
+        }
+    }
+
+    #[async_trait]
+    impl ProviderCredentialResolver for RenewingCredentials {
+        async fn resolve_provider_credentials(
+            &self,
+            request: ProviderCredentialResolution,
+        ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
+            if self.renewed.load(Ordering::SeqCst) {
+                return Err(SecretStoreError::AccountMismatch);
+            }
+            let now = Timestamp::default();
+            Ok(self
+                .fields
+                .iter()
+                .filter(|(_, purpose, _)| request.purposes.contains(purpose))
+                .map(|(id, purpose, value)| ResolvedProviderCredential {
+                    credential: ProviderCredential {
+                        provider_account_id: self.account_id,
+                        secret: SecretRef {
+                            id: *id,
+                            owner_user_id: self.owner_id,
+                            purpose: *purpose,
+                            version: 1,
+                            key_id: "fixture-key".to_owned(),
+                            created_at: now,
+                            updated_at: now,
+                        },
+                        session_kind: SessionKind::Composite,
+                        acquired_via: CredentialAcquisition::NativeProviderLogin,
+                        captured_at: now,
+                        expires_at: None,
+                        updated_at: now,
+                    },
+                    value: SecretValue::new(value.to_vec()),
+                })
+                .collect())
+        }
+    }
+
+    #[async_trait]
+    impl ProviderCredentialRenewer for RenewingCredentials {
+        async fn renew_provider_credentials(
+            &self,
+            request: ProviderCredentialRenewal,
+        ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
+            *self.renewal.lock().unwrap() = Some((
+                request.expected_credentials.len(),
+                request
+                    .bundle
+                    .fields
+                    .iter()
+                    .map(|field| field.purpose)
+                    .collect(),
+            ));
+            self.renewed.store(true, Ordering::SeqCst);
+            Ok(request.expected_credentials)
         }
     }
 
@@ -2047,10 +2434,12 @@ mod tests {
             BTreeSet::from([SessionKind::Composite])
         );
         assert!(entry.task_execution.is_some());
-        assert!(entry
-            .metadata
-            .capabilities
-            .contains(&ProviderCapability::ResourceExecution));
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::ResourceExecution)
+        );
         assert!(entry.browser_bridge.is_none());
         ProviderRegistry::default().register(entry).unwrap();
         let digest = [0xabu8; 32];
@@ -2185,13 +2574,82 @@ mod tests {
         assert!(validation.status.valid);
         let replacement = validation.replacement.unwrap();
         assert_eq!(replacement.session_kind, SessionKind::Composite);
-        assert_eq!(replacement.fields.len(), 1);
+        assert_eq!(replacement.fields.len(), 3);
         assert_eq!(
-            replacement.fields[0].purpose,
-            SecretPurpose::ProviderCompositeSession
+            replacement
+                .fields
+                .iter()
+                .map(|field| field.purpose)
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                SecretPurpose::ProviderUsername,
+                SecretPurpose::ProviderPassword,
+                SecretPurpose::ProviderCompositeSession,
+            ])
         );
-        let session: Value =
-            serde_json::from_slice(replacement.fields[0].value.expose_secret()).unwrap();
+        let session_field = replacement
+            .fields
+            .iter()
+            .find(|field| field.purpose == SecretPurpose::ProviderCompositeSession)
+            .unwrap();
+        let session: Value = serde_json::from_slice(session_field.value.expose_secret()).unwrap();
         assert_eq!(session["open_id"], "open-1");
+    }
+
+    #[tokio::test]
+    async fn password_runtime_login_atomically_renews_the_complete_session_bundle() {
+        let account_id = ProviderAccountId::new();
+        let credentials = Arc::new(RenewingCredentials::uai(account_id));
+        let context = ProviderContext {
+            provider_id: ProviderId::new("uai").unwrap(),
+            account_id,
+            credential_refs: credentials.credential_refs(),
+            correlation_id: "fixture-runtime-renewal".to_owned(),
+        };
+        let client = UaiWorkerClient::new(
+            "python",
+            workspace_path("workers/uai/worker.py"),
+            workspace_path("workers/uai/tests/fixtures/fake_upstream.py"),
+        )
+        .with_source_metadata(workspace_path(
+            "workers/uai/tests/fixtures/fake_SOURCE.json",
+        ));
+        let entry = UpstreamWorkerProvider::entry_with_renewal(
+            ProviderId::new("uai").unwrap(),
+            "UAI renewal fixture",
+            client,
+            credentials.clone(),
+            credentials.clone(),
+            WorkerAuthProfile::Password,
+        );
+
+        let courses = entry
+            .course_inventory
+            .as_ref()
+            .unwrap()
+            .list_courses(&context)
+            .await
+            .unwrap();
+        let cached_courses = entry
+            .course_inventory
+            .as_ref()
+            .unwrap()
+            .list_courses(&context)
+            .await
+            .unwrap();
+
+        assert_eq!(courses.len(), 1);
+        assert_eq!(cached_courses.len(), 1);
+        assert_eq!(
+            *credentials.renewal.lock().unwrap(),
+            Some((
+                3,
+                HashSet::from([
+                    SecretPurpose::ProviderUsername,
+                    SecretPurpose::ProviderPassword,
+                    SecretPurpose::ProviderCompositeSession,
+                ]),
+            ))
+        );
     }
 }

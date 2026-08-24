@@ -65,6 +65,7 @@ export const dataProvider: DataProvider = {
               limit,
               offset,
               provider_account_id: stringFilter(filters, "provider_account_id"),
+              course_id: stringFilter(filters, "course_id"),
             },
           }),
         );

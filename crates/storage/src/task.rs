@@ -21,6 +21,54 @@ impl SqliteTaskQueryRepository {
     pub const fn new(database: Database) -> Self {
         Self { database }
     }
+
+    pub async fn list_owned_course_tasks(
+        &self,
+        owner_id: UserId,
+        course_id: CourseId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<TaskPage, StorageError> {
+        if limit == 0 || limit > MAX_PAGE_SIZE || offset > i64::MAX.cast_unsigned() {
+            return Err(StorageError::InvalidData(
+                "task pagination is outside the supported range".to_owned(),
+            ));
+        }
+        let course_id = course_id.to_string();
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tasks AS task \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             WHERE account.owner_user_id = ? AND task.course_id = ?",
+        )
+        .bind(owner_id.to_string())
+        .bind(&course_id)
+        .fetch_one(self.database.pool())
+        .await?;
+        let rows = sqlx::query(
+            "SELECT task.id, task.provider_account_id, task.course_id, task.remote_id, \
+                    task.source_type, task.assessment_class, task.title, task.remote_state, \
+                    task.orchestration_state, task.opens_at, task.due_at, task.closes_at, \
+                    task.discovered_at, task.updated_at, task.latest_snapshot_id, \
+                    task.capabilities_json \
+             FROM tasks AS task \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             WHERE account.owner_user_id = ? AND task.course_id = ? \
+             ORDER BY task.updated_at DESC, task.id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(owner_id.to_string())
+        .bind(&course_id)
+        .bind(i64::from(limit))
+        .bind(i64::try_from(offset).expect("validated task offset fits i64"))
+        .fetch_all(self.database.pool())
+        .await?;
+        let items = rows.iter().map(decode_task).collect::<Result<_, _>>()?;
+        Ok(TaskPage {
+            items,
+            total: u64::try_from(total).map_err(|error| {
+                StorageError::InvalidData(format!("task count is invalid: {error}"))
+            })?,
+        })
+    }
 }
 
 #[async_trait]
@@ -240,6 +288,8 @@ mod tests {
         let first = insert_task(&database, account, "first", 1).await;
         let second = insert_task(&database, second_account, "second", 2).await;
         let other = insert_task(&database, other_account, "other", 3).await;
+        let course = insert_course(&database, account, "course-alpha").await;
+        attach_task_to_course(&database, first, course).await;
         let repository = SqliteTaskQueryRepository::new(database);
 
         let page = repository
@@ -255,6 +305,21 @@ mod tests {
             .unwrap();
         assert_eq!(filtered.total, 1);
         assert_eq!(filtered.items[0].id, first);
+        let course_filtered = repository
+            .list_owned_course_tasks(owner, course, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(course_filtered.total, 1);
+        assert_eq!(course_filtered.items[0].id, first);
+        assert_eq!(course_filtered.items[0].course_id, Some(course));
+        assert_eq!(
+            repository
+                .list_owned_course_tasks(other_owner, course, 50, 0)
+                .await
+                .unwrap()
+                .total,
+            0
+        );
         assert!(
             repository
                 .find_owned_task(owner, other)
@@ -360,6 +425,38 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    async fn insert_course(
+        database: &Database,
+        account_id: ProviderAccountId,
+        remote_id: &str,
+    ) -> CourseId {
+        let id = CourseId::new();
+        let now = timestamp(Utc::now());
+        sqlx::query(
+            "INSERT INTO courses \
+             (id, provider_account_id, remote_id, title, metadata_json, last_seen_at) \
+             VALUES (?, ?, ?, ?, '{}', ?)",
+        )
+        .bind(id.to_string())
+        .bind(account_id.to_string())
+        .bind(remote_id)
+        .bind(remote_id)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn attach_task_to_course(database: &Database, task_id: TaskId, course_id: CourseId) {
+        sqlx::query("UPDATE tasks SET course_id = ? WHERE id = ?")
+            .bind(course_id.to_string())
+            .bind(task_id.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
     }
 
     fn timestamp(value: Timestamp) -> String {

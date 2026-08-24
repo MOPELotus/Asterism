@@ -32,7 +32,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card.t
 import { Input } from "@/components/ui/input.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import { formatTimestamp } from "@/lib/format.ts";
-import { groupTasks, providerName, remoteStateLabel, taskActionLabel, taskTypeLabels } from "@/lib/learning-display.ts";
+import { providerName } from "@/lib/learning-display.ts";
 
 const selectClassName = "h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-50";
 const supportedInlineMethods: AuthMethod[] = ["password", "imported_cookie", "imported_token"];
@@ -50,7 +50,6 @@ export function ProviderAccountDetailPage() {
   const latestAuth = useQuery({ queryKey: ["provider-accounts", accountId, "auth-session"], enabled: Boolean(accountId), retry: false, queryFn: async () => optionalNotFound(getLatestProviderAccountAuthSession({ path: { account_id: accountId } })) });
   const schedule = useQuery({ queryKey: ["provider-accounts", accountId, "scan-schedule"], enabled: Boolean(accountId && canManageSystem), retry: false, queryFn: async () => optionalNotFound(getProviderAccountScanSchedule({ path: { account_id: accountId } })) });
   const courses = useList<Course>({ resource: "courses", pagination: { pageSize: 200 }, filters: [{ field: "provider_account_id", operator: "eq", value: accountId }] });
-  const tasks = useList<Task>({ resource: "tasks", pagination: { pageSize: 200 }, filters: [{ field: "provider_account_id", operator: "eq", value: accountId }] });
   const provider = providers.result.data?.find((item) => item.id === account.data?.provider_id);
   const authMethods = provider?.auth_methods ?? [];
   const captureRecipes = useQuery({ queryKey: ["providers", provider?.id, "capture-recipes"], enabled: Boolean(provider?.id), retry: false, queryFn: async () => requireData(await listProviderCaptureRecipes({ path: { provider_id: provider!.id } })) });
@@ -95,7 +94,12 @@ export function ProviderAccountDetailPage() {
   }, [account.data?.provider_id, batchCourseId, courses.result.data]);
 
   const selectedBatchCourse = courses.result.data?.find((course) => course.id === batchCourseId);
-  const selectedBatchTasks = useMemo(() => (tasks.result.data ?? []).filter((task) => task.course_id === batchCourseId), [batchCourseId, tasks.result.data]);
+  const selectedBatchTasks = useList<Task>({
+    resource: "tasks",
+    pagination: { pageSize: 1 },
+    filters: [{ field: "course_id", operator: "eq", value: batchCourseId }],
+    queryOptions: { enabled: account.data?.provider_id === "welearn" && Boolean(batchCourseId) },
+  });
 
   const authenticate = useMutation({
     mutationFn: async () => {
@@ -151,10 +155,10 @@ export function ProviderAccountDetailPage() {
   });
   const createBatch = useMutation({
     mutationFn: async () => {
-      if (!selectedBatchCourse || !selectedBatchTasks.length) throw new Error("请先巡查账号，并选择一门已发现学习任务的课程");
-      const firstTask = selectedBatchTasks[0];
+      const expectedChildCount = selectedBatchTasks.result.total ?? 0;
+      if (!selectedBatchCourse || !expectedChildCount) throw new Error("请先巡查账号，并选择一门已发现学习任务的课程");
+      const firstTask = selectedBatchTasks.result.data?.[0];
       if (!firstTask) throw new Error("当前课程没有可执行任务");
-      const expectedChildCount = selectedBatchTasks.length;
       const duration = batchFlow === "fanyuchang_duration"
         ? { kind: "per_child_seconds" as const, target_seconds: Array.from({ length: expectedChildCount }, () => Number(batchPerTaskSeconds)) }
         : { kind: "auto_aggregate" as const, configured_minutes: Number(batchConfiguredMinutes), random_range_minutes: Number(batchRandomRange), sampled_offset_minutes: Number(batchSampledOffset) };
@@ -197,7 +201,7 @@ export function ProviderAccountDetailPage() {
     },
   });
 
-  const error = account.error ?? providers.query.error ?? courses.query.error ?? tasks.query.error ?? captureRecipes.error ?? (latestAuth.error instanceof AsterismApiError && latestAuth.error.statusCode === 404 ? null : latestAuth.error) ?? authenticate.error ?? pollInteractive.error ?? completeOauth.error ?? startCapture.error ?? refreshCapture.error ?? createBatch.error ?? scan.error ?? saveSchedule.error ?? remove.error;
+  const error = account.error ?? providers.query.error ?? courses.query.error ?? selectedBatchTasks.query.error ?? captureRecipes.error ?? (latestAuth.error instanceof AsterismApiError && latestAuth.error.statusCode === 404 ? null : latestAuth.error) ?? authenticate.error ?? pollInteractive.error ?? completeOauth.error ?? startCapture.error ?? refreshCapture.error ?? createBatch.error ?? scan.error ?? saveSchedule.error ?? remove.error;
   const canSubmitCredential = !supportedInlineMethods.includes(method) || (method === "password" ? Boolean(username.trim() && password) : Boolean(credential.trim()));
   const compatibleSessionKinds = useMemo(() => provider?.session_kinds ?? [], [provider]);
 
@@ -228,21 +232,17 @@ export function ProviderAccountDetailPage() {
     </CardContent></Card>
 
     <Card><CardHeader><CardTitle className="flex items-center gap-2"><BookOpen className="size-5" />课程与任务</CardTitle></CardHeader><CardContent className="space-y-4">
-      {courses.query.isLoading || tasks.query.isLoading ? <TableSkeleton /> : courses.result.data?.length ? courses.result.data.map((course) => {
-        const courseTasks = (tasks.result.data ?? []).filter((task) => task.course_id === course.id);
-        return <div key={course.id} className="rounded-xl border bg-card">
+      {courses.query.isLoading ? <TableSkeleton /> : courses.result.data?.length ? courses.result.data.map((course) => <div key={course.id} className="rounded-xl border bg-card">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
-            <div><Link className="font-semibold text-primary hover:underline" to={`/courses/${course.id}`}>{course.title}</Link><p className="mt-1 text-sm text-muted-foreground">{[course.term, course.teacher].filter(Boolean).join(" · ") || `${courseTasks.length} 个任务`}</p></div>
-            <Link className={buttonVariants({ variant: "outline", size: "sm" })} to={`/courses/${course.id}`}>选择任务<ChevronRight className="size-4" /></Link>
+            <div><Link className="font-semibold text-primary hover:underline" to={`/courses/${course.id}`}>{course.title}</Link><p className="mt-1 text-sm text-muted-foreground">{[course.term, course.teacher].filter(Boolean).join(" · ") || "进入课程查看任务、进度与题目"}</p></div>
+            <Link className={buttonVariants({ variant: "outline", size: "sm" })} to={`/courses/${course.id}`}>查看课程<ChevronRight className="size-4" /></Link>
           </div>
-          {courseTasks.length ? <div className="space-y-4 p-4">{groupTasks(courseTasks).map(([type, grouped]) => <section key={type}><div className="mb-2 flex items-center gap-2"><h3 className="text-sm font-medium">{taskTypeLabels[type]}</h3><Badge variant="secondary">{grouped.length}</Badge></div><div className="divide-y rounded-lg border">{grouped.map((task) => <div key={task.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm"><div className="min-w-0"><Link className="block truncate font-medium hover:text-primary" to={`/tasks/${task.id}`}>{task.title}</Link><span className="text-xs text-muted-foreground">{remoteStateLabel(task.remote_state)}</span></div><Link className="shrink-0 text-xs font-medium text-primary hover:underline" to={`/tasks/${task.id}`}>{taskActionLabel(task)}</Link></div>)}</div></section>)}</div> : <p className="p-4 text-sm text-muted-foreground">这门课程尚未发现任务，请重新同步。</p>}
-        </div>;
-      }) : <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">尚未读取到课程。登录成功后点击“同步课程与任务”。</p>}
+        </div>) : <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">尚未读取到课程。登录成功后点击“同步课程与任务”。</p>}
     </CardContent></Card>
 
     {method === "assisted_session" && captureRecipes.data?.items.length ? <Card><CardHeader><CardTitle>本地认证辅助</CardTitle></CardHeader><CardContent className="space-y-4"><p className="text-sm text-muted-foreground">仅当平台登录依赖微信内页面、浏览器会话或动态加密信息时使用。点击下方按钮创建一次性配对，然后在本机认证辅助程序中输入配对令牌；令牌只用于本次认证，完成或过期后立即失效。</p>{capture ? <div className="space-y-3 rounded-lg border p-4"><div className="flex flex-wrap items-center gap-2"><StateBadge state={capture.session.state} /><Badge variant="outline">流程版本 {capture.session.required_recipe_version}</Badge><Badge variant="secondary">{capture.session.id}</Badge></div><div className="space-y-2"><Label>一次性配对令牌</Label><pre className="overflow-auto rounded-md bg-muted p-3 text-xs">{capture.pairing_token}</pre><Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(capture.pairing_token)}><Copy className="size-4" />复制令牌</Button></div><p className="break-all text-sm">认证入口：{captureRecipes.data.items.find((recipe) => recipe.version === capture.session.required_recipe_version)?.start_url}</p><Button variant="outline" disabled={refreshCapture.isPending} onClick={() => refreshCapture.mutate()}><RefreshCw className="size-4" />{refreshCapture.isPending ? "刷新中…" : "检查辅助认证状态"}</Button></div> : <Button disabled={startCapture.isPending} onClick={() => startCapture.mutate()}>{startCapture.isPending ? "创建中…" : "创建一次性配对"}</Button>}</CardContent></Card> : null}
 
-    {account.data.provider_id === "welearn" ? <Card><CardHeader><CardTitle>WELearn 课程批量执行</CardTitle></CardHeader><CardContent className="space-y-4"><Alert><AlertTitle>从巡查结果直接选择</AlertTitle><AlertDescription>系统会使用当前账号凭据巡查课程和学习任务，并自动填充内部标识与任务数量。这里不需要手工复制任何编号；如果列表为空，请先完成认证并点击页面顶部的“立即巡查”。</AlertDescription></Alert>{courses.query.isLoading || tasks.query.isLoading ? <TableSkeleton /> : <div className="grid gap-4 md:grid-cols-2"><Field label="课程"><select className={selectClassName} value={batchCourseId} onChange={(event) => setBatchCourseId(event.target.value)}><option value="">请选择课程</option>{courses.result.data?.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></Field><Field label="已发现任务"><div className="flex h-9 items-center rounded-md border border-input bg-muted px-3 text-sm">{selectedBatchTasks.length ? `${selectedBatchTasks.length} 个任务，将在执行前重新核对` : "当前课程尚未发现任务"}</div></Field><Field label="执行方式"><select className={selectClassName} value={batchFlow} onChange={(event) => setBatchFlow(event.target.value as typeof batchFlow)}><option value="fanyuchang_duration">逐任务计时并完成</option><option value="auto_duration">按总时长自动分配并完成</option></select></Field>{batchFlow === "fanyuchang_duration" ? <Field label="每个任务目标秒数"><Input type="number" min={1} value={batchPerTaskSeconds} onChange={(event) => setBatchPerTaskSeconds(event.target.value)} /></Field> : <><Field label="总时长（分钟）"><Input type="number" min={1} max={300} value={batchConfiguredMinutes} onChange={(event) => setBatchConfiguredMinutes(event.target.value)} /></Field><Field label="随机浮动范围（分钟）"><Input type="number" min={0} max={30} value={batchRandomRange} onChange={(event) => setBatchRandomRange(event.target.value)} /></Field><Field label="本次固定偏移（分钟）"><Input type="number" min={-30} max={30} value={batchSampledOffset} onChange={(event) => setBatchSampledOffset(event.target.value)} /></Field></>}</div>}{batchResult ? <Alert><AlertTitle>批量执行已调度</AlertTitle><AlertDescription>{batchResult}</AlertDescription></Alert> : null}<Button disabled={createBatch.isPending || !selectedBatchCourse || !selectedBatchTasks.length} onClick={() => createBatch.mutate()}><RefreshCw className="size-4" />{createBatch.isPending ? "调度中…" : "创建课程批量执行"}</Button></CardContent></Card> : null}
+    {account.data.provider_id === "welearn" ? <Card><CardHeader><CardTitle>WELearn 课程批量执行</CardTitle></CardHeader><CardContent className="space-y-4"><Alert><AlertTitle>从巡查结果直接选择</AlertTitle><AlertDescription>系统会使用当前账号凭据巡查课程和学习任务，并自动填充内部标识与任务数量。这里不需要手工复制任何编号；如果列表为空，请先完成认证并点击页面顶部的“同步课程与任务”。</AlertDescription></Alert>{courses.query.isLoading || selectedBatchTasks.query.isLoading ? <TableSkeleton /> : <div className="grid gap-4 md:grid-cols-2"><Field label="课程"><select className={selectClassName} value={batchCourseId} onChange={(event) => setBatchCourseId(event.target.value)}><option value="">请选择课程</option>{courses.result.data?.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></Field><Field label="已发现任务"><div className="flex h-9 items-center rounded-md border border-input bg-muted px-3 text-sm">{selectedBatchTasks.result.total ? `${selectedBatchTasks.result.total} 个任务，将在执行前重新核对` : "当前课程尚未发现任务"}</div></Field><Field label="执行方式"><select className={selectClassName} value={batchFlow} onChange={(event) => setBatchFlow(event.target.value as typeof batchFlow)}><option value="fanyuchang_duration">逐任务计时并完成</option><option value="auto_duration">按总时长自动分配并完成</option></select></Field>{batchFlow === "fanyuchang_duration" ? <Field label="每个任务目标秒数"><Input type="number" min={1} value={batchPerTaskSeconds} onChange={(event) => setBatchPerTaskSeconds(event.target.value)} /></Field> : <><Field label="总时长（分钟）"><Input type="number" min={1} max={300} value={batchConfiguredMinutes} onChange={(event) => setBatchConfiguredMinutes(event.target.value)} /></Field><Field label="随机浮动范围（分钟）"><Input type="number" min={0} max={30} value={batchRandomRange} onChange={(event) => setBatchRandomRange(event.target.value)} /></Field><Field label="本次固定偏移（分钟）"><Input type="number" min={-30} max={30} value={batchSampledOffset} onChange={(event) => setBatchSampledOffset(event.target.value)} /></Field></>}</div>}{batchResult ? <Alert><AlertTitle>批量执行已调度</AlertTitle><AlertDescription>{batchResult}</AlertDescription></Alert> : null}<Button disabled={createBatch.isPending || !selectedBatchCourse || !(selectedBatchTasks.result.total ?? 0)} onClick={() => createBatch.mutate()}><RefreshCw className="size-4" />{createBatch.isPending ? "调度中…" : "创建课程批量执行"}</Button></CardContent></Card> : null}
 
     {canManageSystem ? <Card><CardHeader><CardTitle className="flex items-center gap-2"><CalendarClock className="size-5" />定期巡查</CardTitle></CardHeader><CardContent className="space-y-4">
       {schedule.isLoading ? <TableSkeleton /> : <><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => setScheduleEnabled(event.target.checked)} />启用章节新增及其他任务的定期巡查</label><div className="max-w-sm space-y-2"><Label htmlFor="scan-interval">期望间隔（秒；留空则使用当前平台和账号的默认值）</Label><Input id="scan-interval" type="number" min={1} value={scheduleInterval} onChange={(event) => setScheduleInterval(event.target.value)} /></div>{schedule.data ? <p className="text-sm text-muted-foreground">最终间隔 {schedule.data.effective_interval_seconds} 秒；下次 {formatTimestamp(schedule.data.next_run_at)}</p> : null}<Button disabled={saveSchedule.isPending} onClick={() => saveSchedule.mutate()}>{saveSchedule.isPending ? "保存中…" : "保存巡查计划"}</Button></>}
