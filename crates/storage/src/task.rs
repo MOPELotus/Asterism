@@ -22,6 +22,12 @@ impl SqliteTaskQueryRepository {
         Self { database }
     }
 
+    /// Lists the non-removed tasks owned through one course.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid pagination, storage failures, or invalid
+    /// persisted task data.
     pub async fn list_owned_course_tasks(
         &self,
         owner_id: UserId,
@@ -60,7 +66,9 @@ impl SqliteTaskQueryRepository {
         .bind(owner_id.to_string())
         .bind(&course_id)
         .bind(i64::from(limit))
-        .bind(i64::try_from(offset).expect("validated task offset fits i64"))
+        .bind(i64::try_from(offset).map_err(|_| {
+            StorageError::InvalidData("task offset does not fit SQLite integer".to_owned())
+        })?)
         .fetch_all(self.database.pool())
         .await?;
         let items = rows.iter().map(decode_task).collect::<Result<_, _>>()?;

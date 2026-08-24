@@ -65,15 +65,50 @@ def new_public():
         spend_min_time=1, spend_max_time=2, topic_code="")
 
 
+def course_title(document, course_id):
+    preferred_keys = ("course_name", "book_name", "course_title", "book_title", "title", "name")
+
+    def visit(value):
+        if isinstance(value, Mapping):
+            value_course_id = value.get("course_id")
+            if value_course_id in (None, "", course_id, str(course_id)):
+                for key in preferred_keys:
+                    candidate = value.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        return candidate.strip()
+            for child in value.values():
+                found = visit(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = visit(child)
+                if found:
+                    return found
+        return None
+
+    return visit(document) or f"词达人课程 {course_id}"
+
+
+def class_task_capabilities(progress, is_complete):
+    if progress >= 100 or is_complete:
+        return ["run"]
+    return ["questions", "run"]
+
+
 def courses(modules, payload, events, redactor):
-    login, request_header, _, _, decoder, _, _ = modules; token = restore(request_header, decoder, payload.get("session"))
+    login, request_header, basic, _, decoder, _, _ = modules; token = restore(request_header, decoder, payload.get("session"))
     with capture_output(events, redactor): result = login.verify_token(token)
     if not isinstance(result, Mapping): raise WorkerFailure("session_invalid", "token validation failed")
     user = result.get("data", {}).get("user_info", {})
     course_id = user.get("course_id")
     if course_id in (None, ""): raise WorkerFailure("course_shape_mismatch", "course_id missing")
-    title = user.get("course_name") or user.get("book_name") or f"词达人课程 {course_id}"
-    return {"courses": [{"remote_id": str(course_id), "title": str(title), "native": {"course_id": course_id}}],
+    public = new_public()
+    public.course_id = course_id
+    with capture_output(events, redactor): basic.get_all_unit(public)
+    title = course_title({"login": result.get("data", {}), "study": public.all_unit}, course_id)
+    return {"courses": [{"remote_id": f"course:{course_id}", "title": title,
+                          "native": {"course_id": course_id}}],
             "session": payload.get("session")}
 
 
@@ -88,9 +123,12 @@ def tasks(modules, payload, events, redactor):
             if not isinstance(unit, Mapping): continue
             remote_id = str(unit.get("list_id") or unit.get("id") or unit_index + 1)
             progress = int(unit.get("progress") or 0)
-            result.append({"remote_id": f"unit:{remote_id}", "title": str(unit.get("task_name") or unit.get("list_name") or unit.get("name") or remote_id),
+            result.append({"remote_id": f"study-task:{public.course_id}:{remote_id}",
+                           "global_remote_id": True, "source_type": "practice",
+                           "assessment_class": "routine",
+                           "title": str(unit.get("task_name") or unit.get("list_name") or unit.get("name") or remote_id),
                            "state": "completed" if progress >= 100 or unit.get("is_complete") else "pending",
-                           "progress_percent": progress, "capabilities": ["questions", "run"],
+                           "progress_percent": progress, "capabilities": ["run"],
                            "native": {"task_family": "unit", "course_id": public.course_id,
                                       "unit": {**unit, "course_id": public.course_id}}})
         page = 1
@@ -101,11 +139,16 @@ def tasks(modules, payload, events, redactor):
         rows = page_data.get("records") or page_data.get("list") or page_data.get("rows") or page_data.get("data") or []
         for item in rows if isinstance(rows, list) else []:
             if not isinstance(item, Mapping): continue
-            remote_id = str(item.get("task_id") or item.get("release_id") or item.get("id"))
+            remote_id = str(item.get("release_id") or item.get("task_id") or item.get("id"))
             progress = int(item.get("progress") or 0)
-            result.append({"remote_id": f"class:{remote_id}", "title": str(item.get("task_name") or item.get("name") or remote_id),
+            task_type = int(item.get("task_type") or 1)
+            result.append({"remote_id": f"class-task:{remote_id}", "global_remote_id": True,
+                           "source_type": "exam" if task_type == 2 else "practice",
+                           "assessment_class": "routine",
+                           "title": str(item.get("task_name") or item.get("name") or remote_id),
                            "state": "completed" if progress >= 100 or item.get("is_complete") else "pending",
-                           "progress_percent": progress, "capabilities": ["questions", "run"],
+                           "progress_percent": progress,
+                           "capabilities": class_task_capabilities(progress, item.get("is_complete")),
                            "native": {"task_family": "class", "course_id": public.course_id,
                                       "task": {**item, "course_id": public.course_id}}})
     return {"tasks": result, "session": payload.get("session")}

@@ -302,7 +302,9 @@ fn merge_courses(
                 )
             })?
             .to_owned();
-        existing.remote_status = study_course.remote_status.clone();
+        existing
+            .remote_status
+            .clone_from(&study_course.remote_status);
         existing.metadata_sanitized = serde_json::json!({
             "schema": "cidaren.course.v1",
             "course_id": course_id,

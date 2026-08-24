@@ -46,6 +46,7 @@ use tokio::{
     sync::{Mutex, watch},
     time::MissedTickBehavior,
 };
+use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
 
 type DaemonScanWorker = ScanSchedulerWorker<
@@ -88,6 +89,10 @@ struct Arguments {
     /// TOML configuration file. A missing default file is allowed.
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// Production `WebUI` directory. When `index.html` exists, it is served as an SPA.
+    #[arg(long, env = "ASTERISM_WEB_DIST", default_value = "web/dist")]
+    web_dist: Option<PathBuf>,
 
     /// Address on which the HTTP API listens.
     #[arg(long)]
@@ -162,11 +167,19 @@ struct Arguments {
     enable_development_cidaren: Option<bool>,
 
     /// Pinned Chaoxing donor checkout used by the 0.0.1 worker.
-    #[arg(long, env = "ASTERISM_CHAOXING_WORKER_UPSTREAM")]
+    #[arg(
+        long,
+        env = "ASTERISM_CHAOXING_WORKER_UPSTREAM",
+        default_value = "upstreams/chaoxing"
+    )]
     chaoxing_worker_upstream: Option<PathBuf>,
 
-    /// Pinned CxKitty checkout used for Chaoxing course Exam inventory/execution.
-    #[arg(long, env = "ASTERISM_CHAOXING_AUXILIARY_UPSTREAM")]
+    /// Pinned `CxKitty` checkout used for Chaoxing course Exam inventory/execution.
+    #[arg(
+        long,
+        env = "ASTERISM_CHAOXING_AUXILIARY_UPSTREAM",
+        default_value = "upstreams/chaoxing-exam"
+    )]
     chaoxing_auxiliary_upstream: Option<PathBuf>,
 
     /// Chromium-compatible browser used for Chaoxing's audited DOM fallback.
@@ -174,7 +187,11 @@ struct Arguments {
     chaoxing_browser_executable: Option<PathBuf>,
 
     /// Pinned `WELearn` donor entrypoint used by the 0.0.1 worker.
-    #[arg(long, env = "ASTERISM_WELEARN_WORKER_UPSTREAM")]
+    #[arg(
+        long,
+        env = "ASTERISM_WELEARN_WORKER_UPSTREAM",
+        default_value = "upstreams/welearn/welearn_decompiled.py"
+    )]
     welearn_worker_upstream: Option<PathBuf>,
 
     /// Pinned Cidaren donor checkout used by the 0.0.1 worker.
@@ -186,11 +203,19 @@ struct Arguments {
     cidaren_worker_upstream: Option<PathBuf>,
 
     /// Pinned upstream UAI Python entrypoint used by the 0.0.1 worker.
-    #[arg(long, env = "ASTERISM_UAI_WORKER_UPSTREAM")]
+    #[arg(
+        long,
+        env = "ASTERISM_UAI_WORKER_UPSTREAM",
+        default_value = "upstreams/uai/配置我运行我.py"
+    )]
     uai_worker_upstream: Option<PathBuf>,
 
-    /// Pinned UnipusAIAutoPlayer checkout used for UAI page-residence duration.
-    #[arg(long, env = "ASTERISM_UAI_BROWSER_UPSTREAM")]
+    /// Pinned `UnipusAIAutoPlayer` checkout used for UAI page-residence duration.
+    #[arg(
+        long,
+        env = "ASTERISM_UAI_BROWSER_UPSTREAM",
+        default_value = "upstreams/uai-browser"
+    )]
     uai_browser_upstream: Option<PathBuf>,
 
     /// Chromium-compatible browser used by the upstream UAI userscript worker.
@@ -241,6 +266,7 @@ async fn main() -> anyhow::Result<()> {
 
     let arguments = Arguments::parse();
     let provider_workers = build_provider_worker_clients(&arguments);
+    let web_dist = arguments.web_dist.clone();
     let config = load_config(arguments)?;
 
     let database = Database::connect(&config.database.url)
@@ -303,7 +329,19 @@ async fn main() -> anyhow::Result<()> {
         }
         api_state = api_state.with_provider_worker(provider, worker);
     }
-    let app = build_router(api_state);
+    let mut app = build_router(api_state);
+    if let Some(web_dist) = web_dist.as_ref() {
+        let index = web_dist.join("index.html");
+        if index.is_file() {
+            app = app
+                .nest_service("/assets", ServeDir::new(web_dist.join("assets")))
+                .route_service("/", ServeFile::new(index.clone()))
+                .route_service("/{*path}", ServeFile::new(index));
+            tracing::info!(path = %web_dist.display(), "production WebUI configured");
+        } else {
+            tracing::warn!(path = %web_dist.display(), "production WebUI was not built; API-only mode");
+        }
+    }
     let listener = tokio::net::TcpListener::bind(config.server.bind)
         .await
         .context("failed to bind the Asterism HTTP listener")?;

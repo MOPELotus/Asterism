@@ -99,6 +99,15 @@ class WorkReadParamsTests(unittest.TestCase):
         self.assertEqual(rows[0]["kind"], "single_choice")
         self.assertEqual(rows[0]["native_shape"]["native_type"], "单选题")
 
+    def test_reviewed_question_infers_parenthesized_inline_type(self):
+        rows = WORKER.parse_completed_work_result(
+            '<div class="questionLi"><div class="tit">4. (判断题) 示例</div>'
+            '<ul><li>A. 对</li><li>B. 错</li></ul></div>'
+        )
+
+        self.assertEqual(rows[0]["kind"], "true_false")
+        self.assertEqual(rows[0]["native_shape"]["native_type"], "判断题")
+
     def test_course_homework_question_li_preserves_shared_options(self):
         rows = WORKER.parse_completed_work_result(
             '<div class="questionLi" data="q20"><div class="tit">【共用选项题】Choose</div>'

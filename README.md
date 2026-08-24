@@ -33,7 +33,7 @@ Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。�
 
 | 批次 | Provider | 状态 |
 |---|---|---|
-| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中 |
+| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | upstream 执行已接入；账号与只读链路已验证 |
 | 第二批 | `zhihuishu`、`zjy`、`icve` | 计划中 |
 | 后续批次 | `fif`、`itest`、`utalk` 及其他已分配 Provider ID 的平台 | 未来 |
 
@@ -90,6 +90,9 @@ cd Asterism
 cargo build --workspace
 ```
 
+完整的生产构建、SecretStore、浏览器和反向代理步骤见
+[`docs/0.0.1/DEPLOYMENT.md`](docs/0.0.1/DEPLOYMENT.md)。
+
 已有 checkout 先同步 donor：
 
 ```bash
@@ -105,7 +108,20 @@ py -m venv .venv-workers
 .\.venv-workers\Scripts\python.exe -m pip install -r workers\welearn\requirements.txt
 .\.venv-workers\Scripts\python.exe -m pip install -r workers\uai\requirements.txt
 .\.venv-workers\Scripts\python.exe -m pip install -r workers\cidaren\requirements.txt
+$env:ASTERISM_UAI_WORKER_PYTHON = '.venv-workers\Scripts\python.exe'
 ```
+
+`asterismd` 默认从 `upstreams/` 下的固定 submodule 加载四个平台 donor；无需再传入
+各 donor 路径。Chaoxing 的 DOM 兜底和 UAI 页面驻留还需要一个 Chromium 兼容浏览器，
+通过以下两个环境变量指向同一个可执行文件即可：
+
+```powershell
+$env:ASTERISM_CHAOXING_BROWSER_EXECUTABLE = '<chromium-or-edge-path>'
+$env:ASTERISM_UAI_BROWSER_EXECUTABLE = $env:ASTERISM_CHAOXING_BROWSER_EXECUTABLE
+```
+
+WELearn donor 当前未声明开源许可证。固定 submodule 便于当前授权环境复现运行，但在
+取得上游授权或明确许可证前，不应把其源码随公开安装包重新分发。
 
 复制示例配置并启动服务：
 
@@ -162,6 +178,10 @@ npm run dev
 ```bash
 npm run build
 ```
+
+构建完成后，`asterismd` 默认直接从 `web/dist` 提供 WebUI，因此生产部署不需要再运行
+Vite。若静态文件放在其他位置，可设置 `ASTERISM_WEB_DIST`；目录不存在时 daemon 会以
+API-only 模式启动并记录警告。
 
 WebUI 使用从 Asterism OpenAPI 自动生成的 TypeScript Client。修改 API 后应重新生成并执行类型检查。
 

@@ -424,7 +424,7 @@ def list_tasks(module: ModuleType, payload: Mapping[str, Any], events: EventWrit
             "path": "课程学习时长",
             "state": "pending",
             "source_type": "resource",
-            "capabilities": ["duration"],
+            "capabilities": ["duration", "duration_read"],
             "native": {"route_kind": "course_duration", "course": course_native},
         })
     return {"tasks": tasks, "session": serialize_session(bot)}
@@ -725,18 +725,26 @@ def run_course_residence(module: ModuleType, payload: Mapping[str, Any], events:
 
 
 def read_duration(module: ModuleType, payload: Mapping[str, Any], events: EventWriter) -> dict[str, Any]:
-    """Read the exact donor-documented unitTaskSituation duration in seconds."""
+    """Read exact task duration or the donor-documented course total."""
     bot = prepared_course_bot(module, payload, events)
     task = require_mapping(payload.get("task"), "payload.task")
     native = require_mapping(task.get("native"), "task.native")
     remote_id = require_text(task.get("remote_id"), "task.remote_id")
-    unit_id = require_text(native.get("unit_id"), "task.native.unit_id")
     course = require_mapping(native.get("course"), "task.native.course")
     resource_id = course.get("resource_id")
     if resource_id is None:
         raise WorkerFailure("request_invalid", "task.native.course.resource_id is required")
-    url = f"https://{module.UAI_HOST}/api/tla/learningDetail/studyRecord/unitTaskSituation"
     redactor = Redactor(request_secrets(payload))
+    if native.get("route_kind") == "course_duration":
+        return {
+            "duration_seconds": course_duration_total(
+                bot, module, resource_id, events, redactor
+            ),
+            "native_record": {"route_kind": "course_duration"},
+        }
+
+    unit_id = require_text(native.get("unit_id"), "task.native.unit_id")
+    url = f"https://{module.UAI_HOST}/api/tla/learningDetail/studyRecord/unitTaskSituation"
     try:
         with capture_donor_output(events, redactor):
             response = bot.session.get(url, params={

@@ -117,6 +117,11 @@ impl UaiWorkerClient {
     }
 
     /// Invokes a worker and retains its bounded log/progress observations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for process, timeout, protocol-binding, output-limit,
+    /// decoding, missing-result, or worker-reported failures.
     pub async fn invoke_observed_result(
         &self,
         operation: &str,

@@ -933,7 +933,7 @@ impl BatchExecutionChildExecutionRepository for SqliteBatchExecutionRepository {
                 || other_active_executions != 0
                 || !matches!(
                     row.try_get::<String, _>("orchestration_state")?.as_str(),
-                    "ready" | "failed"
+                    "discovered" | "ready" | "failed"
                 )
                 || matches!(
                     row.try_get::<String, _>("remote_state")?.as_str(),
@@ -1128,7 +1128,7 @@ impl BatchExecutionChildActivationRepository for SqliteBatchExecutionRepository 
                     != batch.requested_by.map(|id| id.to_string())
                 || decode_timestamp(row.try_get("created_at")?)? != child.created_at
                 || request.at < child.created_at
-                || !matches!(prior_task_state.as_str(), "ready" | "failed")
+                || !matches!(prior_task_state.as_str(), "discovered" | "ready" | "failed")
                 || matches!(
                     row.try_get::<String, _>("remote_state")?.as_str(),
                     "expired" | "removed"

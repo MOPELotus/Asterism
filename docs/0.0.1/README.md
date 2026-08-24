@@ -240,12 +240,15 @@ upstream 当前可用性和许可证条件调整。第二个平台真的重复�
   QuestionSnapshot 复用现有控制面；
 - 四个真实 donor checkout 的本地导入健康检查通过，daemon 同时注册四个平台的冒烟通过；
 - 真实账号已验证 WELearn 4 门课程/797 个资源任务，UAI 2 门课程/558 个资源任务外加
-  2 个课程级时长任务；第二次扫描均为零新增并全部 unchanged。UAI 已从真实任务读到
-  Provider 官方精确秒数；Cidaren 保留旧库存 2 门课程/31 个任务，按当前顺序放到最后；
-- Chaoxing 正式账号扫描覆盖 17 门课程、1837 个唯一远端任务：1784 个章节任务、43 个
-  课程独立作业和 10 个课程 Exam，其中 576 个任务暴露 Question capability、1836 个任务
-  暴露 ResourceExecution。旧 `other` 行因 source type 修正保留在本地测试库，扫描探针按
-  remote id 优先 typed row 去重，不删除历史；
+  2 个课程级时长任务；重复扫描均稳定。UAI 已实读课程累计 `102595` 秒和代表任务
+  `1045` 秒；
+- Cidaren 微信 OAuth 已重新认证并完成只读扫描：2 门课程，当前有任务的课程为
+  “全新版大学进阶英语综合教程2”，共 31 个任务。错误短 ID 扫描产生的 1 门重复课程和
+  31 个完全重复任务已在确认零 Execution/Question 后清理，清理前数据库备份保存在本机
+  `target/`；
+- Chaoxing 当前活跃库存为 17 门课程、1752 个任务，其中 1331 个普通执行任务、421 个
+  带题目读取能力的作业/考试/章节任务。“无机及分析化学”按官方顺序展示 87 个知识点、
+  21 个独立作业和 3 个考试，当前均为已完成；历史全量题库扫描证据继续保留；
 - Chaoxing 已批阅结果中的 `answer_evidence` 现在可经 Provider-native AnswerCandidate 边界
   导入；canonical typed-task 扫描完成 576/576，成功读取 2649 题并持久化 1243 个
   AnswerCandidate。安全探针只记录任务/快照 ID、数量和错误码，不落题干、答案或凭据；
@@ -279,9 +282,9 @@ upstream 当前可用性和许可证条件调整。第二个平台真的重复�
 - UAI `ResourceExecution` 调用 AutoFinish donor `process_task`，并关闭 AI、空文本和随机
   占位提交；独立秒数读取沿用 UnipusHelperPro 的 `unitTaskSituation`，实际页面驻留/视频
   则把 UnipusAIAutoPlayer 原 userscript 放入 Playwright/Edge 运行环境；
-- Worker 日志和 progress 已进入 Provider Execution 事件。当前本机 bearer token 没有
-  `task_execute` 权限，因此真实写入 Job 尚未验证，不能把 Worker 单测和只读扫描误报成
-  远端完成验证。
+- Worker 日志和 progress 已进入 Provider Execution 事件。四个平台的 mutation 路径直接
+  复用 donor 或其最小扩展并通过离线测试；本轮按要求只做只读实测，没有为制造验证记录
+  对已结课账号发起写入 Job。
 
 ### 2026-08-24 Cidaren 与 WebUI 收口
 
@@ -294,10 +297,14 @@ upstream 当前可用性和许可证条件调整。第二个平台真的重复�
   Worker progress/log 回调；
 - 修正 donor 真实库存形状：自学章节来自 `task_list`，班级分页来自 `records`。两类任务
   都公开 `ResourceExecution`，完成度由 donor `progress` 映射；
-- 最新 daemon 中四个 Worker health 全部通过，Cidaren health 已公开 `run`；UAI 真实账号
-  再扫描保持 2 门课程、560 个任务全部 unchanged。现存 Cidaren OAuth 会话已过期，
-  WELearn 现存会话被平台拒绝，因此这两个账号需重新登录后再做当季只读复验，不能把
-  历史 `authenticated` 标志误报为当前在线验证；
-- WebUI OpenAPI 重新生成、TypeScript 类型检查及生产构建通过。账号 OAuth、课程/任务、
-  普通 Worker 执行、题目审核入口、Execution SSE 与日志页面已接到同一 API；浏览器视觉
-  复验仍需有效 Web Session，不会为调试重置 Master 密码或绕过认证。
+- 最新 daemon 中四个 Worker health 全部通过；Chaoxing、WELearn、UAI 和 Cidaren 四个
+  账号均为当前已认证状态。WELearn 4 门/797 任务、UAI 2 门/560 任务和 Cidaren
+  2 门/31 任务的只读链路已复验；Chaoxing 沿用本轮已完成的长扫描，不重复消耗远端请求；
+- WebUI OpenAPI、TypeScript 类型检查及生产构建通过。`asterismd` 现在直接提供
+  `web/dist`，首页、SPA 深链接和静态资源均返回 200；概览、账号、课程、任务、答案审核、
+  执行、点数、运行设置、协议观察、用户、审计、Service Token、404 等页面已用当前 Web
+  Session 逐页验证；
+- 首次发现的 `discovered` 任务现在可以从 WebUI 直接原子调度，批量执行同样接受首次发现
+  任务，不再要求一个不存在的隐藏“转 ready”步骤；正式测评确认和远端状态保护保持不变；
+- UAI 课程级驻留任务同时公开 `DurationReport` 与 `DurationRead`，课程总时长和普通任务
+  精确时长均已从真实账号成功读取；生产部署步骤见 `DEPLOYMENT.md`。

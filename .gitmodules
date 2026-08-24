@@ -1,3 +1,18 @@
 [submodule "upstreams/cidaren"]
 	path = upstreams/cidaren
 	url = https://github.com/MOPELotus/Easy_Cidaren_Backend.git
+[submodule "upstreams/chaoxing"]
+	path = upstreams/chaoxing
+	url = https://github.com/Samueli924/chaoxing.git
+[submodule "upstreams/chaoxing-exam"]
+	path = upstreams/chaoxing-exam
+	url = https://github.com/surinrasu/CxKitty.git
+[submodule "upstreams/uai"]
+	path = upstreams/uai
+	url = https://github.com/create-try-now/AutoFinish_UxiaoyuanAI.git
+[submodule "upstreams/uai-browser"]
+	path = upstreams/uai-browser
+	url = https://github.com/uxudjs/UnipusAIAutoPlayer.git
+[submodule "upstreams/welearn"]
+	path = upstreams/welearn
+	url = https://github.com/Fanyuchang2026/welearn-helper.git

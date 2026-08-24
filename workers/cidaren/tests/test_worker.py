@@ -52,11 +52,30 @@ class InventoryTests(unittest.TestCase):
             WORKER.Redactor(["secret"]),
         )
 
-        self.assertEqual([row["remote_id"] for row in result["tasks"]], ["unit:unit-1", "class:22"])
+        self.assertEqual(
+            [row["remote_id"] for row in result["tasks"]],
+            ["study-task:course-1:unit-1", "class-task:33"],
+        )
+        self.assertTrue(all(row["global_remote_id"] for row in result["tasks"]))
+        self.assertEqual([row["source_type"] for row in result["tasks"]], ["practice", "exam"])
+        self.assertTrue(all(row["assessment_class"] == "routine" for row in result["tasks"]))
         self.assertEqual(result["tasks"][0]["state"], "completed")
         self.assertEqual(result["tasks"][1]["progress_percent"], 40)
+        self.assertNotIn("questions", result["tasks"][0]["capabilities"])
+        self.assertIn("questions", result["tasks"][1]["capabilities"])
         self.assertIn("run", result["tasks"][1]["capabilities"])
         self.assertEqual(result["tasks"][1]["native"]["task"]["course_id"], "course-1")
+
+    def test_course_title_finds_nested_current_course(self):
+        document = {"user_info": {"course_id": "JJ_2"},
+                    "current_course": {"course_id": "JJ_2", "course_name": "Book 2"}}
+
+        self.assertEqual(WORKER.course_title(document, "JJ_2"), "Book 2")
+
+    def test_completed_class_task_does_not_offer_unreadable_questions(self):
+        self.assertEqual(WORKER.class_task_capabilities(100, False), ["run"])
+        self.assertEqual(WORKER.class_task_capabilities(0, True), ["run"])
+        self.assertEqual(WORKER.class_task_capabilities(40, False), ["questions", "run"])
 
 
 class ExecutionTests(unittest.TestCase):

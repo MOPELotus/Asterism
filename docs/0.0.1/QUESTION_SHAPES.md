@@ -94,6 +94,15 @@ Shared Domain。
 扫描工具 `workers/question_scan_probe.py` 只保存任务 ID、课程标题、聚合数量、题型和
 脱敏错误码，支持断点续跑；不保存题干、选项、答案、session 或凭据，也不执行远端提交。
 
+### 当前库与历史扫描的边界
+
+任务 source type 和全局远端身份修正后，当前活跃 Chaoxing 库为 421 个可读题任务；旧
+typed task 的 576-task 全量快照仍作为 Answer History/题型研究证据保留，不篡改或搬接到
+新任务身份。数据库当前累计 1700 个 QuestionSnapshot、7389 个 Question item，历史聚合
+包含 Matching 36、Ordering 21；当前活跃任务中已有 45 个任务快照。后续补扫应按活跃
+Task ID 记录覆盖，不把“历史已扫”误报为“当前身份已扫”，也不为统一计数直接改写快照
+外键。
+
 UAI 的 100-task 诊断样本观察到：61 个单选、13 个多选、5 个排序、22 个口语原生
 节点和 145 个其他 Provider-native 节点。关键原生 shape 包括：
 

@@ -750,7 +750,7 @@ fn validate_task(
 ) -> Result<(), ExecutionRequestError> {
     if !(matches!(
         task.orchestration_state,
-        OrchestrationState::Ready | OrchestrationState::Failed
+        OrchestrationState::Discovered | OrchestrationState::Ready | OrchestrationState::Failed
     ) || strict_completion_retry_confirmed
         && task.orchestration_state == OrchestrationState::HumanRequired
         || score_improvement_retake_confirmed
@@ -1275,5 +1275,29 @@ mod tests {
             normalize_requested_capabilities(vec![TaskCapability::ProgressRead]),
             Err(ExecutionRequestError::InvalidCapabilitySelection)
         ));
+    }
+
+    #[test]
+    fn newly_discovered_task_can_be_scheduled_directly() {
+        let mut discovered = task(
+            RemoteState::Pending,
+            vec![
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ],
+        );
+        discovered.orchestration_state = OrchestrationState::Discovered;
+
+        assert!(
+            validate_task(
+                &discovered,
+                &[TaskCapability::ResourceExecution],
+                false,
+                false,
+                false,
+                FormalAssessmentPolicy::default(),
+            )
+            .is_ok()
+        );
     }
 }

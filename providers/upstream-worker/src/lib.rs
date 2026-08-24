@@ -137,6 +137,10 @@ impl UpstreamWorkerProvider {
         )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the thin Worker registration keeps its capability slots visible in one place"
+    )]
     fn entry_inner(
         provider_id: asterism_domain::ProviderId,
         display_name: impl Into<String>,
@@ -253,7 +257,7 @@ impl UpstreamWorkerProvider {
             submission_verify: None,
             answer_history_harvest: None,
             task_execution: supports_execution
-                .then(|| provider as Arc<dyn TaskExecutionCapability>),
+                .then_some(provider as Arc<dyn TaskExecutionCapability>),
             browser_bridge: None,
         }
     }
@@ -308,6 +312,10 @@ impl UpstreamWorkerProvider {
             .map_err(|error| Self::map_client(operation, &error))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "credential renewal must remain adjacent to the one retried Worker request"
+    )]
     async fn session(&self, context: &ProviderContext) -> ProviderResult<Value> {
         if let Some(session) = self.cached_request_session(context)? {
             return Ok(session);
@@ -660,7 +668,13 @@ impl UpstreamWorkerProvider {
             .iter()
             .map(|row| {
                 let worker_remote_id = required_string(row, "remote_id")?;
-                let remote_id = scoped_task_remote_id(course_id, &worker_remote_id);
+                let remote_id = worker_task_remote_id(
+                    course_id,
+                    &worker_remote_id,
+                    row.get("global_remote_id")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                );
                 let mut native = row.get("native").cloned().unwrap_or_else(|| json!({}));
                 if let Some(object) = native.as_object_mut() {
                     object.insert(
@@ -700,7 +714,7 @@ impl UpstreamWorkerProvider {
                     course_remote_id: Some(course_id.to_owned()),
                     title: required_string(row, "title")?,
                     source_type: map_source_type(row.get("source_type")),
-                    assessment_class: AssessmentClass::Unknown,
+                    assessment_class: map_assessment_class(row.get("assessment_class")),
                     remote_state: map_state(row.get("state")),
                     opens_at: None,
                     due_at: None,
@@ -809,8 +823,16 @@ impl ProviderIdentity for UpstreamWorkerProvider {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the four Worker authentication profiles intentionally share one thin boundary"
+)]
 #[async_trait]
 impl AuthenticationCapability for UpstreamWorkerProvider {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the four Worker authentication profiles intentionally share one thin boundary"
+    )]
     async fn begin_authentication(
         &self,
         context: &ProviderAuthContext,
@@ -828,8 +850,8 @@ impl AuthenticationCapability for UpstreamWorkerProvider {
         if self.auth_profile == WorkerAuthProfile::ExternalOauthComposite {
             let result = self.invoke("oauth_begin", json!({})).await?;
             let binding = ExternalOauthCallbackBinding::from_digests(
-                decode_digest(required_string(&result, "state_digest")?)?,
-                decode_digest(required_string(&result, "marker_digest")?)?,
+                decode_digest(&required_string(&result, "state_digest")?)?,
+                decode_digest(&required_string(&result, "marker_digest")?)?,
             );
             let external_oauth = ExternalOauthAuthorization {
                 authorization_url: required_string(&result, "authorization_url")?,
@@ -1365,6 +1387,11 @@ impl DurationReadCapability for UpstreamWorkerProvider {
 }
 
 impl UpstreamWorkerProvider {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::too_many_lines,
+        reason = "bounded decimal-millis settings and Worker event mapping stay next to donor dispatch"
+    )]
     async fn execute_worker(
         &self,
         context: &ProviderContext,
@@ -1513,12 +1540,21 @@ impl UpstreamWorkerProvider {
     }
 }
 
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::too_many_lines,
+    reason = "the thin Worker execution boundary keeps private validation and donor dispatch together"
+)]
 #[async_trait]
 impl TaskExecutionCapability for UpstreamWorkerProvider {
     fn requires_execution_verification(&self, _requested_capabilities: &[TaskCapability]) -> bool {
         false
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Chaoxing answer binding validates one complete private invocation boundary"
+    )]
     async fn prepare_private_invocation(
         &self,
         context: &ProviderContext,
@@ -1558,11 +1594,7 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
             CHAOXING_ANSWERS_INPUT_TYPE,
             SecretValue::new(request.raw_input.expose_secret().to_vec()),
         )?;
-        let input_digest = private_input
-            .input_digest()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let input_digest = encode_digest(private_input.input_digest());
         let artifact = ProviderExecutionPlanArtifact::try_new(
             self.metadata.id.clone(),
             CHAOXING_ANSWERS_PLAN_TYPE,
@@ -1723,6 +1755,11 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
         Ok(outcome)
     }
 
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::too_many_lines,
+        reason = "private answer validation and the original Worker execution remain one boundary"
+    )]
     async fn execute_private_invocation(
         &self,
         context: &ProviderContext,
@@ -1742,11 +1779,7 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
         let artifact = request.provider_plan_artifact.as_ref().ok_or_else(|| {
             invalid_worker_answers("Chaoxing reviewed-answer plan artifact is missing")
         })?;
-        let digest = private_input
-            .input_digest()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let digest = encode_digest(private_input.input_digest());
         if artifact.provider_id() != &self.metadata.id
             || artifact.artifact_type() != CHAOXING_ANSWERS_PLAN_TYPE
             || artifact
@@ -1893,7 +1926,7 @@ fn encode_digest(value: [u8; 32]) -> String {
     encoded
 }
 
-fn decode_digest(value: String) -> ProviderResult<[u8; 32]> {
+fn decode_digest(value: &str) -> ProviderResult<[u8; 32]> {
     if value.len() != 64 || !value.is_ascii() {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidResponse,
@@ -2059,6 +2092,13 @@ fn map_source_type(value: Option<&Value>) -> SourceType {
         Some("practice") => SourceType::Practice,
         Some("discussion") => SourceType::Discussion,
         _ => SourceType::Other,
+    }
+}
+fn map_assessment_class(value: Option<&Value>) -> AssessmentClass {
+    match value.and_then(Value::as_str) {
+        Some("routine") => AssessmentClass::Routine,
+        Some("formal") => AssessmentClass::Formal,
+        _ => AssessmentClass::Unknown,
     }
 }
 fn map_kind(value: Option<&Value>) -> QuestionKind {
@@ -2230,6 +2270,13 @@ fn scoped_task_remote_id(course_id: &str, worker_remote_id: &str) -> String {
     } else {
         let digest = Sha256::digest(scoped.as_bytes());
         format!("scoped:{digest:x}")
+    }
+}
+fn worker_task_remote_id(course_id: &str, worker_remote_id: &str, global: bool) -> String {
+    if global {
+        worker_remote_id.to_owned()
+    } else {
+        scoped_task_remote_id(course_id, worker_remote_id)
     }
 }
 fn map_secret_error(error: &SecretStoreError) -> ProviderError {
@@ -2449,7 +2496,7 @@ mod tests {
         assert!(entry.browser_bridge.is_none());
         ProviderRegistry::default().register(entry).unwrap();
         let digest = [0xabu8; 32];
-        assert_eq!(decode_digest(encode_digest(digest)).unwrap(), digest);
+        assert_eq!(decode_digest(&encode_digest(digest)).unwrap(), digest);
     }
 
     #[test]
@@ -2531,6 +2578,10 @@ mod tests {
         let provider = ProviderId::new("uai").unwrap();
         let scoped = scoped_task_remote_id("course-a", "task-a");
         assert_eq!(scoped, "course-a:task-a");
+        assert_eq!(
+            worker_task_remote_id("course-a", "global-task", true),
+            "global-task"
+        );
         assert!(scoped_task_remote_id(&"课".repeat(200), &"题".repeat(200)).len() <= 256);
         assert!(fingerprint(&provider, &scoped, &json!({"shape": 1})).starts_with("v1:"));
         assert_eq!(

@@ -172,6 +172,19 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(events[-1]["data"]["duration_seconds"], 321)
         self.assertEqual(events[-1]["data"]["native_record"]["finishProgress"], 50)
 
+    def test_duration_reads_course_total_for_residence_task(self):
+        session = {"authorization": "jwt-secret", "cookies": [], "open_id": "open-1", "user_id": "user-1", "sso_id": "sso-1"}
+        task = {
+            "remote_id": "course-duration:9",
+            "native": {
+                "route_kind": "course_duration",
+                "course": {"resource_id": 9, "class_id": "class-1", "curricula_id": "7"},
+            },
+        }
+        completed, events = self.invoke("duration", {"session": session, "task": task})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(events[-1]["data"]["duration_seconds"], 654)
+
 
 if __name__ == "__main__":
     unittest.main()

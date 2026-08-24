@@ -6411,6 +6411,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn task_api_is_owner_scoped_paginated_and_keeps_state_dimensions_separate() {
         let (app, database) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;

@@ -40,6 +40,8 @@ class Session:
                     "duration": 321, "required": True,
                 }],
             }]}})
+        if "totalAndUnitSituation" in url:
+            return Response({"success": True, "value": {"totalDetail": {"duration": 654}}})
         raise AssertionError(url)
 
 

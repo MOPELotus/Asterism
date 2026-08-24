@@ -3,7 +3,7 @@
   "repository": "https://example.invalid/fake",
   "revision": "fixture-revision",
   "entrypoint": "fake_upstream.py",
-  "entrypoint_sha256": "2a3efd1c6bed9dd1acca316859b362d16a50ede40bf5da3d516c35e0bf1919de",
+  "entrypoint_sha256": "853e024f337ec117795a9e2d6466b8477fca6a14ff9bbbefe7eb156a42a697ce",
   "license": "Apache-2.0",
   "adapter_protocol": "asterism.uai.worker.v1"
 }
