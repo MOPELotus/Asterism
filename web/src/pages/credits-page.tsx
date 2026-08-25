@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { CircleDollarSign, LockKeyhole } from "lucide-react";
 
-import { getOwnCreditAccount, listOwnCreditReservations, listOwnCreditTransactions } from "@/api/generated/sdk.gen.ts";
+import { getOwnCreditAccount, getRechargeContact, listOwnCreditReservations, listOwnCreditTransactions } from "@/api/generated/sdk.gen.ts";
 import { requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
 import { QueryError, TableSkeleton } from "@/components/query-feedback.tsx";
@@ -14,7 +14,8 @@ export function CreditsPage() {
   const account = useQuery({ queryKey: ["credits", "account"], queryFn: async () => requireData(await getOwnCreditAccount()) });
   const reservations = useQuery({ queryKey: ["credits", "reservations"], queryFn: async () => requireData(await listOwnCreditReservations({ query: { limit: 50, offset: 0 } })) });
   const transactions = useQuery({ queryKey: ["credits", "transactions"], queryFn: async () => requireData(await listOwnCreditTransactions({ query: { limit: 50, offset: 0 } })) });
-  const error = account.error ?? reservations.error ?? transactions.error;
+  const recharge = useQuery({ queryKey: ["credits", "recharge-contact"], queryFn: async () => requireData(await getRechargeContact()) });
+  const error = account.error ?? reservations.error ?? transactions.error ?? recharge.error;
 
   return (
     <PageShell title="点数" description="查看可用点数、执行预留与不可变账本记录。">
@@ -23,6 +24,7 @@ export function CreditsPage() {
         <BalanceCard title="可用" value={account.data?.available ?? 0} icon={CircleDollarSign} />
         <BalanceCard title="已预留" value={account.data?.reserved ?? 0} icon={LockKeyhole} />
       </div>
+      {recharge.data?.contact ? <Card><CardHeader><CardTitle>充值联系</CardTitle></CardHeader><CardContent className="whitespace-pre-wrap text-sm">{recharge.data.contact}</CardContent></Card> : null}
       <Card>
         <CardHeader><CardTitle>当前预留</CardTitle></CardHeader>
         <CardContent className="p-0">

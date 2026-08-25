@@ -379,6 +379,10 @@ fn credit_routes() -> Router<ApiState> {
     Router::new()
         .route("/api/v1/credits/account", get(credit::get_credit_account))
         .route(
+            "/api/v1/credits/recharge-contact",
+            get(credit::get_recharge_contact),
+        )
+        .route(
             "/api/v1/credits/transactions",
             get(credit::list_credit_transactions),
         )
@@ -1313,6 +1317,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/credits/recharge-contact".to_owned(),
+            recharge_contact_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/credits/transactions".to_owned(),
             credit_page_path(
                 "listOwnCreditTransactions",
@@ -1662,6 +1673,19 @@ fn credit_account_path() -> Value {
         "security": [{"cookieAuth": []}, {"bearerAuth": []}],
         "responses": {
             "200": {"description": "Owner credit account; missing accounts read as zero balances without a write"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "ReadOwnCredits or CreditRead is required"}
+        }
+    }})
+}
+
+fn recharge_contact_path() -> Value {
+    json!({"get": {
+        "operationId": "getRechargeContact",
+        "description": "Reads the optional deployment administrator recharge contact from the active pricing catalog.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "responses": {
+            "200": {"description": "Optional sanitized recharge contact", "content": {"application/json": {"schema": {"type": "object", "required": ["contact"], "properties": {"contact": {"type": ["string", "null"], "maxLength": 512}}}}}},
             "401": {"description": "Authentication required"},
             "403": {"description": "ReadOwnCredits or CreditRead is required"}
         }

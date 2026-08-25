@@ -16,6 +16,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 
 use crate::{ApiError, ApiState, auth::AuthContext};
 
@@ -104,6 +105,35 @@ pub(super) async fn get_credit_account(
             reserved: CreditAmount::ZERO,
         });
     Ok(crate::auth::no_store(Json(account).into_response()))
+}
+
+/// Returns the deployment administrator's recharge contact from the active
+/// pricing catalog. This is deliberately a read-only, owner-scoped surface;
+/// credentials and pricing internals never leave the admin API.
+pub(super) async fn get_recharge_contact(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
+    let _owner_id = auth.require_credit_read()?;
+    let now = Utc::now();
+    let row = sqlx::query(
+        "SELECT catalog_json FROM pricing_catalog_revisions \
+         WHERE effective_from <= ? AND (expires_at IS NULL OR expires_at > ?) \
+         ORDER BY effective_from DESC, created_at DESC LIMIT 1",
+    )
+    .bind(now)
+    .bind(now)
+    .fetch_optional(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let contact = row
+        .and_then(|row| row.try_get::<String, _>("catalog_json").ok())
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|catalog| catalog.get("recharge_contact").cloned())
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .map(|value| value.chars().take(512).collect::<String>())
+        .filter(|value| !value.trim().is_empty());
+    Ok(crate::auth::no_store(Json(RechargeContactResponse { contact }).into_response()))
 }
 
 pub(super) async fn list_credit_transactions(
@@ -252,4 +282,9 @@ struct CreditReservationPageResponse {
 struct CreditReservationDetailResponse {
     reservation: CreditReservation,
     quote: PriceQuote,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct RechargeContactResponse {
+    contact: Option<String>,
 }
