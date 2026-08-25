@@ -8,6 +8,7 @@ const endpoint = "/api/v1/admin/ai-config";
 
 export function AiConfigPage() {
   const [value, setValue] = useState("");
+  const [usage, setUsage] = useState<Array<Record<string, unknown>>>([]);
   const [status, setStatus] = useState<string>();
   const [loading, setLoading] = useState(true);
 
@@ -19,6 +20,10 @@ export function AiConfigPage() {
       })
       .catch((error: unknown) => setStatus(error instanceof Error ? error.message : "读取失败"))
       .finally(() => setLoading(false));
+    void fetch("/api/v1/admin/ai-usage?limit=20&offset=0", { credentials: "same-origin" })
+      .then(async (response) => response.ok ? (await response.json()).items as Array<Record<string, unknown>> : [])
+      .then(setUsage)
+      .catch(() => setUsage([]));
   }, []);
 
   async function save() {
@@ -50,6 +55,10 @@ export function AiConfigPage() {
     <Card><CardHeader><CardTitle>部署级 AiConfig（JSON）</CardTitle></CardHeader><CardContent className="space-y-3">
       <textarea className="min-h-[32rem] w-full rounded-md border bg-muted/20 p-3 font-mono text-xs" value={value} disabled={loading} onChange={(event) => setValue(event.target.value)} spellCheck={false} />
       <Button onClick={() => void save()} disabled={loading || !value.trim()}>保存配置</Button>
+    </CardContent></Card>
+    <Card><CardHeader><CardTitle>最近 AI 用量（脱敏）</CardTitle></CardHeader><CardContent>
+      <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b"><th className="p-2">时间</th><th className="p-2">模型</th><th className="p-2">组合</th><th className="p-2">输入字符</th><th className="p-2">输出字符</th><th className="p-2">结果</th></tr></thead><tbody>{usage.map((row) => <tr className="border-b" key={String(row.id)}><td className="p-2 whitespace-nowrap">{String(row.created_at ?? "—")}</td><td className="p-2">{String(row.model ?? "—")}</td><td className="p-2">{String(row.profile ?? "—")}</td><td className="p-2">{String(row.input_chars ?? "—")}</td><td className="p-2">{String(row.output_chars ?? "—")}</td><td className="p-2">{String(row.outcome ?? "—")}</td></tr>)}</tbody></table></div>
+      {usage.length === 0 ? <p className="mt-3 text-sm text-muted-foreground">暂无 AI 用量记录。</p> : null}
     </CardContent></Card>
   </div>;
 }
