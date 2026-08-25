@@ -557,12 +557,15 @@ def parse_course_grade_summary(html_text: str, source_url: str = "") -> dict[str
             continue
         facts: dict[str, Any] = {"type": component}
         explicit = False
+        condition_match = re.search(r"(?:完成条件|达标条件|满分条件)\s*[:：]?\s*([^；;。]{2,160}?)(?=\s+(?:要求|已读|已看|观看|阅读|直播|时长|得分|成绩|完成率|进度|权重|占比)|$)", text)
+        if condition_match:
+            facts["completion_condition"] = clean_inventory_text(condition_match.group(1), 256, "平台显示的完成条件")
         patterns = (
             ("weight_percent", r"(?:权重|占比)\s*[:：]?\s*(\d+(?:\.\d{1,3})?)\s*%", True),
             ("completion_percent", r"(?:完成度|完成率|进度)\s*[:：]?\s*(\d+(?:\.\d{1,3})?)\s*%", True),
             ("score", r"(?:得分|成绩)\s*[:：]?\s*(\d+(?:\.\d{1,3})?)\s*(?:分|$)", True),
             ("required_minutes", r"(?:要求|满分|需|应)\D{0,8}(\d+(?:\.\d{1,2})?)\s*分钟", False),
-            ("observed_minutes", r"(?:已读|已看|观看|阅读|直播|时长)\D{0,8}(\d+(?:\.\d{1,2})?)\s*分钟", False),
+            ("observed_minutes", r"(?:已读|已看|观看|直播|时长)\D{0,8}(\d+(?:\.\d{1,2})?)\s*分钟", False),
         )
         for name, pattern, is_percent in patterns:
             match = re.search(pattern, text)
@@ -572,6 +575,10 @@ def parse_course_grade_summary(html_text: str, source_url: str = "") -> dict[str
                     facts[name] = value
                     explicit = True
         if explicit:
+            if "required_minutes" in facts and "observed_minutes" in facts:
+                facts["remaining_gap"] = max(0.0, facts["required_minutes"] - facts["observed_minutes"])
+            elif "completion_percent" in facts:
+                facts["remaining_gap"] = max(0.0, 100.0 - facts["completion_percent"])
             facts["label"] = clean_inventory_text(text, 512, component)
             previous = components.get(component, {})
             components[component] = {**previous, **facts}

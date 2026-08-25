@@ -248,6 +248,15 @@ class WorkReadParamsTests(unittest.TestCase):
         self.assertEqual(by_type["discussion"]["score"], 8.0)
         self.assertEqual(summary["source_path"], "/mooc-ans/statistic/student")
 
+    def test_grade_composition_keeps_completion_condition_and_remaining_gap(self):
+        summary = WORKER.parse_course_grade_summary(
+            '<table><tr><td>阅读</td><td>完成条件：阅读满 120 分钟</td>'
+            '<td>要求阅读 120 分钟</td><td>已读 87 分钟</td></tr></table>'
+        )
+        component = summary["components"][0]
+        self.assertEqual(component["completion_condition"], "阅读满 120 分钟")
+        self.assertEqual(component["remaining_gap"], 33.0)
+
     def test_native_matching_routes_to_browser_without_affecting_common_choices(self):
         html = (
             '<div class="singleQuesId" data="q1"><div class="TiMu" data="11"></div></div>'
