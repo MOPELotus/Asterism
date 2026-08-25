@@ -743,8 +743,8 @@ async fn record_ai_usage(
     }
     sqlx::query(
         "INSERT INTO ai_usage_records \
-         (id, owner_user_id, task_id, provider_endpoint, model, profile, route, input_chars, output_chars, remote_input_tokens, remote_output_tokens, outcome, created_at, estimated_cost, settlement_status) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, owner_user_id, task_id, provider_endpoint, model, profile, route, input_chars, output_chars, remote_input_tokens, remote_output_tokens, remote_cache_read_tokens, remote_cache_write_tokens, outcome, created_at, estimated_cost, settlement_status) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(usage_id)
     .bind(owner_id.to_string())
@@ -757,6 +757,8 @@ async fn record_ai_usage(
     .bind(i64::try_from(output_chars).unwrap_or(i64::MAX))
     .bind(usage.input_tokens)
     .bind(usage.output_tokens)
+    .bind(usage.cache_read_tokens)
+    .bind(usage.cache_write_tokens)
     .bind(outcome)
     .bind(Utc::now())
     .bind(i64::try_from(estimated_cost).unwrap_or(i64::MAX))
@@ -820,31 +822,64 @@ async fn estimate_ai_cost(
         .get("output_per_1k")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    Ok(cost_from_rates(
+    let cache_read_per_1k = rate
+        .get("cache_read_per_1k")
+        .and_then(Value::as_u64)
+        .unwrap_or(input_per_1k);
+    let cache_write_per_1k = rate
+        .get("cache_write_per_1k")
+        .and_then(Value::as_u64)
+        .unwrap_or(input_per_1k);
+    Ok(cost_from_detailed_rates(
         input_tokens,
         output_tokens,
+        usage.cache_read_tokens.unwrap_or(0),
+        usage.cache_write_tokens.unwrap_or(0),
         input_per_1k,
         output_per_1k,
+        cache_read_per_1k,
+        cache_write_per_1k,
     ))
 }
 
-fn cost_from_rates(
+fn cost_from_detailed_rates(
     input_tokens: i64,
     output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
     input_per_1k: u64,
     output_per_1k: u64,
+    cache_read_per_1k: u64,
+    cache_write_per_1k: u64,
 ) -> u64 {
-    let input_cost = (input_tokens.max(0) as u64).saturating_mul(input_per_1k);
-    let output_cost = (output_tokens.max(0) as u64).saturating_mul(output_per_1k);
-    input_cost
+    let cache_read_tokens = cache_read_tokens.max(0) as u64;
+    let cache_write_tokens = cache_write_tokens.max(0) as u64;
+    let uncached_input_tokens = (input_tokens.max(0) as u64)
+        .saturating_sub(cache_read_tokens)
+        .saturating_sub(cache_write_tokens);
+    let output_tokens = output_tokens.max(0) as u64;
+    uncached_input_tokens
+        .saturating_mul(input_per_1k)
         .div_ceil(1000)
-        .saturating_add(output_cost.div_ceil(1000))
+        .saturating_add(output_tokens.saturating_mul(output_per_1k).div_ceil(1000))
+        .saturating_add(
+            cache_read_tokens
+                .saturating_mul(cache_read_per_1k)
+                .div_ceil(1000),
+        )
+        .saturating_add(
+            cache_write_tokens
+                .saturating_mul(cache_write_per_1k)
+                .div_ceil(1000),
+        )
 }
 
 #[derive(Clone, Debug, Default)]
 struct AiRemoteUsage {
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    cache_write_tokens: Option<i64>,
     endpoint: Option<String>,
     model: Option<String>,
 }
@@ -1615,15 +1650,39 @@ fn extract_usage(protocol: AiProtocol, response: &Value) -> AiRemoteUsage {
         keys.iter()
             .find_map(|key| usage.get(*key).and_then(Value::as_i64))
     };
+    let read_pointer = |pointers: &[&str]| {
+        pointers
+            .iter()
+            .find_map(|pointer| usage.pointer(pointer).and_then(Value::as_i64))
+    };
+    let cache_read_tokens =
+        read(&["cache_read_input_tokens", "cached_input_tokens"]).or_else(|| {
+            read_pointer(&[
+                "/input_tokens_details/cached_tokens",
+                "/prompt_tokens_details/cached_tokens",
+                "/input_tokens_details/cache_read_tokens",
+            ])
+        });
+    let cache_write_tokens = read(&["cache_creation_input_tokens", "cache_write_input_tokens"])
+        .or_else(|| {
+            read_pointer(&[
+                "/input_tokens_details/cache_write_tokens",
+                "/prompt_tokens_details/cache_write_tokens",
+            ])
+        });
     match protocol {
         AiProtocol::Responses => AiRemoteUsage {
             input_tokens: read(&["input_tokens", "prompt_tokens"]),
             output_tokens: read(&["output_tokens", "completion_tokens"]),
+            cache_read_tokens,
+            cache_write_tokens,
             ..AiRemoteUsage::default()
         },
         AiProtocol::ChatCompletions => AiRemoteUsage {
             input_tokens: read(&["prompt_tokens", "input_tokens"]),
             output_tokens: read(&["completion_tokens", "output_tokens"]),
+            cache_read_tokens,
+            cache_write_tokens,
             ..AiRemoteUsage::default()
         },
     }
@@ -1908,8 +1967,16 @@ mod tests {
 
     #[test]
     fn extracts_provider_usage_without_treating_missing_usage_as_an_error() {
-        let responses = json!({"usage": {"input_tokens": 12, "output_tokens": 5}});
-        let chat = json!({"usage": {"prompt_tokens": 19, "completion_tokens": 7}});
+        let responses = json!({"usage": {
+            "input_tokens": 12,
+            "output_tokens": 5,
+            "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 2}
+        }});
+        let chat = json!({"usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 7,
+            "prompt_tokens_details": {"cached_tokens": 6}
+        }});
         assert_eq!(
             extract_usage(AiProtocol::Responses, &responses).input_tokens,
             Some(12)
@@ -1917,6 +1984,14 @@ mod tests {
         assert_eq!(
             extract_usage(AiProtocol::Responses, &responses).output_tokens,
             Some(5)
+        );
+        assert_eq!(
+            extract_usage(AiProtocol::Responses, &responses).cache_read_tokens,
+            Some(4)
+        );
+        assert_eq!(
+            extract_usage(AiProtocol::Responses, &responses).cache_write_tokens,
+            Some(2)
         );
         assert_eq!(
             extract_usage(AiProtocol::ChatCompletions, &chat).input_tokens,
@@ -1927,6 +2002,10 @@ mod tests {
             Some(7)
         );
         assert_eq!(
+            extract_usage(AiProtocol::ChatCompletions, &chat).cache_read_tokens,
+            Some(6)
+        );
+        assert_eq!(
             extract_usage(AiProtocol::Responses, &json!({})).input_tokens,
             None
         );
@@ -1934,8 +2013,12 @@ mod tests {
 
     #[test]
     fn ai_cost_rounds_each_token_component_up_and_ignores_negative_usage() {
-        assert_eq!(cost_from_rates(1_001, 1, 2, 3), 4);
-        assert_eq!(cost_from_rates(-1, 999, 2, 3), 3);
+        assert_eq!(cost_from_detailed_rates(1_001, 1, 0, 0, 2, 3, 2, 2), 4);
+        assert_eq!(cost_from_detailed_rates(-1, 999, -5, -10, 2, 3, 1, 6), 3);
+        assert_eq!(
+            cost_from_detailed_rates(1_500, 200, 500, 250, 4, 8, 1, 6),
+            8
+        );
     }
 
     #[test]

@@ -98,7 +98,8 @@ pub(super) async fn list_ai_usage(
         .map_err(ApiError::internal)?;
     let rows = sqlx::query(
         "SELECT id, owner_user_id, task_id, provider_endpoint, model, profile, route, \
-                input_chars, output_chars, remote_input_tokens, remote_output_tokens, outcome, created_at, estimated_cost, settlement_status \
+                input_chars, output_chars, remote_input_tokens, remote_output_tokens, remote_cache_read_tokens, remote_cache_write_tokens, \
+                outcome, created_at, estimated_cost, settlement_status \
          FROM ai_usage_records ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(i64::from(limit))
@@ -121,6 +122,8 @@ pub(super) async fn list_ai_usage(
                 "output_chars": row.try_get::<i64, _>("output_chars").unwrap_or_default(),
                 "remote_input_tokens": row.try_get::<Option<i64>, _>("remote_input_tokens").unwrap_or(None),
                 "remote_output_tokens": row.try_get::<Option<i64>, _>("remote_output_tokens").unwrap_or(None),
+                "remote_cache_read_tokens": row.try_get::<Option<i64>, _>("remote_cache_read_tokens").unwrap_or(None),
+                "remote_cache_write_tokens": row.try_get::<Option<i64>, _>("remote_cache_write_tokens").unwrap_or(None),
                 "outcome": row.try_get::<String, _>("outcome").unwrap_or_default(),
                 "estimated_cost": row.try_get::<i64, _>("estimated_cost").unwrap_or_default(),
                 "settlement_status": row.try_get::<String, _>("settlement_status").unwrap_or_else(|_| "pending".to_owned()),
