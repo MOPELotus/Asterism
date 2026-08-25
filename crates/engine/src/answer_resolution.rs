@@ -139,18 +139,31 @@ fn resolve_question(
     let provider_native = known
         .iter()
         .copied()
-        .filter(|record| record.candidate.source == AnswerSource::ProviderNative)
+        .filter(|record| {
+            record.candidate.source == AnswerSource::ProviderNative
+                && record
+                    .candidate
+                    .confidence
+                    .is_some_and(|confidence| confidence.basis_points() >= 9_000)
+        })
         .collect::<Vec<_>>();
     if !provider_native.is_empty() {
         return select_if_source_agrees(question_id, &provider_native, considered_candidate_ids);
     }
 
+    let has_low_trust_provider_native = known.iter().any(|record| {
+        record.candidate.source == AnswerSource::ProviderNative
+            && record
+                .candidate
+                .confidence
+                .is_none_or(|confidence| confidence.basis_points() < 9_000)
+    });
     let consensus_answer = known[0].candidate.answer.clone();
     let all_agree = known
         .iter()
         .skip(1)
         .all(|record| record.candidate.answer == consensus_answer);
-    if all_agree {
+    if all_agree && !has_low_trust_provider_native {
         let selected = preferred_candidate(&known);
         return AnswerResolutionDecision {
             question_id,
@@ -171,6 +184,16 @@ fn resolve_question(
         .collect::<Vec<_>>();
     if !ai.is_empty() {
         return select_if_source_agrees(question_id, &ai, considered_candidate_ids);
+    }
+
+    if has_low_trust_provider_native {
+        return AnswerResolutionDecision {
+            question_id,
+            status: AnswerResolutionStatus::Conflict,
+            considered_candidate_ids,
+            selected_candidate_id: None,
+            selected_answer: None,
+        };
     }
 
     AnswerResolutionDecision {
