@@ -479,24 +479,29 @@ async fn execute_chaoxing_challenge_escalation(
         .map_err(ApiError::internal)?
         .filter(|snapshot| snapshot.task_id == claimed.task_id)
         .ok_or_else(|| ApiError::not_found("question_snapshot_not_found"))?;
-    if snapshot.questions.is_empty() || snapshot.questions.len() > MAX_AI_QUESTIONS_PER_REQUEST {
+    if snapshot.questions.is_empty() || snapshot.questions.len() > 4096 {
         return Err(ApiError::conflict(
             "challenge_escalation_invalid",
             "challenge escalation requires between 1 and 100 questions",
         ));
     }
-    let questions = snapshot.questions.iter().collect::<Vec<_>>();
-    let records = generate_ai_records(
-        state,
-        claimed.owner_user_id,
-        claimed.task_id,
-        &snapshot,
-        &questions,
-        AiAnswerProfile::GptOnly,
-        AiAnswerRoute::Escalation,
-        true,
-    )
-    .await?;
+    let mut records = Vec::with_capacity(snapshot.questions.len());
+    for questions in snapshot.questions.chunks(MAX_AI_QUESTIONS_PER_REQUEST) {
+        let questions = questions.iter().collect::<Vec<_>>();
+        records.extend(
+            generate_ai_records(
+                state,
+                claimed.owner_user_id,
+                claimed.task_id,
+                &snapshot,
+                &questions,
+                AiAnswerProfile::GptOnly,
+                AiAnswerRoute::Escalation,
+                true,
+            )
+            .await?,
+        );
+    }
     let answers = snapshot
         .questions
         .iter()
