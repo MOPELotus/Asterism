@@ -19,6 +19,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 
 use crate::{
     ApiError, ApiState,
@@ -82,6 +83,53 @@ pub(super) async fn put_ai_config(
     .map_err(ApiError::internal)?;
     state.replace_ai_config(config.clone()).await;
     Ok(crate::auth::no_store(Json(config).into_response()))
+}
+
+pub(super) async fn list_ai_usage(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    query: Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    require_system_authority(auth.require_provider_settings_manage()?)?;
+    let (limit, offset) = parse_page(query)?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_usage_records")
+        .fetch_one(state.database.pool())
+        .await
+        .map_err(ApiError::internal)?;
+    let rows = sqlx::query(
+        "SELECT id, owner_user_id, task_id, provider_endpoint, model, profile, route, \
+                input_chars, output_chars, remote_input_tokens, remote_output_tokens, outcome, created_at \
+         FROM ai_usage_records ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+    )
+    .bind(i64::from(limit))
+    .bind(i64::try_from(offset).map_err(ApiError::internal)?)
+    .fetch_all(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "id": row.try_get::<String, _>("id").unwrap_or_default(),
+                "owner_user_id": row.try_get::<String, _>("owner_user_id").unwrap_or_default(),
+                "task_id": row.try_get::<Option<String>, _>("task_id").unwrap_or(None),
+                "endpoint": row.try_get::<String, _>("provider_endpoint").unwrap_or_default(),
+                "model": row.try_get::<String, _>("model").unwrap_or_default(),
+                "profile": row.try_get::<String, _>("profile").unwrap_or_default(),
+                "route": row.try_get::<String, _>("route").unwrap_or_default(),
+                "input_chars": row.try_get::<i64, _>("input_chars").unwrap_or_default(),
+                "output_chars": row.try_get::<i64, _>("output_chars").unwrap_or_default(),
+                "remote_input_tokens": row.try_get::<Option<i64>, _>("remote_input_tokens").unwrap_or(None),
+                "remote_output_tokens": row.try_get::<Option<i64>, _>("remote_output_tokens").unwrap_or(None),
+                "outcome": row.try_get::<String, _>("outcome").unwrap_or_default(),
+                "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(crate::auth::no_store(
+        Json(serde_json::json!({"items": items, "total": total, "limit": limit, "offset": offset}))
+            .into_response(),
+    ))
 }
 
 fn require_system_authority(authority: ProviderSettingsAuthority) -> Result<(), ApiError> {

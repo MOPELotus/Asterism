@@ -287,6 +287,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(admin::get_ai_config).put(admin::put_ai_config),
         )
         .route(
+            "/api/v1/admin/ai-usage",
+            get(admin::list_ai_usage),
+        )
+        .route(
             "/api/v1/admin/users",
             get(admin::list_users).post(admin::create_user),
         )
@@ -1508,6 +1512,10 @@ pub fn openapi_document() -> Value {
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")
+        .insert("/api/v1/admin/ai-usage".to_owned(), admin_ai_usage_path());
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
         .insert(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache".to_owned(),
             local_answer_cache_path(),
@@ -2010,6 +2018,21 @@ fn admin_ai_config_path() -> Value {
             }
         }
     })
+}
+
+fn admin_ai_usage_path() -> Value {
+    json!({"get": {
+        "operationId": "listAdminAiUsage",
+        "description": "Lists deployment-local AI usage metadata without exposing prompts, answers, API keys or remote credentials.",
+        "security": [{"cookieAuth": []}],
+        "parameters": admin_page_parameters(),
+        "responses": {
+            "200": {"description": "Paginated local AI usage metadata", "content": {"application/json": {"schema": {"type": "object", "required": ["items", "total", "limit", "offset"], "properties": {"items": {"type": "array", "items": {"type": "object"}}, "total": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}, "offset": {"type": "integer", "minimum": 0}}}}}},
+            "400": {"description": "Invalid pagination"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "ManageSystem permission required"}
+        }
+    }})
 }
 
 fn admin_user_path() -> Value {

@@ -295,14 +295,23 @@ pub(super) async fn generate_uai_discussion_draft(
         "discussion_context": detail.detail.normalized_detail,
     }))
     .map_err(ApiError::internal)?;
-    let generated_text = AiAnswerClient::new(
+    let client = AiAnswerClient::new(
         state.ai_config().await,
         request.profile,
         AiAnswerRoute::Untimed,
-    )?
-    .plain_text(&prompt)
-    .await?;
+    )?;
+    let generated_text = client.plain_text(&prompt).await?;
     validate_human_plain_text(&generated_text)?;
+    record_ai_usage(
+        &state,
+        owner_id,
+        Some(task_id),
+        &client,
+        prompt.len(),
+        generated_text.len(),
+        "succeeded",
+    )
+    .await?;
     let secret_store = state.secret_store.clone().ok_or_else(|| {
         ApiError::service_unavailable(
             "secret_store_unavailable",
