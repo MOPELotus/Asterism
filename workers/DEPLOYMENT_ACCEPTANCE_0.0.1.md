@@ -20,6 +20,10 @@ from live account evidence and is safe to keep in the repository.
   accounts authenticated and records these live read-only inventories:
   Chaoxing 17 courses / 5,330 tasks, Cidaren 2 / 31, UAI 2 / 1,250 and WELearn
   4 / 1,594. No course title, question, answer or native payload is selected.
+- The same snapshot reports deployment prerequisites without exposing values.
+  This deployment currently has no AI configuration, active pricing catalog or
+  active QQ gateway token with both required scopes. Those three are explicit
+  administrator configuration steps, not hidden runtime failures.
 - QQ formal notifications: deadline-before confirmation and deadline-missed
   draft-preserved stages are persisted, claim/report scoped, idempotent and
   retryable.

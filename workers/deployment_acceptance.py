@@ -8,6 +8,7 @@ credentials, cookies, tokens or answer content.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import sqlite3
 import urllib.request
@@ -68,6 +69,37 @@ def aggregates(database_path: Path) -> list[dict]:
     ]
 
 
+def deployment_readiness(database_path: Path) -> dict:
+    database = sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)
+    ai_configured = database.execute(
+        "SELECT EXISTS(SELECT 1 FROM deployment_ai_config)"
+    ).fetchone()[0] == 1
+    pricing_configured = database.execute(
+        "SELECT EXISTS(SELECT 1 FROM pricing_catalog_revisions)"
+    ).fetchone()[0] == 1
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    gateway_rows = database.execute(
+        "SELECT scopes_json FROM service_tokens "
+        "WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+        (now,),
+    ).fetchall()
+    gateway_ready = False
+    for (scopes_json,) in gateway_rows:
+        try:
+            scopes = set(json.loads(scopes_json))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if {"qq_identity_assert", "notification_delivery_report"} <= scopes:
+            gateway_ready = True
+            break
+    database.close()
+    return {
+        "ai_configured": ai_configured,
+        "pricing_catalog_configured": pricing_configured,
+        "qq_gateway_service_token_configured": gateway_ready,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", type=Path, default=Path("asterism.db"))
@@ -76,6 +108,7 @@ def main() -> int:
     result = {
         "health": health(args.health_url),
         "providers": aggregates(args.database),
+        "deployment_readiness": deployment_readiness(args.database),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
