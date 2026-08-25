@@ -1455,6 +1455,12 @@ pub(super) fn map_execution_request_error(error: ExecutionRequestError) -> ApiEr
             "formal_assessment_blocked",
             "formal assessment execution is disabled by Core policy",
         ),
+        ExecutionRequestError::Storage(asterism_storage::StorageError::InsufficientCredits) => {
+            ApiError::conflict(
+                "insufficient_credits",
+                "the account does not have enough available credits for this execution",
+            )
+        }
         ExecutionRequestError::Transition(_)
         | ExecutionRequestError::Storage(_)
         | ExecutionRequestError::SecretStore(_) => ApiError::internal(error),
