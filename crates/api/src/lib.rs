@@ -7865,13 +7865,22 @@ mod tests {
         )
         .bind(asterism_domain::AuditRecordId::new().to_string())
         .bind("default-test-v1")
-        .bind(r#"{"default_amount":4,"fixed_markup":1,"percentage_markup_basis_points":500,"reason":"catalog execution"}"#)
+        .bind(r#"{"default_amount":4,"answer_bank_hit_amount":2,"fixed_markup":1,"percentage_markup_basis_points":500,"reason":"catalog execution"}"#)
         .bind(now)
         .bind(user_id)
         .bind(now)
         .execute(database.pool())
         .await
         .unwrap();
+        let (metered, answer_bank_amount) = task::configured_billing_with_answer_bank(
+            &database,
+            &[asterism_domain::TaskCapability::ResourceExecution],
+            3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer_bank_amount, 6);
+        assert_eq!(metered.unwrap().amount.value(), 12);
         let response =
             post_task_execution(&app, &cookie, routine_task, Some("catalog-execution-1")).await;
         assert_eq!(response.status(), StatusCode::CREATED);

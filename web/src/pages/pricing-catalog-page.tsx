@@ -12,6 +12,18 @@ export function PricingCatalogPage() {
   "catalog": {
     "default_amount": 0,
     "capability_amounts": {},
+    "answer_bank_hit_amount": 0,
+    "fixed_markup": 0,
+    "percentage_markup_basis_points": 0,
+    "ai_rates": {
+      "default": {
+        "input_per_1k": 0,
+        "output_per_1k": 0,
+        "cache_read_per_1k": 0,
+        "cache_write_per_1k": 0
+      }
+    },
+    "recharge_contact": "请联系管理员充值",
     "reason": "task execution"
   }
 }`);
@@ -65,7 +77,7 @@ export function PricingCatalogPage() {
       <p className="text-sm text-muted-foreground">可在下方 JSON 的 <code>recharge_contact</code> 字段填写管理员联系方式；普通用户页面只展示这段文本，不会暴露凭据。</p>
     </CardContent></Card>
     <Card><CardHeader><CardTitle>部署级定价版本（JSON）</CardTitle></CardHeader><CardContent className="space-y-3">
-      <p className="text-sm text-muted-foreground">支持 <code>default_amount</code>、按 capability 的 <code>capability_amounts</code>、<code>reason</code> 和生效时间。金额为部署内部点数，不是人民币。</p>
+      <p className="text-sm text-muted-foreground">支持基础/能力价格、<code>answer_bank_hit_amount</code>、固定与百分比加价，以及按 <code>端点:模型</code> 配置 AI 输入、输出、缓存读写单价。金额均为部署内部点数，不是人民币。</p>
       <textarea className="min-h-[28rem] w-full rounded-md border bg-muted/20 p-3 font-mono text-xs" value={value} disabled={loading} onChange={(event) => setValue(event.target.value)} spellCheck={false} />
       <Button onClick={() => void save()} disabled={loading || !value.trim()}>保存定价版本</Button>
     </CardContent></Card>

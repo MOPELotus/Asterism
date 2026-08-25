@@ -2,12 +2,12 @@ use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, CourseId, Execution,
-    ExecutionAttempt, ExecutionInvocationDraftId, NormalizedAnswer, ProviderAccountId, ProviderId,
-    Question, QuestionGroup, QuestionId, QuestionSnapshotId, RemoteState, ScoreImprovementWorkflow,
-    ScoreImprovementWorkflowId, StrictCompletionWorkflow, StrictCompletionWorkflowId,
-    SubmissionDraftId, SubmissionQuestionVerificationStatus, SubmissionResultId,
-    SubmissionResultStatus, SubmissionScore, Task, TaskCapability, TaskId, TaskLifecycleAction,
-    Timestamp,
+    ExecutionAttempt, ExecutionId, ExecutionInvocationDraftId, NormalizedAnswer, ProviderAccountId,
+    ProviderId, Question, QuestionGroup, QuestionId, QuestionSnapshotId, RemoteState,
+    ScoreImprovementWorkflow, ScoreImprovementWorkflowId, StrictCompletionWorkflow,
+    StrictCompletionWorkflowId, SubmissionDraftId, SubmissionQuestionVerificationStatus,
+    SubmissionResultId, SubmissionResultStatus, SubmissionScore, Task, TaskCapability, TaskId,
+    TaskLifecycleAction, Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
@@ -1018,13 +1018,20 @@ pub(super) async fn execute_task(
             })
         })
         .transpose()?;
-    let billing = match (
+    let answer_bank_hit_count =
+        local_cache_hit_count(&state.database, owner_id, task_id, submission_draft_id).await?;
+    let (billing, answer_bank_charged_amount) = match (
         request.billing_amount,
         request.billing_pricing_revision,
         request.billing_reason,
     ) {
         (None, None, None) => {
-            configured_billing(&state.database, &request.requested_capabilities).await?
+            configured_billing_with_answer_bank(
+                &state.database,
+                &request.requested_capabilities,
+                answer_bank_hit_count,
+            )
+            .await?
         }
         (Some(amount), Some(pricing_revision), Some(reason)) => {
             auth.require_pricing_manage()
@@ -1047,11 +1054,14 @@ pub(super) async fn execute_task(
                     "billing reason must be 1-512 bytes",
                 ));
             }
-            Some(ExecutionBillingInput {
-                amount: asterism_domain::CreditAmount::new(amount),
-                pricing_revision,
-                reason,
-            })
+            (
+                Some(ExecutionBillingInput {
+                    amount: asterism_domain::CreditAmount::new(amount),
+                    pricing_revision,
+                    reason,
+                }),
+                0,
+            )
         }
         _ => {
             return Err(ApiError::bad_request(
@@ -1091,7 +1101,7 @@ pub(super) async fn execute_task(
         SqliteExecutionRepository::new(state.database.clone()),
         SqliteProviderAccountRepository::new(state.database.clone()),
         SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
-        SqliteQuestionSnapshotRepository::new(state.database),
+        SqliteQuestionSnapshotRepository::new(state.database.clone()),
         state.providers,
         if formal_assessment_confirmed
             || strict_completion_retry.is_some()
@@ -1132,6 +1142,17 @@ pub(super) async fn execute_task(
         })
         .await
         .map_err(map_execution_request_error)?;
+    if answer_bank_hit_count > 0 {
+        record_answer_bank_execution_usage(
+            &state.database,
+            owner_id,
+            task_id,
+            result.execution.id,
+            answer_bank_hit_count,
+            answer_bank_charged_amount,
+        )
+        .await?;
+    }
     let status = if result.created {
         StatusCode::CREATED
     } else {
@@ -1153,6 +1174,86 @@ pub(crate) async fn configured_billing(
     database: &asterism_storage::Database,
     capabilities: &[TaskCapability],
 ) -> Result<Option<ExecutionBillingInput>, ApiError> {
+    configured_billing_with_answer_bank(database, capabilities, 0)
+        .await
+        .map(|(billing, _)| billing)
+}
+
+async fn local_cache_hit_count(
+    database: &asterism_storage::Database,
+    owner_id: asterism_domain::UserId,
+    task_id: TaskId,
+    submission_draft_id: Option<SubmissionDraftId>,
+) -> Result<u64, ApiError> {
+    let Some(submission_draft_id) = submission_draft_id else {
+        return Ok(0);
+    };
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM submission_draft_items AS item \
+         JOIN submission_drafts AS draft ON draft.id = item.draft_id \
+         JOIN answer_candidates AS candidate ON candidate.id = item.answer_candidate_id \
+         JOIN tasks AS task ON task.id = draft.task_id \
+         JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         WHERE draft.id = ? AND draft.task_id = ? AND account.owner_user_id = ? \
+           AND candidate.source = 'local_cache'",
+    )
+    .bind(submission_draft_id.to_string())
+    .bind(task_id.to_string())
+    .bind(owner_id.to_string())
+    .fetch_one(database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    u64::try_from(count).map_err(ApiError::internal)
+}
+
+async fn record_answer_bank_execution_usage(
+    database: &asterism_storage::Database,
+    owner_id: asterism_domain::UserId,
+    task_id: TaskId,
+    execution_id: ExecutionId,
+    hit_count: u64,
+    charged_amount: u64,
+) -> Result<(), ApiError> {
+    let reservation_state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM credit_reservations WHERE execution_id = ?")
+            .bind(execution_id.to_string())
+            .fetch_optional(database.pool())
+            .await
+            .map_err(ApiError::internal)?;
+    let settlement_status = if charged_amount == 0 {
+        "not_billable"
+    } else {
+        match reservation_state.as_deref() {
+            Some("committed") => "settled",
+            Some("released") => "waived",
+            _ => "pending",
+        }
+    };
+    sqlx::query(
+        "INSERT INTO answer_bank_usage_records \
+         (id, owner_user_id, task_id, execution_id, source, hit_count, charged_amount, settlement_status, created_at) \
+         VALUES (?, ?, ?, ?, 'deployment_global_verified_cache', ?, ?, ?, ?) \
+         ON CONFLICT(execution_id) DO NOTHING",
+    )
+    .bind(AnswerCandidateId::new().to_string())
+    .bind(owner_id.to_string())
+    .bind(task_id.to_string())
+    .bind(execution_id.to_string())
+    .bind(i64::try_from(hit_count).map_err(ApiError::internal)?)
+    .bind(i64::try_from(charged_amount).map_err(ApiError::internal)?)
+    .bind(settlement_status)
+    .bind(Utc::now())
+    .execute(database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+pub(crate) async fn configured_billing_with_answer_bank(
+    database: &asterism_storage::Database,
+    capabilities: &[TaskCapability],
+    answer_bank_hit_count: u64,
+) -> Result<(Option<ExecutionBillingInput>, u64), ApiError> {
     let now = Utc::now();
     let row = sqlx::query(
         "SELECT revision, catalog_json FROM pricing_catalog_revisions \
@@ -1165,7 +1266,7 @@ pub(crate) async fn configured_billing(
     .await
     .map_err(ApiError::internal)?;
     let Some(row) = row else {
-        return Ok(None);
+        return Ok((None, 0));
     };
     let revision: String = sqlx::Row::try_get(&row, "revision").map_err(ApiError::internal)?;
     let catalog_json: String =
@@ -1188,6 +1289,19 @@ pub(crate) async fn configured_billing(
                 .and_then(serde_json::Value::as_u64)
         })
         .unwrap_or(0);
+    let answer_bank_charged_amount = catalog
+        .get("answer_bank_hit_amount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .checked_mul(answer_bank_hit_count)
+        .ok_or_else(|| {
+            ApiError::bad_request("invalid_pricing_catalog", "answer-bank pricing overflows")
+        })?;
+    let amount = amount
+        .checked_add(answer_bank_charged_amount)
+        .ok_or_else(|| {
+            ApiError::bad_request("invalid_pricing_catalog", "pricing amount overflows")
+        })?;
     let fixed_markup = catalog
         .get("fixed_markup")
         .and_then(serde_json::Value::as_u64)
@@ -1200,25 +1314,32 @@ pub(crate) async fn configured_billing(
     let percentage_markup = amount
         .checked_mul(percentage_basis_points)
         .map(|value| value.div_ceil(10_000))
-        .ok_or_else(|| ApiError::bad_request("invalid_pricing_catalog", "pricing markup overflows"))?;
+        .ok_or_else(|| {
+            ApiError::bad_request("invalid_pricing_catalog", "pricing markup overflows")
+        })?;
     let amount = amount
         .checked_add(fixed_markup)
         .and_then(|value| value.checked_add(percentage_markup))
-        .ok_or_else(|| ApiError::bad_request("invalid_pricing_catalog", "pricing amount overflows"))?;
+        .ok_or_else(|| {
+            ApiError::bad_request("invalid_pricing_catalog", "pricing amount overflows")
+        })?;
     if amount == 0 {
-        return Ok(None);
+        return Ok((None, answer_bank_charged_amount));
     }
-    Ok(Some(ExecutionBillingInput {
-        amount: asterism_domain::CreditAmount::new(amount),
-        pricing_revision: revision,
-        reason: catalog
-            .get("reason")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("task execution")
-            .chars()
-            .take(512)
-            .collect(),
-    }))
+    Ok((
+        Some(ExecutionBillingInput {
+            amount: asterism_domain::CreditAmount::new(amount),
+            pricing_revision: revision,
+            reason: catalog
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("task execution")
+                .chars()
+                .take(512)
+                .collect(),
+        }),
+        answer_bank_charged_amount,
+    ))
 }
 
 pub(super) async fn prepare_execution_invocation_draft(
@@ -1554,7 +1675,9 @@ pub(super) fn map_execution_request_error(error: ExecutionRequestError) -> ApiEr
             "score_improvement_retake_conflict",
             "Score Improvement retake confirmation is missing, stale, or invalid",
         ),
-        ExecutionRequestError::Assessment(asterism_engine::AssessmentGuardError::FormalSubmissionWindowClosed) => ApiError::conflict(
+        ExecutionRequestError::Assessment(
+            asterism_engine::AssessmentGuardError::FormalSubmissionWindowClosed,
+        ) => ApiError::conflict(
             "formal_assessment_window_closed",
             "formal assessment submission window is closed; the saved draft was not submitted",
         ),

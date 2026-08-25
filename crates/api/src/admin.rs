@@ -149,7 +149,7 @@ pub(super) async fn list_answer_bank_usage(
         .await
         .map_err(ApiError::internal)?;
     let rows = sqlx::query(
-        "SELECT id, owner_user_id, task_id, source, hit_count, charged_amount, settlement_status, created_at \
+        "SELECT id, owner_user_id, task_id, execution_id, source, hit_count, charged_amount, settlement_status, created_at \
          FROM answer_bank_usage_records ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(i64::from(limit))
@@ -164,6 +164,7 @@ pub(super) async fn list_answer_bank_usage(
                 "id": row.try_get::<String, _>("id").unwrap_or_default(),
                 "owner_user_id": row.try_get::<String, _>("owner_user_id").unwrap_or_default(),
                 "task_id": row.try_get::<Option<String>, _>("task_id").unwrap_or(None),
+                "execution_id": row.try_get::<Option<String>, _>("execution_id").unwrap_or(None),
                 "source": row.try_get::<String, _>("source").unwrap_or_default(),
                 "hit_count": row.try_get::<i64, _>("hit_count").unwrap_or_default(),
                 "charged_amount": row.try_get::<i64, _>("charged_amount").unwrap_or_default(),
