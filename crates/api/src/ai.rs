@@ -1070,15 +1070,18 @@ impl AiAnswerClient {
         match primary {
             Ok(text) => Ok(text),
             Err(primary_error) if self.profile.allow_domestic_fallback => {
-                let fallback = self
-                    .profile
-                    .objective_fallback
-                    .as_ref()
-                    .ok_or(primary_error)?;
+                let fallback = self.plain_text_fallback().ok_or(primary_error)?;
                 self.call_plain_text_route(fallback, prompt).await
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn plain_text_fallback(&self) -> Option<&AiModelRoute> {
+        self.profile
+            .allow_domestic_fallback
+            .then_some(self.profile.rich_content_fallback.as_ref())
+            .flatten()
     }
 
     async fn call_plain_text_route(
@@ -1798,6 +1801,42 @@ mod tests {
             json!({"choices":[{"message":{"content":"{\"type\":\"boolean\",\"value\":true}"}}]});
         assert!(extract_answer_text(AiProtocol::Responses, &responses).is_some());
         assert!(extract_answer_text(AiProtocol::ChatCompletions, &chat).is_some());
+    }
+
+    #[test]
+    fn subjective_plain_text_uses_the_rich_content_fallback_only() {
+        let economy = AiAnswerClient::new(
+            AiConfig::default(),
+            AiAnswerProfile::Economy,
+            AiAnswerRoute::Untimed,
+        )
+        .unwrap();
+        assert_eq!(
+            economy
+                .plain_text_fallback()
+                .map(|route| route.endpoint.as_str()),
+            Some("kimi")
+        );
+        assert_ne!(
+            economy
+                .profile
+                .rich_content_fallback
+                .as_ref()
+                .map(|route| route.endpoint.as_str()),
+            economy
+                .profile
+                .objective_fallback
+                .as_ref()
+                .map(|route| route.endpoint.as_str())
+        );
+
+        let gpt_only = AiAnswerClient::new(
+            AiConfig::default(),
+            AiAnswerProfile::GptOnly,
+            AiAnswerRoute::Untimed,
+        )
+        .unwrap();
+        assert!(gpt_only.plain_text_fallback().is_none());
     }
 
     #[test]
