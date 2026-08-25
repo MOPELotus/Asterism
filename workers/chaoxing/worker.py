@@ -1170,13 +1170,10 @@ def cxkitty_exam(payload, native, events, redactor):
         module.cpi, module.enc_task,
     )
 
-    def human_gate(*_args, **_kwargs):
-        raise WorkerFailure("human_interaction_required", "Chaoxing Exam requires a browser/user verification gate")
-
-    # CxKitty can automate these gates, but the thin worker deliberately hands
-    # them back to Asterism/the user instead of silently solving or spoofing.
-    exam._ExamDto__resolve_face_detection = human_gate
-    exam._ExamDto__resolve_captcha = human_gate
+    # Keep the donor's original captcha and face-detection callbacks. They are
+    # bounded by chaoxing-exam's own retry policy; a failed/absent face asset or
+    # exhausted captcha attempt propagates as a normal provider failure and is
+    # handled by account-level backoff.
     return cxapi, api, exam, module
 
 
