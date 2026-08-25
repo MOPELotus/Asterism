@@ -7989,7 +7989,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         let payload = response_json(response).await;
         assert_eq!(payload["created"], true);
-        assert_eq!(payload["execution"]["requested_capabilities"], json!(["resource_execution"]));
+        assert_eq!(
+            payload["execution"]["requested_capabilities"],
+            json!(["resource_execution"])
+        );
     }
 
     #[tokio::test]
@@ -9326,6 +9329,143 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(subset.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn qq_notification_delivery_claims_and_retries_formal_tasks() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let user_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'master'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO qq_identities (user_id, qq, verified_at, is_primary) VALUES (?, 123456789, ?, 1)",
+        )
+        .bind(&user_id)
+        .bind(now.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_accounts (id, owner_user_id, provider_id, display_name, auth_state_json, created_at, updated_at) VALUES ('account-qq-notify', ?, 'chaoxing', 'notify', '{}', ?, ?)",
+        )
+        .bind(&user_id)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tasks (id, provider_account_id, remote_id, remote_fingerprint, source_type, assessment_class, title, remote_state, orchestration_state, closes_at, discovered_at, updated_at, capabilities_json) VALUES ('formal-task-1', 'account-qq-notify', 'remote-formal-1', 'fingerprint-1', 'exam', 'formal', '期末作业', 'pending', 'ready', ?, ?, ?, '[]')",
+        )
+        .bind((now + chrono::Duration::hours(2)).to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let token = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-tokens")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"name":"qq-delivery","scopes":["notification_delivery_report"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(token.status(), StatusCode::OK);
+        let token = response_json(token).await["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/notifications/claim")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+        let claim = response_json(claim).await;
+        assert_eq!(claim["items"].as_array().unwrap().len(), 1);
+        assert_eq!(claim["items"][0]["qq"], "123456789");
+        assert_eq!(claim["items"][0]["task_id"], "formal-task-1");
+        assert!(
+            claim["items"][0]["web_login_path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/api/v1/auth/qq-login/")
+        );
+        let delivery_id = claim["items"][0]["id"].as_str().unwrap().to_owned();
+
+        let report = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/notifications/report")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"items":[{{"id":"{delivery_id}","delivered":false,"error":" send\nfailed "}}]}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.status(), StatusCode::NO_CONTENT);
+        let row: (String, i64, String) = sqlx::query_as(
+            "SELECT state, attempts, last_error FROM qq_formal_notification_deliveries WHERE id = ?",
+        )
+        .bind(&delivery_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(row, ("retry".to_owned(), 1, "sendfailed".to_owned()));
+
+        sqlx::query(
+            "UPDATE qq_formal_notification_deliveries SET next_attempt_at = ? WHERE id = ?",
+        )
+        .bind((now - chrono::Duration::minutes(1)).to_rfc3339())
+        .bind(&delivery_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let retry_claim = app
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/notifications/claim")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry_claim.status(), StatusCode::OK);
+        let retry_claim = response_json(retry_claim).await;
+        assert_eq!(retry_claim["items"][0]["id"], delivery_id);
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT attempts FROM qq_formal_notification_deliveries WHERE id = ?",
+        )
+        .bind(&delivery_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
     }
 
     #[tokio::test]
