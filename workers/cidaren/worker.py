@@ -421,10 +421,21 @@ def execute_task(modules, payload, entry, events, redactor):
                 "mode": _mode,
                 "exam": _json_public(exam),
             }
+            started_at = time.monotonic()
             try:
                 response = _bridge_post(bridge, request, bridge_timeout)
             except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
-                return None
+                response = None
+            if response is None and answer_route == "timed" and fallback_grace > 0:
+                remaining = max(1, int(total_answer_budget - (time.monotonic() - started_at)))
+                if remaining > 0:
+                    retry_request = dict(request)
+                    retry_request["route"] = "escalation"
+                    retry_request["timeout_seconds"] = min(10, remaining)
+                    try:
+                        response = _bridge_post(bridge, retry_request, retry_request["timeout_seconds"])
+                    except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+                        response = None
             if not response or response.get("answer_available") is False:
                 return None
             raw_value = response.get("donor_value") if "donor_value" in response else response.get("value", response.get("answer"))

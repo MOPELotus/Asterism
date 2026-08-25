@@ -218,6 +218,49 @@ class ExecutionTests(unittest.TestCase):
             "submission_reserve_seconds": 1,
         })
 
+    def test_timed_bridge_retries_with_escalation_after_instant_timeout(self):
+        calls = []
+
+        class Runner:
+            def __init__(self, root, *, progress, log):
+                self.public = types.SimpleNamespace(course_id=None, right_count=0, wrong_count=0)
+
+            def set_answer_override(self, callback):
+                self.override = callback
+
+            def run_class_task(self, task):
+                self.public.exam = {"topic_code": "timed", "topic_mode": 13,
+                                    "options": [{"answer_tag": 0, "content": "A"},
+                                                 {"answer_tag": 1, "content": "B"}]}
+                self.override(self.public, 13)
+                return {"complete": True}
+
+        runner_module = types.SimpleNamespace(HeadlessTaskRunner=Runner)
+        original = WORKER._bridge_post
+        def bridge(_bridge, request, _timeout):
+            calls.append(request["route"])
+            if len(calls) == 1:
+                raise TimeoutError("instant")
+            return {"answer_available": True, "donor_value": "B"}
+        try:
+            WORKER._bridge_post = bridge
+            result = WORKER.execute_task(
+                session_modules(runner=runner_module),
+                {"session": {"token": "secret"},
+                 "settings": {"answer_route": "timed", "instant_timeout_seconds": 1,
+                               "instant_fallback_grace_seconds": 2,
+                               "answer_bridge_url": "http://127.0.0.1:19001/answer",
+                               "answer_bridge_ticket": "bridge-secret", "execution_id": "e1",
+                               "task_id": "t1", "remote_task_id": "r1"},
+                 "task": {"native": {"task_family": "class", "course_id": "course-1",
+                                       "task": {"task_id": 22, "task_type": 2}}}},
+                pathlib.Path("C:/repo/api/login.py"), Events(), WORKER.Redactor(["secret", "bridge-secret"]),
+            )
+        finally:
+            WORKER._bridge_post = original
+        self.assertTrue(result["verified"])
+        self.assertEqual(calls, ["timed", "escalation"])
+
 
 if __name__ == "__main__":
     unittest.main()
