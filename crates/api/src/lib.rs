@@ -690,7 +690,7 @@ pub fn openapi_document() -> Value {
                 "operationId": "claimQqFormalNotifications",
                 "description": "Claims bounded pending formal-assessment confirmation notifications for a Yunzai gateway.",
                 "security": [{"bearerAuth": []}],
-                "responses": {"200": {"description": "Claimed notifications", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["items"], "properties": {"items": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "qq", "task_id", "title", "closes_at", "message", "web_login_path"], "properties": {"id": {"type": "string"}, "qq": {"type": "string"}, "task_id": {"type": "string"}, "title": {"type": "string"}, "closes_at": {"type": "string", "format": "date-time"}, "message": {"type": "string"}, "web_login_path": {"type": "string"}}}}}}}}}, "403": {"description": "Service token lacks notification delivery scope"}}
+                "responses": {"200": {"description": "Claimed notifications", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["items"], "properties": {"items": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "qq", "task_id", "title", "closes_at", "message", "web_login_path"], "properties": {"id": {"type": "string"}, "kind": {"type": "string", "enum": ["confirmation_due", "deadline_missed"]}, "qq": {"type": "string"}, "task_id": {"type": "string"}, "title": {"type": "string"}, "closes_at": {"type": "string", "format": "date-time"}, "message": {"type": "string"}, "web_login_path": {"type": "string"}}}}}}}}}, "403": {"description": "Service token lacks notification delivery scope"}}
             }},
             "/api/v1/integrations/qq/notifications/report": {"post": {
                 "operationId": "reportQqFormalNotifications",
@@ -9405,6 +9405,7 @@ mod tests {
         assert_eq!(claim.status(), StatusCode::OK);
         let claim = response_json(claim).await;
         assert_eq!(claim["items"].as_array().unwrap().len(), 1);
+        assert_eq!(claim["items"][0]["kind"], "confirmation_due");
         assert_eq!(claim["items"][0]["qq"], "123456789");
         assert_eq!(claim["items"][0]["task_id"], "formal-task-1");
         assert!(
@@ -9447,6 +9448,7 @@ mod tests {
         .await
         .unwrap();
         let retry_claim = app
+            .clone()
             .oneshot(
                 Request::post("/api/v1/integrations/qq/notifications/claim")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
@@ -9466,6 +9468,31 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(attempts, 2);
+
+        sqlx::query("UPDATE tasks SET closes_at = ? WHERE id = 'formal-task-1'")
+            .bind((Utc::now() - chrono::Duration::minutes(1)).to_rfc3339())
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let missed = app
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/notifications/claim")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missed.status(), StatusCode::OK);
+        let missed = response_json(missed).await;
+        assert_eq!(missed["items"].as_array().unwrap().len(), 1);
+        assert_eq!(missed["items"][0]["kind"], "deadline_missed");
+        assert!(
+            missed["items"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("没有自动提交")
+        );
     }
 
     #[tokio::test]

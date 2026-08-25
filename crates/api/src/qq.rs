@@ -120,6 +120,7 @@ pub(super) async fn assert_qq_identity(
 #[derive(Debug, Serialize)]
 pub(super) struct QqFormalNotification {
     id: String,
+    kind: String,
     qq: String,
     task_id: String,
     title: String,
@@ -140,6 +141,7 @@ pub(super) async fn claim_qq_formal_notifications(
     auth.require_notification_delivery()?;
     let now = Utc::now();
     let window_end = now + Duration::hours(24);
+    let recent_deadline_start = now - Duration::hours(24);
     let stale_claim = now - Duration::minutes(5);
     let mut transaction = state
         .database
@@ -175,8 +177,8 @@ pub(super) async fn claim_qq_formal_notifications(
     for row in candidates {
         sqlx::query(
             "INSERT OR IGNORE INTO qq_formal_notification_deliveries \
-             (id, task_id, user_id, qq, state, attempts, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
+             (id, task_id, user_id, qq, notification_kind, state, attempts, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'confirmation_due', 'pending', 0, ?, ?)",
         )
         .bind(uuid::Uuid::now_v7().to_string())
         .bind(
@@ -194,8 +196,38 @@ pub(super) async fn claim_qq_formal_notifications(
         .await
         .map_err(ApiError::internal)?;
     }
+    let missed = sqlx::query(
+        "SELECT tasks.id AS task_id, accounts.owner_user_id AS user_id, identities.qq \
+         FROM tasks \
+         INNER JOIN provider_accounts AS accounts ON accounts.id = tasks.provider_account_id \
+         INNER JOIN qq_identities AS identities ON identities.user_id = accounts.owner_user_id AND identities.is_primary = 1 \
+         WHERE tasks.assessment_class = 'formal' \
+           AND tasks.closes_at IS NOT NULL AND tasks.closes_at > ? AND tasks.closes_at <= ? \
+           AND tasks.remote_state NOT IN ('completed', 'removed')",
+    )
+    .bind(recent_deadline_start.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    for row in missed {
+        sqlx::query(
+            "INSERT OR IGNORE INTO qq_formal_notification_deliveries \
+             (id, task_id, user_id, qq, notification_kind, state, attempts, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'deadline_missed', 'pending', 0, ?, ?)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(row.try_get::<String, _>("task_id").map_err(ApiError::internal)?)
+        .bind(row.try_get::<String, _>("user_id").map_err(ApiError::internal)?)
+        .bind(row.try_get::<i64, _>("qq").map_err(ApiError::internal)?)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    }
     let rows = sqlx::query(
-        "SELECT delivery.id, delivery.user_id, delivery.qq, tasks.id AS task_id, tasks.title, tasks.closes_at \
+        "SELECT delivery.id, delivery.notification_kind, delivery.user_id, delivery.qq, tasks.id AS task_id, tasks.title, tasks.closes_at \
          FROM qq_formal_notification_deliveries AS delivery \
          INNER JOIN tasks ON tasks.id = delivery.task_id \
          WHERE delivery.state = 'pending' \
@@ -223,6 +255,8 @@ pub(super) async fn claim_qq_formal_notifications(
         if updated.rows_affected() == 1 {
             claimed.push((
                 id,
+                row.try_get::<String, _>("notification_kind")
+                    .map_err(ApiError::internal)?,
                 row.try_get::<String, _>("user_id")
                     .map_err(ApiError::internal)?,
                 row.try_get::<i64, _>("qq").map_err(ApiError::internal)?,
@@ -237,21 +271,28 @@ pub(super) async fn claim_qq_formal_notifications(
     }
     transaction.commit().await.map_err(ApiError::internal)?;
     let mut items = Vec::with_capacity(claimed.len());
-    for (id, user_id, qq, task_id, title, closes_at) in claimed {
+    for (id, kind, user_id, qq, task_id, title, closes_at) in claimed {
         let user_id = user_id
             .parse()
             .map_err(|_| ApiError::internal("stored notification user ID is invalid"))?;
-        let return_to = format!("/tasks/{task_id}?confirm=1");
+        let return_to = if kind == "confirmation_due" {
+            format!("/tasks/{task_id}?confirm=1")
+        } else {
+            format!("/tasks/{task_id}")
+        };
         let (web_login_path, _) = create_web_login_ticket(&state, user_id, &return_to, now).await?;
         items.push(QqFormalNotification {
             id,
+            kind: kind.clone(),
             qq: qq.to_string(),
             task_id,
             title: title.clone(),
             closes_at: closes_at.clone(),
-            message: format!(
-                "独立作业/考试“{title}”尚待提交前确认，截止时间 {closes_at}。截止后不会自动提交。"
-            ),
+            message: if kind == "confirmation_due" {
+                format!("独立作业/考试“{title}”尚待提交前确认，截止时间 {closes_at}。截止后不会自动提交。")
+            } else {
+                format!("独立作业/考试“{title}”已于 {closes_at} 截止且未确认提交；Asterism 已保留草稿且没有自动提交。")
+            },
             web_login_path,
         });
     }
