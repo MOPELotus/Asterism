@@ -3644,6 +3644,9 @@ mod tests {
         assert!(entry.question_parse.is_none());
         assert!(entry.duration_read.is_some());
         assert!(entry.task_execution.is_some());
+        assert!(entry.question_inventory.is_some());
+        assert!(entry.question_parse.is_some());
+        assert!(entry.answer_resolve.is_some());
         assert!(
             entry
                 .metadata
