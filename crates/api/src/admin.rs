@@ -132,6 +132,113 @@ pub(super) async fn list_ai_usage(
     ))
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PricingCatalogRequest {
+    revision: String,
+    catalog: serde_json::Value,
+    effective_from: Option<Timestamp>,
+    expires_at: Option<Timestamp>,
+}
+
+pub(super) async fn get_pricing_catalog(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
+    auth.require_pricing_manage()?;
+    let row = sqlx::query(
+        "SELECT id, revision, catalog_json, effective_from, expires_at, created_by, created_at \
+         FROM pricing_catalog_revisions ORDER BY effective_from DESC, created_at DESC LIMIT 1",
+    )
+    .fetch_optional(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let Some(row) = row else {
+        return Ok(crate::auth::no_store(
+            Json(serde_json::Value::Null).into_response(),
+        ));
+    };
+    let catalog: serde_json::Value = serde_json::from_str(
+        &row.try_get::<String, _>("catalog_json")
+            .map_err(ApiError::internal)?,
+    )
+    .map_err(ApiError::internal)?;
+    Ok(crate::auth::no_store(
+        Json(serde_json::json!({
+            "id": row.try_get::<String, _>("id").map_err(ApiError::internal)?,
+            "revision": row.try_get::<String, _>("revision").map_err(ApiError::internal)?,
+            "catalog": catalog,
+            "effective_from": row.try_get::<String, _>("effective_from").map_err(ApiError::internal)?,
+            "expires_at": row.try_get::<Option<String>, _>("expires_at").map_err(ApiError::internal)?,
+            "created_by": row.try_get::<String, _>("created_by").map_err(ApiError::internal)?,
+            "created_at": row.try_get::<String, _>("created_at").map_err(ApiError::internal)?,
+        }))
+        .into_response(),
+    ))
+}
+
+pub(super) async fn put_pricing_catalog(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    payload: Result<Json<PricingCatalogRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let created_by = auth.require_pricing_manage()?;
+    let Json(request) = payload.map_err(|_| {
+        ApiError::bad_request("invalid_pricing_catalog", "pricing catalog body is invalid")
+    })?;
+    if request.revision.is_empty()
+        || request.revision.len() > 128
+        || request.revision.chars().any(char::is_control)
+        || !request.catalog.is_object()
+    {
+        return Err(ApiError::bad_request(
+            "invalid_pricing_catalog",
+            "revision must be 1-128 bytes and catalog must be a JSON object",
+        ));
+    }
+    let catalog_json = serde_json::to_string(&request.catalog).map_err(ApiError::internal)?;
+    if catalog_json.len() > 64 * 1024 {
+        return Err(ApiError::bad_request(
+            "invalid_pricing_catalog",
+            "pricing catalog must not exceed 65536 bytes",
+        ));
+    }
+    let now = Utc::now();
+    let effective_from = request.effective_from.unwrap_or_else(|| now.into());
+    let id = asterism_domain::AuditRecordId::new().to_string();
+    sqlx::query(
+        "INSERT INTO pricing_catalog_revisions \
+         (id, revision, catalog_json, effective_from, expires_at, created_by, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&request.revision)
+    .bind(&catalog_json)
+    .bind(effective_from)
+    .bind(request.expires_at)
+    .bind(created_by.to_string())
+    .bind(now)
+    .execute(state.database.pool())
+    .await
+    .map_err(|error| {
+        if let sqlx::Error::Database(database_error) = &error {
+            if database_error.message().contains("UNIQUE") {
+                return ApiError::conflict(
+                    "pricing_revision_exists",
+                    "pricing revision already exists",
+                );
+            }
+        }
+        ApiError::internal(error)
+    })?;
+    Ok(crate::auth::no_store(
+        Json(
+            serde_json::json!({"id": id, "revision": request.revision, "catalog": request.catalog}),
+        )
+        .into_response(),
+    ))
+}
+
 fn require_system_authority(authority: ProviderSettingsAuthority) -> Result<(), ApiError> {
     match authority {
         ProviderSettingsAuthority::System => Ok(()),

@@ -291,6 +291,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(admin::list_ai_usage),
         )
         .route(
+            "/api/v1/admin/pricing-catalog",
+            get(admin::get_pricing_catalog).put(admin::put_pricing_catalog),
+        )
+        .route(
             "/api/v1/admin/users",
             get(admin::list_users).post(admin::create_user),
         )
@@ -1517,6 +1521,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/admin/pricing-catalog".to_owned(),
+            admin_pricing_catalog_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache".to_owned(),
             local_answer_cache_path(),
         );
@@ -2051,6 +2062,42 @@ fn admin_ai_usage_path() -> Value {
             "403": {"description": "ManageSystem permission required"}
         }
     }})
+}
+
+fn admin_pricing_catalog_path() -> Value {
+    json!({
+        "get": {
+            "operationId": "getAdminPricingCatalog",
+            "security": [{"cookieAuth": []}],
+            "responses": {
+                "200": {"description": "Current deployment-local pricing catalog or null"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "ManagePricing permission required"}
+            }
+        },
+        "put": {
+            "operationId": "putAdminPricingCatalog",
+            "security": [{"cookieAuth": []}],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                "type": "object",
+                "required": ["revision", "catalog"],
+                "additionalProperties": false,
+                "properties": {
+                    "revision": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "catalog": {"type": "object"},
+                    "effective_from": {"type": "string", "format": "date-time"},
+                    "expires_at": {"type": "string", "format": "date-time"}
+                }
+            }}}},
+            "responses": {
+                "200": {"description": "Pricing catalog revision stored locally"},
+                "400": {"description": "Invalid pricing catalog"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "ManagePricing permission required"},
+                "409": {"description": "Pricing revision already exists"}
+            }
+        }
+    })
 }
 
 fn admin_user_path() -> Value {
@@ -7658,6 +7705,47 @@ mod tests {
             reservation,
             (execution_id.to_owned(), 7, "reserved".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn task_execution_uses_the_current_pricing_catalog_by_default() {
+        let (app, database, _events, cookie, routine_task, _, _, _) =
+            execution_action_fixture().await;
+        sqlx::query("UPDATE credit_accounts SET available = 25, reserved = 0")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let user_id: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO pricing_catalog_revisions \
+             (id, revision, catalog_json, effective_from, expires_at, created_by, created_at) \
+             VALUES (?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .bind(asterism_domain::AuditRecordId::new().to_string())
+        .bind("default-test-v1")
+        .bind(r#"{"default_amount":4,"reason":"catalog execution"}"#)
+        .bind(now)
+        .bind(user_id)
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let response =
+            post_task_execution(&app, &cookie, routine_task, Some("catalog-execution-1")).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        assert!(!payload["execution"]["quote_id"].is_null());
+        let amount: i64 =
+            sqlx::query_scalar("SELECT amount FROM credit_reservations WHERE execution_id = ?")
+                .bind(payload["execution"]["id"].as_str().unwrap())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(amount, 4);
     }
 
     #[tokio::test]

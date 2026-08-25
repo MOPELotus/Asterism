@@ -1022,8 +1022,12 @@ pub(super) async fn execute_task(
         request.billing_pricing_revision,
         request.billing_reason,
     ) {
-        (None, None, None) => None,
+        (None, None, None) => {
+            configured_billing(&state.database, &request.requested_capabilities).await?
+        }
         (Some(amount), Some(pricing_revision), Some(reason)) => {
+            auth.require_pricing_manage()
+                .map_err(|_| ApiError::forbidden())?;
             if amount == 0 {
                 return Err(ApiError::bad_request(
                     "invalid_billing_amount",
@@ -1116,6 +1120,61 @@ pub(super) async fn execute_task(
         )
             .into_response(),
     ))
+}
+
+async fn configured_billing(
+    database: &asterism_storage::Database,
+    capabilities: &[TaskCapability],
+) -> Result<Option<ExecutionBillingInput>, ApiError> {
+    let now = Utc::now();
+    let row = sqlx::query(
+        "SELECT revision, catalog_json FROM pricing_catalog_revisions \
+         WHERE effective_from <= ? AND (expires_at IS NULL OR expires_at > ?) \
+         ORDER BY effective_from DESC, created_at DESC LIMIT 1",
+    )
+    .bind(now)
+    .bind(now)
+    .fetch_optional(database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let revision: String = sqlx::Row::try_get(&row, "revision").map_err(ApiError::internal)?;
+    let catalog_json: String =
+        sqlx::Row::try_get(&row, "catalog_json").map_err(ApiError::internal)?;
+    let catalog: serde_json::Value =
+        serde_json::from_str(&catalog_json).map_err(ApiError::internal)?;
+    let amount = capabilities
+        .iter()
+        .find_map(|capability| {
+            catalog
+                .get("capability_amounts")
+                .and_then(|values| {
+                    values.get(serde_json::to_string(capability).ok()?.trim_matches('"'))
+                })
+                .and_then(serde_json::Value::as_u64)
+        })
+        .or_else(|| {
+            catalog
+                .get("default_amount")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .unwrap_or(0);
+    if amount == 0 {
+        return Ok(None);
+    }
+    Ok(Some(ExecutionBillingInput {
+        amount: asterism_domain::CreditAmount::new(amount),
+        pricing_revision: revision,
+        reason: catalog
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("task execution")
+            .chars()
+            .take(512)
+            .collect(),
+    }))
 }
 
 pub(super) async fn prepare_execution_invocation_draft(
