@@ -1844,6 +1844,24 @@ fn task_execute_path() -> Value {
                             "workflow_id": {"type": "string", "format": "uuid"},
                             "expected_revision": {"type": "integer", "format": "int64", "minimum": 1}
                         }
+                    },
+                    "billing_amount": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 1,
+                        "description": "Optional one-shot credit amount. Must be supplied together with billing_pricing_revision and billing_reason; the quote and reservation are persisted atomically with this Execution."
+                    },
+                    "billing_pricing_revision": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Admin pricing policy revision for the one-shot quote."
+                    },
+                    "billing_reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512,
+                        "description": "Human-readable billing reason persisted with the quote."
                     }
                 }
             }}}
