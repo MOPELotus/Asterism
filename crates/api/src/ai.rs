@@ -232,10 +232,12 @@ async fn record_ai_usage(
     outcome: &str,
     usage: AiRemoteUsage,
 ) -> Result<(), ApiError> {
+    let estimated_cost = estimate_ai_cost(&state.database, &usage, client).await?;
+    let settlement_status = if estimated_cost == 0 { "not_billable" } else { "pending" };
     sqlx::query(
         "INSERT INTO ai_usage_records \
-         (id, owner_user_id, task_id, provider_endpoint, model, profile, route, input_chars, output_chars, remote_input_tokens, remote_output_tokens, outcome, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, owner_user_id, task_id, provider_endpoint, model, profile, route, input_chars, output_chars, remote_input_tokens, remote_output_tokens, outcome, created_at, estimated_cost, settlement_status) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(asterism_domain::AnswerCandidateId::new().to_string())
     .bind(owner_id.to_string())
@@ -250,10 +252,44 @@ async fn record_ai_usage(
     .bind(usage.output_tokens)
     .bind(outcome)
     .bind(Utc::now())
+    .bind(i64::try_from(estimated_cost).unwrap_or(i64::MAX))
+    .bind(settlement_status)
     .execute(state.database.pool())
     .await
     .map_err(ApiError::internal)?;
     Ok(())
+}
+
+async fn estimate_ai_cost(
+    database: &asterism_storage::Database,
+    usage: &AiRemoteUsage,
+    client: &AiAnswerClient,
+) -> Result<u64, ApiError> {
+    let Some(input_tokens) = usage.input_tokens else { return Ok(0); };
+    let Some(output_tokens) = usage.output_tokens else { return Ok(0); };
+    let row = sqlx::query(
+        "SELECT catalog_json FROM pricing_catalog_revisions \
+         WHERE effective_from <= ? AND (expires_at IS NULL OR expires_at > ?) \
+         ORDER BY effective_from DESC, created_at DESC LIMIT 1",
+    )
+    .bind(Utc::now())
+    .bind(Utc::now())
+    .fetch_optional(database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let Some(row) = row else { return Ok(0); };
+    let catalog_json: String = sqlx::Row::try_get(&row, "catalog_json").map_err(ApiError::internal)?;
+    let catalog: Value = serde_json::from_str(&catalog_json).map_err(ApiError::internal)?;
+    let rate = catalog
+        .get("ai_rates")
+        .and_then(|rates| rates.get(format!("{}:{}", usage.endpoint.as_deref().unwrap_or(&client.route.endpoint), usage.model.as_deref().unwrap_or(&client.route.model))))
+        .or_else(|| catalog.get("ai_rates").and_then(|rates| rates.get("default")));
+    let Some(rate) = rate else { return Ok(0); };
+    let input_per_1k = rate.get("input_per_1k").and_then(Value::as_u64).unwrap_or(0);
+    let output_per_1k = rate.get("output_per_1k").and_then(Value::as_u64).unwrap_or(0);
+    let input_cost = input_tokens.max(0) as u64 * input_per_1k;
+    let output_cost = output_tokens.max(0) as u64 * output_per_1k;
+    Ok(input_cost.div_ceil(1000).saturating_add(output_cost.div_ceil(1000)))
 }
 
 #[derive(Clone, Debug, Default)]
