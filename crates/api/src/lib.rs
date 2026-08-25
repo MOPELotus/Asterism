@@ -259,6 +259,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             get(account::get_scan_schedule).put(account::configure_scan_schedule),
         )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/chaoxing-verification",
+            get(account::get_chaoxing_verification_status),
+        )
         .merge(task_routes())
         .route("/api/v1/courses", get(course::list_courses))
         .route("/api/v1/courses/{course_id}", get(course::get_course))
@@ -1507,6 +1511,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/provider-accounts/{account_id}/chaoxing-verification".to_owned(),
+            chaoxing_verification_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/admin/protocol-observations".to_owned(),
             protocol_observations_path(),
         );
@@ -2109,6 +2120,31 @@ fn admin_pricing_catalog_path() -> Value {
             }
         }
     })
+}
+
+fn chaoxing_verification_path() -> Value {
+    json!({"get": {
+        "operationId": "getChaoxingVerificationStatus",
+        "description": "Shows deployment-local automatic Chaoxing verification budget and recent account-scoped observations without exposing captcha material.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+        "responses": {
+            "200": {"description": "Chaoxing verification budget and recent results", "content": {"application/json": {"schema": {
+                "type": "object",
+                "required": ["provider_account_id", "provider_id", "automatic_attempt_budget", "automatic_time_budget_seconds", "recent_attempts"],
+                "properties": {
+                    "provider_account_id": {"type": "string", "format": "uuid"},
+                    "provider_id": {"type": "string"},
+                    "automatic_attempt_budget": {"type": "integer", "minimum": 0},
+                    "automatic_time_budget_seconds": {"type": "integer", "minimum": 0},
+                    "recent_attempts": {"type": "array", "items": {"type": "object", "required": ["occurred_at", "stage", "result", "message"], "properties": {"occurred_at": {"type": "string", "format": "date-time"}, "stage": {"type": "string"}, "result": {"type": "string"}, "message": {"type": "string"}}}}
+                }
+            }}}},
+            "403": {"description": "Provider settings permission required"},
+            "404": {"description": "Provider account not found"},
+            "409": {"description": "Account is not Chaoxing"}
+        }
+    }})
 }
 
 fn admin_user_path() -> Value {

@@ -639,6 +639,77 @@ pub(super) async fn get_answer_history_scan_status(
     Ok(crate::auth::no_store(Json(response).into_response()))
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct ChaoxingVerificationStatusResponse {
+    provider_account_id: ProviderAccountId,
+    provider_id: ProviderId,
+    automatic_attempt_budget: u32,
+    automatic_time_budget_seconds: u32,
+    recent_attempts: Vec<ChaoxingVerificationAttemptSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChaoxingVerificationAttemptSummary {
+    occurred_at: String,
+    stage: String,
+    result: String,
+    message: String,
+}
+
+pub(super) async fn get_chaoxing_verification_status(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let authority = auth.require_provider_settings_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let account = SqliteProviderAccountRepository::new(state.database.clone())
+        .find_runtime_provider_account(account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|account| authority.permits_owner(account.owner_id))
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    if account.provider_id.as_str() != "chaoxing" {
+        return Err(ApiError::conflict(
+            "chaoxing_verification_unavailable",
+            "Chaoxing verification status is only available for Chaoxing accounts",
+        ));
+    }
+    let rows = sqlx::query(
+        "SELECT logs.timestamp, logs.stage, logs.message \
+         FROM execution_logs AS logs \
+         INNER JOIN executions AS execution ON execution.id = logs.execution_id \
+         INNER JOIN tasks ON tasks.id = execution.task_id \
+         WHERE tasks.provider_account_id = ? \
+           AND (lower(logs.message) LIKE '%captcha%' OR lower(logs.message) LIKE '%slider%' \
+                OR lower(logs.message) LIKE '%face%' OR lower(logs.message) LIKE '%verification%') \
+         ORDER BY logs.timestamp DESC LIMIT 20",
+    )
+    .bind(account_id.to_string())
+    .fetch_all(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let recent_attempts = rows
+        .into_iter()
+        .map(|row| ChaoxingVerificationAttemptSummary {
+            occurred_at: row.try_get("timestamp").unwrap_or_default(),
+            stage: row.try_get("stage").unwrap_or_default(),
+            result: "observed".to_owned(),
+            message: row.try_get("message").unwrap_or_default(),
+        })
+        .collect();
+    Ok(crate::auth::no_store(
+        Json(ChaoxingVerificationStatusResponse {
+            provider_account_id: account_id,
+            provider_id: account.provider_id,
+            automatic_attempt_budget: 3,
+            automatic_time_budget_seconds: 90,
+            recent_attempts,
+        })
+        .into_response(),
+    ))
+}
+
 pub(super) async fn control_answer_history_scan(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,
