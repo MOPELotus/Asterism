@@ -61,17 +61,13 @@ def load_cxkitty(events: Events, redactor: Redactor):
     logger_module.Logger = EventLogger
     logger_module.set_log_filename = lambda _phone: None
     sys.modules["logger"] = logger_module
-    # CxKitty eagerly loads a large OCR model at module import solely for its
-    # automatic CAPTCHA path. Asterism deliberately returns those gates to the
-    # user, so keep the donor's import shape without loading/using that model.
-    ddddocr_module = ModuleType("ddddocr")
-
-    class DisabledOcr:
-        def __init__(self, *args, **kwargs): pass
-        def classification(self, *_args, **_kwargs):
-            raise WorkerFailure("human_interaction_required", "Chaoxing CAPTCHA requires user interaction")
-
-    ddddocr_module.DdddOcr = DisabledOcr
+    # Preserve CxKitty's own bounded OCR strategy.  The worker runtime image
+    # carries ddddocr; if a deployment omits it, the donor import fails cleanly
+    # and the scheduler applies the normal account-level backoff policy.
+    try:
+        import ddddocr as ddddocr_module
+    except ImportError as error:
+        raise WorkerFailure("dependency_missing", "ddddocr is required for Chaoxing CAPTCHA handling") from error
     sys.modules["ddddocr"] = ddddocr_module
     # Face upload is another explicitly user-mediated gate. Avoid importing
     # CxKitty's top-level persistence/config helper just to construct the DTO.

@@ -1629,7 +1629,14 @@ impl AnswerResolveCapability for UpstreamWorkerProvider {
                 ));
             }
         }
-        let confidence = AnswerConfidence::try_new(10_000).map_err(|_| {
+        let confidence = AnswerConfidence::try_new(if self.metadata.id.as_str() == "cidaren" {
+            // The donor answer_lib is useful historical evidence, but it
+            // is not an audited platform standard answer.
+            3_000
+        } else {
+            10_000
+        })
+        .map_err(|_| {
             ProviderError::new(ProviderErrorKind::Internal, "answer confidence is invalid")
         })?;
         let mut candidates = Vec::new();
