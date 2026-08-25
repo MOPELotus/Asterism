@@ -694,7 +694,10 @@ pub(super) async fn get_chaoxing_verification_status(
         .map(|row| ChaoxingVerificationAttemptSummary {
             occurred_at: row.try_get("timestamp").unwrap_or_default(),
             stage: row.try_get("stage").unwrap_or_default(),
-            result: "observed".to_owned(),
+            result: classify_chaoxing_verification_result(
+                row.try_get::<String, _>("message").unwrap_or_default().as_str(),
+            )
+            .to_owned(),
             message: row.try_get("message").unwrap_or_default(),
         })
         .collect();
@@ -708,6 +711,28 @@ pub(super) async fn get_chaoxing_verification_status(
         })
         .into_response(),
     ))
+}
+
+fn classify_chaoxing_verification_result(message: &str) -> &'static str {
+    let normalized = message.to_ascii_lowercase();
+    if ["success", "succeeded", "passed", "verified", "completed"]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        "succeeded"
+    } else if ["failed", "failure", "rejected", "expired", "exhausted"]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        "failed"
+    } else if ["required", "challenge", "captcha", "slider", "face"]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        "required"
+    } else {
+        "observed"
+    }
 }
 
 pub(super) async fn control_answer_history_scan(
@@ -1684,5 +1709,13 @@ mod tests {
         let debug = format!("{request:?}");
         assert!(debug.contains("ProviderCookie"));
         assert!(!debug.contains("private-cookie"));
+    }
+
+    #[test]
+    fn chaoxing_verification_result_is_classified_without_exposing_material() {
+        assert_eq!(classify_chaoxing_verification_result("captcha passed"), "succeeded");
+        assert_eq!(classify_chaoxing_verification_result("slider challenge required"), "required");
+        assert_eq!(classify_chaoxing_verification_result("verification failed"), "failed");
+        assert_eq!(classify_chaoxing_verification_result("verification log"), "observed");
     }
 }
