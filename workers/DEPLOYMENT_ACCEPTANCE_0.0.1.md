@@ -8,9 +8,10 @@ from live account evidence and is safe to keep in the repository.
 - Branch is `0.0.1`; `master` and `0.1.0` remain unchanged.
 - Daemon health: `ok`; database schema: 105; four Providers registered; no
   outbox backlog or dead-letter outbox entries.
-- Full Rust workspace: green, including API 75, Engine 160, Storage 170,
+- Full Rust workspace: green, including API 80, Engine 163, Storage 173,
   Chaoxing 204, WELearn 255, UAI 308, Cidaren 214, and all remaining crates.
-- Python Worker fixture smoke: 42/42 green with declared Chaoxing HTML parser
+- Python Worker fixture smoke: Chaoxing 44/44 and Cidaren 8/8 green with declared
+  parser and Answer Bridge coverage
   dependencies installed.
 - Yunzai plugin: `npm test` 10/10 and `npm run check` green.
 - WebUI production build/typecheck and the major route/mobile/error-state pass
