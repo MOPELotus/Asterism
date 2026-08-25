@@ -2070,7 +2070,7 @@ fn admin_pricing_catalog_path() -> Value {
             "operationId": "getAdminPricingCatalog",
             "security": [{"cookieAuth": []}],
             "responses": {
-                "200": {"description": "Current deployment-local pricing catalog or null"},
+                "200": {"description": "Current deployment-local pricing catalog or null", "content": {"application/json": {"schema": {"type": ["object", "null"]}}}},
                 "401": {"description": "Authentication required"},
                 "403": {"description": "ManagePricing permission required"}
             }
@@ -2090,7 +2090,7 @@ fn admin_pricing_catalog_path() -> Value {
                 }
             }}}},
             "responses": {
-                "200": {"description": "Pricing catalog revision stored locally"},
+                "200": {"description": "Pricing catalog revision stored locally", "content": {"application/json": {"schema": {"type": "object"}}}},
                 "400": {"description": "Invalid pricing catalog"},
                 "401": {"description": "Authentication required"},
                 "403": {"description": "ManagePricing permission required"},
