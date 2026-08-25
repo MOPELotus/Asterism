@@ -7820,6 +7820,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recharge_contact_is_owner_scoped_and_sanitized_from_active_catalog() {
+        let (app, database, _events, cookie, _routine_task, _, _, _) =
+            execution_action_fixture().await;
+        let user_id: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO pricing_catalog_revisions \
+             (id, revision, catalog_json, effective_from, expires_at, created_by, created_at) \
+             VALUES (?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .bind(asterism_domain::AuditRecordId::new().to_string())
+        .bind("contact-test-v1")
+        .bind(r#"{"default_amount":1,"recharge_contact":"QQ 群：123456\n请联系管理员"}"#)
+        .bind(now)
+        .bind(user_id)
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/credits/recharge-contact")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["contact"], "QQ 群：123456\n请联系管理员");
+    }
+
+    #[tokio::test]
     async fn formal_execution_requires_and_accepts_explicit_owner_confirmation() {
         let (app, _database, _events, cookie, _, _, formal_task, _) =
             execution_action_fixture().await;
