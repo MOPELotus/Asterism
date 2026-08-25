@@ -12,6 +12,7 @@ mod browser_bridge;
 mod browser_bridge_command;
 mod completion_workflow;
 mod course;
+mod course_automation_plan;
 mod course_enrollment;
 mod credit;
 mod database;
@@ -54,6 +55,7 @@ pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
 pub use browser_bridge_command::SqliteBrowserBridgeCommandArtifactRepository;
 pub use completion_workflow::SqliteCompletionWorkflowRepository;
 pub use course::SqliteCourseProgressRepository;
+pub use course_automation_plan::SqliteCourseAutomationPlanRepository;
 pub use course_enrollment::SqliteCourseEnrollmentDraftRepository;
 pub use credit::{CreditGrant, CreditGrantOutcome, CreditGrantResult, SqliteCreditRepository};
 pub use database::{Database, StorageError};
@@ -114,10 +116,11 @@ pub use repository::{
     BrowserBridgeWorkflowCommitOutcome, BrowserBridgeWorkflowCommitRequest,
     BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue,
     ClaimedAnswerBootstrapHarvest, CompletionWorkflowCreateOutcome, CompletionWorkflowRepository,
-    CourseAggregateProgressRecord, CourseEnrollmentAttemptCreateOutcome,
-    CourseEnrollmentAttemptCreateRequest, CourseEnrollmentAttemptMutationIssueRequest,
-    CourseEnrollmentAttemptReceiptRequest, CourseEnrollmentAttemptRepository,
-    CourseEnrollmentAttemptVerificationBeginRequest,
+    CourseAggregateProgressRecord, CourseAutomationPlanRepository,
+    CourseAutomationPlanWriteOutcome, CourseAutomationPlanWriteRequest,
+    CourseEnrollmentAttemptCreateOutcome, CourseEnrollmentAttemptCreateRequest,
+    CourseEnrollmentAttemptMutationIssueRequest, CourseEnrollmentAttemptReceiptRequest,
+    CourseEnrollmentAttemptRepository, CourseEnrollmentAttemptVerificationBeginRequest,
     CourseEnrollmentAttemptVerificationRecordRequest, CourseEnrollmentDraftCreateOutcome,
     CourseEnrollmentDraftCreateRequest, CourseEnrollmentDraftRecord,
     CourseEnrollmentDraftRepository, CourseEnrollmentDraftResolveRequest,

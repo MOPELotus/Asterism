@@ -1,9 +1,9 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckSquare2, ChevronRight, Play } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 
-import { executeTask, getCourse, getCourseProgress, getProviderAccount, listTasks } from "@/api/generated/sdk.gen.ts";
+import { configureCourseAutomation, executeTask, getCourse, getCourseAutomation, getCourseProgress, getProviderAccount, listTasks } from "@/api/generated/sdk.gen.ts";
 import type { Task } from "@/api/generated/types.gen.ts";
 import { requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
@@ -19,6 +19,7 @@ type DirectCapability = "resource_execution" | "duration_report" | "practice";
 
 export function CourseDetailPage() {
   const { courseId = "" } = useParams();
+  const queryClient = useQueryClient();
   const [selected, setSelected] = useState<string[]>([]);
   const [startedCount, setStartedCount] = useState<number>();
   const [taskPage, setTaskPage] = useState(1);
@@ -32,6 +33,9 @@ export function CourseDetailPage() {
     queryFn: () => loadCourseTasks(courseId, isChaoxing, taskPage),
   });
   const progress = useQuery({ queryKey: ["courses", courseId, "progress"], enabled: Boolean(courseId), retry: false, queryFn: async () => requireData(await getCourseProgress({ path: { course_id: courseId } })) });
+  const automation = useQuery({ queryKey: ["courses", courseId, "automation"], enabled: Boolean(courseId), retry: false, queryFn: async () => requireData(await getCourseAutomation({ path: { course_id: courseId } })) });
+  const automationMutation = useMutation({ mutationFn: async (enabled: boolean) => requireData(await configureCourseAutomation({ path: { course_id: courseId }, body: { enabled } })), onSuccess: (value) => queryClient.setQueryData(["courses", courseId, "automation"], value) });
+  const automationEnabled = (automation.data as { enabled?: boolean } | undefined)?.enabled === true;
   const courseTasks = useMemo(() => {
     const visible = (tasks.data?.items ?? []).filter((task) => task.remote_state !== "removed");
     if (!isChaoxing) return visible;
@@ -64,7 +68,7 @@ export function CourseDetailPage() {
     },
     onSuccess: (count) => { setStartedCount(count); setSelected([]); },
   });
-  const error = course.error ?? account.error ?? tasks.error ?? progress.error ?? startSelected.error;
+  const error = course.error ?? account.error ?? tasks.error ?? progress.error ?? automation.error ?? startSelected.error ?? automationMutation.error;
 
   if (course.isLoading) return <PageShell title="课程详情" description="正在读取课程。"><TableSkeleton /></PageShell>;
   if (!course.data) return <PageShell title="课程详情" description="课程不存在或当前账号无法访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
@@ -80,6 +84,7 @@ export function CourseDetailPage() {
       <Summary label="最近同步" value={formatTimestamp(course.data.last_seen_at)} />
     </div>
     {progress.data ? <Card><CardHeader><CardTitle>课程进度</CardTitle></CardHeader><CardContent className="flex flex-wrap gap-2"><Badge variant="secondary">剩余 {progress.data.progress.remaining_task_count}</Badge><Badge variant="secondary">需要人工处理 {progress.data.progress.human_required_task_count}</Badge>{progress.data.progress.duration ? <Badge variant="outline">学习 {Math.round(progress.data.progress.duration.observed_seconds / 60)} 分钟</Badge> : null}</CardContent></Card> : null}
+    <Card><CardHeader><CardTitle>自动巡检后执行</CardTitle></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm">巡检发现新增且可安全执行的课程任务后自动加入队列。</p><p className="text-xs text-muted-foreground">默认关闭；正式作业/考试和需要人工确认的任务不会自动提交。</p></div><Button variant={automationEnabled ? "default" : "outline"} disabled={automation.isLoading || automationMutation.isPending} onClick={() => automationMutation.mutate(!automationEnabled)}>{automationMutation.isPending ? "保存中…" : automationEnabled ? "已启用" : "启用自动巡检执行"}</Button></CardContent></Card>
     {chaoxingGrade ? <Card><CardHeader><CardTitle>学习通成绩构成</CardTitle><p className="text-sm text-muted-foreground">只读同步平台当前显示的成绩、权重、完成条件与剩余缺口；没有明确显示的字段不会推算。</p></CardHeader><CardContent className="space-y-3">{chaoxingGrade.overall_score != null ? <Badge>综合成绩 {chaoxingGrade.overall_score} 分</Badge> : null}<div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">{chaoxingGrade.components.map((component) => <div key={component.type} className="rounded-lg border p-3"><p className="font-medium">{gradeComponentLabel(component.type)}</p><div className="mt-2 flex flex-wrap gap-1.5">{component.weight_percent != null ? <Badge variant="secondary">权重 {component.weight_percent}%</Badge> : null}{component.score != null ? <Badge variant="outline">得分 {component.score}</Badge> : null}{component.completion_percent != null ? <Badge variant="outline">完成 {component.completion_percent}%</Badge> : null}{component.observed_minutes != null ? <Badge variant="outline">已计 {component.observed_minutes} 分钟</Badge> : null}{component.required_minutes != null ? <Badge variant="outline">要求 {component.required_minutes} 分钟</Badge> : null}{component.remaining_gap != null && component.remaining_gap > 0 ? <Badge variant="warning">剩余缺口 {component.remaining_gap}{component.required_minutes != null ? " 分钟" : "%"}</Badge> : null}</div>{component.completion_condition ? <p className="mt-2 text-xs text-muted-foreground">完成条件：{component.completion_condition}</p> : null}</div>)}</div></CardContent></Card> : null}
     <Card><CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between"><div><CardTitle>课程任务</CardTitle><p className="mt-1 text-sm text-muted-foreground">普通学习任务可以勾选后批量开始；作业、考试和需要填写内容的任务请直接进入处理。</p></div><div className="flex flex-wrap gap-2">{account.data?.provider_id === "uai" && directTasks.length ? <Button variant="outline" onClick={() => setSelected(allDirectSelected ? [] : directTasks.map((task) => task.id))}>{allDirectSelected ? "取消全选" : "全选必做未完成"}</Button> : null}<Button disabled={!selected.length || startSelected.isPending} onClick={() => startSelected.mutate()}><Play className="size-4" />{startSelected.isPending ? "正在开始…" : `开始所选任务${selected.length ? `（${selected.length}）` : ""}`}</Button></div></CardHeader><CardContent>
       {tasks.isLoading ? <TableSkeleton /> : allTasks.length ? <div className="space-y-6">{groupTasks(allTasks).map(([type, grouped]) => <section key={type}><div className="mb-2 flex items-center justify-between gap-2"><div className="flex items-center gap-2"><h2 className="font-semibold">{taskTypeLabels[type]}</h2><Badge variant="secondary">{grouped.length}</Badge></div>{isChaoxing && type === "chapter" && directTasks.length ? <Button size="sm" variant="outline" onClick={() => setSelected(allDirectSelected ? [] : directTasks.map((task) => task.id))}>{allDirectSelected ? "取消全选" : "全选知识点"}</Button> : null}</div><div className="divide-y rounded-xl border">{grouped.map((task) => {

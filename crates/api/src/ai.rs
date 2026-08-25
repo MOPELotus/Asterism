@@ -170,7 +170,7 @@ pub(super) async fn generate_ai_answer_candidates(
     ))
 }
 
-async fn generate_ai_records(
+pub(crate) async fn generate_ai_records(
     state: &ApiState,
     owner_id: asterism_domain::UserId,
     task_id: TaskId,

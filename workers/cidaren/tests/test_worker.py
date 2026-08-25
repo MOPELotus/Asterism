@@ -79,6 +79,53 @@ class InventoryTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_run_uses_loopback_answer_bridge_for_unsupplied_question(self):
+        seen = []
+
+        class Runner:
+            def __init__(self, root, *, progress, log):
+                self.public = types.SimpleNamespace(course_id=None, right_count=0, wrong_count=0)
+
+            def set_answer_override(self, callback):
+                self.override = callback
+
+            def run_class_task(self, task):
+                exam = {"topic_code": "topic-bridge", "topic_mode": 13,
+                        "stem": {"content": "Choose"},
+                        "options": [{"answer_tag": 0, "content": "Alpha"}, {"answer_tag": 1, "content": "Beta"}]}
+                self.public.exam = exam
+                seen.append(self.override(self.public, 13))
+                return {"complete": True}
+
+        runner_module = types.SimpleNamespace(HeadlessTaskRunner=Runner)
+        runner_module.submit = lambda public, option: None
+        original = WORKER._bridge_post
+        try:
+            WORKER._bridge_post = lambda bridge, document, timeout: ({
+                "answer_available": True, "value": "B"
+            } if document.get("kind") == "resolve_answer" else {"ok": True})
+            result = WORKER.execute_task(
+                session_modules(runner=runner_module),
+                {"session": {"token": "secret"},
+                 "settings": {"answer_bridge_url": "http://127.0.0.1:19001/answer",
+                               "answer_bridge_ticket": "bridge-secret", "execution_id": "e1",
+                               "task_id": "t1", "remote_task_id": "r1"},
+                 "task": {"native": {"task_family": "class", "course_id": "course-1",
+                                       "task": {"task_id": 22, "task_type": 2}}}},
+                pathlib.Path("C:/repo/api/login.py"), Events(), WORKER.Redactor(["secret", "bridge-secret"]),
+            )
+        finally:
+            WORKER._bridge_post = original
+        self.assertTrue(result["verified"])
+        self.assertEqual(seen, [1])
+
+    def test_answer_bridge_requires_loopback_and_bindings(self):
+        with self.assertRaises(WORKER.WorkerFailure):
+            WORKER._answer_bridge_settings({"answer_bridge_url": "https://example.test/a", "answer_bridge_ticket": "x",
+                                             "execution_id": "e", "task_id": "t"})
+        with self.assertRaises(WORKER.WorkerFailure):
+            WORKER._answer_bridge_settings({"answer_bridge_url": "http://127.0.0.1/a", "answer_bridge_ticket": "x"})
+
     def test_run_delegates_class_task_to_headless_donor_runner(self):
         seen = {}
 

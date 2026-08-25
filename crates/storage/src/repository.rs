@@ -7,25 +7,26 @@ use asterism_auth::TokenDigest;
 use asterism_domain::{
     AccountHealth, AnswerBootstrapHarvest, AnswerCandidate, AnswerCandidateId, AttemptResult,
     AuditActor, AuditRecord, AuthBootstrapClientEvent, AuthBootstrapSession,
-    AuthBootstrapSessionId, AuthSession, AuthSessionId, BatchExecution, BatchExecutionAttempt,
-    BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
-    BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession, BrowserBridgeSessionId,
-    CompletionPolicySnapshot, Course, CourseAggregateProgress, CourseEnrollmentAttempt,
-    CourseEnrollmentAttemptId, CourseEnrollmentDraft, CourseEnrollmentDraftId,
-    CourseEnrollmentMutationReceipt, CourseEnrollmentVerification, CourseId, CreditAccount,
-    CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId, Execution,
-    ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionInvocationDraft,
-    ExecutionInvocationDraftId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
-    ExecutionStage, ExecutionState, ExternalOauthPending, GlobalAnswerCorpusEntryId,
-    GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel, OrchestrationState, PriceQuote,
-    PrivateAnswerEvidence, PrivateAnswerEvidenceId, ProtocolObservation, ProtocolObservationKind,
-    ProtocolSurface, ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId,
-    ProviderRuntimeSettingsId, Question, QuestionContentFingerprint, QuestionGroup,
-    QuestionReadAttempt, QuestionReadAttemptId, QuestionSemanticFingerprint, QuestionSession,
-    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionDraftId, SubmissionReceipt, SubmissionResult, SubmissionResultId,
-    SubmissionScore, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
-    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
+    AuthBootstrapSessionId, AuthSession, AuthSessionId, AutomationPlan, BatchExecution,
+    BatchExecutionAttempt, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
+    BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession,
+    BrowserBridgeSessionId, CompletionPolicySnapshot, Course, CourseAggregateProgress,
+    CourseEnrollmentAttempt, CourseEnrollmentAttemptId, CourseEnrollmentDraft,
+    CourseEnrollmentDraftId, CourseEnrollmentMutationReceipt, CourseEnrollmentVerification,
+    CourseId, CreditAccount, CreditReservation, CreditReservationId, CreditTransaction,
+    CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId, ExecutionId,
+    ExecutionInvocationDraft, ExecutionInvocationDraftId, ExecutionLease, ExecutionLogEvent,
+    ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
+    GlobalAnswerCorpusEntryId, GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel,
+    OrchestrationState, PriceQuote, PrivateAnswerEvidence, PrivateAnswerEvidenceId,
+    ProtocolObservation, ProtocolObservationKind, ProtocolSurface, ProviderAccount,
+    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
+    QuestionContentFingerprint, QuestionGroup, QuestionReadAttempt, QuestionReadAttemptId,
+    QuestionSemanticFingerprint, QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken,
+    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId,
+    SubmissionReceipt, SubmissionResult, SubmissionResultId, SubmissionScore, Task,
+    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
+    UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
@@ -605,6 +606,42 @@ pub trait CourseProgressRepository: Send + Sync {
         owner_id: UserId,
         course_id: CourseId,
     ) -> Result<Option<CourseAggregateProgressRecord>, StorageError>;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CourseAutomationPlanWriteRequest {
+    pub owner_user_id: UserId,
+    pub course_id: CourseId,
+    pub enabled: bool,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CourseAutomationPlanWriteOutcome {
+    Stored(AutomationPlan),
+    CourseNotFound,
+}
+
+/// Thin Course opt-in view over the existing `automation_plans` model.
+/// Missing or non-active plans mean disabled; inventory scans never create an
+/// active plan by themselves.
+#[async_trait]
+pub trait CourseAutomationPlanRepository: Send + Sync {
+    async fn find_owned_course_automation_plan(
+        &self,
+        owner_user_id: UserId,
+        course_id: CourseId,
+    ) -> Result<Option<AutomationPlan>, StorageError>;
+
+    async fn list_effective_course_automation_plans(
+        &self,
+        at: Timestamp,
+    ) -> Result<Vec<AutomationPlan>, StorageError>;
+
+    async fn write_course_automation_plan(
+        &self,
+        request: CourseAutomationPlanWriteRequest,
+    ) -> Result<CourseAutomationPlanWriteOutcome, StorageError>;
 }
 
 #[async_trait]

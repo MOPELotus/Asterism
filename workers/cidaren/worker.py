@@ -4,8 +4,13 @@
 from __future__ import annotations
 
 import importlib
+import json
 import pathlib
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -14,6 +19,98 @@ from common.runtime import (Events, Redactor, SourceMetadata, WorkerFailure,
                             capture_output, require_mapping, require_text, run)
 
 PROTOCOL = "asterism.cidaren.worker.v1"
+ANSWER_BRIDGE_PROTOCOL = "asterism.cidaren.answer-bridge.v1"
+
+
+def _json_public(value, *, depth=0):
+    """Return the donor's public exam shape without transport/session secrets."""
+    if depth > 16:
+        return None
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        result = {}
+        for key, child in value.items():
+            name = str(key)
+            lowered = name.lower()
+            if any(marker in lowered for marker in ("token", "cookie", "authorization", "password", "secret", "ticket")):
+                continue
+            result[name] = _json_public(child, depth=depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_json_public(child, depth=depth + 1) for child in value]
+    return str(value)
+
+
+def _answer_bridge_settings(settings):
+    nested = settings.get("answer_bridge") if isinstance(settings.get("answer_bridge"), Mapping) else {}
+    url = str(nested.get("url") or settings.get("answer_bridge_url") or "").strip()
+    ticket = str(nested.get("ticket") or settings.get("answer_bridge_ticket") or "").strip()
+    execution_id = str(nested.get("execution_id") or settings.get("execution_id") or settings.get("answer_bridge_execution_id") or "").strip()
+    task_id = str(nested.get("task_id") or settings.get("task_id") or settings.get("answer_bridge_task_id") or "").strip()
+    remote_task_id = str(nested.get("remote_task_id") or settings.get("remote_task_id") or "").strip()
+    expires_at = nested.get("expires_at") or settings.get("answer_bridge_expires_at")
+    if not url:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "http" or (parsed.hostname or "").lower() not in {"127.0.0.1", "::1", "localhost"}:
+        raise WorkerFailure("request_invalid", "Cidaren answer bridge must use a loopback HTTP URL")
+    if not ticket or not execution_id or not task_id:
+        raise WorkerFailure("request_invalid", "Cidaren answer bridge requires ticket, execution_id, and task_id bindings")
+    if expires_at not in (None, ""):
+        try:
+            # Contract uses Unix seconds (integer/float) to avoid timezone
+            # ambiguity at the worker boundary.
+            if float(expires_at) <= time.time():
+                raise WorkerFailure("request_invalid", "Cidaren answer bridge ticket has expired")
+        except (TypeError, ValueError) as error:
+            raise WorkerFailure("request_invalid", "Cidaren answer_bridge_expires_at must be Unix seconds") from error
+    return {"url": url, "ticket": ticket, "execution_id": execution_id, "task_id": task_id,
+            "remote_task_id": remote_task_id, "expires_at": expires_at}
+
+
+def _bridge_post(bridge, document, timeout):
+    body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        bridge["url"], body, method="POST",
+        headers={
+            "Authorization": f"Bearer {bridge['ticket']}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        if getattr(response, "status", 200) < 200 or getattr(response, "status", 200) >= 300:
+            return None
+        raw = response.read(1024 * 1024)
+    result = json.loads(raw.decode("utf-8")) if raw else None
+    return result if isinstance(result, Mapping) else None
+
+
+def _resolve_donor_answer(exam, value):
+    if value is None:
+        return None
+    options = exam.get("options") or []
+    option_rows = [row for row in options if isinstance(row, Mapping)]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (list, tuple, dict)):
+        return value
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+    for row in option_rows:
+        tag = row.get("answer_tag")
+        content = row.get("content")
+        if text_value == str(tag) or text_value == str(content).strip():
+            return tag if tag is not None else content
+    # Normalized choice answers may be represented as A/B/C…; map those to
+    # the donor's zero-based option index only when bounded.
+    if len(text_value) == 1 and text_value.isalpha():
+        index = ord(text_value.upper()) - ord("A")
+        if 0 <= index < len(options):
+            return index
+    return text_value
 
 
 def load(entry, events, redactor):
@@ -266,46 +363,6 @@ def execute_task(modules, payload, entry, events, redactor):
 
     worker = runner_module.HeadlessTaskRunner(entry.resolve().parents[1], progress=progress, log=log)
     worker.public.course_id = native.get("course_id")
-    supplied_answers = payload.get("answers")
-    if isinstance(supplied_answers, list) and hasattr(worker, "set_answer_override"):
-        # Keep the donor's option/tag protocol at the boundary.  Asterism
-        # supplies normalized values; this adapter resolves them against the
-        # currently displayed donor options without reimplementing submission.
-        by_remote_id = {
-            str(row.get("remote_id")): row.get("value")
-            for row in supplied_answers
-            if isinstance(row, Mapping) and row.get("remote_id") is not None
-        }
-
-        def answer_override(public, _mode):
-            exam = public.exam if isinstance(public.exam, Mapping) else {}
-            topic_code = str(exam.get("topic_code") or "")
-            value = by_remote_id.get(topic_code)
-            if value is None:
-                return None
-            options = exam.get("options") or []
-            option_rows = [row for row in options if isinstance(row, Mapping)]
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return int(value)
-            if isinstance(value, (list, tuple, dict)):
-                return value
-            text_value = str(value).strip()
-            if not text_value:
-                return None
-            for row in option_rows:
-                tag = row.get("answer_tag")
-                content = row.get("content")
-                if text_value == str(tag) or text_value == str(content).strip():
-                    return tag if tag is not None else content
-            # Normalized choice answers may be represented as A/B/C…; map
-            # those to the donor's zero-based option index only when bounded.
-            if len(text_value) == 1 and text_value.isalpha():
-                index = ord(text_value.upper()) - ord("A")
-                if 0 <= index < len(options):
-                    return index
-            return text_value
-
-        worker.set_answer_override(answer_override)
     settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
     answer_route = str(settings.get("answer_route", "untimed")).strip().lower()
     if answer_route not in {"timed", "untimed", "escalation"}:
@@ -317,6 +374,62 @@ def execute_task(modules, payload, entry, events, redactor):
         raise WorkerFailure("request_invalid", "Cidaren instant budgets must be integers") from error
     if answer_route == "timed" and (instant_timeout < 1 or instant_timeout > 300 or fallback_grace < 0 or fallback_grace > 120):
         raise WorkerFailure("request_invalid", "Cidaren timed answer budgets are outside the supported bounds")
+    bridge = _answer_bridge_settings(settings)
+    bridge_timeout = min(max(1, instant_timeout), 10)
+    supplied_answers = payload.get("answers")
+    by_remote_id = {
+        str(row.get("remote_id")): row.get("value")
+        for row in supplied_answers
+        if isinstance(row, Mapping) and row.get("remote_id") is not None
+    } if isinstance(supplied_answers, list) else {}
+    selected_sources = {}
+    if (by_remote_id or bridge is not None) and hasattr(worker, "set_answer_override"):
+        # Keep the donor's option/tag protocol at the boundary. Static
+        # Asterism answers win; only questions without one call the short-lived
+        # loopback bridge. The donor remains responsible for fallback and
+        # submission semantics.
+
+        def answer_override(public, _mode):
+            exam = public.exam if isinstance(public.exam, Mapping) else {}
+            topic_code = str(exam.get("topic_code") or "")
+            if topic_code in by_remote_id:
+                resolved = _resolve_donor_answer(exam, by_remote_id[topic_code])
+                if resolved is not None:
+                    selected_sources[topic_code] = "supplied"
+                return resolved
+            if bridge is None:
+                return None
+            request = {
+                "protocol": ANSWER_BRIDGE_PROTOCOL,
+                "kind": "resolve_answer",
+                "execution_id": bridge["execution_id"],
+                "task_id": bridge["task_id"],
+                "remote_task_id": bridge["remote_task_id"],
+                "route": answer_route,
+                "timeout_seconds": bridge_timeout,
+                "remote_id": topic_code,
+                "mode": _mode,
+                "exam": _json_public(exam),
+            }
+            try:
+                response = _bridge_post(bridge, request, bridge_timeout)
+            except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+                return None
+            if not response or response.get("answer_available") is False:
+                return None
+            raw_value = response.get("donor_value") if "donor_value" in response else response.get("value", response.get("answer"))
+            # Unknown donor modes are allowed to reach the resolver with their
+            # complete public exam, but only an explicit donor-native value is
+            # safe to return. Otherwise preserve the donor answer_lib/skip path.
+            known_modes = {11, 13, 15, 16, 17, 18, 21, 22, 31, 32, 41, 42, 43, 44, 51, 52, 53, 54, 73}
+            if _mode not in known_modes and "donor_value" not in response:
+                return None
+            resolved = _resolve_donor_answer(exam, raw_value)
+            if resolved is not None:
+                selected_sources[topic_code] = "bridge"
+            return resolved
+
+        worker.set_answer_override(answer_override)
     try:
         spend_min = int(settings.get("spend_min_time", getattr(worker.public, "spend_min_time", 1)))
         spend_max = int(settings.get("spend_max_time", getattr(worker.public, "spend_max_time", 2)))
@@ -329,13 +442,56 @@ def execute_task(modules, payload, entry, events, redactor):
     else:
         worker.public.spend_min_time = spend_min
         worker.public.spend_max_time = spend_max
-    with capture_output(events, redactor):
-        if family == "unit":
-            result = worker.run_unit(require_mapping(native.get("unit"), "task.native.unit"))
-        elif family == "class":
-            result = worker.run_class_task(require_mapping(native.get("task"), "task.native.task"))
-        else:
-            raise WorkerFailure("task_unsupported", f"unsupported Cidaren task family: {family}")
+    original_submit = getattr(runner_module, "submit", None)
+    if bridge is not None and callable(original_submit):
+        def observed_submit(public, option):
+            exam = public.exam if isinstance(public.exam, Mapping) else {}
+            topic_code = str(exam.get("topic_code") or "")
+            right_before = int(getattr(public, "right_count", 0) or 0)
+            wrong_before = int(getattr(public, "wrong_count", 0) or 0)
+            result_value = original_submit(public, option)
+            right_delta = int(getattr(public, "right_count", 0) or 0) - right_before
+            wrong_delta = int(getattr(public, "wrong_count", 0) or 0) - wrong_before
+            correctness = (
+                "correct" if right_delta > 0 and wrong_delta == 0 else
+                "wrong" if wrong_delta > 0 and right_delta == 0 else
+                "mixed" if right_delta > 0 and wrong_delta > 0 else
+                "unknown"
+            )
+            observation = {
+                "protocol": ANSWER_BRIDGE_PROTOCOL,
+                "kind": "answer_observation",
+                "execution_id": bridge["execution_id"],
+                "task_id": bridge["task_id"],
+                "remote_task_id": bridge["remote_task_id"],
+                "remote_id": topic_code,
+                "mode": exam.get("topic_mode"),
+                "submitted": _json_public(option),
+                "source": selected_sources.pop(topic_code, "donor"),
+                "outcome": {
+                    "correctness": correctness,
+                    "right_delta": max(0, right_delta),
+                    "wrong_delta": max(0, wrong_delta),
+                },
+            }
+            try:
+                _bridge_post(bridge, observation, bridge_timeout)
+            except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+                pass
+            return result_value
+
+        runner_module.submit = observed_submit
+    try:
+        with capture_output(events, redactor):
+            if family == "unit":
+                result = worker.run_unit(require_mapping(native.get("unit"), "task.native.unit"))
+            elif family == "class":
+                result = worker.run_class_task(require_mapping(native.get("task"), "task.native.task"))
+            else:
+                raise WorkerFailure("task_unsupported", f"unsupported Cidaren task family: {family}")
+    finally:
+        if bridge is not None and callable(original_submit):
+            runner_module.submit = original_submit
     complete = result.get("complete") is True
     return {
         "remote_state": "completed" if complete else "in_progress",

@@ -11,13 +11,17 @@ use asterism_config::{
     Config, ConfigFile, ConfigOverrides, DEFAULT_CONFIG_FILE, DatabaseOverrides, Environment,
     ProviderOverrides, SchedulerOverrides, ServerOverrides,
 };
-use asterism_domain::ProviderId;
+use asterism_domain::{
+    AssessmentClass, AuditActor, OrchestrationState, PlanScope, ProviderId, RemoteState,
+    RequestSource, SourceType, TaskCapability,
+};
 use asterism_engine::{
     AnswerHistoryHarvestTickReport, AnswerHistoryHarvestWorker, AnswerHistoryHarvestWorkerConfig,
     BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorConfig,
     BrowserBridgeCredentialTickReport, BrowserBridgeWorkflowProcessor,
     BrowserBridgeWorkflowProcessorConfig, BrowserBridgeWorkflowTickReport, DispatchConfig,
-    DispatchReport, ExecutionRunnerConfig, ExecutionSchedulerConfig, ExecutionSchedulerTickReport,
+    DispatchReport, ExecuteTaskCommand, ExecutionAiSelectionInput, ExecutionRequestService,
+    ExecutionRunnerConfig, ExecutionSchedulerConfig, ExecutionSchedulerTickReport,
     ExecutionSchedulerWorker, FormalAssessmentPolicy, OutboxDispatcher, ProviderScanService,
     ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker,
 };
@@ -32,11 +36,13 @@ use asterism_provider_welearn::build_development_provider_with_renewal as build_
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
-    Database, RecoveryReport, SecretKeyring, SqliteAnswerBootstrapHarvestRepository,
-    SqliteAnswerHistoryIngestionRepository, SqliteBrowserBridgeSessionRepository,
+    CourseAutomationPlanRepository, Database, RecoveryReport, SecretKeyring,
+    SqliteAnswerBootstrapHarvestRepository, SqliteAnswerHistoryIngestionRepository,
+    SqliteBrowserBridgeSessionRepository, SqliteCourseAutomationPlanRepository,
     SqliteExecutionLeaseRepository, SqliteExecutionRepository, SqliteOutboxRepository,
     SqliteProtocolObservationRepository, SqliteProviderAccountRepository,
-    SqliteProviderCredentialResolver, SqliteProviderScanRepository, SqliteSchedulerRepository,
+    SqliteProviderCredentialResolver, SqliteProviderRuntimeSettingsRepository,
+    SqliteProviderScanRepository, SqliteQuestionSnapshotRepository, SqliteSchedulerRepository,
     SqliteSecretStore, SqliteTaskQueryRepository,
 };
 use asterism_uai_worker_client::UaiWorkerClient;
@@ -844,6 +850,8 @@ fn start_scan_scheduler(
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     let handle = if config.scheduler.enabled {
+        let automation_database = database.clone();
+        let automation_providers = providers.clone();
         let worker = ScanSchedulerWorker::new(
             SqliteSchedulerRepository::new(database.clone()),
             SqliteProviderAccountRepository::new(database.clone()),
@@ -871,6 +879,8 @@ fn start_scan_scheduler(
         let tick_interval = std::time::Duration::from_secs(config.scheduler.tick_interval_seconds);
         Some(tokio::spawn(run_scan_scheduler(
             worker,
+            automation_database,
+            automation_providers,
             tick_interval,
             background_tick_lock,
             shutdown,
@@ -1274,6 +1284,8 @@ async fn run_browser_bridge_workflow_processor(
 
 async fn run_scan_scheduler(
     worker: DaemonScanWorker,
+    database: Database,
+    providers: Arc<ProviderRegistry>,
     tick_interval: std::time::Duration,
     background_tick_lock: BackgroundTickLock,
     mut shutdown: watch::Receiver<bool>,
@@ -1305,6 +1317,9 @@ async fn run_scan_scheduler(
                     dead_lettered = report.dead_lettered,
                     "scan scheduler tick completed"
                 );
+                if report.completed > 0 {
+                    run_course_automation_tick(&database, providers.clone()).await;
+                }
             }
             Ok(_) => {}
             Err(error) => {
@@ -1313,6 +1328,173 @@ async fn run_scan_scheduler(
         }
     }
     tracing::info!("scan scheduler stopped");
+}
+
+async fn run_course_automation_tick(database: &Database, providers: Arc<ProviderRegistry>) {
+    let now = chrono::Utc::now();
+    let plans = match SqliteCourseAutomationPlanRepository::new(database.clone())
+        .list_effective_course_automation_plans(now)
+        .await
+    {
+        Ok(plans) => plans,
+        Err(error) => {
+            tracing::error!(%error, "course automation policy read failed");
+            return;
+        }
+    };
+    let tasks = SqliteTaskQueryRepository::new(database.clone());
+    let service = ExecutionRequestService::new(
+        tasks.clone(),
+        SqliteExecutionRepository::new(database.clone()),
+        SqliteProviderAccountRepository::new(database.clone()),
+        SqliteProviderRuntimeSettingsRepository::new(database.clone()),
+        SqliteQuestionSnapshotRepository::new(database.clone()),
+        providers,
+        FormalAssessmentPolicy::default(),
+    );
+    for plan in plans {
+        let PlanScope::Course(course_id) = plan.scope else {
+            continue;
+        };
+        let provider_id: Option<String> = match sqlx::query_scalar(
+            "SELECT account.provider_id FROM courses AS course INNER JOIN provider_accounts AS account ON account.id = course.provider_account_id WHERE course.id = ? AND account.owner_user_id = ?",
+        )
+        .bind(course_id.to_string())
+        .bind(plan.owner_user_id.to_string())
+        .fetch_optional(database.pool())
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(%error, course_id = %course_id, "course automation Provider lookup failed");
+                continue;
+            }
+        };
+        let Some(provider_id) = provider_id else {
+            continue;
+        };
+        let mut offset = 0;
+        loop {
+            let page = match tasks
+                .list_owned_course_tasks(plan.owner_user_id, course_id, 200, offset)
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::error!(%error, course_id = %course_id, "course automation task read failed");
+                    break;
+                }
+            };
+            let count = page.items.len();
+            for task in page.items {
+                if !course_automation_task_is_safe(database, &provider_id, &task).await {
+                    continue;
+                }
+                let mut capabilities = Vec::new();
+                if task
+                    .capabilities
+                    .contains(&TaskCapability::ResourceExecution)
+                {
+                    capabilities.push(TaskCapability::ResourceExecution);
+                }
+                if task.capabilities.contains(&TaskCapability::DurationReport) {
+                    capabilities.push(TaskCapability::DurationReport);
+                }
+                if capabilities.is_empty() {
+                    continue;
+                }
+                let result = service
+                    .execute(ExecuteTaskCommand {
+                        owner_id: plan.owner_user_id,
+                        task_id: task.id,
+                        requested_capabilities: capabilities,
+                        submission_draft_id: None,
+                        invocation_draft_id: None,
+                        strict_completion_retry: None,
+                        score_improvement_retake: None,
+                        billing: None,
+                        ai_selection: Some(ExecutionAiSelectionInput {
+                            profile: "economy".to_owned(),
+                            route: if provider_id == "cidaren" {
+                                "timed"
+                            } else {
+                                "untimed"
+                            }
+                            .to_owned(),
+                        }),
+                        request_source: RequestSource::Scheduler,
+                        actor: AuditActor::User(plan.owner_user_id),
+                        idempotency_key: format!(
+                            "course-patrol:{}:{}",
+                            task.id,
+                            task.updated_at.timestamp_micros()
+                        ),
+                        correlation_id: format!("course-patrol:{}", task.id),
+                        requested_at: now,
+                    })
+                    .await;
+                match result {
+                    Ok(result) if result.created => {
+                        tracing::info!(course_id = %course_id, task_id = %task.id, execution_id = %result.execution.id, "course patrol scheduled task")
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(course_id = %course_id, task_id = %task.id, %error, "course patrol skipped unschedulable task")
+                    }
+                }
+            }
+            offset += count as u64;
+            if count == 0 || offset >= page.total {
+                break;
+            }
+        }
+    }
+}
+
+async fn course_automation_task_is_safe(
+    database: &Database,
+    provider_id: &str,
+    task: &asterism_domain::Task,
+) -> bool {
+    if task.assessment_class != AssessmentClass::Routine
+        || !matches!(
+            task.remote_state,
+            RemoteState::Pending | RemoteState::InProgress
+        )
+        || !matches!(
+            task.orchestration_state,
+            OrchestrationState::Discovered | OrchestrationState::Ready | OrchestrationState::Failed
+        )
+        || task.source_type == SourceType::Discussion
+    {
+        return false;
+    }
+    if provider_id == "chaoxing" && task.source_type != SourceType::Chapter {
+        return false;
+    }
+    if provider_id == "uai" {
+        let Some(snapshot_id) = task.latest_snapshot_id else {
+            return false;
+        };
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT remote_raw_sanitized_json FROM task_snapshots WHERE id = ? AND task_id = ?",
+        )
+        .bind(snapshot_id.to_string())
+        .bind(task.id.to_string())
+        .fetch_optional(database.pool())
+        .await
+        .ok()
+        .flatten();
+        return raw
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .and_then(|value| {
+                value
+                    .pointer("/provider_summary/required")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            == Some(true);
+    }
+    true
 }
 
 async fn run_answer_history_worker(

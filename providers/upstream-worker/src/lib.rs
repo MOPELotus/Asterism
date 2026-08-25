@@ -1020,6 +1020,19 @@ impl UpstreamWorkerProvider {
     }
 }
 
+fn cidaren_answer_bridge_ticket() -> Option<String> {
+    std::env::var("ASTERISM_CIDAREN_ANSWER_BRIDGE_TICKET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            let deployment_secret = std::env::var("ASTERISM_SECRET_KEYS").ok()?;
+            let digest = Sha256::digest(
+                format!("asterism.cidaren.answer-bridge.v1\0{deployment_secret}").as_bytes(),
+            );
+            Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+        })
+}
+
 impl ProviderIdentity for UpstreamWorkerProvider {
     fn metadata(&self) -> &ProviderMetadata {
         &self.metadata
@@ -2036,24 +2049,12 @@ impl UpstreamWorkerProvider {
                     .duration_seconds("worker.instant_timeout_seconds").unwrap_or(8),
                 "instant_fallback_grace_seconds": request.runtime_settings
                     .duration_seconds("worker.instant_fallback_grace_seconds").unwrap_or(2),
-            }),
-            TaskCapability::ResourceExecution if self.metadata.id.as_str() == "uai" => json!({
-                "cooldown_count": request.runtime_settings
-                    .integer("worker.cooldown_count").unwrap_or(5),
-                "cooldown_seconds": request.runtime_settings
-                    .duration_seconds("worker.cooldown_seconds").unwrap_or(120),
-            }),
-            TaskCapability::ResourceExecution if self.metadata.id.as_str() == "cidaren" => json!({
-                "spend_min_time": request.runtime_settings
-                    .duration_seconds("worker.spend_min_time").unwrap_or(1),
-                "spend_max_time": request.runtime_settings
-                    .duration_seconds("worker.spend_max_time").unwrap_or(2),
-                "answer_route": request.runtime_settings
-                    .choice("worker.answer_route").unwrap_or("timed"),
-                "instant_timeout_seconds": request.runtime_settings
-                    .duration_seconds("worker.instant_timeout_seconds").unwrap_or(8),
-                "instant_fallback_grace_seconds": request.runtime_settings
-                    .duration_seconds("worker.instant_fallback_grace_seconds").unwrap_or(2),
+                "answer_bridge_url": Some(std::env::var("ASTERISM_CIDAREN_ANSWER_BRIDGE_URL").unwrap_or_else(|_| "http://127.0.0.1:8068/api/v1/internal/cidaren/answer-bridge".to_owned())),
+                "answer_bridge_ticket": cidaren_answer_bridge_ticket(),
+                "answer_bridge_expires_at": chrono::Utc::now().timestamp().saturating_add(300),
+                "execution_id": request.execution_id.to_string(),
+                "task_id": request.task_id.to_string(),
+                "remote_task_id": request.remote_task_id,
             }),
             TaskCapability::ResourceExecution => json!({}),
             _ => unreachable!("capability was validated above"),
@@ -2384,6 +2385,24 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
                     .integer("worker.challenge_retry_attempts").unwrap_or(3),
                 "challenge_escalation_route": request.runtime_settings
                     .choice("worker.challenge_escalation_route").unwrap_or("sol_xhigh"),
+            }),
+            TaskCapability::ResourceExecution if self.metadata.id.as_str() == "cidaren" => json!({
+                "spend_min_time": request.runtime_settings
+                    .duration_seconds("worker.spend_min_time").unwrap_or(1),
+                "spend_max_time": request.runtime_settings
+                    .duration_seconds("worker.spend_max_time").unwrap_or(2),
+                "answer_route": request.runtime_settings
+                    .choice("worker.answer_route").unwrap_or("timed"),
+                "instant_timeout_seconds": request.runtime_settings
+                    .duration_seconds("worker.instant_timeout_seconds").unwrap_or(8),
+                "instant_fallback_grace_seconds": request.runtime_settings
+                    .duration_seconds("worker.instant_fallback_grace_seconds").unwrap_or(2),
+                "answer_bridge_url": Some(std::env::var("ASTERISM_CIDAREN_ANSWER_BRIDGE_URL").unwrap_or_else(|_| "http://127.0.0.1:8068/api/v1/internal/cidaren/answer-bridge".to_owned())),
+                "answer_bridge_ticket": cidaren_answer_bridge_ticket(),
+                "answer_bridge_expires_at": chrono::Utc::now().timestamp().saturating_add(300),
+                "execution_id": request.execution_id.to_string(),
+                "task_id": request.task_id.to_string(),
+                "remote_task_id": request.remote_task_id,
             }),
             TaskCapability::ResourceExecution => json!({}),
             _ => unreachable!("capability was validated above"),

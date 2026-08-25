@@ -1,10 +1,19 @@
 use std::str::FromStr;
 
-use asterism_domain::{Course, CourseAggregateProgress, CourseId, ProviderAccountId};
-use asterism_storage::{CourseProgressRepository, SqliteCourseProgressRepository};
+use asterism_domain::{
+    AutomationPlanStatus, Course, CourseAggregateProgress, CourseId, ProviderAccountId, Timestamp,
+};
+use asterism_storage::{
+    CourseAutomationPlanRepository, CourseAutomationPlanWriteOutcome,
+    CourseAutomationPlanWriteRequest, CourseProgressRepository,
+    SqliteCourseAutomationPlanRepository, SqliteCourseProgressRepository,
+};
 use axum::{
     Extension, Json,
-    extract::{Path, Query, State, rejection::QueryRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -145,6 +154,80 @@ pub(super) async fn get_course_progress(
         })
         .into_response(),
     ))
+}
+
+pub(super) async fn get_course_automation(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(course_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let course_id = CourseId::from_str(&course_id)
+        .map_err(|_| ApiError::bad_request("invalid_course_id", "course ID is invalid"))?;
+    let plan = SqliteCourseAutomationPlanRepository::new(state.database.clone())
+        .find_owned_course_automation_plan(owner_id, course_id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(crate::auth::no_store(
+        Json(CourseAutomationResponse::from_plan(plan)).into_response(),
+    ))
+}
+
+pub(super) async fn configure_course_automation(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(course_id): Path<String>,
+    payload: Result<Json<ConfigureCourseAutomationRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let course_id = CourseId::from_str(&course_id)
+        .map_err(|_| ApiError::bad_request("invalid_course_id", "course ID is invalid"))?;
+    let request = payload.map(|Json(value)| value).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_course_automation",
+            "course automation request is invalid",
+        )
+    })?;
+    let result = SqliteCourseAutomationPlanRepository::new(state.database)
+        .write_course_automation_plan(CourseAutomationPlanWriteRequest {
+            owner_user_id: owner_id,
+            course_id,
+            enabled: request.enabled,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let CourseAutomationPlanWriteOutcome::Stored(plan) = result else {
+        return Err(ApiError::not_found("course_not_found"));
+    };
+    Ok(crate::auth::no_store(
+        Json(CourseAutomationResponse::from_plan(Some(plan))).into_response(),
+    ))
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ConfigureCourseAutomationRequest {
+    enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct CourseAutomationResponse {
+    enabled: bool,
+    status: Option<AutomationPlanStatus>,
+    updated_at: Option<Timestamp>,
+}
+
+impl CourseAutomationResponse {
+    fn from_plan(plan: Option<asterism_domain::AutomationPlan>) -> Self {
+        Self {
+            enabled: plan
+                .as_ref()
+                .is_some_and(|plan| plan.status == AutomationPlanStatus::Active),
+            status: plan.as_ref().map(|plan| plan.status),
+            updated_at: plan.map(|plan| plan.updated_at),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

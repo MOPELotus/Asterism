@@ -9,6 +9,7 @@ mod auth;
 mod auth_bootstrap;
 mod batch_execution;
 mod browser_bridge;
+mod cidaren_answer_bridge;
 mod course;
 mod course_enrollment;
 mod credit;
@@ -291,6 +292,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/courses", get(course::list_courses))
         .route("/api/v1/courses/{course_id}", get(course::get_course))
         .route(
+            "/api/v1/courses/{course_id}/automation",
+            get(course::get_course_automation).put(course::configure_course_automation),
+        )
+        .route(
             "/api/v1/courses/{course_id}/progress",
             get(course::get_course_progress),
         )
@@ -355,6 +360,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/api/v1/auth/qq-login/{ticket}",
             get(qq::consume_qq_web_login),
+        )
+        .route(
+            "/api/v1/internal/cidaren/answer-bridge",
+            post(cidaren_answer_bridge::handle),
         )
         .route(
             "/api/v1/auth-bootstrap/sessions/{session_id}/claim",
@@ -1548,6 +1557,13 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/courses/{course_id}/progress".to_owned(),
             course_progress_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/courses/{course_id}/automation".to_owned(),
+            course_automation_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -2879,6 +2895,26 @@ fn course_path() -> Value {
         "parameters": [{"name": "course_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
         "responses": {"200": {"description": "Owner-scoped discovered Course"}, "400": {"description": "Invalid Course ID"}, "401": {"description": "Authentication required"}, "404": {"description": "Course not found"}}
     }})
+}
+
+fn course_automation_path() -> Value {
+    json!({
+        "get": {
+            "operationId": "getCourseAutomation",
+            "description": "Reads whether the owner opted this Course into automatic execution after patrol.",
+            "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+            "parameters": [{"name": "course_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+            "responses": {"200": {"description": "Course automation policy; absent or paused means disabled", "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}, "status": {"type": ["string", "null"], "enum": ["draft", "active", "paused", "expired", "cancelled", null]}, "updated_at": {"type": ["string", "null"], "format": "date-time"}}}}}}, "401": {"description": "Authentication required"}, "403": {"description": "Task read permission is required"}, "404": {"description": "Course not found"}}
+        },
+        "put": {
+            "operationId": "configureCourseAutomation",
+            "description": "Explicitly enables or disables automatic execution for this Course. Default is disabled.",
+            "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+            "parameters": [{"name": "course_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}, "additionalProperties": false}}}},
+            "responses": {"200": {"description": "Course automation policy updated", "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}, "status": {"type": ["string", "null"], "enum": ["draft", "active", "paused", "expired", "cancelled", null]}, "updated_at": {"type": ["string", "null"], "format": "date-time"}}}}}}, "400": {"description": "Invalid Course ID or request"}, "401": {"description": "Authentication required"}, "403": {"description": "Task read permission is required"}, "404": {"description": "Course not found"}}
+        }
+    })
 }
 
 fn welearn_batch_executions_path() -> Value {
@@ -6077,6 +6113,33 @@ mod tests {
         assert!(progress["progress"]["required"].is_null());
         assert!(progress["progress"]["duration"].is_null());
         assert!(progress["progress"]["score"].is_null());
+
+        let automation_path = format!("/api/v1/courses/{course_id}/automation");
+        let automation = app
+            .clone()
+            .oneshot(
+                Request::get(&automation_path)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(automation.status(), StatusCode::OK);
+        assert_eq!(response_json(automation).await["enabled"], false);
+        let automation = app
+            .clone()
+            .oneshot(
+                Request::put(&automation_path)
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(automation.status(), StatusCode::OK);
+        assert_eq!(response_json(automation).await["enabled"], true);
 
         let foreign = app
             .oneshot(
