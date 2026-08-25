@@ -7883,6 +7883,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_answer_bank_usage_is_paginated_and_master_scoped() {
+        let (app, database, _events, cookie, _routine_task, _, _, _) =
+            execution_action_fixture().await;
+        let owner_id: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO answer_bank_usage_records \
+             (id, owner_user_id, task_id, source, hit_count, charged_amount, settlement_status, created_at) \
+             VALUES (?, ?, NULL, 'local_cache', 2, 0, 'not_billable', ?)",
+        )
+        .bind(asterism_domain::AnswerCandidateId::new().to_string())
+        .bind(owner_id)
+        .bind(Utc::now())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/admin/answer-bank-usage?limit=1&offset=0")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["limit"], 1);
+        assert_eq!(body["items"][0]["source"], "local_cache");
+        assert_eq!(body["items"][0]["hit_count"], 2);
+    }
+
+    #[tokio::test]
     async fn formal_execution_requires_and_accepts_explicit_owner_confirmation() {
         let (app, _database, _events, cookie, _, _, formal_task, _) =
             execution_action_fixture().await;
