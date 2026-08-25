@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use asterism_auth::Argon2idPasswordService;
+use asterism_config::AiConfig;
 use asterism_domain::{
     Permission, ProtocolObservationKind, ProviderId, Role, Timestamp, User, UserId, UserStatus,
 };
@@ -24,6 +25,32 @@ use crate::{ApiError, ApiState, auth::AuditAuthority, auth::AuthContext};
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_OFFSET: u64 = 1_000_000;
+
+pub(super) async fn get_ai_config(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
+    auth.require_user_manage()?;
+    Ok(crate::auth::no_store(
+        Json(state.ai_config().await).into_response(),
+    ))
+}
+
+pub(super) async fn put_ai_config(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    payload: Result<Json<AiConfig>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    auth.require_user_manage()?;
+    let Json(config) = payload.map_err(|_| {
+        ApiError::bad_request("invalid_ai_config", "AI configuration body is invalid")
+    })?;
+    config
+        .validate()
+        .map_err(|error| ApiError::bad_request("invalid_ai_config", error.to_string()))?;
+    state.replace_ai_config(config.clone()).await;
+    Ok(crate::auth::no_store(Json(config).into_response()))
+}
 
 pub(super) async fn list_users(
     State(state): State<ApiState>,

@@ -107,7 +107,7 @@ pub(super) async fn generate_ai_answer_candidates(
         .list_owned_answer_candidates(owner_id, snapshot_id)
         .await
         .map_err(ApiError::internal)?;
-    let client = AiAnswerClient::new(state.ai, request.profile, request.route)?;
+    let client = AiAnswerClient::new(state.ai_config().await, request.profile, request.route)?;
     let mut records = Vec::with_capacity(questions.len());
     for question in questions {
         let evidence = existing
@@ -234,10 +234,13 @@ pub(super) async fn generate_uai_discussion_draft(
         "discussion_context": detail.detail.normalized_detail,
     }))
     .map_err(ApiError::internal)?;
-    let generated_text =
-        AiAnswerClient::new(state.ai.clone(), request.profile, AiAnswerRoute::Untimed)?
-            .plain_text(&prompt)
-            .await?;
+    let generated_text = AiAnswerClient::new(
+        state.ai_config().await,
+        request.profile,
+        AiAnswerRoute::Untimed,
+    )?
+    .plain_text(&prompt)
+    .await?;
     validate_human_plain_text(&generated_text)?;
     let secret_store = state.secret_store.clone().ok_or_else(|| {
         ApiError::service_unavailable(

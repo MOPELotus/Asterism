@@ -27,6 +27,7 @@ const TasksPage = lazy(() => import("@/pages/tasks-page.tsx").then((module) => (
 const TaskDetailPage = lazy(() => import("@/pages/task-detail-page.tsx").then((module) => ({ default: module.TaskDetailPage })));
 const AnswerWorkflowPage = lazy(() => import("@/pages/answer-workflow-page.tsx").then((module) => ({ default: module.AnswerWorkflowPage })));
 const UsersPage = lazy(() => import("@/pages/users-page.tsx").then((module) => ({ default: module.UsersPage })));
+const AiConfigPage = lazy(() => import("@/pages/ai-config-page.tsx").then((module) => ({ default: module.AiConfigPage })));
 
 export function App() {
   return (
@@ -80,6 +81,7 @@ export function App() {
             <Route path="admin/service-tokens" element={<ServiceTokensPage />} />
             <Route path="admin/runtime-settings" element={<RuntimeSettingsPage />} />
             <Route path="admin/protocol-observations" element={<ProtocolObservationsPage />} />
+            <Route path="admin/ai-config" element={<AiConfigPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
 

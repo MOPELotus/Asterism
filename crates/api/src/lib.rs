@@ -38,7 +38,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::{RwLock, watch};
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
@@ -61,7 +61,7 @@ pub struct ApiState {
     bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter,
     browser_bridge_claim_rate_limiter: rate_limit::LoginRateLimiter,
     provider_workers: BTreeMap<String, UaiWorkerClient>,
-    ai: AiConfig,
+    ai: Arc<RwLock<AiConfig>>,
 }
 
 impl ApiState {
@@ -84,7 +84,7 @@ impl ApiState {
             bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter::default(),
             browser_bridge_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
             provider_workers: BTreeMap::new(),
-            ai: AiConfig::default(),
+            ai: Arc::new(RwLock::new(AiConfig::default())),
         }
     }
 
@@ -114,8 +114,16 @@ impl ApiState {
 
     #[must_use]
     pub fn with_ai_config(mut self, ai: AiConfig) -> Self {
-        self.ai = ai;
+        self.ai = Arc::new(RwLock::new(ai));
         self
+    }
+
+    pub(crate) async fn ai_config(&self) -> AiConfig {
+        self.ai.read().await.clone()
+    }
+
+    pub(crate) async fn replace_ai_config(&self, ai: AiConfig) {
+        *self.ai.write().await = ai;
     }
 
     /// Adds one configured 0.0.1 upstream-backed Provider worker.
@@ -250,6 +258,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/api/v1/admin/protocol-observations",
             get(admin::list_protocol_observations),
+        )
+        .route(
+            "/api/v1/admin/ai-config",
+            get(admin::get_ai_config).put(admin::put_ai_config),
         )
         .route(
             "/api/v1/admin/users",

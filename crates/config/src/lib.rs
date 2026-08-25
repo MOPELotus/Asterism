@@ -179,7 +179,11 @@ fn default_kimi_endpoint() -> AiEndpointConfig {
 }
 
 impl AiConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
+    /// Validates an AI deployment configuration received from the admin API.
+    ///
+    /// API keys are never part of this value; only endpoint names, model
+    /// routing and environment-variable names are accepted.
+    pub fn validate(&self) -> Result<(), ConfigError> {
         for (name, endpoint) in [
             ("gpt_router", &self.gpt_router),
             ("deepseek", &self.deepseek),
