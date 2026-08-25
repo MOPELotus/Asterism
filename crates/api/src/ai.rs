@@ -115,7 +115,23 @@ pub(super) async fn generate_ai_answer_candidates(
             .filter(|record| record.candidate.question_id == question.id)
             .map(|record| &record.candidate)
             .collect::<Vec<_>>();
-        let (generated, usage) = client.answer(&snapshot, question, &evidence).await?;
+        let (generated, usage) = match client.answer(&snapshot, question, &evidence).await {
+            Ok(value) => value,
+            Err(error) => {
+                record_ai_usage(
+                    &state,
+                    owner_id,
+                    Some(task_id),
+                    &client,
+                    prompt_len(&snapshot, question, &evidence),
+                    0,
+                    "failed",
+                    AiRemoteUsage::default(),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
         record_ai_usage(
             &state,
             owner_id,
@@ -312,7 +328,23 @@ pub(super) async fn generate_uai_discussion_draft(
         request.profile,
         AiAnswerRoute::Untimed,
     )?;
-    let (generated_text, usage) = client.plain_text(&prompt).await?;
+    let (generated_text, usage) = match client.plain_text(&prompt).await {
+        Ok(value) => value,
+        Err(error) => {
+            record_ai_usage(
+                &state,
+                owner_id,
+                Some(task_id),
+                &client,
+                prompt.len(),
+                0,
+                "failed",
+                AiRemoteUsage::default(),
+            )
+            .await?;
+            return Err(error);
+        }
+    };
     validate_human_plain_text(&generated_text)?;
     record_ai_usage(
         &state,
