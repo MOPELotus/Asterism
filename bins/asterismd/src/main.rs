@@ -339,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let challenge_escalation_handle =
         start_challenge_escalation_worker(api_state.clone(), shutdown_receiver.clone());
-    let mut app = build_router(api_state);
+    let mut app = build_router(api_state.clone());
     if let Some(web_dist) = web_dist.as_ref() {
         let index = web_dist.join("index.html");
         if index.is_file() {
@@ -366,6 +366,7 @@ async fn main() -> anyhow::Result<()> {
     let scan_scheduler_handle = start_scan_scheduler(
         &database,
         providers.clone(),
+        api_state.clone(),
         &config,
         background_tick_lock.clone(),
         shutdown_receiver.clone(),
@@ -845,6 +846,7 @@ fn build_provider_registry(
 fn start_scan_scheduler(
     database: &Database,
     providers: Arc<ProviderRegistry>,
+    api_state: ApiState,
     config: &Config,
     background_tick_lock: BackgroundTickLock,
     shutdown: watch::Receiver<bool>,
@@ -881,6 +883,7 @@ fn start_scan_scheduler(
             worker,
             automation_database,
             automation_providers,
+            api_state,
             tick_interval,
             background_tick_lock,
             shutdown,
@@ -1286,6 +1289,7 @@ async fn run_scan_scheduler(
     worker: DaemonScanWorker,
     database: Database,
     providers: Arc<ProviderRegistry>,
+    api_state: ApiState,
     tick_interval: std::time::Duration,
     background_tick_lock: BackgroundTickLock,
     mut shutdown: watch::Receiver<bool>,
@@ -1318,7 +1322,7 @@ async fn run_scan_scheduler(
                     "scan scheduler tick completed"
                 );
                 if report.completed > 0 {
-                    run_course_automation_tick(&database, providers.clone()).await;
+                    run_course_automation_tick(&database, providers.clone(), &api_state).await;
                 }
             }
             Ok(_) => {}
@@ -1330,7 +1334,11 @@ async fn run_scan_scheduler(
     tracing::info!("scan scheduler stopped");
 }
 
-async fn run_course_automation_tick(database: &Database, providers: Arc<ProviderRegistry>) {
+async fn run_course_automation_tick(
+    database: &Database,
+    providers: Arc<ProviderRegistry>,
+    api_state: &ApiState,
+) {
     let now = chrono::Utc::now();
     let plans = match SqliteCourseAutomationPlanRepository::new(database.clone())
         .list_effective_course_automation_plans(now)
@@ -1403,6 +1411,56 @@ async fn run_course_automation_tick(database: &Database, providers: Arc<Provider
                 if capabilities.is_empty() {
                     continue;
                 }
+                let idempotency_key = format!(
+                    "course-patrol:{}:{}",
+                    task.id,
+                    task.updated_at.timestamp_micros()
+                );
+                let correlation_id = format!("course-patrol:{}", task.id);
+                if provider_id == "chaoxing"
+                    && task
+                        .capabilities
+                        .contains(&TaskCapability::QuestionInventory)
+                {
+                    match api_state
+                        .schedule_automatic_chaoxing_task(
+                            plan.owner_user_id,
+                            task.id,
+                            &idempotency_key,
+                            &correlation_id,
+                        )
+                        .await
+                    {
+                        Ok(Some(execution_id)) => {
+                            tracing::info!(course_id = %course_id, task_id = %task.id, %execution_id, "course patrol scheduled answered Chaoxing chapter");
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(error_code) => {
+                            tracing::warn!(course_id = %course_id, task_id = %task.id, %error_code, "course patrol deferred Chaoxing chapter answer preparation");
+                            continue;
+                        }
+                    }
+                }
+                if provider_id == "uai" && task.source_type == SourceType::Discussion {
+                    match api_state
+                        .schedule_automatic_uai_discussion(
+                            plan.owner_user_id,
+                            task.id,
+                            &idempotency_key,
+                            &correlation_id,
+                        )
+                        .await
+                    {
+                        Ok(execution_id) => {
+                            tracing::info!(course_id = %course_id, task_id = %task.id, %execution_id, "course patrol scheduled required UAI discussion");
+                        }
+                        Err(error_code) => {
+                            tracing::warn!(course_id = %course_id, task_id = %task.id, %error_code, "course patrol deferred required UAI discussion");
+                        }
+                    }
+                    continue;
+                }
                 let result = service
                     .execute(ExecuteTaskCommand {
                         owner_id: plan.owner_user_id,
@@ -1424,12 +1482,8 @@ async fn run_course_automation_tick(database: &Database, providers: Arc<Provider
                         }),
                         request_source: RequestSource::Scheduler,
                         actor: AuditActor::User(plan.owner_user_id),
-                        idempotency_key: format!(
-                            "course-patrol:{}:{}",
-                            task.id,
-                            task.updated_at.timestamp_micros()
-                        ),
-                        correlation_id: format!("course-patrol:{}", task.id),
+                        idempotency_key,
+                        correlation_id,
                         requested_at: now,
                     })
                     .await;
@@ -1465,7 +1519,7 @@ async fn course_automation_task_is_safe(
             task.orchestration_state,
             OrchestrationState::Discovered | OrchestrationState::Ready | OrchestrationState::Failed
         )
-        || task.source_type == SourceType::Discussion
+        || (task.source_type == SourceType::Discussion && provider_id != "uai")
     {
         return false;
     }
@@ -1675,6 +1729,7 @@ mod tests {
         let scan_handle = start_scan_scheduler(
             &database,
             providers.clone(),
+            ApiState::new(database.clone(), providers.clone(), 3_600, false),
             &Config::default(),
             background_tick_lock.clone(),
             shutdown_receiver.clone(),

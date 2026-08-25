@@ -4,19 +4,25 @@ use asterism_config::{
     AiConfig, AiEndpointConfig, AiModelRoute, AiProfileConfig, AiProtocol, AiReasoningEffort,
 };
 use asterism_domain::{
-    AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, AuditActor,
-    NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind, QuestionId,
-    QuestionKind, QuestionSnapshotId, RequestSource, TaskCapability, TaskId, UserId,
+    AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerResolutionStatus, AnswerSource,
+    AuditActor, ExecutionId, NormalizedAnswer, Question, QuestionAttachment,
+    QuestionAttachmentKind, QuestionId, QuestionKind, QuestionSnapshotId, RequestSource,
+    TaskCapability, TaskId, UserId,
 };
 use asterism_engine::{
-    ExecuteTaskCommand, ExecutionAiSelectionInput, ExecutionRequestService, FormalAssessmentPolicy,
-    PrepareExecutionInvocationCommand, ProviderTaskDetailService, ReadTaskDetailCommand,
+    ConservativeAnswerResolverService, ExecuteTaskCommand, ExecutionAiSelectionInput,
+    ExecutionRequestService, FormalAssessmentPolicy, ImportLocalAnswerCandidatesCommand,
+    LocalAnswerCacheService, PrepareExecutionInvocationCommand, ProviderAnswerResolveService,
+    ProviderQuestionReadResult, ProviderQuestionReadService, ProviderTaskDetailService,
+    ReadTaskDetailCommand, ReadTaskQuestionsCommand, ResolveAnswerCandidatesCommand,
+    ResolveProviderAnswersCommand,
 };
 use asterism_secrets::SecretValue;
 use asterism_storage::{
     AnswerCandidateRecord, AnswerCandidateRepository, QuestionSnapshot, QuestionSnapshotRepository,
-    SqliteExecutionRepository, SqliteProviderAccountRepository,
-    SqliteProviderRuntimeSettingsRepository, SqliteQuestionSnapshotRepository,
+    SqliteExecutionRepository, SqliteProtocolObservationRepository,
+    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
+    SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository,
     SqliteTaskQueryRepository,
 };
 use axum::{
@@ -590,6 +596,229 @@ async fn execute_chaoxing_challenge_escalation(
     Ok(execution.execution.id.to_string())
 }
 
+pub(crate) async fn schedule_automatic_chaoxing_task(
+    state: &ApiState,
+    owner_id: UserId,
+    task_id: TaskId,
+    idempotency_key: &str,
+    correlation_id: &str,
+) -> Result<Option<ExecutionId>, ApiError> {
+    let repository = SqliteQuestionSnapshotRepository::new(state.database.clone());
+    let mut reader = ProviderQuestionReadService::new(
+        state.providers.clone(),
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        repository.clone(),
+    )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database.clone(),
+    )));
+    if let Some(secret_store) = state.secret_store.clone() {
+        reader = reader.with_durable_flow(
+            Arc::new(SqliteProviderRuntimeSettingsRepository::new(
+                state.database.clone(),
+            )),
+            Arc::new(SqliteQuestionReadAttemptRepository::new(
+                state.database.clone(),
+            )),
+            Arc::new(secret_store.clone()),
+            Arc::new(secret_store),
+        );
+    }
+    let read = reader
+        .read(ReadTaskQuestionsCommand {
+            owner_id,
+            task_id,
+            correlation_id: format!("{correlation_id}:questions"),
+            confirm_formal_read: false,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let ProviderQuestionReadResult::Questions { snapshot_id, .. } = read else {
+        return Ok(None);
+    };
+    let snapshot = repository
+        .find_owned_question_snapshot(owner_id, snapshot_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|snapshot| snapshot.task_id == task_id)
+        .ok_or_else(|| ApiError::not_found("question_snapshot_not_found"))?;
+    if snapshot.questions.is_empty() {
+        return Ok(None);
+    }
+    let mut provider_answers = ProviderAnswerResolveService::new(
+        state.providers.clone(),
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        repository.clone(),
+    )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database.clone(),
+    )));
+    if let Some(secret_store) = state.secret_store.clone() {
+        provider_answers = provider_answers.with_question_session_artifacts(Arc::new(secret_store));
+    }
+    provider_answers
+        .resolve(ResolveProviderAnswersCommand {
+            owner_id,
+            task_id,
+            question_snapshot_id: snapshot.id,
+            correlation_id: format!("{correlation_id}:provider-answers"),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    LocalAnswerCacheService::new(repository.clone())
+        .import(ImportLocalAnswerCandidatesCommand {
+            owner_id,
+            task_id,
+            question_snapshot_id: snapshot.id,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let resolver = ConservativeAnswerResolverService::new(repository.clone());
+    let initial = resolver
+        .resolve(ResolveAnswerCandidatesCommand {
+            owner_id,
+            task_id,
+            question_snapshot_id: snapshot.id,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let unresolved_ids = initial
+        .decisions
+        .iter()
+        .filter(|decision| decision.status != AnswerResolutionStatus::Selected)
+        .map(|decision| decision.question_id)
+        .collect::<BTreeSet<_>>();
+    if !unresolved_ids.is_empty() {
+        for questions in snapshot
+            .questions
+            .iter()
+            .filter(|question| unresolved_ids.contains(&question.id))
+            .collect::<Vec<_>>()
+            .chunks(MAX_AI_QUESTIONS_PER_REQUEST)
+        {
+            generate_ai_records(
+                state,
+                owner_id,
+                task_id,
+                &snapshot,
+                questions,
+                AiAnswerProfile::Economy,
+                AiAnswerRoute::Untimed,
+                false,
+            )
+            .await?;
+        }
+    }
+    let resolved = resolver
+        .resolve(ResolveAnswerCandidatesCommand {
+            owner_id,
+            task_id,
+            question_snapshot_id: snapshot.id,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let decisions = resolved
+        .decisions
+        .iter()
+        .map(|decision| (decision.question_id, decision))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let answers = snapshot
+        .questions
+        .iter()
+        .map(|question| {
+            let decision = decisions.get(&question.id).ok_or_else(|| {
+                ApiError::conflict(
+                    "automatic_answer_incomplete",
+                    "automatic Chaoxing answer selection is incomplete",
+                )
+            })?;
+            if decision.status != AnswerResolutionStatus::Selected {
+                return Err(ApiError::conflict(
+                    "automatic_answer_incomplete",
+                    "automatic Chaoxing answer selection is incomplete",
+                ));
+            }
+            let remote_id = question.remote_question_id.as_deref().ok_or_else(|| {
+                ApiError::conflict(
+                    "automatic_answer_identity_missing",
+                    "automatic Chaoxing answer has no Provider identity",
+                )
+            })?;
+            let answer = decision.selected_answer.as_ref().ok_or_else(|| {
+                ApiError::conflict(
+                    "automatic_answer_incomplete",
+                    "automatic Chaoxing answer selection is incomplete",
+                )
+            })?;
+            Ok(json!({
+                "remote_id": remote_id,
+                "value": chaoxing_worker_answer_value(question, answer)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let secret_store = state.secret_store.clone().ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "encrypted execution invocation drafts are not configured",
+        )
+    })?;
+    let service = ExecutionRequestService::new(
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteExecutionRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
+        repository,
+        state.providers.clone(),
+        FormalAssessmentPolicy::default(),
+    )
+    .with_execution_invocation_drafts(Arc::new(secret_store));
+    let invocation = service
+        .prepare_invocation(PrepareExecutionInvocationCommand {
+            owner_id,
+            task_id,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            submission_draft_id: None,
+            input_type: CHAOXING_ANSWERS_INPUT_TYPE.to_owned(),
+            raw_input: SecretValue::new(
+                serde_json::to_vec(&json!({"answers": answers, "mode": "submit"}))
+                    .map_err(ApiError::internal)?,
+            ),
+            idempotency_key: format!("{idempotency_key}:invocation"),
+            correlation_id: correlation_id.to_owned(),
+            created_at: Utc::now(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let billing =
+        crate::task::configured_billing(&state.database, &[TaskCapability::ResourceExecution])
+            .await?;
+    let execution = service
+        .execute(ExecuteTaskCommand {
+            owner_id,
+            task_id,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            submission_draft_id: None,
+            invocation_draft_id: Some(invocation.record.draft.id),
+            strict_completion_retry: None,
+            score_improvement_retake: None,
+            billing,
+            ai_selection: Some(ExecutionAiSelectionInput {
+                profile: "economy".to_owned(),
+                route: "untimed".to_owned(),
+            }),
+            request_source: RequestSource::Scheduler,
+            actor: AuditActor::User(owner_id),
+            idempotency_key: idempotency_key.to_owned(),
+            correlation_id: correlation_id.to_owned(),
+            requested_at: Utc::now(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Some(execution.execution.id))
+}
+
 fn chaoxing_worker_answer_value(
     question: &Question,
     answer: &NormalizedAnswer,
@@ -689,8 +918,8 @@ async fn record_ai_usage(
     outcome: &str,
     usage: AiRemoteUsage,
 ) -> Result<(), ApiError> {
-    let estimated_cost = estimate_ai_cost(&state.database, &usage, client).await?;
-    let billable = estimated_cost > 0 && outcome == "succeeded";
+    let (estimated_cost, charged_cost) = estimate_ai_cost(&state.database, &usage, client).await?;
+    let billable = charged_cost > 0 && outcome == "succeeded";
     let settlement_status = if !billable { "not_billable" } else { "settled" };
     let usage_id = asterism_domain::AnswerCandidateId::new().to_string();
     let mut transaction = state
@@ -713,10 +942,10 @@ async fn record_ai_usage(
             "UPDATE credit_accounts SET available = available - ?, updated_at = ? \
              WHERE user_id = ? AND available >= ?",
         )
-        .bind(i64::try_from(estimated_cost).unwrap_or(i64::MAX))
+        .bind(i64::try_from(charged_cost).unwrap_or(i64::MAX))
         .bind(Utc::now())
         .bind(owner_id.to_string())
-        .bind(i64::try_from(estimated_cost).unwrap_or(i64::MAX))
+        .bind(i64::try_from(charged_cost).unwrap_or(i64::MAX))
         .execute(&mut *transaction)
         .await
         .map_err(ApiError::internal)?;
@@ -733,7 +962,7 @@ async fn record_ai_usage(
         )
         .bind(asterism_domain::CreditTransactionId::new().to_string())
         .bind(owner_id.to_string())
-        .bind(-i64::try_from(estimated_cost).unwrap_or(i64::MAX))
+        .bind(-i64::try_from(charged_cost).unwrap_or(i64::MAX))
         .bind(task_id.map(|id| id.to_string()))
         .bind(format!("AI usage: {}", client.route.model))
         .bind(Utc::now())
@@ -774,12 +1003,12 @@ async fn estimate_ai_cost(
     database: &asterism_storage::Database,
     usage: &AiRemoteUsage,
     client: &AiAnswerClient,
-) -> Result<u64, ApiError> {
+) -> Result<(u64, u64), ApiError> {
     let Some(input_tokens) = usage.input_tokens else {
-        return Ok(0);
+        return Ok((0, 0));
     };
     let Some(output_tokens) = usage.output_tokens else {
-        return Ok(0);
+        return Ok((0, 0));
     };
     let row = sqlx::query(
         "SELECT catalog_json FROM pricing_catalog_revisions \
@@ -792,7 +1021,7 @@ async fn estimate_ai_cost(
     .await
     .map_err(ApiError::internal)?;
     let Some(row) = row else {
-        return Ok(0);
+        return Ok((0, 0));
     };
     let catalog_json: String =
         sqlx::Row::try_get(&row, "catalog_json").map_err(ApiError::internal)?;
@@ -812,7 +1041,7 @@ async fn estimate_ai_cost(
                 .and_then(|rates| rates.get("default"))
         });
     let Some(rate) = rate else {
-        return Ok(0);
+        return Ok((0, 0));
     };
     let input_per_1k = rate
         .get("input_per_1k")
@@ -830,7 +1059,7 @@ async fn estimate_ai_cost(
         .get("cache_write_per_1k")
         .and_then(Value::as_u64)
         .unwrap_or(input_per_1k);
-    Ok(cost_from_detailed_rates(
+    let estimated_cost = cost_from_detailed_rates(
         input_tokens,
         output_tokens,
         usage.cache_read_tokens.unwrap_or(0),
@@ -839,7 +1068,24 @@ async fn estimate_ai_cost(
         output_per_1k,
         cache_read_per_1k,
         cache_write_per_1k,
-    ))
+    );
+    let percentage_basis_points = catalog
+        .get("percentage_markup_basis_points")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(100_000);
+    let percentage_markup = estimated_cost
+        .checked_mul(percentage_basis_points)
+        .map(|value| value.div_ceil(10_000))
+        .ok_or_else(|| {
+            ApiError::bad_request("invalid_pricing_catalog", "AI pricing markup overflows")
+        })?;
+    let charged_cost = estimated_cost
+        .checked_add(percentage_markup)
+        .ok_or_else(|| {
+            ApiError::bad_request("invalid_pricing_catalog", "AI pricing amount overflows")
+        })?;
+    Ok((estimated_cost, charged_cost))
 }
 
 fn cost_from_detailed_rates(
@@ -1066,6 +1312,139 @@ pub(super) async fn generate_uai_discussion_draft(
         )
             .into_response(),
     ))
+}
+
+pub(crate) async fn schedule_automatic_uai_discussion(
+    state: &ApiState,
+    owner_id: UserId,
+    task_id: TaskId,
+    idempotency_key: &str,
+    correlation_id: &str,
+) -> Result<ExecutionId, ApiError> {
+    let detail = ProviderTaskDetailService::new(
+        state.providers.clone(),
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+    )
+    .read(ReadTaskDetailCommand {
+        owner_id,
+        task_id,
+        correlation_id: correlation_id.to_owned(),
+    })
+    .await
+    .map_err(crate::task::map_task_detail_error)?;
+    if detail.provider_id.as_str() != "uai"
+        || detail
+            .detail
+            .normalized_detail
+            .pointer("/task/category")
+            .and_then(Value::as_str)
+            != Some("discussion")
+    {
+        return Err(ApiError::conflict(
+            "uai_discussion_required",
+            "the task is not a freshly verified UAI discussion",
+        ));
+    }
+    let variation_seed =
+        discussion_variation_seed(&owner_id.to_string(), &task_id.to_string(), idempotency_key);
+    let prompt = serde_json::to_string_pretty(&json!({
+        "instruction": "Write one concise, directly relevant discussion response as a normal student. Answer the actual topic using the supplied course context. Vary wording naturally. Return plain text only: no Markdown, headings, quotes, preface, signature, source list, AI/automation/testing references, or invented personal experience.",
+        "style_variation_seed": variation_seed,
+        "task": detail.detail.task.title,
+        "discussion_context": detail.detail.normalized_detail,
+    }))
+    .map_err(ApiError::internal)?;
+    let client = AiAnswerClient::new(
+        state.ai_config().await,
+        AiAnswerProfile::Economy,
+        AiAnswerRoute::Untimed,
+    )?;
+    let (generated_text, usage) = match client.plain_text(&prompt).await {
+        Ok(value) => value,
+        Err(error) => {
+            record_ai_usage(
+                state,
+                owner_id,
+                Some(task_id),
+                &client,
+                prompt.len(),
+                0,
+                "failed",
+                AiRemoteUsage::default(),
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    validate_human_plain_text(&generated_text)?;
+    record_ai_usage(
+        state,
+        owner_id,
+        Some(task_id),
+        &client,
+        prompt.len(),
+        generated_text.len(),
+        "succeeded",
+        usage,
+    )
+    .await?;
+    let secret_store = state.secret_store.clone().ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "encrypted execution invocation drafts are not configured",
+        )
+    })?;
+    let service = ExecutionRequestService::new(
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteExecutionRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
+        SqliteQuestionSnapshotRepository::new(state.database.clone()),
+        state.providers.clone(),
+        FormalAssessmentPolicy::default(),
+    )
+    .with_execution_invocation_drafts(Arc::new(secret_store));
+    let invocation = service
+        .prepare_invocation(PrepareExecutionInvocationCommand {
+            owner_id,
+            task_id,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            submission_draft_id: None,
+            input_type: UAI_GENERATED_TEXT_INPUT_TYPE.to_owned(),
+            raw_input: SecretValue::new(generated_text.into_bytes()),
+            idempotency_key: format!("{idempotency_key}:invocation"),
+            correlation_id: correlation_id.to_owned(),
+            created_at: Utc::now(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let billing =
+        crate::task::configured_billing(&state.database, &[TaskCapability::ResourceExecution])
+            .await?;
+    let execution = service
+        .execute(ExecuteTaskCommand {
+            owner_id,
+            task_id,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            submission_draft_id: None,
+            invocation_draft_id: Some(invocation.record.draft.id),
+            strict_completion_retry: None,
+            score_improvement_retake: None,
+            billing,
+            ai_selection: Some(ExecutionAiSelectionInput {
+                profile: "economy".to_owned(),
+                route: "untimed".to_owned(),
+            }),
+            request_source: RequestSource::Scheduler,
+            actor: AuditActor::User(owner_id),
+            idempotency_key: idempotency_key.to_owned(),
+            correlation_id: correlation_id.to_owned(),
+            requested_at: Utc::now(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(execution.execution.id)
 }
 
 fn discussion_variation_seed(owner_id: &str, task_id: &str, idempotency_key: &str) -> String {
@@ -1918,6 +2297,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(credit_accounts, 0);
+    }
+
+    #[tokio::test]
+    async fn ai_cost_applies_the_catalog_percentage_markup_once() {
+        let database = asterism_storage::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        database.migrate().await.unwrap();
+        let now = Utc::now();
+        let owner_id = UserId::new();
+        sqlx::query(
+            "INSERT INTO users \
+             (id, username, password_hash, status, roles_json, permissions_json, created_at, updated_at) \
+             VALUES (?, 'ai-markup', 'not-a-password', 'active', '[]', '[]', ?, ?)",
+        )
+        .bind(owner_id.to_string())
+        .bind(now)
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO pricing_catalog_revisions \
+             (id, revision, catalog_json, effective_from, expires_at, created_by, created_at) \
+             VALUES (?, 'ai-markup', ?, ?, NULL, ?, ?)",
+        )
+        .bind(AnswerCandidateId::new().to_string())
+        .bind(
+            json!({
+                "percentage_markup_basis_points": 2500,
+                "ai_rates": {"default": {"input_per_1k": 100, "output_per_1k": 200}}
+            })
+            .to_string(),
+        )
+        .bind(now)
+        .bind(owner_id.to_string())
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let client = AiAnswerClient::new(
+            AiConfig::default(),
+            AiAnswerProfile::Economy,
+            AiAnswerRoute::Untimed,
+        )
+        .unwrap();
+        let costs = estimate_ai_cost(
+            &database,
+            &AiRemoteUsage {
+                input_tokens: Some(1_000),
+                output_tokens: Some(1_000),
+                ..AiRemoteUsage::default()
+            },
+            &client,
+        )
+        .await
+        .unwrap();
+        assert_eq!(costs, (300, 375));
     }
 
     #[test]

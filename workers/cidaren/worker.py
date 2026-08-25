@@ -375,7 +375,17 @@ def execute_task(modules, payload, entry, events, redactor):
     if answer_route == "timed" and (instant_timeout < 1 or instant_timeout > 300 or fallback_grace < 0 or fallback_grace > 120):
         raise WorkerFailure("request_invalid", "Cidaren timed answer budgets are outside the supported bounds")
     bridge = _answer_bridge_settings(settings)
-    bridge_timeout = min(max(1, instant_timeout), 10)
+    total_answer_budget = max(1, instant_timeout + fallback_grace)
+    bridge_timeout = min(
+        10,
+        max(
+            1,
+            min(
+                instant_timeout,
+                (total_answer_budget * 65) // 100 if answer_route == "timed" else instant_timeout,
+            ),
+        ),
+    )
     supplied_answers = payload.get("answers")
     by_remote_id = {
         str(row.get("remote_id")): row.get("value")
@@ -500,6 +510,9 @@ def execute_task(modules, payload, entry, events, redactor):
             "route": answer_route,
             "instant_timeout_seconds": instant_timeout,
             "instant_fallback_grace_seconds": fallback_grace,
+            "model_budget_seconds": bridge_timeout,
+            "fallback_decision_seconds": max(bridge_timeout, (total_answer_budget * 85) // 100),
+            "submission_reserve_seconds": max(1, total_answer_budget - ((total_answer_budget * 85) // 100)),
         },
         "result": result,
         "session": payload.get("session"),

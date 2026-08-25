@@ -166,6 +166,48 @@ impl ApiState {
             .map_err(|error| error.code.to_owned())
     }
 
+    /// Resolves and freezes one routine Chaoxing chapter answer set before
+    /// scheduling its upstream-backed execution. A `None` result means the
+    /// Provider reported no question payload and the caller may schedule the
+    /// remaining resource work without an answer invocation.
+    pub async fn schedule_automatic_chaoxing_task(
+        &self,
+        owner_id: asterism_domain::UserId,
+        task_id: asterism_domain::TaskId,
+        idempotency_key: &str,
+        correlation_id: &str,
+    ) -> Result<Option<asterism_domain::ExecutionId>, String> {
+        ai::schedule_automatic_chaoxing_task(
+            self,
+            owner_id,
+            task_id,
+            idempotency_key,
+            correlation_id,
+        )
+        .await
+        .map_err(|error| error.code.to_owned())
+    }
+
+    /// Generates a bounded human-style response for one required UAI
+    /// discussion and schedules the donor-backed publication invocation.
+    pub async fn schedule_automatic_uai_discussion(
+        &self,
+        owner_id: asterism_domain::UserId,
+        task_id: asterism_domain::TaskId,
+        idempotency_key: &str,
+        correlation_id: &str,
+    ) -> Result<asterism_domain::ExecutionId, String> {
+        ai::schedule_automatic_uai_discussion(
+            self,
+            owner_id,
+            task_id,
+            idempotency_key,
+            correlation_id,
+        )
+        .await
+        .map_err(|error| error.code.to_owned())
+    }
+
     /// Adds one configured 0.0.1 upstream-backed Provider worker.
     #[must_use]
     pub fn with_provider_worker(

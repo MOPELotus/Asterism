@@ -214,6 +214,8 @@ class ExecutionTests(unittest.TestCase):
         )
         self.assertEqual(result["answer_policy"], {
             "route": "timed", "instant_timeout_seconds": 5, "instant_fallback_grace_seconds": 1,
+            "model_budget_seconds": 3, "fallback_decision_seconds": 5,
+            "submission_reserve_seconds": 1,
         })
 
 
