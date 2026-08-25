@@ -205,8 +205,17 @@ async fn generate_ai_records(
                     && record.candidate.validate().is_ok()
             })
         {
-            record_answer_bank_hit(&state, owner_id, Some(task_id), cached.candidate.source)
-                .await?;
+            record_ai_usage(
+                &state,
+                owner_id,
+                Some(task_id),
+                &client,
+                0,
+                0,
+                "cached",
+                AiRemoteUsage::default(),
+            )
+            .await?;
             records.push(cached.clone());
             continue;
         }
@@ -659,100 +668,6 @@ fn chaoxing_worker_option_value(question: &Question, internal_id: &str) -> Strin
         .filter(|value| !value.is_empty())
         .unwrap_or(internal_id)
         .to_owned()
-}
-
-async fn record_answer_bank_hit(
-    state: &ApiState,
-    owner_id: asterism_domain::UserId,
-    task_id: Option<TaskId>,
-    source: AnswerSource,
-) -> Result<(), ApiError> {
-    let now = Utc::now();
-    let row = sqlx::query(
-        "SELECT catalog_json FROM pricing_catalog_revisions \
-         WHERE effective_from <= ? AND (expires_at IS NULL OR expires_at > ?) \
-         ORDER BY effective_from DESC, created_at DESC LIMIT 1",
-    )
-    .bind(now)
-    .bind(now)
-    .fetch_optional(state.database.pool())
-    .await
-    .map_err(ApiError::internal)?;
-    let unit_cost = row
-        .and_then(|row| sqlx::Row::try_get::<String, _>(&row, "catalog_json").ok())
-        .and_then(|json| serde_json::from_str::<Value>(&json).ok())
-        .and_then(|catalog| catalog.get("answer_bank_unit_cost").and_then(Value::as_u64))
-        .unwrap_or(0);
-    let settlement_status = if unit_cost == 0 {
-        "not_billable"
-    } else {
-        "settled"
-    };
-    let mut transaction = state
-        .database
-        .pool()
-        .begin()
-        .await
-        .map_err(ApiError::internal)?;
-    if unit_cost > 0 {
-        sqlx::query(
-            "INSERT INTO credit_accounts (user_id, available, reserved, updated_at) \
-             VALUES (?, 0, 0, ?) ON CONFLICT(user_id) DO NOTHING",
-        )
-        .bind(owner_id.to_string())
-        .bind(now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(ApiError::internal)?;
-        let amount = i64::try_from(unit_cost).map_err(ApiError::internal)?;
-        let changed = sqlx::query(
-            "UPDATE credit_accounts SET available = available - ?, updated_at = ? \
-             WHERE user_id = ? AND available >= ?",
-        )
-        .bind(amount)
-        .bind(now)
-        .bind(owner_id.to_string())
-        .bind(amount)
-        .execute(&mut *transaction)
-        .await
-        .map_err(ApiError::internal)?;
-        if changed.rows_affected() != 1 {
-            return Err(ApiError::conflict(
-                "insufficient_credits",
-                "insufficient credits for the answer-bank lookup",
-            ));
-        }
-        sqlx::query(
-            "INSERT INTO credit_transactions \
-             (id, user_id, amount, transaction_type, task_id, execution_id, operator_id, reason, created_at) \
-             VALUES (?, ?, ?, 'answer_bank', ?, NULL, NULL, ?, ?)",
-        )
-        .bind(asterism_domain::CreditTransactionId::new().to_string())
-        .bind(owner_id.to_string())
-        .bind(-amount)
-        .bind(task_id.map(|id| id.to_string()))
-        .bind(format!("Answer cache hit: {}", answer_source_name(source)))
-        .bind(now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(ApiError::internal)?;
-    }
-    sqlx::query(
-        "INSERT INTO answer_bank_usage_records \
-         (id, owner_user_id, task_id, source, hit_count, charged_amount, settlement_status, created_at) \
-         VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
-    )
-    .bind(asterism_domain::AnswerCandidateId::new().to_string())
-    .bind(owner_id.to_string())
-    .bind(task_id.map(|id| id.to_string()))
-    .bind(answer_source_name(source))
-    .bind(i64::try_from(unit_cost).unwrap_or(i64::MAX))
-    .bind(settlement_status)
-    .bind(now)
-    .execute(&mut *transaction)
-    .await
-    .map_err(ApiError::internal)?;
-    transaction.commit().await.map_err(ApiError::internal)
 }
 
 const fn should_reuse_ai_cache(force_refresh: bool, route: AiAnswerRoute) -> bool {
