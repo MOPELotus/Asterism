@@ -1504,6 +1504,10 @@ pub fn openapi_document() -> Value {
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")
+        .insert("/api/v1/admin/ai-config".to_owned(), admin_ai_config_path());
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
         .insert(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache".to_owned(),
             local_answer_cache_path(),
@@ -1605,6 +1609,18 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI schemas object")
         .insert("NormalizedAnswer".to_owned(), normalized_answer_schema());
+    document["components"]["schemas"]
+        .as_object_mut()
+        .expect("static OpenAPI schemas object")
+        .insert(
+            "AiConfig".to_owned(),
+            json!({
+                "type": "object",
+                "description": "Deployment-local AI routes and endpoint metadata; API keys are environment-only.",
+                "required": ["remote_store", "gpt_router", "deepseek", "kimi", "economy", "gpt_only"],
+                "additionalProperties": true
+            }),
+        );
     openapi_contract::finalize(&mut document);
     document
 }
@@ -1964,6 +1980,33 @@ fn admin_users_path() -> Value {
                 "401": {"description": "Authentication required"},
                 "403": {"description": "ManageUsers Web permission required"},
                 "409": {"description": "Username already exists"}
+            }
+        }
+    })
+}
+
+fn admin_ai_config_path() -> Value {
+    json!({
+        "get": {
+            "operationId": "getAdminAiConfig",
+            "description": "Returns the deployment-local AI endpoint and combination configuration. API keys remain environment-only.",
+            "security": [{"cookieAuth": []}],
+            "responses": {
+                "200": {"description": "Current local AI configuration", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AiConfig"}}}},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "ManageUsers permission required"}
+            }
+        },
+        "put": {
+            "operationId": "putAdminAiConfig",
+            "description": "Validates and atomically replaces the deployment-local AI configuration; API keys are never accepted.",
+            "security": [{"cookieAuth": []}],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AiConfig"}}}},
+            "responses": {
+                "200": {"description": "Updated local AI configuration", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AiConfig"}}}},
+                "400": {"description": "Invalid AI configuration"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "ManageUsers permission required"}
             }
         }
     })
