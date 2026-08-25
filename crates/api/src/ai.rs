@@ -197,7 +197,8 @@ async fn generate_ai_records(
         // newest valid AI candidate for this immutable snapshot before making
         // another remote request. Escalation is deliberately always fresh:
         // a high-quality fallback must not return the answer that just failed.
-        let may_reuse_ai_cache = should_reuse_ai_cache(force_refresh, route);
+        let may_reuse_ai_cache =
+            should_reuse_ai_cache(force_refresh, route, client.profile.trust_verified_cache);
         if may_reuse_ai_cache
             && let Some(cached) = existing.iter().rev().find(|record| {
                 record.candidate.question_id == question.id
@@ -670,8 +671,12 @@ fn chaoxing_worker_option_value(question: &Question, internal_id: &str) -> Strin
         .to_owned()
 }
 
-const fn should_reuse_ai_cache(force_refresh: bool, route: AiAnswerRoute) -> bool {
-    !force_refresh && !matches!(route, AiAnswerRoute::Escalation)
+const fn should_reuse_ai_cache(
+    force_refresh: bool,
+    route: AiAnswerRoute,
+    trust_verified_cache: bool,
+) -> bool {
+    trust_verified_cache && !force_refresh && !matches!(route, AiAnswerRoute::Escalation)
 }
 
 async fn record_ai_usage(
@@ -1709,10 +1714,15 @@ mod tests {
         let refreshed: GenerateAiAnswerCandidatesRequest =
             serde_json::from_value(json!({"force_refresh": true})).unwrap();
         assert!(refreshed.force_refresh);
-        assert!(should_reuse_ai_cache(false, AiAnswerRoute::Untimed));
-        assert!(should_reuse_ai_cache(false, AiAnswerRoute::Timed));
-        assert!(!should_reuse_ai_cache(true, AiAnswerRoute::Untimed));
-        assert!(!should_reuse_ai_cache(false, AiAnswerRoute::Escalation));
+        assert!(should_reuse_ai_cache(false, AiAnswerRoute::Untimed, true));
+        assert!(should_reuse_ai_cache(false, AiAnswerRoute::Timed, true));
+        assert!(!should_reuse_ai_cache(true, AiAnswerRoute::Untimed, true));
+        assert!(!should_reuse_ai_cache(
+            false,
+            AiAnswerRoute::Escalation,
+            true
+        ));
+        assert!(!should_reuse_ai_cache(false, AiAnswerRoute::Untimed, false));
     }
 
     #[tokio::test]
