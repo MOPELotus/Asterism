@@ -307,6 +307,16 @@ def execute_task(modules, payload, entry, events, redactor):
 
         worker.set_answer_override(answer_override)
     settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
+    answer_route = str(settings.get("answer_route", "untimed")).strip().lower()
+    if answer_route not in {"timed", "untimed", "escalation"}:
+        raise WorkerFailure("request_invalid", "Cidaren answer_route must be timed, untimed, or escalation")
+    try:
+        instant_timeout = int(settings.get("instant_timeout_seconds", 8))
+        fallback_grace = int(settings.get("instant_fallback_grace_seconds", 2))
+    except (TypeError, ValueError) as error:
+        raise WorkerFailure("request_invalid", "Cidaren instant budgets must be integers") from error
+    if answer_route == "timed" and (instant_timeout < 1 or instant_timeout > 300 or fallback_grace < 0 or fallback_grace > 120):
+        raise WorkerFailure("request_invalid", "Cidaren timed answer budgets are outside the supported bounds")
     try:
         spend_min = int(settings.get("spend_min_time", getattr(worker.public, "spend_min_time", 1)))
         spend_max = int(settings.get("spend_max_time", getattr(worker.public, "spend_max_time", 2)))
@@ -330,6 +340,11 @@ def execute_task(modules, payload, entry, events, redactor):
     return {
         "remote_state": "completed" if complete else "in_progress",
         "verified": complete,
+        "answer_policy": {
+            "route": answer_route,
+            "instant_timeout_seconds": instant_timeout,
+            "instant_fallback_grace_seconds": fallback_grace,
+        },
         "result": result,
         "session": payload.get("session"),
     }

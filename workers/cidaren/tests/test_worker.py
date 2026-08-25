@@ -146,6 +146,29 @@ class ExecutionTests(unittest.TestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(seen["value"], "x")
 
+    def test_run_freezes_timed_answer_policy_without_implementing_model_protocol(self):
+        class Runner:
+            def __init__(self, root, *, progress, log):
+                self.public = types.SimpleNamespace(course_id=None, spend_min_time=1, spend_max_time=2)
+
+            def run_class_task(self, task):
+                return {"complete": True}
+
+        modules = session_modules(runner=types.SimpleNamespace(HeadlessTaskRunner=Runner))
+        result = WORKER.execute_task(
+            modules,
+            {
+                "session": {"token": "secret"},
+                "settings": {"answer_route": "timed", "instant_timeout_seconds": 5, "instant_fallback_grace_seconds": 1},
+                "task": {"native": {"task_family": "class", "course_id": "course-1",
+                                      "task": {"task_id": 22, "task_type": 2}}},
+            },
+            pathlib.Path("C:/repo/api/login.py"), Events(), WORKER.Redactor(["secret"]),
+        )
+        self.assertEqual(result["answer_policy"], {
+            "route": "timed", "instant_timeout_seconds": 5, "instant_fallback_grace_seconds": 1,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()
