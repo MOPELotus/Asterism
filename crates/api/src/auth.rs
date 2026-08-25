@@ -149,6 +149,38 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn resolve_provider_account_owner(
+        &self,
+        requested_owner_id: Option<UserId>,
+    ) -> Result<UserId, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } => {
+                let owner_id = requested_owner_id.unwrap_or(principal.user_id);
+                if owner_id == principal.user_id
+                    && (principal.has(Permission::ManageOwnAccounts)
+                        || principal.has(Permission::ManageProviders))
+                {
+                    return Ok(owner_id);
+                }
+                if principal.has(Permission::ManageProviders) {
+                    return Ok(owner_id);
+                }
+                Err(ApiError::forbidden())
+            }
+            AuthIdentity::Service(token)
+                if token.scopes.contains(&ServiceScope::ProviderManage) =>
+            {
+                let owner_id = token.owner_user_id.ok_or_else(ApiError::forbidden)?;
+                if requested_owner_id.is_none_or(|requested| requested == owner_id) {
+                    Ok(owner_id)
+                } else {
+                    Err(ApiError::forbidden())
+                }
+            }
+            AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     pub(super) fn require_provider_settings_manage(
         &self,
     ) -> Result<ProviderSettingsAuthority, ApiError> {

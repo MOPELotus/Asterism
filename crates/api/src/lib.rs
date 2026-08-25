@@ -1206,7 +1206,8 @@ pub fn openapi_document() -> Value {
                     "properties": {
                         "provider_id": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"},
                         "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
-                        "tenant": {"type": ["string", "null"], "maxLength": 256}
+                        "tenant": {"type": ["string", "null"], "maxLength": 256},
+                        "owner_user_id": {"type": ["string", "null"], "format": "uuid", "description": "Optional target owner; assigning another user requires ManageProviders"}
                     },
                     "additionalProperties": false
                 },
@@ -4272,6 +4273,58 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit_count, 3);
+    }
+
+    #[tokio::test]
+    async fn provider_manager_can_create_an_account_for_an_active_user() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+
+        let user = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/users")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"username":"managed-user","password":"managed-user-password","roles":["user"],"permissions":["manage_own_accounts"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(user.status(), StatusCode::CREATED);
+        let user = response_json(user).await;
+        let user_id = user["id"].as_str().unwrap();
+
+        let created = app
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(format!(
+                        r#"{{"provider_id":"provider-alpha","display_name":"managed","owner_user_id":"{user_id}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let account = response_json(created).await;
+        let stored_owner: String =
+            sqlx::query_scalar("SELECT owner_user_id FROM provider_accounts WHERE id = ?")
+                .bind(account["id"].as_str().unwrap())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored_owner, user_id);
     }
 
     #[tokio::test]

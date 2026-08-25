@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt, str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AuthMethod, AuthSession, AuthSessionId, AuthState, ExternalOauthState, ProviderAccount,
-    ProviderAccountId, ProviderId, SessionKind, Timestamp, UserId,
+    ProviderAccountId, ProviderId, SessionKind, Timestamp, UserId, UserStatus,
 };
 use asterism_engine::{
     AuthSessionCredentialRequest, AuthSessionService, AuthSessionServiceError,
@@ -24,7 +24,7 @@ use asterism_storage::{
     ProviderRuntimeSettingsTarget, ScanScheduleRepository, SqliteAuthSessionRepository,
     SqliteProtocolObservationRepository, SqliteProviderAccountRepository,
     SqliteProviderRuntimeSettingsRepository, SqliteProviderScanRepository,
-    SqliteSchedulerRepository, StorageError,
+    SqliteSchedulerRepository, SqliteUserRepository, StorageError, UserRepository,
 };
 use axum::{
     Extension, Json,
@@ -96,8 +96,25 @@ pub(super) async fn create_provider_account(
     Extension(auth): Extension<AuthContext>,
     payload: Result<Json<CreateProviderAccountRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let owner_id = auth.require_account_manage()?;
     let request = api_json(payload)?;
+    let requested_owner_id = request
+        .owner_user_id
+        .as_deref()
+        .map(parse_user_id)
+        .transpose()?;
+    let owner_id = auth.resolve_provider_account_owner(requested_owner_id)?;
+    let owner = SqliteUserRepository::new(state.database.clone())
+        .find_user(owner_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|user| user.status == UserStatus::Active)
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "invalid_provider_account_owner",
+                "provider account owner must be an active user",
+            )
+        })?;
+    debug_assert_eq!(owner.id, owner_id);
     let provider_id = ProviderId::new(request.provider_id)
         .map_err(|error| ApiError::bad_request("invalid_provider_id", error.to_string()))?;
     let (display_name, tenant) = validate_mutable_fields(&request.display_name, request.tenant)?;
@@ -695,7 +712,9 @@ pub(super) async fn get_chaoxing_verification_status(
             occurred_at: row.try_get("timestamp").unwrap_or_default(),
             stage: row.try_get("stage").unwrap_or_default(),
             result: classify_chaoxing_verification_result(
-                row.try_get::<String, _>("message").unwrap_or_default().as_str(),
+                row.try_get::<String, _>("message")
+                    .unwrap_or_default()
+                    .as_str(),
             )
             .to_owned(),
             message: row.try_get("message").unwrap_or_default(),
@@ -1084,6 +1103,7 @@ pub(super) struct CreateProviderAccountRequest {
     provider_id: String,
     display_name: String,
     tenant: Option<String>,
+    owner_user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1406,6 +1426,15 @@ fn parse_account_id(value: &str) -> Result<ProviderAccountId, ApiError> {
     })
 }
 
+fn parse_user_id(value: &str) -> Result<UserId, ApiError> {
+    UserId::from_str(value).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_provider_account_owner",
+            "provider account owner ID is invalid",
+        )
+    })
+}
+
 fn parse_auth_session_id(value: &str) -> Result<AuthSessionId, ApiError> {
     AuthSessionId::from_str(value).map_err(|_| {
         ApiError::bad_request(
@@ -1713,9 +1742,21 @@ mod tests {
 
     #[test]
     fn chaoxing_verification_result_is_classified_without_exposing_material() {
-        assert_eq!(classify_chaoxing_verification_result("captcha passed"), "succeeded");
-        assert_eq!(classify_chaoxing_verification_result("slider challenge required"), "required");
-        assert_eq!(classify_chaoxing_verification_result("verification failed"), "failed");
-        assert_eq!(classify_chaoxing_verification_result("verification log"), "observed");
+        assert_eq!(
+            classify_chaoxing_verification_result("captcha passed"),
+            "succeeded"
+        );
+        assert_eq!(
+            classify_chaoxing_verification_result("slider challenge required"),
+            "required"
+        );
+        assert_eq!(
+            classify_chaoxing_verification_result("verification failed"),
+            "failed"
+        );
+        assert_eq!(
+            classify_chaoxing_verification_result("verification log"),
+            "observed"
+        );
     }
 }
