@@ -115,7 +115,7 @@ pub(super) async fn generate_ai_answer_candidates(
             .filter(|record| record.candidate.question_id == question.id)
             .map(|record| &record.candidate)
             .collect::<Vec<_>>();
-        let generated = client.answer(&snapshot, question, &evidence).await?;
+        let (generated, usage) = client.answer(&snapshot, question, &evidence).await?;
         record_ai_usage(
             &state,
             owner_id,
@@ -126,6 +126,7 @@ pub(super) async fn generate_ai_answer_candidates(
                 .map(|value| value.len())
                 .unwrap_or_default(),
             "succeeded",
+            usage,
         )
         .await?;
         records.push(AnswerCandidateRecord {
@@ -164,27 +165,38 @@ async fn record_ai_usage(
     input_chars: usize,
     output_chars: usize,
     outcome: &str,
+    usage: AiRemoteUsage,
 ) -> Result<(), ApiError> {
     sqlx::query(
         "INSERT INTO ai_usage_records \
-         (id, owner_user_id, task_id, provider_endpoint, model, profile, route, input_chars, output_chars, outcome, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, owner_user_id, task_id, provider_endpoint, model, profile, route, input_chars, output_chars, remote_input_tokens, remote_output_tokens, outcome, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(asterism_domain::AnswerCandidateId::new().to_string())
     .bind(owner_id.to_string())
     .bind(task_id.map(|id| id.to_string()))
-    .bind(&client.route.endpoint)
-    .bind(&client.route.model)
+    .bind(usage.endpoint.as_deref().unwrap_or(&client.route.endpoint))
+    .bind(usage.model.as_deref().unwrap_or(&client.route.model))
     .bind(client.profile_name)
     .bind(route_name(&client.route))
     .bind(i64::try_from(input_chars).unwrap_or(i64::MAX))
     .bind(i64::try_from(output_chars).unwrap_or(i64::MAX))
+    .bind(usage.input_tokens)
+    .bind(usage.output_tokens)
     .bind(outcome)
     .bind(Utc::now())
     .execute(state.database.pool())
     .await
     .map_err(ApiError::internal)?;
     Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+struct AiRemoteUsage {
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    endpoint: Option<String>,
+    model: Option<String>,
 }
 
 fn route_name(route: &AiModelRoute) -> &'static str {
@@ -300,7 +312,7 @@ pub(super) async fn generate_uai_discussion_draft(
         request.profile,
         AiAnswerRoute::Untimed,
     )?;
-    let generated_text = client.plain_text(&prompt).await?;
+    let (generated_text, usage) = client.plain_text(&prompt).await?;
     validate_human_plain_text(&generated_text)?;
     record_ai_usage(
         &state,
@@ -310,6 +322,7 @@ pub(super) async fn generate_uai_discussion_draft(
         prompt.len(),
         generated_text.len(),
         "succeeded",
+        usage,
     )
     .await?;
     let secret_store = state.secret_store.clone().ok_or_else(|| {
@@ -392,7 +405,7 @@ impl AiAnswerClient {
         })
     }
 
-    async fn plain_text(&self, prompt: &str) -> Result<String, ApiError> {
+    async fn plain_text(&self, prompt: &str) -> Result<(String, AiRemoteUsage), ApiError> {
         let primary = self.call_plain_text_route(&self.route, prompt).await;
         match primary {
             Ok(text) => Ok(text),
@@ -412,7 +425,7 @@ impl AiAnswerClient {
         &self,
         route: &AiModelRoute,
         prompt: &str,
-    ) -> Result<String, ApiError> {
+    ) -> Result<(String, AiRemoteUsage), ApiError> {
         let endpoint = self.endpoint(&route.endpoint)?;
         if endpoint.base_url.is_empty() {
             return Err(ApiError::service_unavailable(
@@ -450,12 +463,15 @@ impl AiAnswerClient {
         let response: Value = response.json().await.map_err(|_| {
             ApiError::bad_gateway("ai_response_invalid", "AI endpoint returned invalid JSON")
         })?;
+        let mut usage = extract_usage(endpoint.protocol, &response);
+        usage.endpoint = Some(route.endpoint.clone());
+        usage.model = Some(route.model.clone());
         let text = extract_answer_text(endpoint.protocol, &response).ok_or_else(|| {
             ApiError::bad_gateway("ai_response_invalid", "AI endpoint returned no text")
         })?;
         let text = text.trim().to_owned();
         validate_human_plain_text(&text)?;
-        Ok(text)
+        Ok((text, usage))
     }
 
     async fn answer(
@@ -463,12 +479,12 @@ impl AiAnswerClient {
         snapshot: &QuestionSnapshot,
         question: &Question,
         evidence: &[&AnswerCandidate],
-    ) -> Result<AnswerCandidate, ApiError> {
+    ) -> Result<(AnswerCandidate, AiRemoteUsage), ApiError> {
         let prompt = build_prompt(snapshot, question, evidence)?;
         let media = readable_media_urls(snapshot, question);
         let mut used_fallback = false;
         let mut selected_route = self.route.clone();
-        let answer = match self.call_route(&selected_route, &prompt, &media).await {
+        let (answer, usage) = match self.call_route(&selected_route, &prompt, &media).await {
             Ok(answer) => answer,
             Err(primary_error) if self.profile.allow_domestic_fallback => {
                 let fallback = if has_rich_content(snapshot, question) {
@@ -510,7 +526,7 @@ impl AiAnswerClient {
                 "model returned an invalid normalized answer",
             )
         })?;
-        Ok(candidate)
+        Ok((candidate, usage))
     }
 
     async fn call_route(
@@ -518,7 +534,7 @@ impl AiAnswerClient {
         route: &AiModelRoute,
         prompt: &str,
         media: &[String],
-    ) -> Result<NormalizedAnswer, ApiError> {
+    ) -> Result<(NormalizedAnswer, AiRemoteUsage), ApiError> {
         let endpoint = self.endpoint(&route.endpoint)?;
         if endpoint.base_url.is_empty() {
             return Err(ApiError::service_unavailable(
@@ -555,10 +571,13 @@ impl AiAnswerClient {
         let response: Value = response.json().await.map_err(|_| {
             ApiError::bad_gateway("ai_response_invalid", "AI endpoint returned invalid JSON")
         })?;
+        let mut usage = extract_usage(endpoint.protocol, &response);
+        usage.endpoint = Some(route.endpoint.clone());
+        usage.model = Some(route.model.clone());
         let text = extract_answer_text(endpoint.protocol, &response).ok_or_else(|| {
             ApiError::bad_gateway("ai_response_invalid", "AI endpoint returned no answer text")
         })?;
-        parse_normalized_answer(text)
+        Ok((parse_normalized_answer(text)?, usage))
     }
 
     fn endpoint(&self, name: &str) -> Result<&AiEndpointConfig, ApiError> {
@@ -870,6 +889,31 @@ fn extract_answer_text<'a>(protocol: AiProtocol, response: &'a Value) -> Option<
     }
 }
 
+fn extract_usage(protocol: AiProtocol, response: &Value) -> AiRemoteUsage {
+    let usage = response
+        .get("usage")
+        .or_else(|| response.pointer("/response/usage"));
+    let Some(usage) = usage else {
+        return AiRemoteUsage::default();
+    };
+    let read = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| usage.get(*key).and_then(Value::as_i64))
+    };
+    match protocol {
+        AiProtocol::Responses => AiRemoteUsage {
+            input_tokens: read(&["input_tokens", "prompt_tokens"]),
+            output_tokens: read(&["output_tokens", "completion_tokens"]),
+            ..AiRemoteUsage::default()
+        },
+        AiProtocol::ChatCompletions => AiRemoteUsage {
+            input_tokens: read(&["prompt_tokens", "input_tokens"]),
+            output_tokens: read(&["completion_tokens", "output_tokens"]),
+            ..AiRemoteUsage::default()
+        },
+    }
+}
+
 fn parse_normalized_answer(value: &str) -> Result<NormalizedAnswer, ApiError> {
     let value = value.trim();
     let value = value
@@ -1009,6 +1053,32 @@ mod tests {
             json!({"choices":[{"message":{"content":"{\"type\":\"boolean\",\"value\":true}"}}]});
         assert!(extract_answer_text(AiProtocol::Responses, &responses).is_some());
         assert!(extract_answer_text(AiProtocol::ChatCompletions, &chat).is_some());
+    }
+
+    #[test]
+    fn extracts_provider_usage_without_treating_missing_usage_as_an_error() {
+        let responses = json!({"usage": {"input_tokens": 12, "output_tokens": 5}});
+        let chat = json!({"usage": {"prompt_tokens": 19, "completion_tokens": 7}});
+        assert_eq!(
+            extract_usage(AiProtocol::Responses, &responses).input_tokens,
+            Some(12)
+        );
+        assert_eq!(
+            extract_usage(AiProtocol::Responses, &responses).output_tokens,
+            Some(5)
+        );
+        assert_eq!(
+            extract_usage(AiProtocol::ChatCompletions, &chat).input_tokens,
+            Some(19)
+        );
+        assert_eq!(
+            extract_usage(AiProtocol::ChatCompletions, &chat).output_tokens,
+            Some(7)
+        );
+        assert_eq!(
+            extract_usage(AiProtocol::Responses, &json!({})).input_tokens,
+            None
+        );
     }
 
     #[test]
