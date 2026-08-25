@@ -708,14 +708,9 @@ pub(super) async fn get_chaoxing_verification_status(
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(90);
     let rows = sqlx::query(
-        "SELECT logs.timestamp, logs.stage, logs.message \
-         FROM execution_logs AS logs \
-         INNER JOIN executions AS execution ON execution.id = logs.execution_id \
-         INNER JOIN tasks ON tasks.id = execution.task_id \
-         WHERE tasks.provider_account_id = ? \
-           AND (lower(logs.message) LIKE '%captcha%' OR lower(logs.message) LIKE '%slider%' \
-                OR lower(logs.message) LIKE '%face%' OR lower(logs.message) LIKE '%verification%') \
-         ORDER BY logs.timestamp DESC LIMIT 20",
+        "SELECT occurred_at, verification_type, state, detail_sanitized \
+         FROM chaoxing_verification_attempts \
+         WHERE provider_account_id = ? ORDER BY occurred_at DESC LIMIT 20",
     )
     .bind(account_id.to_string())
     .fetch_all(state.database.pool())
@@ -724,15 +719,10 @@ pub(super) async fn get_chaoxing_verification_status(
     let recent_attempts = rows
         .into_iter()
         .map(|row| ChaoxingVerificationAttemptSummary {
-            occurred_at: row.try_get("timestamp").unwrap_or_default(),
-            stage: row.try_get("stage").unwrap_or_default(),
-            result: classify_chaoxing_verification_result(
-                row.try_get::<String, _>("message")
-                    .unwrap_or_default()
-                    .as_str(),
-            )
-            .to_owned(),
-            message: row.try_get("message").unwrap_or_default(),
+            occurred_at: row.try_get("occurred_at").unwrap_or_default(),
+            stage: row.try_get("verification_type").unwrap_or_default(),
+            result: row.try_get("state").unwrap_or_default(),
+            message: row.try_get("detail_sanitized").unwrap_or_default(),
         })
         .collect();
     Ok(crate::auth::no_store(
@@ -747,6 +737,7 @@ pub(super) async fn get_chaoxing_verification_status(
     ))
 }
 
+#[cfg(test)]
 fn classify_chaoxing_verification_result(message: &str) -> &'static str {
     let normalized = message.to_ascii_lowercase();
     if ["success", "succeeded", "passed", "verified", "completed"]

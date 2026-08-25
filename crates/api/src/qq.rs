@@ -228,6 +228,43 @@ pub(super) async fn claim_qq_formal_notifications(
         .await
         .map_err(ApiError::internal)?;
     }
+    let running_executions = sqlx::query(
+        "SELECT execution.id AS execution_id, tasks.id AS task_id, \
+                accounts.owner_user_id AS user_id, identities.qq, progress.percent \
+         FROM executions AS execution \
+         INNER JOIN execution_progress AS progress ON progress.execution_id = execution.id \
+         INNER JOIN tasks ON tasks.id = execution.task_id \
+         INNER JOIN provider_accounts AS accounts ON accounts.id = tasks.provider_account_id \
+         INNER JOIN qq_identities AS identities ON identities.user_id = accounts.owner_user_id AND identities.is_primary = 1 \
+         WHERE execution.state = 'running' AND progress.percent BETWEEN 25 AND 99",
+    )
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    for row in running_executions {
+        let execution_id: String = row.try_get("execution_id").map_err(ApiError::internal)?;
+        let percent = row
+            .try_get::<i64, _>("percent")
+            .map_err(ApiError::internal)?;
+        let bucket = (percent / 25).clamp(1, 3);
+        sqlx::query(
+            "INSERT INTO qq_formal_notification_deliveries \
+             (id, task_id, execution_id, user_id, qq, notification_kind, deduplication_key, state, attempts, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, 'execution_progress', ?, 'pending', 0, ?, ?) \
+             ON CONFLICT(user_id, notification_kind, deduplication_key) DO NOTHING",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(row.try_get::<String, _>("task_id").map_err(ApiError::internal)?)
+        .bind(&execution_id)
+        .bind(row.try_get::<String, _>("user_id").map_err(ApiError::internal)?)
+        .bind(row.try_get::<i64, _>("qq").map_err(ApiError::internal)?)
+        .bind(format!("{execution_id}:{bucket}"))
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    }
     let terminal_executions = sqlx::query(
         "SELECT execution.id AS execution_id, tasks.id AS task_id, accounts.owner_user_id AS user_id, identities.qq, execution.state \
          FROM executions AS execution \
@@ -272,10 +309,12 @@ pub(super) async fn claim_qq_formal_notifications(
     }
     let rows = sqlx::query(
         "SELECT delivery.id, delivery.notification_kind, delivery.execution_id, delivery.user_id, delivery.qq, tasks.id AS task_id, tasks.title, \
-                COALESCE(tasks.closes_at, execution.finished_at, delivery.created_at) AS event_at \
+                COALESCE(tasks.closes_at, execution.finished_at, progress.updated_at, delivery.created_at) AS event_at, \
+                progress.percent, progress.stage, progress.status_text \
          FROM qq_formal_notification_deliveries AS delivery \
          INNER JOIN tasks ON tasks.id = delivery.task_id \
          LEFT JOIN executions AS execution ON execution.id = delivery.execution_id \
+         LEFT JOIN execution_progress AS progress ON progress.execution_id = delivery.execution_id \
          WHERE delivery.state = 'pending' \
             OR (delivery.state = 'retry' AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= ?)) \
          ORDER BY event_at, delivery.created_at LIMIT 50",
@@ -314,18 +353,40 @@ pub(super) async fn claim_qq_formal_notifications(
                     .map_err(ApiError::internal)?,
                 row.try_get::<String, _>("event_at")
                     .map_err(ApiError::internal)?,
+                row.try_get::<Option<i64>, _>("percent")
+                    .map_err(ApiError::internal)?,
+                row.try_get::<Option<String>, _>("stage")
+                    .map_err(ApiError::internal)?,
+                row.try_get::<Option<String>, _>("status_text")
+                    .map_err(ApiError::internal)?,
             ));
         }
     }
     transaction.commit().await.map_err(ApiError::internal)?;
     let mut items = Vec::with_capacity(claimed.len());
-    for (id, kind, execution_id, user_id, qq, task_id, title, closes_at) in claimed {
+    for (
+        id,
+        kind,
+        execution_id,
+        user_id,
+        qq,
+        task_id,
+        title,
+        closes_at,
+        percent,
+        stage,
+        status_text,
+    ) in claimed
+    {
         let user_id = user_id
             .parse()
             .map_err(|_| ApiError::internal("stored notification user ID is invalid"))?;
         let return_to = match (kind.as_str(), execution_id.as_deref()) {
             ("confirmation_due", _) => format!("/tasks/{task_id}?confirm=1"),
-            ("execution_succeeded" | "execution_failed", Some(execution_id)) => {
+            (
+                "execution_progress" | "execution_succeeded" | "execution_failed",
+                Some(execution_id),
+            ) => {
                 format!("/executions/{execution_id}")
             }
             _ => format!("/tasks/{task_id}"),
@@ -341,6 +402,12 @@ pub(super) async fn claim_qq_formal_notifications(
             message: match kind.as_str() {
                 "confirmation_due" => format!("独立作业/考试“{title}”尚待提交前确认，截止时间 {closes_at}。截止后不会自动提交。"),
                 "deadline_missed" => format!("独立作业/考试“{title}”已于 {closes_at} 截止且未确认提交；Asterism 已保留草稿且没有自动提交。"),
+                "execution_progress" => format!(
+                    "任务“{title}”当前进度 {}%，阶段：{}{}。",
+                    percent.unwrap_or(0),
+                    stage.as_deref().unwrap_or("执行中"),
+                    status_text.as_deref().map(|value| format!("（{value}）")).unwrap_or_default(),
+                ),
                 "execution_succeeded" => format!("任务“{title}”已完成，可打开执行详情查看进度和日志。"),
                 "execution_failed" => format!("任务“{title}”执行失败，请打开执行详情查看原因和重试状态。"),
                 _ => "Asterism 任务状态已更新。".to_owned(),

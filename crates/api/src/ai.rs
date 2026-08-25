@@ -1080,8 +1080,13 @@ async fn estimate_ai_cost(
         .ok_or_else(|| {
             ApiError::bad_request("invalid_pricing_catalog", "AI pricing markup overflows")
         })?;
+    let fixed_markup = catalog
+        .get("fixed_markup")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let charged_cost = estimated_cost
         .checked_add(percentage_markup)
+        .and_then(|value| value.checked_add(fixed_markup))
         .ok_or_else(|| {
             ApiError::bad_request("invalid_pricing_catalog", "AI pricing amount overflows")
         })?;
@@ -2327,6 +2332,7 @@ mod tests {
         .bind(
             json!({
                 "percentage_markup_basis_points": 2500,
+                "fixed_markup": 1,
                 "ai_rates": {"default": {"input_per_1k": 100, "output_per_1k": 200}}
             })
             .to_string(),
@@ -2354,7 +2360,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(costs, (300, 375));
+        assert_eq!(costs, (300, 376));
     }
 
     #[test]

@@ -150,13 +150,14 @@ mod tests {
     async fn all_migrations_apply_to_a_fresh_database() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
+        assert_eq!(database.schema_version().await.unwrap(), 109);
         database.health_check().await.unwrap();
 
         let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 106);
+        assert_eq!(migration_count, 109);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())

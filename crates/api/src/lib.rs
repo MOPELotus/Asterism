@@ -9660,6 +9660,7 @@ mod tests {
             .await
             .unwrap();
         let missed = app
+            .clone()
             .oneshot(
                 Request::post("/api/v1/integrations/qq/notifications/claim")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
@@ -9678,6 +9679,73 @@ mod tests {
                 .unwrap()
                 .contains("没有自动提交")
         );
+
+        sqlx::query(
+            "INSERT INTO tasks (id, provider_account_id, remote_id, remote_fingerprint, source_type, assessment_class, title, remote_state, orchestration_state, discovered_at, updated_at, capabilities_json) \
+             VALUES ('routine-task-1', 'account-qq-notify', 'remote-routine-1', 'fingerprint-routine-1', 'chapter', 'routine', '章节任务', 'in_progress', 'running', ?, ?, '[]')",
+        )
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO executions (id, task_id, requested_by, request_source, state, started_at, created_at) \
+             VALUES ('execution-progress-1', 'routine-task-1', ?, 'scheduler', 'running', ?, ?)",
+        )
+        .bind(&user_id)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO execution_progress (execution_id, percent, stage, status_text, completed_items, total_items, updated_at) \
+             VALUES ('execution-progress-1', 50, 'video', '正在播放', 1, 2, ?)",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let visible_progress: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM executions AS execution \
+             INNER JOIN execution_progress AS progress ON progress.execution_id = execution.id \
+             INNER JOIN tasks ON tasks.id = execution.task_id \
+             INNER JOIN provider_accounts AS accounts ON accounts.id = tasks.provider_account_id \
+             INNER JOIN qq_identities AS identities ON identities.user_id = accounts.owner_user_id AND identities.is_primary = 1 \
+             WHERE execution.state = 'running' AND progress.percent BETWEEN 25 AND 99",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(visible_progress, 1);
+        let progress = app
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/notifications/claim")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let progress_status = progress.status();
+        let progress = response_json(progress).await;
+        assert_eq!(progress_status, StatusCode::OK, "{progress}");
+        assert_eq!(progress["items"].as_array().unwrap().len(), 1);
+        assert_eq!(progress["items"][0]["kind"], "execution_progress");
+        assert!(
+            progress["items"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("50%")
+        );
+        let progress_return_to: String = sqlx::query_scalar(
+            "SELECT return_to FROM qq_web_login_tickets ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(progress_return_to, "/executions/execution-progress-1");
     }
 
     #[tokio::test]
