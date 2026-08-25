@@ -33,7 +33,7 @@ pub(super) async fn get_ai_config(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Response, ApiError> {
-    auth.require_provider_settings_manage()?;
+    require_system_authority(auth.require_provider_settings_manage()?)?;
     Ok(crate::auth::no_store(
         Json(state.ai_config().await).into_response(),
     ))
@@ -44,10 +44,7 @@ pub(super) async fn put_ai_config(
     Extension(auth): Extension<AuthContext>,
     payload: Result<Json<AiConfig>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let actor_id = match auth.require_provider_settings_manage()? {
-        ProviderSettingsAuthority::System => None,
-        ProviderSettingsAuthority::Owner(user_id) => Some(user_id),
-    };
+    require_system_authority(auth.require_provider_settings_manage()?)?;
     let Json(config) = payload.map_err(|_| {
         ApiError::bad_request("invalid_ai_config", "AI configuration body is invalid")
     })?;
@@ -73,11 +70,11 @@ pub(super) async fn put_ai_config(
         "INSERT INTO audit_records \
          (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
           correlation_id, outcome, metadata_sanitized_json) \
-         VALUES (?, ?, 'user', ?, 'ai_config_updated', 'deployment', 'ai', ?, 'succeeded', ?)",
+         VALUES (?, ?, 'system', ?, 'ai_config_updated', 'deployment', 'ai', ?, 'succeeded', ?)",
     )
     .bind(asterism_domain::AuditRecordId::new().to_string())
     .bind(Utc::now())
-    .bind(actor_id.map(|id| id.to_string()))
+    .bind(Option::<String>::None)
     .bind(asterism_domain::AuditRecordId::new().to_string())
     .bind(serde_json::to_string(&metadata).map_err(ApiError::internal)?)
     .execute(state.database.pool())
@@ -85,6 +82,13 @@ pub(super) async fn put_ai_config(
     .map_err(ApiError::internal)?;
     state.replace_ai_config(config.clone()).await;
     Ok(crate::auth::no_store(Json(config).into_response()))
+}
+
+fn require_system_authority(authority: ProviderSettingsAuthority) -> Result<(), ApiError> {
+    match authority {
+        ProviderSettingsAuthority::System => Ok(()),
+        ProviderSettingsAuthority::Owner(_) => Err(ApiError::forbidden()),
+    }
 }
 
 pub(super) async fn list_users(
