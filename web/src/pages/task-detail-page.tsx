@@ -2,7 +2,7 @@ import { usePermissions } from "@refinedev/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Ban, CheckCircle2, Clock3, Copy, ExternalLink, EyeOff, FileQuestion, Hourglass, MonitorUp, Play, RefreshCw, Settings2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { approveTask, cancelTask, createBrowserBridgeSession, delayTask, executeTask, generateUaiDiscussionInvocationDraft, getBrowserBridgeSession, getTask, getTaskCompletionWorkflows, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask, optInScoreImprovement, prepareExecutionInvocationDraft, scanProviderAccount } from "@/api/generated/sdk.gen.ts";
 import type { BrowserBridgeCreateResponse, Task } from "@/api/generated/types.gen.ts";
@@ -29,6 +29,7 @@ const UAI_ORAL_INPUT_TYPE = "uai.compound-oral.authorization.v1";
 
 export function TaskDetailPage() {
   const { taskId = "" } = useParams();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const permissions = usePermissions<string[]>({});
@@ -70,6 +71,12 @@ export function TaskDetailPage() {
     if (!task.data || requestedCapabilities.length) return;
     setRequestedCapabilities(recommendedExecutionCapabilities(task.data));
   }, [requestedCapabilities.length, task.data]);
+  useEffect(() => {
+    if (task.data?.assessment_class === "formal" && searchParams.get("confirm") === "1") {
+      setFormalAssessmentConfirmed(true);
+      setActionNotice("已从 QQ 确认链接打开；请检查题目和答案后，再点击最终执行/提交。页面不会自动提交。");
+    }
+  }, [searchParams, task.data?.assessment_class]);
   const prepareInvocation = useMutation({
     mutationFn: async () => {
       const input = await encodeUaiInvocationInput(requestedCapabilities, discussionContent, artifactFile, task.data?.source_type === "discussion" && task.data.capabilities.includes("resource_execution"));
@@ -199,7 +206,7 @@ export function TaskDetailPage() {
     <Card><CardHeader><CardTitle>任务操作</CardTitle></CardHeader><CardContent className="space-y-4">
       {executable ? <p className="text-sm text-muted-foreground">系统已根据平台和任务类型准备好执行方式，无需选择内部能力。</p> : null}
       {actionNotice ? <Alert><AlertTitle>操作已提交</AlertTitle><AlertDescription>{actionNotice}</AlertDescription></Alert> : null}
-      {isFormalAssessment && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评需要本次明确确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认由当前账号执行所选能力；该确认只随本次请求提交，默认仍为拒绝。</span></label></AlertDescription></Alert> : null}
+      {isFormalAssessment && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评需要本次明确确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认由当前账号执行所选能力；该确认只随本次请求提交，默认仍为拒绝。确认链接只帮助打开本页，不会自动提交。</span></label></AlertDescription></Alert> : null}
       {scoreImprovementRetakeReady ? <Alert><AlertTitle>{scoreImprovementCanBind ? "远端重做已就绪" : "先在远端创建新重做 Attempt"}</AlertTitle><AlertDescription>{scoreImprovementCanBind ? <>Core 会把 workflow {shortId(scoreImprovement!.workflow.id)} 的 revision {scoreImprovement!.revision} 与这次 Execution 原子绑定并消耗一次重试；测评提交仍需选择重做后的新快照和 Draft。</> : <><p>当前远端仍是 completed，Core 不会复用旧答卷。请用下方 BrowserBridge 打开结果页并明确点击“重做”，再立即巡查；状态刷新为 pending/in_progress 后读取新题目。</p><Button className="mt-3" type="button" variant="outline" disabled={scanAccount.isPending} onClick={() => scanAccount.mutate()}><RefreshCw className="size-4" />{scanAccount.isPending ? "巡查中…" : "已重做，立即巡查并刷新"}</Button></>}</AlertDescription></Alert> : null}
       {needsDraft || needsReviewedWorkerAnswers ? <Alert><AlertTitle>先读取题目</AlertTitle><AlertDescription className="space-y-3"><p>系统会读取当前题目、准备答案并在提交前展示审核结果，不需要填写任何内部编号。</p><Button variant="outline" disabled={questions.isFetching} onClick={async () => { const result = await questions.refetch(); if (result.data) navigate(`/tasks/${taskId}/question-snapshots/${result.data.snapshot_id}`); }}><FileQuestion className="size-4" />{questions.isFetching ? "正在读取…" : "读取题目并开始作答"}</Button></AlertDescription></Alert> : null}
       {needsInvocation ? <div className="max-w-2xl space-y-3 rounded-lg border p-4">
