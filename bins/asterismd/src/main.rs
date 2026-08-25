@@ -331,6 +331,8 @@ async fn main() -> anyhow::Result<()> {
         }
         api_state = api_state.with_provider_worker(provider, worker);
     }
+    let challenge_escalation_handle =
+        start_challenge_escalation_worker(api_state.clone(), shutdown_receiver.clone());
     let mut app = build_router(api_state);
     if let Some(web_dist) = web_dist.as_ref() {
         let index = web_dist.join("index.html");
@@ -426,6 +428,9 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("BrowserBridge workflow processor task panicked")?;
     }
+    challenge_escalation_handle
+        .await
+        .context("Chaoxing challenge escalation processor panicked")?;
     outbox_dispatcher_handle
         .await
         .context("outbox dispatcher task panicked")?;
@@ -433,6 +438,32 @@ async fn main() -> anyhow::Result<()> {
     database.close().await;
     tracing::info!("asterismd stopped");
     Ok(())
+}
+
+fn start_challenge_escalation_worker(
+    state: ApiState,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    match state.process_chaoxing_challenge_escalation_tick().await {
+                        Ok(report) if report.processed => {
+                            tracing::info!(materialized = report.materialized, completed = report.completed, "Chaoxing challenge escalation tick completed");
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(%error, "Chaoxing challenge escalation tick deferred"),
+                    }
+                }
+                result = shutdown.changed() => {
+                    if result.is_err() || *shutdown.borrow() { break; }
+                }
+            }
+        }
+    })
 }
 
 fn start_outbox_dispatcher(

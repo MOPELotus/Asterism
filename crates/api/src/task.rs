@@ -1149,7 +1149,7 @@ pub(super) async fn execute_task(
     ))
 }
 
-async fn configured_billing(
+pub(crate) async fn configured_billing(
     database: &asterism_storage::Database,
     capabilities: &[TaskCapability],
 ) -> Result<Option<ExecutionBillingInput>, ApiError> {

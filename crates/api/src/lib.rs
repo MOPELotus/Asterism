@@ -20,6 +20,8 @@ mod runtime_settings;
 mod task;
 mod uai_worker;
 
+pub use ai::ChallengeEscalationTick;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use asterism_config::AiConfig;
@@ -147,6 +149,20 @@ impl ApiState {
             self.replace_ai_config(config).await;
         }
         Ok(())
+    }
+
+    /// Advances at most one durable Chaoxing challenge escalation.
+    ///
+    /// The processor is deliberately bounded: it materializes only executions
+    /// carrying the exact Worker escalation marker, leases one row, generates
+    /// a fresh GPT-only candidate set and schedules one new encrypted Worker
+    /// invocation. Returned errors contain only a stable code.
+    pub async fn process_chaoxing_challenge_escalation_tick(
+        &self,
+    ) -> Result<ChallengeEscalationTick, String> {
+        ai::process_chaoxing_challenge_escalation_tick(self)
+            .await
+            .map_err(|error| error.code.to_owned())
     }
 
     /// Adds one configured 0.0.1 upstream-backed Provider worker.

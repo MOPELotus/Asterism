@@ -4,12 +4,13 @@ use asterism_config::{
     AiConfig, AiEndpointConfig, AiModelRoute, AiProfileConfig, AiProtocol, AiReasoningEffort,
 };
 use asterism_domain::{
-    AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, NormalizedAnswer, Question,
-    QuestionId, QuestionKind, QuestionSnapshotId, TaskCapability, TaskId,
+    AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, AuditActor,
+    NormalizedAnswer, Question, QuestionId, QuestionKind, QuestionSnapshotId, RequestSource,
+    TaskCapability, TaskId, UserId,
 };
 use asterism_engine::{
-    ExecutionRequestService, FormalAssessmentPolicy, PrepareExecutionInvocationCommand,
-    ProviderTaskDetailService, ReadTaskDetailCommand,
+    ExecuteTaskCommand, ExecutionAiSelectionInput, ExecutionRequestService, FormalAssessmentPolicy,
+    PrepareExecutionInvocationCommand, ProviderTaskDetailService, ReadTaskDetailCommand,
 };
 use asterism_secrets::SecretValue;
 use asterism_storage::{
@@ -28,11 +29,15 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::Row;
 
 use crate::{ApiError, ApiState, auth::AuthContext, task::AnswerCandidateResponse};
 
 const MAX_AI_QUESTIONS_PER_REQUEST: usize = 100;
 const UAI_GENERATED_TEXT_INPUT_TYPE: &str = "uai.worker.generated-text.v1";
+const CHAOXING_ANSWERS_INPUT_TYPE: &str = "chaoxing.worker.answers.v1";
+const CHALLENGE_ESCALATION_MAX_ATTEMPTS: i64 = 3;
+const CHALLENGE_ESCALATION_CLAIM_SECONDS: i64 = 180;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,10 +110,6 @@ pub(super) async fn generate_ai_answer_candidates(
             "select between 1 and 100 questions from the current snapshot",
         ));
     }
-    let existing = repository
-        .list_owned_answer_candidates(owner_id, snapshot_id)
-        .await
-        .map_err(ApiError::internal)?;
     let (profile, route) = if let Some(execution_id) = request.execution_id.as_deref() {
         let execution_id = asterism_domain::ExecutionId::from_str(execution_id).map_err(|_| {
             ApiError::bad_request("invalid_execution_id", "execution ID is invalid")
@@ -141,9 +142,52 @@ pub(super) async fn generate_ai_answer_candidates(
     } else {
         (request.profile, request.route)
     };
+    let records = generate_ai_records(
+        &state,
+        owner_id,
+        task_id,
+        &snapshot,
+        &questions,
+        profile,
+        route,
+        request.force_refresh,
+    )
+    .await?;
+    Ok(crate::auth::no_store(
+        Json(GenerateAiAnswerCandidatesResponse {
+            task_id,
+            question_snapshot_id: snapshot_id,
+            candidates: records
+                .into_iter()
+                .map(|record| AnswerCandidateResponse {
+                    id: record.id,
+                    candidate: record.candidate,
+                    created_at: record.created_at,
+                })
+                .collect(),
+        })
+        .into_response(),
+    ))
+}
+
+async fn generate_ai_records(
+    state: &ApiState,
+    owner_id: asterism_domain::UserId,
+    task_id: TaskId,
+    snapshot: &QuestionSnapshot,
+    questions: &[&Question],
+    profile: AiAnswerProfile,
+    route: AiAnswerRoute,
+    force_refresh: bool,
+) -> Result<Vec<AnswerCandidateRecord>, ApiError> {
+    let repository = SqliteQuestionSnapshotRepository::new(state.database.clone());
+    let existing = repository
+        .list_owned_answer_candidates(owner_id, snapshot.id)
+        .await
+        .map_err(ApiError::internal)?;
     let client = AiAnswerClient::new(state.ai_config().await, profile, route)?;
     let mut records = Vec::with_capacity(questions.len());
-    for question in questions {
+    for question in questions.iter().copied() {
         let evidence = existing
             .iter()
             .filter(|record| record.candidate.question_id == question.id)
@@ -153,7 +197,7 @@ pub(super) async fn generate_ai_answer_candidates(
         // newest valid AI candidate for this immutable snapshot before making
         // another remote request. Escalation is deliberately always fresh:
         // a high-quality fallback must not return the answer that just failed.
-        let may_reuse_ai_cache = should_reuse_ai_cache(request.force_refresh, route);
+        let may_reuse_ai_cache = should_reuse_ai_cache(force_refresh, route);
         if may_reuse_ai_cache
             && let Some(cached) = existing.iter().rev().find(|record| {
                 record.candidate.question_id == question.id
@@ -207,21 +251,409 @@ pub(super) async fn generate_ai_answer_candidates(
         .save_answer_candidate_batch(&records)
         .await
         .map_err(ApiError::internal)?;
-    Ok(crate::auth::no_store(
-        Json(GenerateAiAnswerCandidatesResponse {
-            task_id,
-            question_snapshot_id: snapshot_id,
-            candidates: records
-                .into_iter()
-                .map(|record| AnswerCandidateResponse {
-                    id: record.id,
-                    candidate: record.candidate,
-                    created_at: record.created_at,
-                })
-                .collect(),
+    Ok(records)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeEscalationTick {
+    pub materialized: u64,
+    pub processed: bool,
+    pub completed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimedChallengeEscalation {
+    source_execution_id: String,
+    task_id: TaskId,
+    owner_user_id: UserId,
+    question_snapshot_id: QuestionSnapshotId,
+    attempts: i64,
+}
+
+pub(crate) async fn process_chaoxing_challenge_escalation_tick(
+    state: &ApiState,
+) -> Result<ChallengeEscalationTick, ApiError> {
+    let now = Utc::now();
+    let materialized = materialize_challenge_escalations(state, now).await?;
+    recover_expired_challenge_claims(state, now).await?;
+    let Some(claimed) = claim_challenge_escalation(state, now).await? else {
+        return Ok(ChallengeEscalationTick {
+            materialized,
+            processed: false,
+            completed: false,
+        });
+    };
+    match execute_chaoxing_challenge_escalation(state, &claimed).await {
+        Ok(target_execution_id) => {
+            finish_challenge_escalation(state, &claimed, Some(target_execution_id), None).await?;
+            Ok(ChallengeEscalationTick {
+                materialized,
+                processed: true,
+                completed: true,
+            })
+        }
+        Err(error) => {
+            finish_challenge_escalation(state, &claimed, None, Some(error.code)).await?;
+            Ok(ChallengeEscalationTick {
+                materialized,
+                processed: true,
+                completed: false,
+            })
+        }
+    }
+}
+
+async fn materialize_challenge_escalations(
+    state: &ApiState,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, ApiError> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO chaoxing_challenge_escalations \
+         (source_execution_id, task_id, owner_user_id, question_snapshot_id, state, attempts, \
+          next_attempt_at, claimed_until, target_execution_id, last_error_code, created_at, updated_at) \
+         SELECT execution.id, execution.task_id, account.owner_user_id, task.latest_snapshot_id, \
+                'pending', 0, NULL, NULL, NULL, NULL, ?, ? \
+         FROM executions AS execution \
+         INNER JOIN tasks AS task ON task.id = execution.task_id \
+         INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         INNER JOIN execution_logs AS log ON log.execution_id = execution.id \
+         WHERE account.provider_id = 'chaoxing' \
+           AND execution.state = 'failed' \
+           AND task.assessment_class != 'formal' \
+           AND task.latest_snapshot_id IS NOT NULL \
+           AND log.message = 'Chaoxing challenge answer retries exhausted; fresh AI escalation required' \
+           AND json_extract(log.metadata_sanitized_json, '$.challenge_escalation_requested') = 1 \
+           AND json_extract(log.metadata_sanitized_json, '$.route') = 'sol_xhigh'",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(state.database.pool())
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(ApiError::internal)
+}
+
+async fn recover_expired_challenge_claims(
+    state: &ApiState,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE chaoxing_challenge_escalations \
+         SET state = 'retry', claimed_until = NULL, next_attempt_at = ?, \
+             last_error_code = 'processor_claim_expired', updated_at = ? \
+         WHERE state = 'processing' AND claimed_until <= ?",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+async fn claim_challenge_escalation(
+    state: &ApiState,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<ClaimedChallengeEscalation>, ApiError> {
+    let mut transaction = state
+        .database
+        .pool()
+        .begin()
+        .await
+        .map_err(ApiError::internal)?;
+    let row = sqlx::query(
+        "SELECT source_execution_id, task_id, owner_user_id, question_snapshot_id, attempts \
+         FROM chaoxing_challenge_escalations \
+         WHERE state IN ('pending', 'retry') \
+           AND (next_attempt_at IS NULL OR next_attempt_at <= ?) \
+         ORDER BY created_at, source_execution_id LIMIT 1",
+    )
+    .bind(now)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    let Some(row) = row else {
+        transaction.commit().await.map_err(ApiError::internal)?;
+        return Ok(None);
+    };
+    let source_execution_id: String = row
+        .try_get("source_execution_id")
+        .map_err(ApiError::internal)?;
+    let attempts: i64 = row.try_get("attempts").map_err(ApiError::internal)?;
+    let claimed = ClaimedChallengeEscalation {
+        task_id: parse_db_id(&row, "task_id")?,
+        owner_user_id: parse_db_id(&row, "owner_user_id")?,
+        question_snapshot_id: parse_db_id(&row, "question_snapshot_id")?,
+        source_execution_id,
+        attempts: attempts + 1,
+    };
+    let claimed_until = now + chrono::Duration::seconds(CHALLENGE_ESCALATION_CLAIM_SECONDS);
+    let changed = sqlx::query(
+        "UPDATE chaoxing_challenge_escalations \
+         SET state = 'processing', attempts = attempts + 1, claimed_until = ?, \
+             next_attempt_at = NULL, last_error_code = NULL, updated_at = ? \
+         WHERE source_execution_id = ? AND state IN ('pending', 'retry') AND attempts = ?",
+    )
+    .bind(claimed_until)
+    .bind(now)
+    .bind(&claimed.source_execution_id)
+    .bind(attempts)
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    if changed.rows_affected() != 1 {
+        transaction.rollback().await.map_err(ApiError::internal)?;
+        return Ok(None);
+    }
+    transaction.commit().await.map_err(ApiError::internal)?;
+    Ok(Some(claimed))
+}
+
+fn parse_db_id<T>(row: &sqlx::sqlite::SqliteRow, field: &str) -> Result<T, ApiError>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    T::from_str(row.try_get::<&str, _>(field).map_err(ApiError::internal)?)
+        .map_err(ApiError::internal)
+}
+
+async fn finish_challenge_escalation(
+    state: &ApiState,
+    claimed: &ClaimedChallengeEscalation,
+    target_execution_id: Option<String>,
+    error_code: Option<&'static str>,
+) -> Result<(), ApiError> {
+    let terminal = target_execution_id.is_some()
+        || claimed.attempts >= CHALLENGE_ESCALATION_MAX_ATTEMPTS
+        || matches!(
+            error_code,
+            Some("challenge_escalation_invalid" | "question_snapshot_not_found")
+        );
+    let state_name = if target_execution_id.is_some() {
+        "completed"
+    } else if terminal {
+        "failed"
+    } else {
+        "retry"
+    };
+    let next_attempt_at = (!terminal).then(|| {
+        Utc::now()
+            + chrono::Duration::minutes(
+                5_i64.saturating_mul(1_i64 << (claimed.attempts.saturating_sub(1))),
+            )
+    });
+    sqlx::query(
+        "UPDATE chaoxing_challenge_escalations \
+         SET state = ?, target_execution_id = ?, next_attempt_at = ?, claimed_until = NULL, \
+             last_error_code = ?, updated_at = ? \
+         WHERE source_execution_id = ? AND state = 'processing'",
+    )
+    .bind(state_name)
+    .bind(target_execution_id)
+    .bind(next_attempt_at)
+    .bind(error_code)
+    .bind(Utc::now())
+    .bind(&claimed.source_execution_id)
+    .execute(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+async fn execute_chaoxing_challenge_escalation(
+    state: &ApiState,
+    claimed: &ClaimedChallengeEscalation,
+) -> Result<String, ApiError> {
+    let secret_store = state.secret_store.clone().ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "encrypted execution invocation drafts are not configured",
+        )
+    })?;
+    let repository = SqliteQuestionSnapshotRepository::new(state.database.clone());
+    let snapshot = repository
+        .find_owned_question_snapshot(claimed.owner_user_id, claimed.question_snapshot_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|snapshot| snapshot.task_id == claimed.task_id)
+        .ok_or_else(|| ApiError::not_found("question_snapshot_not_found"))?;
+    if snapshot.questions.is_empty() || snapshot.questions.len() > MAX_AI_QUESTIONS_PER_REQUEST {
+        return Err(ApiError::conflict(
+            "challenge_escalation_invalid",
+            "challenge escalation requires between 1 and 100 questions",
+        ));
+    }
+    let questions = snapshot.questions.iter().collect::<Vec<_>>();
+    let records = generate_ai_records(
+        state,
+        claimed.owner_user_id,
+        claimed.task_id,
+        &snapshot,
+        &questions,
+        AiAnswerProfile::GptOnly,
+        AiAnswerRoute::Escalation,
+        true,
+    )
+    .await?;
+    let answers = snapshot
+        .questions
+        .iter()
+        .zip(records.iter())
+        .map(|(question, record)| {
+            let remote_id = question.remote_question_id.as_deref().ok_or_else(|| {
+                ApiError::conflict(
+                    "challenge_escalation_invalid",
+                    "challenge question has no Provider identity",
+                )
+            })?;
+            Ok(json!({
+                "remote_id": remote_id,
+                "value": chaoxing_worker_answer_value(question, &record.candidate.answer)?,
+            }))
         })
-        .into_response(),
-    ))
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let raw_input = serde_json::to_vec(&json!({"answers": answers, "mode": "submit"}))
+        .map_err(ApiError::internal)?;
+    let service = ExecutionRequestService::new(
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteExecutionRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
+        SqliteQuestionSnapshotRepository::new(state.database.clone()),
+        state.providers.clone(),
+        FormalAssessmentPolicy::default(),
+    )
+    .with_execution_invocation_drafts(Arc::new(secret_store));
+    let correlation_id = format!("challenge-escalation:{}", claimed.source_execution_id);
+    let invocation = service
+        .prepare_invocation(PrepareExecutionInvocationCommand {
+            owner_id: claimed.owner_user_id,
+            task_id: claimed.task_id,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            submission_draft_id: None,
+            input_type: CHAOXING_ANSWERS_INPUT_TYPE.to_owned(),
+            raw_input: SecretValue::new(raw_input),
+            idempotency_key: format!(
+                "challenge-escalation-invocation:{}",
+                claimed.source_execution_id
+            ),
+            correlation_id: correlation_id.clone(),
+            created_at: Utc::now(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let billing =
+        crate::task::configured_billing(&state.database, &[TaskCapability::ResourceExecution])
+            .await?;
+    let execution = service
+        .execute(ExecuteTaskCommand {
+            owner_id: claimed.owner_user_id,
+            task_id: claimed.task_id,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            submission_draft_id: None,
+            invocation_draft_id: Some(invocation.record.draft.id),
+            strict_completion_retry: None,
+            score_improvement_retake: None,
+            billing,
+            ai_selection: Some(ExecutionAiSelectionInput {
+                profile: "gpt_only".to_owned(),
+                route: "escalation".to_owned(),
+            }),
+            request_source: RequestSource::Scheduler,
+            actor: AuditActor::User(claimed.owner_user_id),
+            idempotency_key: format!(
+                "challenge-escalation-execution:{}",
+                claimed.source_execution_id
+            ),
+            correlation_id,
+            requested_at: Utc::now(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(execution.execution.id.to_string())
+}
+
+fn chaoxing_worker_answer_value(
+    question: &Question,
+    answer: &NormalizedAnswer,
+) -> Result<Value, ApiError> {
+    let option = |id: &str| chaoxing_worker_option_value(question, id);
+    match answer {
+        NormalizedAnswer::Selections(values) if !values.is_empty() => {
+            let values = values.iter().map(|value| option(value)).collect::<Vec<_>>();
+            Ok(if question.kind == QuestionKind::SingleChoice {
+                Value::String(values[0].clone())
+            } else {
+                json!(values)
+            })
+        }
+        NormalizedAnswer::Texts(values) if !values.is_empty() => Ok(
+            if question.kind == QuestionKind::FillBlank || values.len() > 1 {
+                json!(values)
+            } else {
+                Value::String(values[0].clone())
+            },
+        ),
+        NormalizedAnswer::Boolean(value) => Ok(Value::Bool(*value)),
+        NormalizedAnswer::Ordering(values) if !values.is_empty() => Ok(json!(
+            values.iter().map(|value| option(value)).collect::<Vec<_>>()
+        )),
+        NormalizedAnswer::Pairs(values) if !values.is_empty() => Ok(Value::Object(
+            values
+                .iter()
+                .map(|pair| (option(&pair.left), Value::String(option(&pair.right))))
+                .collect(),
+        )),
+        NormalizedAnswer::Composite(values) if !values.is_empty() => Ok(Value::Array(
+            values
+                .iter()
+                .map(|value| chaoxing_worker_answer_value(question, value))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        _ => Err(ApiError::conflict(
+            "challenge_escalation_invalid",
+            "AI returned an answer that cannot be encoded for Chaoxing",
+        )),
+    }
+}
+
+fn chaoxing_worker_option_value(question: &Question, internal_id: &str) -> String {
+    let Some(option) = question
+        .options
+        .iter()
+        .find(|option| option.id == internal_id)
+    else {
+        return internal_id.to_owned();
+    };
+    if let Some(provider_id) = option
+        .metadata_sanitized
+        .get("provider_option_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        && question
+            .options
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .metadata_sanitized
+                    .get("provider_option_id")
+                    .and_then(Value::as_str)
+                    == Some(provider_id)
+            })
+            .count()
+            == 1
+    {
+        return provider_id.to_owned();
+    }
+    option
+        .content
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(internal_id)
+        .to_owned()
 }
 
 async fn record_answer_bank_hit(

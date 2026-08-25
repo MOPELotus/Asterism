@@ -3347,8 +3347,8 @@ where
                 self.finish_failure(
                     job,
                     attempt,
-                    ProviderErrorClass::HumanRequired,
-                    FailureDisposition::HumanRequired,
+                    ProviderErrorClass::InvalidRemoteState,
+                    FailureDisposition::Failed,
                     failed_at,
                     correlation_id,
                 )
@@ -6862,16 +6862,13 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            ScheduledExecutionOutcome::HumanRequired { ref execution, .. }
+            ScheduledExecutionOutcome::Failed { ref execution, .. }
                 if execution.id == fixture.execution_id
         ));
         assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
         assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
         let state = fixture.persisted_state().await;
-        assert_eq!(
-            state,
-            ("human_required".to_owned(), "human_required".to_owned(), 0)
-        );
+        assert_eq!(state, ("failed".to_owned(), "failed".to_owned(), 0));
         let escalation_log: (String, String, String) = sqlx::query_as(
             "SELECT level, message, metadata_sanitized_json FROM execution_logs \
              WHERE execution_id = ? AND message LIKE 'Chaoxing challenge answer retries exhausted%'",
