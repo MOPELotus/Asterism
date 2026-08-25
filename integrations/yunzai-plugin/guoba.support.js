@@ -24,6 +24,10 @@ export function supportGuoba() {
           bottomHelpMessage: "使用具备 qq_identity_assert 权限的系统 Service Token" },
         { field: "allowedGroups", label: "允许的群", component: "InputTextArea",
           bottomHelpMessage: "每行或逗号分隔一个群号；留空表示所有群" },
+        { field: "notificationGroups", label: "通知群", component: "InputTextArea",
+          bottomHelpMessage: "待确认通知只投递到这些群；留空则保守地不自动投递" },
+        { field: "notificationIntervalMs", label: "通知轮询间隔（毫秒）", component: "InputNumber",
+          componentProps: { min: 5000, max: 3600000, step: 1000 } },
         { field: "adminContact", label: "管理员联系方式", component: "Input",
           bottomHelpMessage: "余额不足、充值或人工处理时展示" },
         { field: "requestTimeoutMs", label: "请求超时（毫秒）", component: "InputNumber",
@@ -31,7 +35,7 @@ export function supportGuoba() {
       ],
       async getConfigData() {
         const config = readConfig({})
-        return { ...config, allowedGroups: [...config.allowedGroups].join("\n") }
+        return { ...config, allowedGroups: [...config.allowedGroups].join("\n"), notificationGroups: [...config.notificationGroups].join("\n") }
       },
       async setConfigData(data, { Result }) {
         try {

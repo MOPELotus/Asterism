@@ -32,6 +32,8 @@ export class AsterismPlugin extends plugin {
       validateConfig(this.config)
       this.gatewayClient = new AsterismClient(this.config)
       this.userSessions = new Map()
+      this.notificationTimer = setInterval(() => void this.deliverNotifications(), this.config.notificationIntervalMs)
+      this.notificationTimer.unref?.()
     } catch (error) {
       this.configurationError = error instanceof Error ? error.message : String(error)
     }
@@ -144,6 +146,35 @@ export class AsterismPlugin extends plugin {
     }
     if (this.config.allowedGroups.size && !this.config.allowedGroups.has(String(e.group_id))) return false
     return true
+  }
+
+  async deliverNotifications() {
+    if (!this.gatewayClient || !this.config.notificationGroups.size || !globalThis.Bot) return
+    try {
+      const response = await this.gatewayClient.claimQqNotifications()
+      const reports = []
+      for (const item of response.items || []) {
+        let delivered = false
+        let error = "notification_groups_unavailable"
+        for (const groupId of this.config.notificationGroups) {
+          try {
+            const group = globalThis.Bot.pickGroup?.(groupId)
+            if (!group?.sendMsg) continue
+            const at = globalThis.segment?.at ? globalThis.segment.at(item.qq) : `@${item.qq}`
+            await group.sendMsg([at, `\n${item.message}\n${this.config.webUrl}${item.web_login_path}`])
+            delivered = true
+            error = undefined
+            break
+          } catch (sendError) {
+            error = sendError instanceof Error ? sendError.message : String(sendError)
+          }
+        }
+        reports.push({ id: item.id, delivered, ...(error ? { error } : {}) })
+      }
+      if (reports.length) await this.gatewayClient.reportQqNotifications(reports)
+    } catch (error) {
+      logger.warn?.(`[Asterism] notification poll failed: ${error?.message || error}`)
+    }
   }
 
   async run(e, action) {

@@ -16,6 +16,8 @@ export function readConfig(env = process.env) {
     webUrl,
     token,
     allowedGroups: parseIds(env.ASTERISM_ALLOWED_GROUPS ?? stored.allowedGroups),
+    notificationGroups: parseIds(env.ASTERISM_NOTIFICATION_GROUPS ?? stored.notificationGroups),
+    notificationIntervalMs: parseNotificationInterval(env.ASTERISM_NOTIFICATION_INTERVAL_MS ?? stored.notificationIntervalMs),
     adminContact: String(env.ASTERISM_ADMIN_CONTACT || stored.adminContact || "").trim(),
     requestTimeoutMs: parseTimeout(env.ASTERISM_REQUEST_TIMEOUT_MS ?? stored.requestTimeoutMs),
   }
@@ -27,6 +29,8 @@ export function writeConfig(value) {
     webUrl: normalizeUrl(value.webUrl || value.apiUrl || "http://127.0.0.1:5173"),
     token: String(value.token || "").trim(),
     allowedGroups: [...parseIds(value.allowedGroups)],
+    notificationGroups: [...parseIds(value.notificationGroups)],
+    notificationIntervalMs: parseNotificationInterval(value.notificationIntervalMs),
     adminContact: String(value.adminContact || "").trim(),
     requestTimeoutMs: parseTimeout(value.requestTimeoutMs),
   }
@@ -68,6 +72,15 @@ function parseTimeout(value) {
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed) || parsed < 1_000 || parsed > 600_000) {
     throw new Error("requestTimeoutMs 必须在 1000-600000 之间")
+  }
+  return parsed
+}
+
+function parseNotificationInterval(value) {
+  if (value == null || String(value).trim() === "") return 30_000
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 5_000 || parsed > 3_600_000) {
+    throw new Error("notificationIntervalMs 必须在 5000-3600000 之间")
   }
   return parsed
 }
