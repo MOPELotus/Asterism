@@ -15,6 +15,8 @@ pub(crate) const ANSWER_DELAY_MAX_SECONDS_KEY: &str = "answer.delay_max_seconds"
 pub(crate) const ANSWER_TIME_MIN_MILLIS_KEY: &str = "answer.reported_time_min_millis";
 pub(crate) const ANSWER_TIME_MAX_MILLIS_KEY: &str = "answer.reported_time_max_millis";
 pub(crate) const SKIP_TIME_MILLIS_KEY: &str = "answer.skip_reported_time_millis";
+pub(crate) const ANSWER_INSTANT_TIMEOUT_SECONDS_KEY: &str = "answer.instant_timeout_seconds";
+pub(crate) const ANSWER_INSTANT_FALLBACK_GRACE_SECONDS_KEY: &str = "answer.instant_fallback_grace_seconds";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CidarenRuntimeSettings {
@@ -23,6 +25,8 @@ pub struct CidarenRuntimeSettings {
     pub(crate) answer_time_min_millis: u64,
     pub(crate) answer_time_max_millis: u64,
     pub(crate) skip_time_millis: u64,
+    pub(crate) instant_timeout_seconds: u64,
+    pub(crate) instant_fallback_grace_seconds: u64,
 }
 
 impl CidarenRuntimeSettings {
@@ -42,6 +46,11 @@ impl CidarenRuntimeSettings {
             answer_time_min_millis: integer(settings, ANSWER_TIME_MIN_MILLIS_KEY)?,
             answer_time_max_millis: integer(settings, ANSWER_TIME_MAX_MILLIS_KEY)?,
             skip_time_millis: integer(settings, SKIP_TIME_MILLIS_KEY)?,
+            instant_timeout_seconds: duration(settings, ANSWER_INSTANT_TIMEOUT_SECONDS_KEY)?,
+            instant_fallback_grace_seconds: duration(
+                settings,
+                ANSWER_INSTANT_FALLBACK_GRACE_SECONDS_KEY,
+            )?,
         };
         if resolved.answer_delay_min_seconds > resolved.answer_delay_max_seconds
             || resolved.answer_time_min_millis > resolved.answer_time_max_millis
@@ -89,6 +98,19 @@ impl CidarenRuntimeSettings {
     /// Returns the donor-observed fixed reported duration for `SkipAnswer`.
     pub const fn skip_reported_time_millis(&self) -> u64 {
         self.skip_time_millis
+    }
+
+    /// Budget for the first, low-latency Instant answer request. The Core/API
+    /// owns the actual model call; the Provider setting keeps the budget
+    /// frozen with the Cidaren execution rather than hiding it in a worker.
+    pub const fn instant_timeout_seconds(&self) -> u64 {
+        self.instant_timeout_seconds
+    }
+
+    /// Grace period reserved for the bounded fallback decision before a
+    /// timed question is marked unresolved.
+    pub const fn instant_fallback_grace_seconds(&self) -> u64 {
+        self.instant_fallback_grace_seconds
     }
 }
 
@@ -242,6 +264,32 @@ fn answer_definitions(
                 step: 500,
             },
             default: ProviderSettingValue::Integer(20_000),
+            scopes: provider_account_task.clone(),
+            core_behavior: None,
+        },
+        ProviderSettingDefinition {
+            key: ANSWER_INSTANT_TIMEOUT_SECONDS_KEY.to_owned(),
+            display_name: "限时题 Instant 超时".to_owned(),
+            description: "Cidaren 限时题首个低延迟模型请求的冻结预算；超时后进入受限兜底判断。".to_owned(),
+            kind: ProviderSettingKind::DurationSeconds {
+                minimum: 1,
+                maximum: 30,
+                step: 1,
+            },
+            default: ProviderSettingValue::DurationSeconds(8),
+            scopes: provider_account_task.clone(),
+            core_behavior: None,
+        },
+        ProviderSettingDefinition {
+            key: ANSWER_INSTANT_FALLBACK_GRACE_SECONDS_KEY.to_owned(),
+            display_name: "限时题兜底等待".to_owned(),
+            description: "Instant 请求超时后的额外有限等待；为零表示立即使用已有候选或失败。".to_owned(),
+            kind: ProviderSettingKind::DurationSeconds {
+                minimum: 0,
+                maximum: 10,
+                step: 1,
+            },
+            default: ProviderSettingValue::DurationSeconds(2),
             scopes: provider_account_task,
             core_behavior: None,
         },
@@ -312,8 +360,12 @@ mod tests {
                 answer_time_min_millis: 5_000,
                 answer_time_max_millis: 10_000,
                 skip_time_millis: 20_000,
+                instant_timeout_seconds: 8,
+                instant_fallback_grace_seconds: 2,
             }
         );
+        assert_eq!(task_settings.instant_timeout_seconds(), 8);
+        assert_eq!(task_settings.instant_fallback_grace_seconds(), 2);
         assert!((2..=4).contains(&task_settings.answer_delay_seconds(b"synthetic-step")));
         assert!((1..=2).contains(&task_settings.verified_advance_delay_seconds(b"synthetic-step")));
         assert!((1..=3).contains(&task_settings.reading_advance_delay_seconds(b"synthetic-step")));

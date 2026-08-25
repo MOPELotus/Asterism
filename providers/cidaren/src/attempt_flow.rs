@@ -3900,6 +3900,8 @@ mod tests {
             answer_time_min_millis: 2_500,
             answer_time_max_millis: 7_500,
             skip_time_millis: 20_000,
+            instant_timeout_seconds: 8,
+            instant_fallback_grace_seconds: 2,
         }
     }
 
