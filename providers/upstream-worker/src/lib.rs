@@ -187,8 +187,10 @@ impl UpstreamWorkerProvider {
             capabilities.insert(ProviderCapability::QuestionInventory);
             capabilities.insert(ProviderCapability::QuestionParse);
         }
-        if provider_id.as_str() == "chaoxing" {
+        if matches!(provider_id.as_str(), "chaoxing" | "cidaren") {
             capabilities.insert(ProviderCapability::AnswerResolve);
+        }
+        if provider_id.as_str() == "chaoxing" {
             capabilities.insert(ProviderCapability::AnswerHistoryHarvest);
         }
         if supports_execution {
@@ -264,7 +266,7 @@ impl UpstreamWorkerProvider {
                 .then(|| provider.clone() as Arc<dyn QuestionInventoryCapability>),
             question_parse: supports_questions
                 .then(|| provider.clone() as Arc<dyn QuestionParseCapability>),
-            answer_resolve: (provider.metadata.id.as_str() == "chaoxing")
+            answer_resolve: matches!(provider.metadata.id.as_str(), "chaoxing" | "cidaren")
                 .then(|| provider.clone() as Arc<dyn AnswerResolveCapability>),
             submission_build: None,
             submission_execute: None,
@@ -875,7 +877,7 @@ impl UpstreamWorkerProvider {
                         TaskCapability::QuestionInventory,
                         TaskCapability::QuestionParse,
                     ]);
-                    if self.metadata.id.as_str() == "chaoxing" {
+                    if matches!(self.metadata.id.as_str(), "chaoxing" | "cidaren") {
                         capabilities.push(TaskCapability::AnswerResolve);
                     }
                 }
