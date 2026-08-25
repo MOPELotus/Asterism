@@ -16,7 +16,8 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use sqlx::{Row, sqlite::SqliteRow};
 
 use crate::{ApiError, ApiState, auth::AuthContext};
@@ -188,20 +189,17 @@ pub(super) async fn configure_course_automation(
             "course automation request is invalid",
         )
     })?;
-    if let Some(Some(profile)) = request.ai_profile.as_ref()
-        && !matches!(profile.as_str(), "economy" | "gpt_only")
-    {
-        return Err(ApiError::bad_request(
-            "invalid_ai_profile",
-            "AI profile must be economy or gpt_only",
-        ));
-    }
+    let ai_profile = match request.ai_profile {
+        AiProfilePatch::Unchanged => None,
+        AiProfilePatch::Clear => Some(None),
+        AiProfilePatch::Set(profile) => Some(Some(profile)),
+    };
     let result = SqliteCourseAutomationPlanRepository::new(state.database)
         .write_course_automation_plan(CourseAutomationPlanWriteRequest {
             owner_user_id: owner_id,
             course_id,
             enabled: request.enabled,
-            ai_profile: request.ai_profile,
+            ai_profile,
             updated_at: chrono::Utc::now(),
         })
         .await
@@ -220,7 +218,32 @@ pub(super) struct ConfigureCourseAutomationRequest {
     enabled: bool,
     /// Omitted keeps the current override; explicit null clears it.
     #[serde(default)]
-    ai_profile: Option<Option<String>>,
+    ai_profile: AiProfilePatch,
+}
+
+#[derive(Clone, Debug, Default)]
+enum AiProfilePatch {
+    #[default]
+    Unchanged,
+    Clear,
+    Set(String),
+}
+
+impl<'de> Deserialize<'de> for AiProfilePatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Value::deserialize(deserializer)? {
+            Value::Null => Ok(Self::Clear),
+            Value::String(profile) if matches!(profile.as_str(), "economy" | "gpt_only") => {
+                Ok(Self::Set(profile))
+            }
+            _ => Err(serde::de::Error::custom(
+                "AI profile must be economy, gpt_only, or null",
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
