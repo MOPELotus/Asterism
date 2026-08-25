@@ -48,6 +48,16 @@ pub(super) async fn put_ai_config(
     config
         .validate()
         .map_err(|error| ApiError::bad_request("invalid_ai_config", error.to_string()))?;
+    let encoded = serde_json::to_string(&config).map_err(ApiError::internal)?;
+    sqlx::query(
+        "INSERT INTO deployment_ai_config (singleton, config_json, updated_at) VALUES (1, ?, ?) \
+         ON CONFLICT(singleton) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at",
+    )
+    .bind(encoded)
+    .bind(Utc::now())
+    .execute(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
     state.replace_ai_config(config.clone()).await;
     Ok(crate::auth::no_store(Json(config).into_response()))
 }

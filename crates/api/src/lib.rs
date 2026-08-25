@@ -38,6 +38,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sqlx::Row;
 use tokio::sync::{RwLock, watch};
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -124,6 +125,28 @@ impl ApiState {
 
     pub(crate) async fn replace_ai_config(&self, ai: AiConfig) {
         *self.ai.write().await = ai;
+    }
+
+    /// Loads the last administrator-saved AI configuration after migrations.
+    pub async fn hydrate_ai_config(&self) -> Result<(), asterism_storage::StorageError> {
+        let row = sqlx::query("SELECT config_json FROM deployment_ai_config WHERE singleton = 1")
+            .fetch_optional(self.database.pool())
+            .await?;
+        if let Some(row) = row {
+            let encoded: String = row.try_get("config_json")?;
+            let config = serde_json::from_str::<AiConfig>(&encoded).map_err(|error| {
+                asterism_storage::StorageError::InvalidData(format!(
+                    "persisted AI configuration is invalid: {error}"
+                ))
+            })?;
+            config.validate().map_err(|error| {
+                asterism_storage::StorageError::InvalidData(format!(
+                    "persisted AI configuration is unsafe: {error}"
+                ))
+            })?;
+            self.replace_ai_config(config).await;
+        }
+        Ok(())
     }
 
     /// Adds one configured 0.0.1 upstream-backed Provider worker.

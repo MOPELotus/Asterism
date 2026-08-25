@@ -313,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
     .with_ai_config(config.ai.clone())
     .with_event_bus(events.clone())
     .with_stream_shutdown(shutdown_receiver.clone());
+    api_state.hydrate_ai_config().await?;
     if let Some(secret_store) = secret_store.clone() {
         api_state = api_state.with_secret_store(secret_store);
     }
