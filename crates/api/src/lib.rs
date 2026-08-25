@@ -7798,7 +7798,7 @@ mod tests {
         )
         .bind(asterism_domain::AuditRecordId::new().to_string())
         .bind("default-test-v1")
-        .bind(r#"{"default_amount":4,"reason":"catalog execution"}"#)
+        .bind(r#"{"default_amount":4,"fixed_markup":1,"percentage_markup_basis_points":500,"reason":"catalog execution"}"#)
         .bind(now)
         .bind(user_id)
         .bind(now)
@@ -7816,7 +7816,7 @@ mod tests {
                 .fetch_one(database.pool())
                 .await
                 .unwrap();
-        assert_eq!(amount, 4);
+        assert_eq!(amount, 6);
     }
 
     #[tokio::test]

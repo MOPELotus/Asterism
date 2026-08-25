@@ -1188,6 +1188,23 @@ async fn configured_billing(
                 .and_then(serde_json::Value::as_u64)
         })
         .unwrap_or(0);
+    let fixed_markup = catalog
+        .get("fixed_markup")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let percentage_basis_points = catalog
+        .get("percentage_markup_basis_points")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .min(100_000);
+    let percentage_markup = amount
+        .checked_mul(percentage_basis_points)
+        .map(|value| value.div_ceil(10_000))
+        .ok_or_else(|| ApiError::bad_request("invalid_pricing_catalog", "pricing markup overflows"))?;
+    let amount = amount
+        .checked_add(fixed_markup)
+        .and_then(|value| value.checked_add(percentage_markup))
+        .ok_or_else(|| ApiError::bad_request("invalid_pricing_catalog", "pricing amount overflows"))?;
     if amount == 0 {
         return Ok(None);
     }
