@@ -7995,6 +7995,7 @@ mod tests {
             provider_plan_artifact: None,
             invocation_draft_id: None,
             billing: Some(ExecutionBillingReservation { quote, reservation }),
+            ai_selection: None,
             runtime_settings: None,
             strict_completion_retry: None,
             score_improvement_retake: None,
