@@ -65,6 +65,10 @@ pub struct SchedulePolicy {
     pub grace_period_seconds: Option<u64>,
     pub quiet_hours_start: Option<String>,
     pub quiet_hours_end: Option<String>,
+    /// Optional per-course AI profile override for scheduler-created work.
+    /// Missing values inherit the deployment administrator default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_profile: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

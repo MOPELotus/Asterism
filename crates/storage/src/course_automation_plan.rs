@@ -101,12 +101,16 @@ impl CourseAutomationPlanRepository for SqliteCourseAutomationPlanRepository {
                 ));
             }
             current.status = status;
+            if let Some(profile) = request.ai_profile.clone() {
+                current.schedule_policy.ai_profile = profile;
+            }
             current.updated_at = request.updated_at;
             sqlx::query(
-                "UPDATE automation_plans SET status = ?, updated_at = ? \
+                "UPDATE automation_plans SET status = ?, schedule_policy_json = ?, updated_at = ? \
                  WHERE id = ? AND owner_user_id = ?",
             )
             .bind(encode_status(status))
+            .bind(serde_json::to_string(&current.schedule_policy)?)
             .bind(encode_timestamp(request.updated_at))
             .bind(current.id.to_string())
             .bind(request.owner_user_id.to_string())
@@ -130,6 +134,7 @@ impl CourseAutomationPlanRepository for SqliteCourseAutomationPlanRepository {
                     grace_period_seconds: None,
                     quiet_hours_start: None,
                     quiet_hours_end: None,
+                    ai_profile: request.ai_profile.clone().flatten(),
                 },
                 effective_from: request.updated_at,
                 expires_at: None,
@@ -378,6 +383,7 @@ mod tests {
                     owner_user_id: other_owner,
                     course_id,
                     enabled: true,
+                    ai_profile: None,
                     updated_at: now,
                 })
                 .await
@@ -390,6 +396,7 @@ mod tests {
                 owner_user_id: owner,
                 course_id,
                 enabled: false,
+                ai_profile: None,
                 updated_at: now,
             })
             .await
@@ -412,6 +419,7 @@ mod tests {
                 owner_user_id: owner,
                 course_id,
                 enabled: true,
+                ai_profile: Some(Some("gpt_only".to_owned())),
                 updated_at: later,
             })
             .await
@@ -422,6 +430,10 @@ mod tests {
         assert_eq!(active.id, paused.id);
         assert_eq!(active.created_at, paused.created_at);
         assert_eq!(active.status, AutomationPlanStatus::Active);
+        assert_eq!(
+            active.schedule_policy.ai_profile.as_deref(),
+            Some("gpt_only")
+        );
         assert!(
             repository
                 .find_owned_course_automation_plan(other_owner, course_id)
@@ -477,6 +489,7 @@ mod tests {
                 owner_user_id: owner,
                 course_id,
                 enabled: true,
+                ai_profile: None,
                 updated_at: now,
             })
             .await
@@ -486,6 +499,7 @@ mod tests {
                 owner_user_id: owner,
                 course_id,
                 enabled: false,
+                ai_profile: None,
                 updated_at: now - Duration::seconds(1),
             })
             .await

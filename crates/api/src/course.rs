@@ -188,11 +188,20 @@ pub(super) async fn configure_course_automation(
             "course automation request is invalid",
         )
     })?;
+    if let Some(Some(profile)) = request.ai_profile.as_ref()
+        && !matches!(profile.as_str(), "economy" | "gpt_only")
+    {
+        return Err(ApiError::bad_request(
+            "invalid_ai_profile",
+            "AI profile must be economy or gpt_only",
+        ));
+    }
     let result = SqliteCourseAutomationPlanRepository::new(state.database)
         .write_course_automation_plan(CourseAutomationPlanWriteRequest {
             owner_user_id: owner_id,
             course_id,
             enabled: request.enabled,
+            ai_profile: request.ai_profile,
             updated_at: chrono::Utc::now(),
         })
         .await
@@ -209,6 +218,9 @@ pub(super) async fn configure_course_automation(
 #[serde(deny_unknown_fields)]
 pub(super) struct ConfigureCourseAutomationRequest {
     enabled: bool,
+    /// Omitted keeps the current override; explicit null clears it.
+    #[serde(default)]
+    ai_profile: Option<Option<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -216,6 +228,7 @@ struct CourseAutomationResponse {
     enabled: bool,
     status: Option<AutomationPlanStatus>,
     updated_at: Option<Timestamp>,
+    ai_profile: Option<String>,
 }
 
 impl CourseAutomationResponse {
@@ -225,7 +238,8 @@ impl CourseAutomationResponse {
                 .as_ref()
                 .is_some_and(|plan| plan.status == AutomationPlanStatus::Active),
             status: plan.as_ref().map(|plan| plan.status),
-            updated_at: plan.map(|plan| plan.updated_at),
+            updated_at: plan.as_ref().map(|plan| plan.updated_at),
+            ai_profile: plan.and_then(|plan| plan.schedule_policy.ai_profile),
         }
     }
 }

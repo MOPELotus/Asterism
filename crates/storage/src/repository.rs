@@ -608,11 +608,14 @@ pub trait CourseProgressRepository: Send + Sync {
     ) -> Result<Option<CourseAggregateProgressRecord>, StorageError>;
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CourseAutomationPlanWriteRequest {
     pub owner_user_id: UserId,
     pub course_id: CourseId,
     pub enabled: bool,
+    /// `None` keeps an existing override; `Some(None)` clears it; `Some(Some(_))`
+    /// stores a per-course override.
+    pub ai_profile: Option<Option<String>>,
     pub updated_at: Timestamp,
 }
 

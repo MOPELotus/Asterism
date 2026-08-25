@@ -196,6 +196,7 @@ impl ApiState {
         task_id: asterism_domain::TaskId,
         idempotency_key: &str,
         correlation_id: &str,
+        ai_profile_override: Option<&str>,
     ) -> Result<asterism_domain::ExecutionId, String> {
         ai::schedule_automatic_uai_discussion(
             self,
@@ -203,6 +204,7 @@ impl ApiState {
             task_id,
             idempotency_key,
             correlation_id,
+            ai_profile_override,
         )
         .await
         .map_err(|error| error.code.to_owned())
@@ -1770,7 +1772,8 @@ pub fn openapi_document() -> Value {
             json!({
                 "type": "object",
                 "description": "Deployment-local AI routes and endpoint metadata; API keys are environment-only.",
-                "required": ["remote_store", "gpt_router", "deepseek", "kimi", "economy", "gpt_only"],
+                "required": ["remote_store", "default_profile", "gpt_router", "deepseek", "kimi", "economy", "gpt_only"],
+                "properties": {"default_profile": {"type": "string", "enum": ["economy", "gpt_only"], "default": "economy"}},
                 "additionalProperties": true
             }),
         );
@@ -2946,15 +2949,15 @@ fn course_automation_path() -> Value {
             "description": "Reads whether the owner opted this Course into automatic execution after patrol.",
             "security": [{"cookieAuth": []}, {"bearerAuth": []}],
             "parameters": [{"name": "course_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-            "responses": {"200": {"description": "Course automation policy; absent or paused means disabled", "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}, "status": {"type": ["string", "null"], "enum": ["draft", "active", "paused", "expired", "cancelled", null]}, "updated_at": {"type": ["string", "null"], "format": "date-time"}}}}}}, "401": {"description": "Authentication required"}, "403": {"description": "Task read permission is required"}, "404": {"description": "Course not found"}}
+            "responses": {"200": {"description": "Course automation policy; absent or paused means disabled", "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}, "status": {"type": ["string", "null"], "enum": ["draft", "active", "paused", "expired", "cancelled", null]}, "updated_at": {"type": ["string", "null"], "format": "date-time"}, "ai_profile": {"type": ["string", "null"], "enum": ["economy", "gpt_only", null]}}}}}}, "401": {"description": "Authentication required"}, "403": {"description": "Task read permission is required"}, "404": {"description": "Course not found"}}
         },
         "put": {
             "operationId": "configureCourseAutomation",
             "description": "Explicitly enables or disables automatic execution for this Course. Default is disabled.",
             "security": [{"cookieAuth": []}, {"bearerAuth": []}],
             "parameters": [{"name": "course_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-            "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}, "additionalProperties": false}}}},
-            "responses": {"200": {"description": "Course automation policy updated", "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}, "status": {"type": ["string", "null"], "enum": ["draft", "active", "paused", "expired", "cancelled", null]}, "updated_at": {"type": ["string", "null"], "format": "date-time"}}}}}}, "400": {"description": "Invalid Course ID or request"}, "401": {"description": "Authentication required"}, "403": {"description": "Task read permission is required"}, "404": {"description": "Course not found"}}
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}, "ai_profile": {"type": ["string", "null"], "enum": ["economy", "gpt_only", null], "description": "Optional per-course override; null inherits the deployment default."}}, "additionalProperties": false}}}},
+            "responses": {"200": {"description": "Course automation policy updated", "content": {"application/json": {"schema": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}, "status": {"type": ["string", "null"], "enum": ["draft", "active", "paused", "expired", "cancelled", null]}, "updated_at": {"type": ["string", "null"], "format": "date-time"}, "ai_profile": {"type": ["string", "null"], "enum": ["economy", "gpt_only", null]}}}}}}, "400": {"description": "Invalid Course ID or request"}, "401": {"description": "Authentication required"}, "403": {"description": "Task read permission is required"}, "404": {"description": "Course not found"}}
         }
     })
 }
@@ -6175,13 +6178,15 @@ mod tests {
                 Request::put(&automation_path)
                     .header(header::COOKIE, &cookie)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"enabled":true}"#))
+                    .body(Body::from(r#"{"enabled":true,"ai_profile":"gpt_only"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(automation.status(), StatusCode::OK);
-        assert_eq!(response_json(automation).await["enabled"], true);
+        let automation_json = response_json(automation).await;
+        assert_eq!(automation_json["enabled"], true);
+        assert_eq!(automation_json["ai_profile"], "gpt_only");
 
         let foreign = app
             .oneshot(

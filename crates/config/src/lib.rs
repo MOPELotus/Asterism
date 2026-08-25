@@ -129,6 +129,10 @@ impl Config {
 #[serde(default, deny_unknown_fields)]
 pub struct AiConfig {
     pub remote_store: bool,
+    /// Deployment default used by scheduler-created AI work. Individual
+    /// executions may still freeze an explicit profile override.
+    #[serde(default = "default_ai_profile")]
+    pub default_profile: String,
     #[serde(default = "default_gpt_router_endpoint")]
     pub gpt_router: AiEndpointConfig,
     #[serde(default = "default_deepseek_endpoint")]
@@ -145,6 +149,7 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             remote_store: false,
+            default_profile: default_ai_profile(),
             gpt_router: default_gpt_router_endpoint(),
             deepseek: default_deepseek_endpoint(),
             kimi: default_kimi_endpoint(),
@@ -152,6 +157,10 @@ impl Default for AiConfig {
             gpt_only: AiProfileConfig::gpt_only(),
         }
     }
+}
+
+fn default_ai_profile() -> String {
+    "economy".to_owned()
 }
 
 fn default_gpt_router_endpoint() -> AiEndpointConfig {
@@ -184,6 +193,11 @@ impl AiConfig {
     /// API keys are never part of this value; only endpoint names, model
     /// routing and environment-variable names are accepted.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if !matches!(self.default_profile.as_str(), "economy" | "gpt_only") {
+            return Err(ConfigError::Validation(
+                "ai.default_profile must be economy or gpt_only".to_owned(),
+            ));
+        }
         for (name, endpoint) in [
             ("gpt_router", &self.gpt_router),
             ("deepseek", &self.deepseek),
@@ -1052,6 +1066,18 @@ enable_development_cidaren = false
         };
         assert!(matches!(
             unsafe_scheduler.validate(),
+            Err(ConfigError::Validation(_))
+        ));
+
+        let invalid_ai_profile = Config {
+            ai: AiConfig {
+                default_profile: "unknown".to_owned(),
+                ..AiConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(matches!(
+            invalid_ai_profile.validate(),
             Err(ConfigError::Validation(_))
         ));
     }

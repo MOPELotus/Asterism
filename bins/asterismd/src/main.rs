@@ -1449,6 +1449,7 @@ async fn run_course_automation_tick(
                             task.id,
                             &idempotency_key,
                             &correlation_id,
+                            plan.schedule_policy.ai_profile.as_deref(),
                         )
                         .await
                     {

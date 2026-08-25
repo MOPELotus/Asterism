@@ -1325,6 +1325,7 @@ pub(crate) async fn schedule_automatic_uai_discussion(
     task_id: TaskId,
     idempotency_key: &str,
     correlation_id: &str,
+    ai_profile_override: Option<&str>,
 ) -> Result<ExecutionId, ApiError> {
     let detail = ProviderTaskDetailService::new(
         state.providers.clone(),
@@ -1360,11 +1361,20 @@ pub(crate) async fn schedule_automatic_uai_discussion(
         "discussion_context": detail.detail.normalized_detail,
     }))
     .map_err(ApiError::internal)?;
-    let client = AiAnswerClient::new(
-        state.ai_config().await,
-        AiAnswerProfile::Economy,
-        AiAnswerRoute::Untimed,
-    )?;
+    let ai_config = state.ai_config().await;
+    let profile_name = ai_profile_override
+        .filter(|value| matches!(*value, "economy" | "gpt_only"))
+        .or_else(|| {
+            matches!(ai_config.default_profile.as_str(), "economy" | "gpt_only")
+                .then_some(ai_config.default_profile.as_str())
+        })
+        .unwrap_or("economy")
+        .to_owned();
+    let profile = match profile_name.as_str() {
+        "gpt_only" => AiAnswerProfile::GptOnly,
+        _ => AiAnswerProfile::Economy,
+    };
+    let client = AiAnswerClient::new(ai_config, profile, AiAnswerRoute::Untimed)?;
     let (generated_text, usage) = match client.plain_text(&prompt).await {
         Ok(value) => value,
         Err(error) => {
@@ -1438,7 +1448,7 @@ pub(crate) async fn schedule_automatic_uai_discussion(
             score_improvement_retake: None,
             billing,
             ai_selection: Some(ExecutionAiSelectionInput {
-                profile: "economy".to_owned(),
+                profile: profile_name,
                 route: "untimed".to_owned(),
             }),
             request_source: RequestSource::Scheduler,
