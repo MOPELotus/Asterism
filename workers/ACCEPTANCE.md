@@ -9,6 +9,7 @@ Run from the repository root:
 
 ```powershell
 py -3.14 workers/run_tests.py
+python workers/deployment_acceptance.py
 ```
 
 The standard-library runner loads each provider's existing `unittest` suite by
@@ -30,11 +31,12 @@ provider protocol regression.
 - Chaoxing: a real authenticated account must complete a read-only scan after
   the current `provider_unavailable` dead-letter cursor resumes; no submission
   is required for this acceptance.
-- WELearn/UAI: real account read-only course/task and completion-rate/duration
-  probes remain deployment validation; the donor paths are fixture-covered.
-- Cidaren: real WeChat OAuth callback and a read-only Unit/class-task probe
-  remain deployment validation. Class-task probing must explicitly authorize
-  the donor's attempt-starting first-question read.
+- WELearn/UAI: real account read-only course/task inventories are present in the
+  deployment database; completion-rate and duration mutation probes remain
+  optional live validation because the audited donor paths are fixture-covered.
+- Cidaren: real WeChat OAuth and read-only Unit/class-task inventory are present.
+  Timed Instant mutation remains live validation. Any future first-question
+  probe must explicitly authorize the donor's attempt-starting read.
 - AI: real endpoint calls remain optional deployment validation; all request
   shapes, fallback, cache, usage and billing behavior are locally covered.
 

@@ -15,6 +15,11 @@ from live account evidence and is safe to keep in the repository.
 - Yunzai plugin: `npm test` 10/10 and `npm run check` green.
 - WebUI production build/typecheck and the major route/mobile/error-state pass
   are complete.
+- `python workers/deployment_acceptance.py` emits only aggregate, credential-free
+  health and inventory facts. The current deployment proves all four stored
+  accounts authenticated and records these live read-only inventories:
+  Chaoxing 17 courses / 5,330 tasks, Cidaren 2 / 31, UAI 2 / 1,250 and WELearn
+  4 / 1,594. No course title, question, answer or native payload is selected.
 - QQ formal notifications: deadline-before confirmation and deadline-missed
   draft-preserved stages are persisted, claim/report scoped, idempotent and
   retryable.
@@ -27,10 +32,12 @@ from live account evidence and is safe to keep in the repository.
 - Chaoxing: resume the existing conservative full-scan cursor after its
   `provider_unavailable` dead-letter and validate CAPTCHA/Exam verification,
   challenge unlock and observed long-tail question families.
-- WELearn/UAI: read-only account probes for course/task inventory and their
-  separate completion/duration paths.
-- Cidaren: WeChat OAuth callback and read-only Unit/class-task probe, including
-  timed Instant route observation.
+- WELearn/UAI: read-only account/course/task inventory is deployment-validated;
+  a real mutation probe of their separate completion/duration paths remains
+  optional because the accepted upstream behavior and local wire fixtures are
+  the 0.0.1 usability evidence.
+- Cidaren: WeChat OAuth and read-only Unit/class-task inventory are
+  deployment-validated; timed Instant mutation/fallback observation remains.
 - AI/pricing: optional real endpoint call and a deployment-local fee settlement
   check after administrators configure endpoints/rates.
 - Yunzai: one real target instance/group message send and delivery report.
@@ -38,4 +45,3 @@ from live account evidence and is safe to keep in the repository.
 These are environment/account checks, not unimplemented control-plane
 features. No live validation report may include titles, questions, answers,
 cookies, JWTs, tokens or native payloads.
-
