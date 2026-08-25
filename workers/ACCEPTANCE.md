@@ -12,7 +12,11 @@ py -3.14 workers/run_tests.py
 ```
 
 The standard-library runner loads each provider's existing `unittest` suite by
-path and does not import donor credentials. The current baseline is 40 tests:
+path and does not import donor credentials. The current baseline is 42 tests
+when the declared Chaoxing parser dependencies are installed. If
+`beautifulsoup4`/`lxml` are absent, only the rich-HTML parser cases fail with
+an explicit dependency error; classify that as an environment gap, not a
+provider protocol regression.
 
 | Provider | Fixture scope | Live account required |
 |---|---|---:|
