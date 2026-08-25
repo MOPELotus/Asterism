@@ -134,6 +134,47 @@ pub(super) async fn list_ai_usage(
     ))
 }
 
+pub(super) async fn list_answer_bank_usage(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    query: Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    require_system_authority(auth.require_provider_settings_manage()?)?;
+    let (limit, offset) = parse_page(query)?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM answer_bank_usage_records")
+        .fetch_one(state.database.pool())
+        .await
+        .map_err(ApiError::internal)?;
+    let rows = sqlx::query(
+        "SELECT id, owner_user_id, task_id, source, hit_count, charged_amount, settlement_status, created_at \
+         FROM answer_bank_usage_records ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+    )
+    .bind(i64::from(limit))
+    .bind(i64::try_from(offset).map_err(ApiError::internal)?)
+    .fetch_all(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "id": row.try_get::<String, _>("id").unwrap_or_default(),
+                "owner_user_id": row.try_get::<String, _>("owner_user_id").unwrap_or_default(),
+                "task_id": row.try_get::<Option<String>, _>("task_id").unwrap_or(None),
+                "source": row.try_get::<String, _>("source").unwrap_or_default(),
+                "hit_count": row.try_get::<i64, _>("hit_count").unwrap_or_default(),
+                "charged_amount": row.try_get::<i64, _>("charged_amount").unwrap_or_default(),
+                "settlement_status": row.try_get::<String, _>("settlement_status").unwrap_or_default(),
+                "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(crate::auth::no_store(
+        Json(serde_json::json!({"items": items, "total": total, "limit": limit, "offset": offset}))
+            .into_response(),
+    ))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PricingCatalogRequest {

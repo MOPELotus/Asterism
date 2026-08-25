@@ -9,6 +9,7 @@ const endpoint = "/api/v1/admin/ai-config";
 export function AiConfigPage() {
   const [value, setValue] = useState("");
   const [usage, setUsage] = useState<Array<Record<string, unknown>>>([]);
+  const [bankUsage, setBankUsage] = useState<Array<Record<string, unknown>>>([]);
   const [status, setStatus] = useState<string>();
   const [loading, setLoading] = useState(true);
 
@@ -24,6 +25,10 @@ export function AiConfigPage() {
       .then(async (response) => response.ok ? (await response.json()).items as Array<Record<string, unknown>> : [])
       .then(setUsage)
       .catch(() => setUsage([]));
+    void fetch("/api/v1/admin/answer-bank-usage?limit=20&offset=0", { credentials: "same-origin" })
+      .then(async (response) => response.ok ? (await response.json()).items as Array<Record<string, unknown>> : [])
+      .then(setBankUsage)
+      .catch(() => setBankUsage([]));
   }, []);
 
   async function save() {
@@ -57,8 +62,12 @@ export function AiConfigPage() {
       <Button onClick={() => void save()} disabled={loading || !value.trim()}>保存配置</Button>
     </CardContent></Card>
     <Card><CardHeader><CardTitle>最近 AI 用量（脱敏）</CardTitle></CardHeader><CardContent>
-      <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b"><th className="p-2">时间</th><th className="p-2">模型</th><th className="p-2">组合</th><th className="p-2">输入字符</th><th className="p-2">输出字符</th><th className="p-2">结果</th></tr></thead><tbody>{usage.map((row) => <tr className="border-b" key={String(row.id)}><td className="p-2 whitespace-nowrap">{String(row.created_at ?? "—")}</td><td className="p-2">{String(row.model ?? "—")}</td><td className="p-2">{String(row.profile ?? "—")}</td><td className="p-2">{String(row.input_chars ?? "—")}</td><td className="p-2">{String(row.output_chars ?? "—")}</td><td className="p-2">{String(row.outcome ?? "—")}</td></tr>)}</tbody></table></div>
+      <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b"><th className="p-2">时间</th><th className="p-2">模型</th><th className="p-2">组合</th><th className="p-2">输入字符</th><th className="p-2">输出字符</th><th className="p-2">成本</th><th className="p-2">结算</th><th className="p-2">结果</th></tr></thead><tbody>{usage.map((row) => <tr className="border-b" key={String(row.id)}><td className="p-2 whitespace-nowrap">{String(row.created_at ?? "—")}</td><td className="p-2">{String(row.model ?? "—")}</td><td className="p-2">{String(row.profile ?? "—")}</td><td className="p-2">{String(row.input_chars ?? "—")}</td><td className="p-2">{String(row.output_chars ?? "—")}</td><td className="p-2">{String(row.estimated_cost ?? 0)}</td><td className="p-2">{String(row.settlement_status ?? "—")}</td><td className="p-2">{String(row.outcome ?? "—")}</td></tr>)}</tbody></table></div>
       {usage.length === 0 ? <p className="mt-3 text-sm text-muted-foreground">暂无 AI 用量记录。</p> : null}
+    </CardContent></Card>
+    <Card><CardHeader><CardTitle>最近答案库命中</CardTitle></CardHeader><CardContent>
+      <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b"><th className="p-2">时间</th><th className="p-2">来源</th><th className="p-2">用户</th><th className="p-2">命中</th><th className="p-2">扣点</th><th className="p-2">结算</th></tr></thead><tbody>{bankUsage.map((row) => <tr className="border-b" key={String(row.id)}><td className="p-2 whitespace-nowrap">{String(row.created_at ?? "—")}</td><td className="p-2">{String(row.source ?? "—")}</td><td className="p-2 font-mono text-xs">{String(row.owner_user_id ?? "—")}</td><td className="p-2">{String(row.hit_count ?? 0)}</td><td className="p-2">{String(row.charged_amount ?? 0)}</td><td className="p-2">{String(row.settlement_status ?? "—")}</td></tr>)}</tbody></table></div>
+      {bankUsage.length === 0 ? <p className="mt-3 text-sm text-muted-foreground">暂无答案库命中记录。</p> : null}
     </CardContent></Card>
   </div>;
 }

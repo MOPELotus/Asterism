@@ -295,6 +295,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(admin::list_ai_usage),
         )
         .route(
+            "/api/v1/admin/answer-bank-usage",
+            get(admin::list_answer_bank_usage),
+        )
+        .route(
             "/api/v1/admin/pricing-catalog",
             get(admin::get_pricing_catalog).put(admin::put_pricing_catalog),
         )
@@ -1544,6 +1548,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/admin/answer-bank-usage".to_owned(),
+            admin_answer_bank_usage_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/admin/pricing-catalog".to_owned(),
             admin_pricing_catalog_path(),
         );
@@ -2103,6 +2114,21 @@ fn admin_ai_usage_path() -> Value {
         "parameters": admin_page_parameters(),
         "responses": {
             "200": {"description": "Paginated local AI usage metadata", "content": {"application/json": {"schema": {"type": "object", "required": ["items", "total", "limit", "offset"], "properties": {"items": {"type": "array", "items": {"type": "object"}}, "total": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}, "offset": {"type": "integer", "minimum": 0}}}}}},
+            "400": {"description": "Invalid pagination"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "ManageSystem permission required"}
+        }
+    }})
+}
+
+fn admin_answer_bank_usage_path() -> Value {
+    json!({"get": {
+        "operationId": "listAdminAnswerBankUsage",
+        "description": "Lists deployment-local answer-bank/cache hit usage and sanitized settlement metadata.",
+        "security": [{"cookieAuth": []}],
+        "parameters": admin_page_parameters(),
+        "responses": {
+            "200": {"description": "Paginated answer-bank usage metadata", "content": {"application/json": {"schema": {"type": "object", "required": ["items", "total", "limit", "offset"], "properties": {"items": {"type": "array", "items": {"type": "object"}}, "total": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}, "offset": {"type": "integer", "minimum": 0}}}}}},
             "400": {"description": "Invalid pagination"},
             "401": {"description": "Authentication required"},
             "403": {"description": "ManageSystem permission required"}
