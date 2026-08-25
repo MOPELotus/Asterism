@@ -141,7 +141,12 @@ pub(super) async fn claim_qq_formal_notifications(
     let now = Utc::now();
     let window_end = now + Duration::hours(24);
     let stale_claim = now - Duration::minutes(5);
-    let mut transaction = state.database.pool().begin().await.map_err(ApiError::internal)?;
+    let mut transaction = state
+        .database
+        .pool()
+        .begin()
+        .await
+        .map_err(ApiError::internal)?;
     sqlx::query(
         "UPDATE qq_formal_notification_deliveries \
          SET state = 'retry', next_attempt_at = ?, updated_at = ? \
@@ -174,8 +179,14 @@ pub(super) async fn claim_qq_formal_notifications(
              VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
         )
         .bind(uuid::Uuid::now_v7().to_string())
-        .bind(row.try_get::<String, _>("task_id").map_err(ApiError::internal)?)
-        .bind(row.try_get::<String, _>("user_id").map_err(ApiError::internal)?)
+        .bind(
+            row.try_get::<String, _>("task_id")
+                .map_err(ApiError::internal)?,
+        )
+        .bind(
+            row.try_get::<String, _>("user_id")
+                .map_err(ApiError::internal)?,
+        )
         .bind(row.try_get::<i64, _>("qq").map_err(ApiError::internal)?)
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
@@ -212,11 +223,15 @@ pub(super) async fn claim_qq_formal_notifications(
         if updated.rows_affected() == 1 {
             claimed.push((
                 id,
-                row.try_get::<String, _>("user_id").map_err(ApiError::internal)?,
+                row.try_get::<String, _>("user_id")
+                    .map_err(ApiError::internal)?,
                 row.try_get::<i64, _>("qq").map_err(ApiError::internal)?,
-                row.try_get::<String, _>("task_id").map_err(ApiError::internal)?,
-                row.try_get::<String, _>("title").map_err(ApiError::internal)?,
-                row.try_get::<String, _>("closes_at").map_err(ApiError::internal)?,
+                row.try_get::<String, _>("task_id")
+                    .map_err(ApiError::internal)?,
+                row.try_get::<String, _>("title")
+                    .map_err(ApiError::internal)?,
+                row.try_get::<String, _>("closes_at")
+                    .map_err(ApiError::internal)?,
             ));
         }
     }
@@ -234,11 +249,15 @@ pub(super) async fn claim_qq_formal_notifications(
             task_id,
             title: title.clone(),
             closes_at: closes_at.clone(),
-            message: format!("独立作业/考试“{title}”尚待提交前确认，截止时间 {closes_at}。截止后不会自动提交。"),
+            message: format!(
+                "独立作业/考试“{title}”尚待提交前确认，截止时间 {closes_at}。截止后不会自动提交。"
+            ),
             web_login_path,
         });
     }
-    Ok(crate::auth::no_store(Json(QqFormalNotificationPage { items }).into_response()))
+    Ok(crate::auth::no_store(
+        Json(QqFormalNotificationPage { items }).into_response(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,7 +281,10 @@ pub(super) async fn report_qq_formal_notifications(
 ) -> Result<Response, ApiError> {
     auth.require_notification_delivery()?;
     let report = payload.map(|Json(value)| value).map_err(|_| {
-        ApiError::bad_request("invalid_notification_report", "notification report body is invalid")
+        ApiError::bad_request(
+            "invalid_notification_report",
+            "notification report body is invalid",
+        )
     })?;
     if report.items.is_empty() || report.items.len() > 100 {
         return Err(ApiError::bad_request(
@@ -272,7 +294,12 @@ pub(super) async fn report_qq_formal_notifications(
     }
     let now = Utc::now();
     let retry_at = now + Duration::minutes(5);
-    let mut transaction = state.database.pool().begin().await.map_err(ApiError::internal)?;
+    let mut transaction = state
+        .database
+        .pool()
+        .begin()
+        .await
+        .map_err(ApiError::internal)?;
     for item in report.items {
         let error = item.error.as_deref().map(sanitize_delivery_error);
         let updated = if item.delivered {
@@ -309,7 +336,9 @@ pub(super) async fn report_qq_formal_notifications(
         }
     }
     transaction.commit().await.map_err(ApiError::internal)?;
-    Ok(crate::auth::no_store(axum::http::StatusCode::NO_CONTENT.into_response()))
+    Ok(crate::auth::no_store(
+        axum::http::StatusCode::NO_CONTENT.into_response(),
+    ))
 }
 
 async fn create_web_login_ticket(
@@ -319,7 +348,8 @@ async fn create_web_login_ticket(
     now: Timestamp,
 ) -> Result<(String, Timestamp), ApiError> {
     let return_to = validate_return_to(return_to)?;
-    let ticket_service = OpaqueTokenService::new("ast_qq_login").expect("fixed token prefix is valid");
+    let ticket_service =
+        OpaqueTokenService::new("ast_qq_login").expect("fixed token prefix is valid");
     let (ticket, ticket_digest) = ticket_service.generate();
     let expires_at = now + Duration::minutes(10);
     sqlx::query(
@@ -336,7 +366,10 @@ async fn create_web_login_ticket(
     .execute(state.database.pool())
     .await
     .map_err(ApiError::internal)?;
-    Ok((format!("/api/v1/auth/qq-login/{}", ticket.expose_secret()), expires_at))
+    Ok((
+        format!("/api/v1/auth/qq-login/{}", ticket.expose_secret()),
+        expires_at,
+    ))
 }
 
 fn sanitize_delivery_error(value: &str) -> String {
@@ -555,5 +588,12 @@ mod tests {
             assert!(validate_return_to(invalid).is_err(), "accepted {invalid:?}");
         }
         assert!(validate_return_to(&format!("/{}", "x".repeat(2048))).is_err());
+    }
+
+    #[test]
+    fn notification_delivery_errors_are_bounded_and_credential_free() {
+        let value = sanitize_delivery_error(" failed\nwith secret-like text ");
+        assert_eq!(value, "failedwith secret-like text");
+        assert!(sanitize_delivery_error(&"x".repeat(600)).len() <= 512);
     }
 }
