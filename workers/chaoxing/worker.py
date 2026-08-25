@@ -2180,6 +2180,16 @@ def run_course_homework(bot, module, payload, native, events, redactor):
     }
 
 
+def _is_challenge_point(point: Mapping[str, Any]) -> bool:
+    """Recognize donor challenge/locked-chain markers without assuming one field name."""
+    for key in ("challenge", "isChallenge", "challengeMode", "闯关", "挑战"):
+        value = point.get(key)
+        if value is True or str(value).strip().lower() in {"true", "1", "yes", "challenge", "闯关", "挑战"}:
+            return True
+    mode = str(point.get("mode") or point.get("taskMode") or "").strip().lower()
+    return mode in {"challenge", "challenge_mode", "闯关", "挑战"}
+
+
 def run_knowledge_point(bot, module, payload, native, events, redactor):
     """Keep the donor's public unit of work: one knowledge point."""
     course = dict(require_mapping(native.get("course"), "task.native.course"))
@@ -2196,6 +2206,10 @@ def run_knowledge_point(bot, module, payload, native, events, redactor):
     if not isinstance(children, list):
         raise WorkerFailure("request_invalid", "task.native.jobs must be an array")
     supplied_answers = _provided_answers(payload.get("answers"))
+    settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
+    challenge = _is_challenge_point(point)
+    challenge_attempts = int(settings.get("challenge_retry_attempts", 3)) if challenge else 1
+    challenge_attempts = max(1, min(3, challenge_attempts))
     processed = 0
     skipped_answer_jobs = 0
     skipped_unsupported_jobs = 0
@@ -2246,6 +2260,49 @@ def run_knowledge_point(bot, module, payload, native, events, redactor):
         ).get("points", [])
     fresh = next((row for row in fresh_points if str(row.get("id")) == str(point.get("id"))), None)
     verified = bool(fresh and fresh.get("has_finished"))
+    attempts_used = 1
+    # Challenge chains can remain locked when an answer was accepted locally
+    # but the platform has not yet unlocked the next node.  Re-run the same
+    # donor sequence a small, explicit number of times; never spin forever or
+    # retry ordinary knowledge points.  The Core/answer service can inspect the
+    # escalation marker and perform its single Sol xhigh fallback.
+    while challenge and not verified and attempts_used < challenge_attempts:
+        attempts_used += 1
+        events.emit("log", level="warning", message=(
+            f"Chaoxing challenge point not complete; bounded retry "
+            f"{attempts_used}/{challenge_attempts}"
+        ))
+        for fallback_index, child_value in enumerate(children):
+            child = require_mapping(child_value, "task.native.jobs item")
+            job = dict(require_mapping(child.get("job"), "task.native.jobs item.job"))
+            if job.get("_asterism_is_passed"):
+                continue
+            job_type = str(job.get("type", ""))
+            # Unlock failures are answer-gated. Never replay video, live,
+            # reading or document mutations merely because a challenge point
+            # remains incomplete.
+            if job_type != "workid":
+                continue
+            job_info = dict(require_mapping(child.get("job_info"), "task.native.jobs item.job_info"))
+            job_key = knowledge_job_key(job, int(child.get("job_index", fallback_index)))
+            child_answers = [
+                {"remote_id": remote_id[len(job_key) + 1:], "value": value}
+                for remote_id, value in supplied_answers.items()
+                if remote_id.startswith(f"{job_key}:")
+            ]
+            if not child_answers:
+                continue
+            child_payload = dict(payload)
+            child_payload["answers"] = child_answers
+            child_payload["task"] = {
+                "remote_id": require_mapping(payload.get("task"), "payload.task").get("remote_id"),
+                "native": {"course": course, "point": point, "job": job, "job_info": job_info},
+            }
+            run_task(module, child_payload, events, redactor)
+        with capture_output(events, redactor):
+            fresh_points = bot.get_course_point(course["courseId"], course["clazzId"], course["cpi"]).get("points", [])
+        fresh = next((row for row in fresh_points if str(row.get("id")) == str(point.get("id"))), None)
+        verified = bool(fresh and fresh.get("has_finished"))
     return {
         "remote_state": "completed" if verified else "in_progress",
         "verified": verified,
@@ -2255,6 +2312,10 @@ def run_knowledge_point(bot, module, payload, native, events, redactor):
             "skipped_answer_jobs": skipped_answer_jobs,
             "skipped_unsupported_jobs": skipped_unsupported_jobs,
             "fresh_completion_observed": verified,
+            "challenge_mode": challenge,
+            "challenge_attempts_used": attempts_used,
+            "challenge_escalation_requested": bool(challenge and not verified),
+            "challenge_escalation_route": str(settings.get("challenge_escalation_route") or "sol_xhigh") if challenge and not verified else None,
         },
         "session": {"cookies": cookies(module.SessionManager.get_session())},
     }

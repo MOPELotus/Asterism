@@ -2010,6 +2010,10 @@ impl UpstreamWorkerProvider {
                     .integer("worker.answer_threads").unwrap_or(1),
                 "other_threads": request.runtime_settings
                     .integer("worker.other_threads").unwrap_or(4),
+                "challenge_retry_attempts": request.runtime_settings
+                    .integer("worker.challenge_retry_attempts").unwrap_or(3),
+                "challenge_escalation_route": request.runtime_settings
+                    .choice("worker.challenge_escalation_route").unwrap_or("sol_xhigh"),
             }),
             TaskCapability::ResourceExecution if self.metadata.id.as_str() == "uai" => json!({
                 "cooldown_count": request.runtime_settings
@@ -2372,6 +2376,10 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
                     .integer("worker.answer_threads").unwrap_or(1),
                 "other_threads": request.runtime_settings
                     .integer("worker.other_threads").unwrap_or(4),
+                "challenge_retry_attempts": request.runtime_settings
+                    .integer("worker.challenge_retry_attempts").unwrap_or(3),
+                "challenge_escalation_route": request.runtime_settings
+                    .choice("worker.challenge_escalation_route").unwrap_or("sol_xhigh"),
             }),
             TaskCapability::ResourceExecution => json!({}),
             _ => unreachable!("capability was validated above"),
@@ -3391,6 +3399,38 @@ fn worker_runtime_settings_schema(
                 scopes,
                 core_behavior: None,
             },
+            ProviderSettingDefinition {
+                key: "worker.challenge_retry_attempts".to_owned(),
+                display_name: "Challenge retry attempts".to_owned(),
+                description: "Bounded retries for Chaoxing challenge-mode knowledge points before escalation.".to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: 3,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(3),
+                scopes: BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                    ProviderSettingScope::Task,
+                ]),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.challenge_escalation_route".to_owned(),
+                display_name: "Challenge escalation route".to_owned(),
+                description: "Route marker emitted after bounded challenge retries; the answer service may escalate once to Sol xhigh.".to_owned(),
+                kind: ProviderSettingKind::Choice {
+                    options: BTreeSet::from(["sol_xhigh".to_owned()]),
+                },
+                default: ProviderSettingValue::Choice("sol_xhigh".to_owned()),
+                scopes: BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                    ProviderSettingScope::Task,
+                ]),
+                core_behavior: None,
+            },
         ],
         "welearn" => vec![
             ProviderSettingDefinition {
@@ -4008,6 +4048,35 @@ mod tests {
                 maximum: 1_000,
                 step: 1,
             }
+        );
+    }
+
+    #[test]
+    fn chaoxing_runtime_schema_exposes_bounded_challenge_escalation() {
+        let provider = ProviderId::new("chaoxing").unwrap();
+        let schema = worker_runtime_settings_schema(&provider);
+        let retries = schema
+            .definitions
+            .iter()
+            .find(|definition| definition.key == "worker.challenge_retry_attempts")
+            .unwrap();
+        assert_eq!(retries.default, ProviderSettingValue::Integer(3));
+        assert_eq!(
+            retries.kind,
+            ProviderSettingKind::Integer {
+                minimum: 1,
+                maximum: 3,
+                step: 1,
+            }
+        );
+        let route = schema
+            .definitions
+            .iter()
+            .find(|definition| definition.key == "worker.challenge_escalation_route")
+            .unwrap();
+        assert_eq!(
+            route.default,
+            ProviderSettingValue::Choice("sol_xhigh".to_owned())
         );
     }
 

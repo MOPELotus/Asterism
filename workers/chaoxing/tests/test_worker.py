@@ -15,6 +15,11 @@ SPEC.loader.exec_module(WORKER)
 
 
 class WorkReadParamsTests(unittest.TestCase):
+    def test_challenge_marker_accepts_donor_variants(self):
+        self.assertTrue(WORKER._is_challenge_point({"need_unlock": True, "challengeMode": True}))
+        self.assertTrue(WORKER._is_challenge_point({"mode": "闯关"}))
+        self.assertFalse(WORKER._is_challenge_point({"mode": "普通"}))
+
     def test_inventory_keeps_one_selectable_task_per_knowledge_point(self):
         class Cookies:
             def get_dict(self):
