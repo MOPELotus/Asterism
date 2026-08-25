@@ -1994,7 +1994,7 @@ fn admin_ai_config_path() -> Value {
             "responses": {
                 "200": {"description": "Current local AI configuration", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AiConfig"}}}},
                 "401": {"description": "Authentication required"},
-                "403": {"description": "ManageUsers permission required"}
+                "403": {"description": "ManageSystem permission required"}
             }
         },
         "put": {
@@ -2006,7 +2006,7 @@ fn admin_ai_config_path() -> Value {
                 "200": {"description": "Updated local AI configuration", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AiConfig"}}}},
                 "400": {"description": "Invalid AI configuration"},
                 "401": {"description": "Authentication required"},
-                "403": {"description": "ManageUsers permission required"}
+                "403": {"description": "ManageSystem permission required"}
             }
         }
     })

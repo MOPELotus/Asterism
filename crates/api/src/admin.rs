@@ -30,7 +30,7 @@ pub(super) async fn get_ai_config(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Response, ApiError> {
-    auth.require_user_manage()?;
+    auth.require_provider_settings_manage()?;
     Ok(crate::auth::no_store(
         Json(state.ai_config().await).into_response(),
     ))
@@ -41,7 +41,7 @@ pub(super) async fn put_ai_config(
     Extension(auth): Extension<AuthContext>,
     payload: Result<Json<AiConfig>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    auth.require_user_manage()?;
+    auth.require_provider_settings_manage()?;
     let Json(config) = payload.map_err(|_| {
         ApiError::bad_request("invalid_ai_config", "AI configuration body is invalid")
     })?;
