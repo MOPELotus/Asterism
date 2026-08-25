@@ -4,7 +4,7 @@ import { Activity, Ban, CheckCircle2, Clock3, Copy, ExternalLink, EyeOff, FileQu
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { approveTask, cancelTask, createBrowserBridgeSession, delayTask, executeTask, getBrowserBridgeSession, getTask, getTaskCompletionWorkflows, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask, optInScoreImprovement, prepareExecutionInvocationDraft, scanProviderAccount } from "@/api/generated/sdk.gen.ts";
+import { approveTask, cancelTask, createBrowserBridgeSession, delayTask, executeTask, generateUaiDiscussionInvocationDraft, getBrowserBridgeSession, getTask, getTaskCompletionWorkflows, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask, optInScoreImprovement, prepareExecutionInvocationDraft, scanProviderAccount } from "@/api/generated/sdk.gen.ts";
 import type { BrowserBridgeCreateResponse, Task } from "@/api/generated/types.gen.ts";
 import { requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
@@ -23,6 +23,7 @@ const EXECUTABLE_CAPABILITIES = ["resource_execution", "submission_execute", "du
 type ExecutableCapability = (typeof EXECUTABLE_CAPABILITIES)[number];
 
 const UAI_DISCUSSION_INPUT_TYPE = "uai.discussion.reply-input.v1";
+const UAI_WORKER_DISCUSSION_INPUT_TYPE = "uai.worker.generated-text.v1";
 const UAI_ARTIFACT_INPUT_TYPE = "uai.artifact-upload.mp3-input.v1";
 const UAI_ORAL_INPUT_TYPE = "uai.compound-oral.authorization.v1";
 
@@ -38,6 +39,7 @@ export function TaskDetailPage() {
   const submissionDraftId = "";
   const [invocationDraftId, setInvocationDraftId] = useState("");
   const [discussionContent, setDiscussionContent] = useState("");
+  const [aiProfile, setAiProfile] = useState<"economy" | "gpt_only">("economy");
   const [artifactFile, setArtifactFile] = useState<File>();
   const [browserSession, setBrowserSession] = useState<BrowserBridgeCreateResponse>();
   const [formalAssessmentConfirmed, setFormalAssessmentConfirmed] = useState(false);
@@ -64,11 +66,11 @@ export function TaskDetailPage() {
   });
   useEffect(() => {
     if (!task.data || requestedCapabilities.length) return;
-    setRequestedCapabilities(recommendedExecutionCapabilities(task.data.capabilities));
+    setRequestedCapabilities(recommendedExecutionCapabilities(task.data));
   }, [requestedCapabilities.length, task.data]);
   const prepareInvocation = useMutation({
     mutationFn: async () => {
-      const input = await encodeUaiInvocationInput(requestedCapabilities, discussionContent, artifactFile);
+      const input = await encodeUaiInvocationInput(requestedCapabilities, discussionContent, artifactFile, task.data?.source_type === "discussion" && task.data.capabilities.includes("resource_execution"));
       return requireData(await prepareExecutionInvocationDraft({
         path: { task_id: taskId },
         headers: {
@@ -83,6 +85,18 @@ export function TaskDetailPage() {
     onSuccess: (draft) => {
       invocationKey.current = crypto.randomUUID();
       setInvocationDraftId(draft.draft_id);
+    },
+  });
+  const generateDiscussion = useMutation({
+    mutationFn: async () => requireData(await generateUaiDiscussionInvocationDraft({
+      path: { task_id: taskId },
+      headers: { "idempotency-key": invocationKey.current },
+      body: { profile: aiProfile },
+    })),
+    onSuccess: (draft) => {
+      invocationKey.current = crypto.randomUUID();
+      setDiscussionContent(draft.generated_text);
+      setInvocationDraftId(draft.invocation_draft_id);
     },
   });
   const createBridge = useMutation({
@@ -144,15 +158,16 @@ export function TaskDetailPage() {
     onSuccess: async () => { ignoreKey.current = crypto.randomUUID(); await refreshTask("任务已忽略；远端任务未被修改。"); },
   });
 
-  const error = task.error ?? completionWorkflows.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? browserSnapshot.error ?? prepareInvocation.error ?? createBridge.error ?? execute.error ?? scoreImprovementOptIn.error ?? scanAccount.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
+  const error = task.error ?? completionWorkflows.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? browserSnapshot.error ?? prepareInvocation.error ?? generateDiscussion.error ?? createBridge.error ?? execute.error ?? scoreImprovementOptIn.error ?? scanAccount.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
   if (task.isLoading) return <PageShell title="任务详情" description="正在读取任务。"><TableSkeleton /></PageShell>;
   if (!task.data) return <PageShell title="任务详情" description="任务不存在或当前身份不可访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
   const executableCapabilities = EXECUTABLE_CAPABILITIES.filter((capability) => task.data.capabilities.includes(capability));
   const needsDraft = requestedCapabilities.includes("submission_execute");
   const needsReviewedWorkerAnswers = requestedCapabilities.includes("resource_execution") && task.data.capabilities.includes("question_inventory") && task.data.capabilities.includes("answer_resolve");
-  const needsInvocation = requestedCapabilities.some((capability) => ["discussion", "artifact_upload", "oral_submission"].includes(capability));
-  const invocationShapeSupported = isSupportedUaiInvocationShape(requestedCapabilities);
+  const isUaiWorkerDiscussion = task.data.source_type === "discussion" && task.data.capabilities.includes("resource_execution");
+  const needsInvocation = isUaiWorkerDiscussion || requestedCapabilities.some((capability) => ["discussion", "artifact_upload", "oral_submission"].includes(capability));
+  const invocationShapeSupported = isUaiWorkerDiscussion || isSupportedUaiInvocationShape(requestedCapabilities);
   const executable = executableCapabilities.length > 0;
   const isFormalAssessment = task.data.assessment_class === "formal";
   const strictCompletion = completionWorkflows.data?.strict_completion;
@@ -176,6 +191,7 @@ export function TaskDetailPage() {
       <Summary label="任务性质"><StateBadge state={task.data.assessment_class} /></Summary>
       <Summary label="截止时间">{formatTimestamp(task.data.due_at)}</Summary>
     </div>
+    {task.data.provider_summary ? <Card><CardHeader><CardTitle>平台任务信息</CardTitle></CardHeader><CardContent className="flex flex-wrap gap-2">{typeof task.data.provider_summary.required === "boolean" ? <Badge variant={task.data.provider_summary.required ? "default" : "outline"}>{task.data.provider_summary.required ? "必做" : "选做"}</Badge> : null}{typeof task.data.provider_summary.finish_progress === "number" ? <Badge variant="secondary">平台进度 {task.data.provider_summary.finish_progress}%</Badge> : null}{task.data.provider_summary.score_task === true ? <Badge variant="secondary">计分任务</Badge> : null}{typeof task.data.provider_summary.task_score === "number" ? <Badge variant="outline">得分 {task.data.provider_summary.task_score}</Badge> : null}{typeof task.data.provider_summary.position === "number" ? <Badge variant="secondary">官方顺序 {task.data.provider_summary.position}</Badge> : null}{typeof task.data.provider_summary.job_count === "number" ? <Badge variant="outline">{task.data.provider_summary.job_count} 个执行点</Badge> : null}{task.data.provider_summary.locked === true ? <Badge variant="outline">尚未开放</Badge> : null}</CardContent></Card> : null}
 
     <Card><CardHeader><CardTitle>任务操作</CardTitle></CardHeader><CardContent className="space-y-4">
       {executable ? <p className="text-sm text-muted-foreground">系统已根据平台和任务类型准备好执行方式，无需选择内部能力。</p> : null}
@@ -185,11 +201,11 @@ export function TaskDetailPage() {
       {needsDraft || needsReviewedWorkerAnswers ? <Alert><AlertTitle>先读取题目</AlertTitle><AlertDescription className="space-y-3"><p>系统会读取当前题目、准备答案并在提交前展示审核结果，不需要填写任何内部编号。</p><Button variant="outline" disabled={questions.isFetching} onClick={async () => { const result = await questions.refetch(); if (result.data) navigate(`/tasks/${taskId}/question-snapshots/${result.data.snapshot_id}`); }}><FileQuestion className="size-4" />{questions.isFetching ? "正在读取…" : "读取题目并开始作答"}</Button></AlertDescription></Alert> : null}
       {needsInvocation ? <div className="max-w-2xl space-y-3 rounded-lg border p-4">
         <div><p className="font-medium">完成任务所需内容</p><p className="text-sm text-muted-foreground">填写或选择平台要求的内容后，系统会安全保存并提交本次任务。</p></div>
-        {requestedCapabilities.includes("discussion") ? <div className="space-y-2"><Label htmlFor="discussion-content">讨论回复</Label><textarea id="discussion-content" className="min-h-28 w-full rounded-md border bg-background px-3 py-2 text-sm" value={discussionContent} onChange={(event) => { setDiscussionContent(event.target.value); setInvocationDraftId(""); }} placeholder="输入将提交的完整回复内容" /></div> : null}
+        {requestedCapabilities.includes("discussion") || isUaiWorkerDiscussion ? <div className="space-y-2"><Label htmlFor="discussion-content">讨论回复</Label><textarea id="discussion-content" className="min-h-28 w-full rounded-md border bg-background px-3 py-2 text-sm" value={discussionContent} onChange={(event) => { setDiscussionContent(event.target.value); setInvocationDraftId(""); }} placeholder="输入将提交的完整回复内容" />{isUaiWorkerDiscussion ? <div className="flex flex-wrap items-end gap-2"><div className="space-y-1"><Label htmlFor="discussion-ai-profile">生成组合</Label><select id="discussion-ai-profile" className="h-9 rounded-md border bg-background px-3 text-sm" value={aiProfile} onChange={(event) => setAiProfile(event.target.value as "economy" | "gpt_only")}><option value="economy">默认省钱组合</option><option value="gpt_only">GPT-only 保质组合</option></select></div><Button type="button" variant="outline" disabled={generateDiscussion.isPending} onClick={() => generateDiscussion.mutate()}>{generateDiscussion.isPending ? "正在读取题目并生成…" : "AI 读取题目并生成草稿"}</Button></div> : null}</div> : null}
         {requestedCapabilities.includes("artifact_upload") ? <div className="space-y-2"><Label htmlFor="artifact-file">MP3 文件</Label><Input id="artifact-file" type="file" accept="audio/mpeg,.mp3" onChange={(event) => { setArtifactFile(event.target.files?.[0]); setInvocationDraftId(""); }} /></div> : null}
         {requestedCapabilities.includes("oral_submission") ? <Alert><AlertTitle>口语任务</AlertTitle><AlertDescription>系统将根据当前题目和已有语音内容准备本次提交。</AlertDescription></Alert> : null}
         {!invocationShapeSupported ? <p className="text-sm text-destructive">当前任务还不能自动准备，请重新同步后再试。</p> : null}
-        <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="outline" disabled={!invocationShapeSupported || prepareInvocation.isPending || (requestedCapabilities.includes("discussion") && !discussionContent.trim()) || (requestedCapabilities.includes("artifact_upload") && !artifactFile) || (needsDraft && !submissionDraftId.trim())} onClick={() => prepareInvocation.mutate()}>{prepareInvocation.isPending ? "正在准备…" : "准备提交内容"}</Button>{invocationDraftId ? <Badge variant="secondary">内容已准备</Badge> : null}</div>
+        <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="outline" disabled={!invocationShapeSupported || prepareInvocation.isPending || ((requestedCapabilities.includes("discussion") || isUaiWorkerDiscussion) && !discussionContent.trim()) || (requestedCapabilities.includes("artifact_upload") && !artifactFile) || (needsDraft && !submissionDraftId.trim())} onClick={() => prepareInvocation.mutate()}>{prepareInvocation.isPending ? "正在准备…" : invocationDraftId ? "按当前文本重新准备" : "准备提交内容"}</Button>{invocationDraftId ? <Badge variant="secondary">内容已准备</Badge> : null}</div>
       </div> : null}
       <div className="flex flex-wrap gap-2">
         {!needsDraft && !needsReviewedWorkerAnswers ? <Button disabled={!executable || requestedCapabilities.length === 0 || !canExecuteState || policyBlocked || execute.isPending || lifecyclePending || (needsInvocation && !invocationDraftId.trim())} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在开始…" : scoreImprovementCanBind ? "继续重做" : "开始执行"}</Button> : null}
@@ -233,19 +249,24 @@ function isSupportedUaiInvocationShape(capabilities: readonly ExecutableCapabili
   return value === "discussion" || value === "artifact_upload" || value === "submission_execute,artifact_upload" || value === "submission_execute,oral_submission";
 }
 
-function recommendedExecutionCapabilities(capabilities: Task["capabilities"]): ExecutableCapability[] {
+function recommendedExecutionCapabilities(task: Task): ExecutableCapability[] {
+  const capabilities = task.capabilities;
+  if (task.source_type === "discussion" && capabilities.includes("resource_execution")) return ["resource_execution"];
   if (capabilities.includes("oral_submission")) return capabilities.includes("submission_execute") ? ["submission_execute", "oral_submission"] : ["oral_submission"];
   if (capabilities.includes("artifact_upload")) return capabilities.includes("submission_execute") ? ["submission_execute", "artifact_upload"] : ["artifact_upload"];
   if (capabilities.includes("discussion")) return ["discussion"];
   if (capabilities.includes("submission_execute")) return ["submission_execute"];
-  if (capabilities.includes("resource_execution")) return ["resource_execution"];
+  if (capabilities.includes("resource_execution")) return capabilities.includes("duration_report") ? ["resource_execution", "duration_report"] : ["resource_execution"];
   if (capabilities.includes("duration_report")) return ["duration_report"];
   if (capabilities.includes("practice")) return ["practice"];
   return [];
 }
 
-async function encodeUaiInvocationInput(capabilities: readonly ExecutableCapability[], discussionContent: string, artifactFile?: File) {
+async function encodeUaiInvocationInput(capabilities: readonly ExecutableCapability[], discussionContent: string, artifactFile?: File, workerDiscussion = false) {
   const encoder = new TextEncoder();
+  if (workerDiscussion && capabilities.length === 1 && capabilities[0] === "resource_execution") {
+    return { inputType: UAI_WORKER_DISCUSSION_INPUT_TYPE, body: new Blob([encoder.encode(discussionContent.trim())]) };
+  }
   if (capabilities.length === 1 && capabilities[0] === "discussion") {
     const content = encoder.encode(discussionContent.trim());
     const prefix = encoder.encode(`${UAI_DISCUSSION_INPUT_TYPE}\0`);

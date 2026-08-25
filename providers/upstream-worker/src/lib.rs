@@ -1,27 +1,32 @@
 //! Thin read-only Provider capabilities backed by an external 0.0.1 worker.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, RwLock},
 };
 
 use asterism_domain::{
     AnswerCandidate, AnswerConfidence, AnswerPair, AnswerSource, AssessmentClass, AuthMethod,
-    LogLevel, NormalizedAnswer, Question, QuestionAttachment, QuestionId, QuestionKind,
-    QuestionOption, RemoteState, SessionKind, SourceType, TaskCapability, TaskId, WaitingUserState,
+    LogLevel, NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind,
+    QuestionGroup, QuestionGroupChild, QuestionGroupId, QuestionId, QuestionKind, QuestionOption,
+    RemoteState, SessionKind, SourceType, TaskCapability, TaskId, WaitingUserState,
 };
 use asterism_provider_api::{
+    AnswerHistoryCursor, AnswerHistoryHarvestCapability, AnswerHistoryPage,
+    AnswerHistoryQuestionEvidence, AnswerHistoryTaskRef, AnswerHistoryTaskRequest,
     AnswerResolveCapability, AuthChallenge, AuthenticationCapability, CourseInventoryCapability,
     CredentialReplacement, CredentialValidation, DurationReadCapability, ExecutionEventSink,
     ExecutionInvocationPreparationRequest, ExecutionOutcome, ExecutionRequest,
     ExternalOauthAuthorization, ExternalOauthCallbackBinding, PreparedProviderExecutionInvocation,
-    ProviderAuthContext, ProviderCapability, ProviderContext, ProviderEntry, ProviderError,
-    ProviderErrorKind, ProviderExecutionLog, ProviderExecutionPlanArtifact,
-    ProviderExecutionPrivateInput, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, ProviderRouteContext, ProviderRuntimeSettingsSchema, ProviderSettingDefinition,
-    ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, QuestionInventoryCapability,
-    QuestionParseCapability, RemoteCourse, RemoteDuration, RemoteQuestionRef, RemoteTask,
-    SessionStatus, TaskExecutionCapability, TaskInventoryCapability, VerificationLevel,
+    ProviderAnswerHistoryTaskEvidence, ProviderAuthContext, ProviderCapability, ProviderContext,
+    ProviderEntry, ProviderError, ProviderErrorKind, ProviderExecutionLog,
+    ProviderExecutionPlanArtifact, ProviderExecutionPrivateInput, ProviderIdentity,
+    ProviderMetadata, ProviderProgress, ProviderResult, ProviderRouteContext,
+    ProviderRuntimeSettingsSchema, ProviderSettingDefinition, ProviderSettingKind,
+    ProviderSettingScope, ProviderSettingValue, ProviderStructuredQuestionParseSet,
+    QuestionInventoryCapability, QuestionParseCapability, RemoteCourse, RemoteDuration,
+    RemoteQuestionRef, RemoteTask, RemoteTaskDetail, SessionStatus, TaskDetailCapability,
+    TaskExecutionCapability, TaskInventoryCapability, VerificationLevel,
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, CredentialField, ProviderCredentialRenewal,
@@ -30,11 +35,14 @@ use asterism_secrets::{
 };
 use asterism_uai_worker_client::{UaiWorkerClient, UaiWorkerClientError};
 use async_trait::async_trait;
+use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const CHAOXING_ANSWERS_INPUT_TYPE: &str = "chaoxing.worker.answers.v1";
 const CHAOXING_ANSWERS_PLAN_TYPE: &str = "chaoxing.worker.answers-plan.v1";
+const UAI_GENERATED_TEXT_INPUT_TYPE: &str = "uai.worker.generated-text.v1";
+const UAI_GENERATED_TEXT_PLAN_TYPE: &str = "uai.worker.generated-text-plan.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerAuthProfile {
@@ -53,6 +61,7 @@ pub struct UpstreamWorkerProvider {
     auth_profile: WorkerAuthProfile,
     authentication_delegate: Option<Arc<dyn AuthenticationCapability>>,
     task_routes: Arc<RwLock<HashMap<(String, String), Value>>>,
+    history_questions: Arc<RwLock<HashMap<(String, String), Vec<Value>>>>,
     request_sessions: Arc<RwLock<HashMap<(String, String), Value>>>,
 }
 
@@ -180,6 +189,7 @@ impl UpstreamWorkerProvider {
         }
         if provider_id.as_str() == "chaoxing" {
             capabilities.insert(ProviderCapability::AnswerResolve);
+            capabilities.insert(ProviderCapability::AnswerHistoryHarvest);
         }
         if supports_execution {
             capabilities.insert(ProviderCapability::ResourceExecution);
@@ -188,7 +198,9 @@ impl UpstreamWorkerProvider {
             capabilities.insert(ProviderCapability::DurationReport);
         }
         if provider_id.as_str() == "uai" {
+            capabilities.insert(ProviderCapability::TaskDetail);
             capabilities.insert(ProviderCapability::DurationRead);
+            capabilities.insert(ProviderCapability::Discussion);
         }
         let metadata = ProviderMetadata {
             id: provider_id,
@@ -232,6 +244,7 @@ impl UpstreamWorkerProvider {
             auth_profile,
             authentication_delegate,
             task_routes: Arc::new(RwLock::new(HashMap::new())),
+            history_questions: Arc::new(RwLock::new(HashMap::new())),
             request_sessions: Arc::new(RwLock::new(HashMap::new())),
         });
         let runtime_settings = worker_runtime_settings_schema(&metadata.id);
@@ -242,7 +255,8 @@ impl UpstreamWorkerProvider {
             course_inventory: Some(provider.clone()),
             course_enrollment: None,
             task_inventory: Some(provider.clone()),
-            task_detail: None,
+            task_detail: (provider.metadata.id.as_str() == "uai")
+                .then(|| provider.clone() as Arc<dyn TaskDetailCapability>),
             task_progress: None,
             duration_read: (provider.metadata.id.as_str() == "uai")
                 .then(|| provider.clone() as Arc<dyn DurationReadCapability>),
@@ -255,7 +269,8 @@ impl UpstreamWorkerProvider {
             submission_build: None,
             submission_execute: None,
             submission_verify: None,
-            answer_history_harvest: None,
+            answer_history_harvest: (provider.metadata.id.as_str() == "chaoxing")
+                .then(|| provider.clone() as Arc<dyn AnswerHistoryHarvestCapability>),
             task_execution: supports_execution
                 .then_some(provider as Arc<dyn TaskExecutionCapability>),
             browser_bridge: None,
@@ -272,7 +287,10 @@ impl UpstreamWorkerProvider {
             UaiWorkerClientError::Remote { code, .. }
                 if matches!(
                     code.as_str(),
-                    "question_access_denied" | "question_type_unsupported" | "task_unsupported"
+                    "question_access_denied"
+                        | "question_type_unsupported"
+                        | "task_unsupported"
+                        | "task_not_open"
                 ) =>
             {
                 ProviderErrorKind::UnsupportedTask
@@ -281,7 +299,13 @@ impl UpstreamWorkerProvider {
             | UaiWorkerClientError::Spawn(_)
             | UaiWorkerClientError::Write(_)
             | UaiWorkerClientError::Read(_)
-            | UaiWorkerClientError::Wait(_) => ProviderErrorKind::Network,
+            | UaiWorkerClientError::Wait(_)
+            // A worker process can be terminated by the OS, a supervisor, or
+            // an interrupted upstream request (for example while a TLS
+            // connection is being established).  This is a transport/runtime
+            // failure, not evidence that the Provider protocol changed.  Keep
+            // the harvest retryable instead of dead-lettering the account.
+            | UaiWorkerClientError::Exited { .. } => ProviderErrorKind::Network,
             UaiWorkerClientError::Remote { .. } => ProviderErrorKind::ProviderUnavailable,
             _ => ProviderErrorKind::InvalidResponse,
         };
@@ -310,6 +334,163 @@ impl UpstreamWorkerProvider {
             .invoke_observed_result(operation, payload)
             .await
             .map_err(|error| Self::map_client(operation, &error))
+    }
+
+    async fn invoke_run_observed(
+        &self,
+        session: Value,
+        worker_remote_id: &str,
+        native: Value,
+        settings: Value,
+        answers: Value,
+    ) -> ProviderResult<asterism_uai_worker_client::WorkerInvocationResult> {
+        if self.metadata.id.as_str() != "chaoxing"
+            || native.get("route_kind").and_then(Value::as_str) != Some("knowledge_point")
+        {
+            return self
+                .invoke_observed(
+                    "run",
+                    json!({
+                        "session": session,
+                        "task": {"remote_id": worker_remote_id, "native": native},
+                        "settings": settings,
+                        "answers": answers,
+                    }),
+                )
+                .await;
+        }
+        self.invoke_chaoxing_knowledge_jobs(session, worker_remote_id, native, settings, answers)
+            .await
+    }
+
+    async fn invoke_chaoxing_knowledge_jobs(
+        &self,
+        session: Value,
+        worker_remote_id: &str,
+        mut native: Value,
+        settings: Value,
+        answers: Value,
+    ) -> ProviderResult<asterism_uai_worker_client::WorkerInvocationResult> {
+        let children = native
+            .get("jobs")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "Chaoxing knowledge point jobs are missing",
+                )
+            })?;
+        if children.is_empty() {
+            return self
+                .invoke_observed("run", json!({"session": session, "task": {"remote_id": worker_remote_id, "native": native}, "settings": settings, "answers": answers}))
+                .await;
+        }
+        let supplied = answers.as_array().cloned().unwrap_or_default();
+        let mut video = Vec::new();
+        let mut answer = Vec::new();
+        let mut other = Vec::new();
+        for (index, child) in children.iter().enumerate() {
+            let Some(job) = child.get("job").and_then(Value::as_object) else {
+                continue;
+            };
+            if job
+                .get("_asterism_is_passed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let kind = job.get("type").and_then(Value::as_str).unwrap_or_default();
+            if !matches!(kind, "video" | "document" | "read" | "workid" | "live") {
+                continue;
+            }
+            let identity = job
+                .get("_asterism_card_identity")
+                .or_else(|| job.get("jobid"))
+                .or_else(|| job.get("id"))
+                .map(value_text)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| format!("job-{}", index + 1));
+            let prefix = format!("{identity}:");
+            let child_answers = supplied
+                .iter()
+                .filter_map(|row| {
+                    let remote_id = row.get("remote_id")?.as_str()?;
+                    remote_id.strip_prefix(&prefix).map(|stripped| json!({"remote_id": stripped, "value": row.get("value").cloned().unwrap_or(Value::Null)}))
+                })
+                .collect::<Vec<_>>();
+            if kind == "workid" && child_answers.is_empty() {
+                continue;
+            }
+            let child_native = json!({
+                "course": native.get("course").cloned().unwrap_or(Value::Null),
+                "point": native.get("point").cloned().unwrap_or(Value::Null),
+                "job": child.get("job").cloned().unwrap_or(Value::Null),
+                "job_info": child.get("job_info").cloned().unwrap_or(Value::Null),
+            });
+            let payload = json!({
+                "session": session,
+                "task": {"remote_id": worker_remote_id, "native": child_native},
+                "settings": settings,
+                "answers": child_answers,
+            });
+            match kind {
+                "video" => video.push(payload),
+                "workid" => answer.push(payload),
+                _ => other.push(payload),
+            }
+        }
+        let limit = |key: &str, fallback: usize| {
+            settings
+                .get(key)
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(fallback)
+        };
+        let run_group = |payloads: Vec<Value>, concurrency: usize| async move {
+            stream::iter(
+                payloads
+                    .into_iter()
+                    .map(|payload| async move { self.invoke_observed("run", payload).await }),
+            )
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await
+        };
+        let (video_results, answer_results, other_results) = tokio::join!(
+            run_group(video, limit("video_threads", 4)),
+            run_group(answer, limit("answer_threads", 1)),
+            run_group(other, limit("other_threads", 4)),
+        );
+        let mut logs = Vec::new();
+        let mut progress = Vec::new();
+        for result in video_results
+            .into_iter()
+            .chain(answer_results)
+            .chain(other_results)
+        {
+            let observed = result?;
+            logs.extend(observed.logs);
+            progress.extend(observed.progress);
+        }
+        if let Some(children) = native.get_mut("jobs").and_then(Value::as_array_mut) {
+            for child in children {
+                if let Some(job) = child.get_mut("job").and_then(Value::as_object_mut) {
+                    job.insert("_asterism_is_passed".to_owned(), Value::Bool(true));
+                }
+            }
+        }
+        let verified = self
+            .invoke_observed("run", json!({"session": session, "task": {"remote_id": worker_remote_id, "native": native}, "settings": settings, "answers": []}))
+            .await?;
+        logs.extend(verified.logs);
+        progress.extend(verified.progress);
+        Ok(asterism_uai_worker_client::WorkerInvocationResult {
+            data: verified.data,
+            logs,
+            progress,
+        })
     }
 
     #[allow(
@@ -635,6 +816,7 @@ impl UpstreamWorkerProvider {
                     metadata_sanitized: json!({
                         "worker_backed": true,
                         "read_only": row.get("read_only").and_then(Value::as_bool).unwrap_or(false),
+                        "provider_summary": row.get("provider_summary").cloned().unwrap_or(Value::Null),
                     }),
                     route_context: ProviderRouteContext::try_from_pairs([(
                         "worker.native".to_owned(),
@@ -700,6 +882,11 @@ impl UpstreamWorkerProvider {
                 if worker_capabilities.iter().any(|value| value == "run") {
                     capabilities.push(TaskCapability::ResourceExecution);
                 }
+                if self.metadata.id.as_str() == "uai"
+                    && native.get("category").and_then(Value::as_str) == Some("discussion")
+                {
+                    capabilities.push(TaskCapability::Discussion);
+                }
                 if worker_capabilities.iter().any(|value| value == "duration") {
                     capabilities.push(TaskCapability::DurationReport);
                 }
@@ -725,6 +912,18 @@ impl UpstreamWorkerProvider {
                     raw_sanitized: json!({
                         "worker_backed": true,
                         "read_only": row.get("read_only").and_then(Value::as_bool).unwrap_or(false),
+                        "provider_summary": if self.metadata.id.as_str() == "uai" { json!({
+                            "category": native.get("category").cloned().unwrap_or(Value::Null),
+                            "required": native.get("required").cloned().unwrap_or(Value::Null),
+                            "score_task": native.get("score_task").cloned().unwrap_or(Value::Null),
+                            "finish_progress": native.get("finish_progress").cloned().unwrap_or(Value::Null),
+                            "task_score": native.get("task_score").cloned().unwrap_or(Value::Null),
+                            "question_num": native.get("question_num").cloned().unwrap_or(Value::Null),
+                        }) } else if self.metadata.id.as_str() == "chaoxing" { json!({
+                            "position": native.get("provider_position").cloned().unwrap_or(Value::Null),
+                            "locked": native.pointer("/point/need_unlock").cloned().unwrap_or(Value::Null),
+                            "job_count": native.get("jobs").and_then(Value::as_array).map_or(Value::Null, |jobs| json!(jobs.len())),
+                        }) } else { Value::Null },
                     }),
                 };
                 Ok((task, native))
@@ -1164,6 +1363,84 @@ impl TaskInventoryCapability for UpstreamWorkerProvider {
 }
 
 #[async_trait]
+impl TaskDetailCapability for UpstreamWorkerProvider {
+    async fn task_detail(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+    ) -> ProviderResult<RemoteTaskDetail> {
+        if self.metadata.id.as_str() != "uai" {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "worker task detail is not enabled for this Provider",
+            ));
+        }
+        let session = self.session(context).await?;
+        let tasks = self.all_tasks(context).await?;
+        let (task, native) = tasks
+            .into_iter()
+            .find(|(task, _)| task.remote_id == remote_task_id)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::RemoteChanged,
+                    "worker task disappeared during fresh detail inspection",
+                )
+            })?;
+        let worker_remote_id = native
+            .get("_asterism_worker_remote_id")
+            .and_then(Value::as_str)
+            .unwrap_or(remote_task_id);
+        let result = self
+            .invoke(
+                "inspect",
+                json!({
+                    "session": session,
+                    "task": {"remote_id": worker_remote_id, "native": native},
+                }),
+            )
+            .await?;
+        let worker_task = result
+            .get("task")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "worker task detail result is invalid",
+                )
+            })?;
+        let detail_native = worker_task
+            .get("native")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "worker task detail native payload is invalid",
+                )
+            })?;
+        let category = detail_native
+            .get("category")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let content = detail_native.get("content").cloned().unwrap_or(Value::Null);
+        Ok(RemoteTaskDetail {
+            task,
+            normalized_detail: json!({
+                "schema": "uai.worker-task-detail.v1",
+                "task": {
+                    "category": category,
+                    "required": detail_native.get("required").cloned().unwrap_or(Value::Null),
+                    "score_task": detail_native.get("score_task").cloned().unwrap_or(Value::Null),
+                    "finish_progress": detail_native.get("finish_progress").cloned().unwrap_or(Value::Null),
+                    "task_score": detail_native.get("task_score").cloned().unwrap_or(Value::Null),
+                    "question_num": detail_native.get("question_num").cloned().unwrap_or(Value::Null),
+                    "content": content,
+                },
+            }),
+        })
+    }
+}
+
+#[async_trait]
 impl QuestionInventoryCapability for UpstreamWorkerProvider {
     async fn list_question_refs(
         &self,
@@ -1214,42 +1491,14 @@ impl QuestionParseCapability for UpstreamWorkerProvider {
         let options = row
             .get("options")
             .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, value)| {
-                        let (provider_id, content) = if let Some(object) = value.as_object() {
-                            (
-                                object
-                                    .get("id")
-                                    .or_else(|| object.get("key"))
-                                    .map_or_else(|| (index + 1).to_string(), value_text),
-                                object
-                                    .get("content")
-                                    .or_else(|| object.get("text"))
-                                    .or_else(|| object.get("value"))
-                                    .map(value_text),
-                            )
-                        } else {
-                            ((index + 1).to_string(), Some(value_text(value)))
-                        };
-                        let content = content.and_then(|value| clean_text(&value, 32 * 1024));
-                        content.map(|content| QuestionOption {
-                            id: (index + 1).to_string(),
-                            attachments: Vec::new(),
-                            metadata_sanitized: json!({"provider_option_id": clean_text(&provider_id, 512)}),
-                            content: Some(content),
-                        })
-                    })
-                    .collect()
-            })
+            .map(|values| worker_question_options(values))
             .unwrap_or_default();
         let prompt = row
             .get("prompt")
             .map(value_text)
             .and_then(|value| clean_text(&value, 64 * 1024))
             .unwrap_or_else(|| format!("Provider question {}", reference.remote_id));
+        let attachments = rich_attachments(&prompt);
         let question = Question {
             id: QuestionId::new(),
             task_id,
@@ -1257,7 +1506,7 @@ impl QuestionParseCapability for UpstreamWorkerProvider {
             kind: reference.kind_hint,
             stem: prompt,
             options,
-            attachments: Vec::<QuestionAttachment>::new(),
+            attachments,
             metadata_sanitized: json!({
                 "worker_backed": true,
                 "provider_kind": row.get("kind").cloned().unwrap_or(Value::Null),
@@ -1272,6 +1521,86 @@ impl QuestionParseCapability for UpstreamWorkerProvider {
             )
         })?;
         Ok(question)
+    }
+
+    async fn parse_structured_question_set(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        references: &[RemoteQuestionRef],
+    ) -> ProviderResult<ProviderStructuredQuestionParseSet> {
+        let mut questions = Vec::with_capacity(references.len());
+        for reference in references {
+            questions.push(
+                self.parse_question(context, task_id, remote_task_id, reference)
+                    .await?,
+            );
+        }
+        if !matches!(self.metadata.id.as_str(), "chaoxing" | "cidaren") {
+            return ProviderStructuredQuestionParseSet::try_new(questions, Vec::new(), None);
+        }
+
+        let mut groups = Vec::<QuestionGroup>::new();
+        let mut group_by_options = BTreeMap::<String, usize>::new();
+        for (reference, question) in references.iter().zip(&questions) {
+            let Some(shared) = reference
+                .metadata_sanitized
+                .pointer("/native_shape/shared_options")
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            let values = shared
+                .iter()
+                .filter_map(|value| value.as_str())
+                .filter_map(|value| clean_text(value, 32 * 1024))
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                continue;
+            }
+            let encoded = serde_json::to_string(&values).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "Chaoxing shared options are invalid",
+                )
+            })?;
+            let digest = format!("{:x}", Sha256::digest(encoded.as_bytes()));
+            let group_index = if let Some(index) = group_by_options.get(&digest) {
+                *index
+            } else {
+                let options = values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, content)| QuestionOption {
+                        id: format!("shared-option-{}", index + 1),
+                        content: Some(content.clone()),
+                        attachments: rich_attachments(content),
+                        metadata_sanitized: json!({"provider_shared_option": true}),
+                    })
+                    .collect::<Vec<_>>();
+                let index = groups.len();
+                groups.push(QuestionGroup {
+                    id: QuestionGroupId::new(),
+                    task_id,
+                    remote_group_id: Some(format!("shared-options:{}", &digest[..16])),
+                    stem: None,
+                    options,
+                    attachments: Vec::new(),
+                    metadata_sanitized: json!({
+                        "worker_backed": true,
+                        "provider_shape": "shared_options",
+                    }),
+                    children: Vec::new(),
+                });
+                group_by_options.insert(digest, index);
+                index
+            };
+            groups[group_index]
+                .children
+                .push(QuestionGroupChild::Question(question.id));
+        }
+        ProviderStructuredQuestionParseSet::try_new(questions, groups, None)
     }
 }
 
@@ -1314,7 +1643,11 @@ impl AnswerResolveCapability for UpstreamWorkerProvider {
             let Some(evidence) = row.get("answer_evidence").and_then(Value::as_object) else {
                 continue;
             };
-            if evidence.get("source").and_then(Value::as_str) != Some("chaoxing_reviewed_result") {
+            let source = evidence.get("source").and_then(Value::as_str);
+            if !matches!(
+                source,
+                Some("chaoxing_reviewed_result") | Some("cidaren_answer_lib")
+            ) {
                 continue;
             }
             let Some(value) = evidence.get("value").and_then(Value::as_str) else {
@@ -1330,7 +1663,7 @@ impl AnswerResolveCapability for UpstreamWorkerProvider {
                 confidence: Some(confidence),
                 explanation: None,
                 provenance_sanitized: json!({
-                    "origin": "chaoxing_reviewed_result",
+                    "origin": source.unwrap_or("provider_native"),
                     "worker_backed": true,
                 }),
             };
@@ -1343,6 +1676,221 @@ impl AnswerResolveCapability for UpstreamWorkerProvider {
             candidates.push(candidate);
         }
         Ok(candidates)
+    }
+}
+
+#[async_trait]
+impl AnswerHistoryHarvestCapability for UpstreamWorkerProvider {
+    async fn list_answer_history(
+        &self,
+        context: &ProviderContext,
+        cursor: Option<&AnswerHistoryCursor>,
+    ) -> ProviderResult<AnswerHistoryPage> {
+        if self.metadata.id.as_str() != "chaoxing" {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "answer history bootstrap is only exposed by the Chaoxing worker",
+            ));
+        }
+        let after = parse_worker_history_cursor(cursor, &self.metadata.id)?;
+        let session = self.session(context).await?;
+        let mut courses = self.worker_courses(session.clone()).await?;
+        courses.sort_by(|left, right| left.remote_id.cmp(&right.remote_id));
+        let mut references = Vec::new();
+        for course in courses {
+            if after
+                .as_ref()
+                .is_some_and(|value| course.remote_id < value.course_remote_id)
+            {
+                continue;
+            }
+            let native = course
+                .route_context
+                .get("worker.native")
+                .and_then(|value| serde_json::from_str(value).ok())
+                .ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::InvalidResponse,
+                        "worker course route is missing",
+                    )
+                })?;
+            let mut tasks = self
+                .worker_tasks(
+                    session.clone(),
+                    &context.account_id.to_string(),
+                    &course.remote_id,
+                    native,
+                )
+                .await?;
+            tasks.sort_by(|(left, _), (right, _)| left.remote_id.cmp(&right.remote_id));
+            for (task, _) in tasks {
+                if after.as_ref().is_some_and(|value| {
+                    course.remote_id == value.course_remote_id
+                        && task.remote_id <= value.task_remote_id
+                }) {
+                    continue;
+                }
+                if task.remote_state != RemoteState::Completed
+                    || !task
+                        .capabilities
+                        .contains(&TaskCapability::QuestionInventory)
+                {
+                    continue;
+                }
+                let provider_attempt_digest =
+                    history_digest(&["chaoxing.worker-history-attempt.v2", &task.remote_id]);
+                references.push(AnswerHistoryTaskRef {
+                    remote_task_id: task.remote_id.clone(),
+                    course_remote_id: task.course_remote_id.clone(),
+                    provider_attempt_digest,
+                    completed_at: None,
+                    metadata_sanitized: json!({
+                        "schema": "chaoxing.worker-history-reference.v1",
+                        "source_family": "completed_worker_task",
+                        "read_only": true,
+                    }),
+                    route_context: ProviderRouteContext::default(),
+                });
+                if references.len() == 20 {
+                    let next_cursor = AnswerHistoryCursor {
+                        version: 2,
+                        cursor_type: "chaoxing.worker-history.v2".to_owned(),
+                        value_sanitized: json!({
+                            "course_remote_id": course.remote_id,
+                            "task_remote_id": task.remote_id,
+                        }),
+                    };
+                    return AnswerHistoryPage::try_new(
+                        &self.metadata.id,
+                        references,
+                        Some(next_cursor),
+                        false,
+                    )
+                    .map_err(|_| {
+                        ProviderError::new(
+                            ProviderErrorKind::InvalidResponse,
+                            "Chaoxing worker history page is invalid",
+                        )
+                    });
+                }
+            }
+        }
+        AnswerHistoryPage::try_new(&self.metadata.id, references, None, true).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing worker history terminal page is invalid",
+            )
+        })
+    }
+
+    async fn read_answer_history_task(
+        &self,
+        context: &ProviderContext,
+        request: &AnswerHistoryTaskRequest,
+    ) -> ProviderResult<ProviderAnswerHistoryTaskEvidence> {
+        if self.metadata.id.as_str() != "chaoxing" {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "answer history bootstrap is only exposed by the Chaoxing worker",
+            ));
+        }
+        let cache_key = (
+            context.account_id.to_string(),
+            request.reference.remote_task_id.clone(),
+        );
+        let cached = self
+            .history_questions
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&cache_key).cloned());
+        let rows = match cached {
+            Some(rows) => rows,
+            None => {
+                self.question_rows(context, &request.reference.remote_task_id)
+                    .await?
+            }
+        };
+        let mut questions = Vec::new();
+        let mut evidence = Vec::new();
+        for row in rows.iter().filter(|row| usable_history_row(row)) {
+            let reference = worker_question_reference(row)?;
+            let question = self
+                .parse_question(
+                    context,
+                    request.task_id,
+                    &request.reference.remote_task_id,
+                    &reference,
+                )
+                .await?;
+            let facts = row.get("answer_evidence").and_then(Value::as_object);
+            let official_answer = facts
+                .and_then(|value| value.get("official_value"))
+                .and_then(Value::as_str)
+                .and_then(|value| normalize_reviewed_answer_for_question(&question, value))
+                .filter(|answer| history_answer_matches_question(&question, answer));
+            let submitted_answer = facts
+                .and_then(|value| value.get("submitted_value"))
+                .and_then(Value::as_str)
+                .and_then(|value| normalize_reviewed_answer_for_question(&question, value))
+                .filter(|answer| history_answer_matches_question(&question, answer));
+            let submitted_answer_correct = submitted_answer.as_ref().and_then(|_| {
+                facts
+                    .and_then(|value| value.get("submitted_correct"))
+                    .and_then(Value::as_bool)
+            });
+            if official_answer.is_some() || submitted_answer.is_some() {
+                evidence.push(AnswerHistoryQuestionEvidence {
+                    question_id: question.id,
+                    submitted_answer,
+                    official_answer,
+                    submitted_answer_correct,
+                    provenance_sanitized: json!({
+                        "schema": "chaoxing.worker-history-question.v1",
+                        "source": "reviewed_result_page",
+                        "read_only": true,
+                    }),
+                });
+            }
+            questions.push(question);
+        }
+        if questions.is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing reviewed task no longer exposes usable answer evidence",
+            ));
+        }
+        let encoded_rows = serde_json::to_string(&rows).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing reviewed evidence could not be digested",
+            )
+        })?;
+        let result = ProviderAnswerHistoryTaskEvidence {
+            task_id: request.task_id,
+            provider_attempt_digest: request.reference.provider_attempt_digest,
+            result_digest: history_digest(&[
+                "chaoxing.worker-history-result.v2",
+                &request.reference.remote_task_id,
+                &encoded_rows,
+            ]),
+            questions,
+            question_evidence: evidence,
+            score: None,
+            retake: None,
+            provenance_sanitized: json!({
+                "schema": "chaoxing.worker-history-task.v1",
+                "source_family": "completed_worker_task",
+                "read_only": true,
+            }),
+            observed_at: chrono::Utc::now(),
+        };
+        result.validate(request).map_err(|error| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("Chaoxing worker history evidence violates the shared contract: {error}"),
+            )
+        })?;
+        Ok(result)
     }
 }
 
@@ -1397,15 +1945,25 @@ impl UpstreamWorkerProvider {
         context: &ProviderContext,
         request: &ExecutionRequest,
         answers: Value,
+        assessment_mode: Option<&str>,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
+        let combined_resource_duration = matches!(
+            request.requested_capabilities.as_slice(),
+            [
+                TaskCapability::ResourceExecution,
+                TaskCapability::DurationReport
+            ]
+        ) && self.metadata.id.as_str() == "welearn";
         let capability = match request.requested_capabilities.as_slice() {
             [TaskCapability::ResourceExecution] => TaskCapability::ResourceExecution,
-            [TaskCapability::DurationReport]
-                if matches!(self.metadata.id.as_str(), "welearn" | "uai") =>
-            {
+            [TaskCapability::DurationReport] if self.metadata.id.as_str() == "welearn" => {
                 TaskCapability::DurationReport
             }
+            [
+                TaskCapability::ResourceExecution,
+                TaskCapability::DurationReport,
+            ] if self.metadata.id.as_str() == "welearn" => TaskCapability::ResourceExecution,
             _ => {
                 return Err(ProviderError::new(
                     ProviderErrorKind::UnsupportedTask,
@@ -1415,7 +1973,7 @@ impl UpstreamWorkerProvider {
         };
         let native = self.task_native(context, &request.remote_task_id).await?;
         let worker_remote_id = required_string(&native, "_asterism_worker_remote_id")?;
-        let settings = match capability {
+        let mut settings = match capability {
             TaskCapability::DurationReport => json!({
                 "action": "duration",
                 "duration_seconds": request.runtime_settings
@@ -1431,11 +1989,41 @@ impl UpstreamWorkerProvider {
             TaskCapability::ResourceExecution if self.metadata.id.as_str() == "chaoxing" => json!({
                 "speed": request.runtime_settings
                     .decimal_millis("worker.playback_rate")
-                    .unwrap_or(1_000) as f64 / 1_000.0,
+                    .unwrap_or(2_000) as f64 / 1_000.0,
+                "minimum_answer_coverage": request.runtime_settings
+                    .decimal_millis("worker.minimum_answer_coverage")
+                    .unwrap_or(900) as f64 / 1_000.0,
+                "video_threads": request.runtime_settings
+                    .integer("worker.video_threads").unwrap_or(4),
+                "answer_threads": request.runtime_settings
+                    .integer("worker.answer_threads").unwrap_or(1),
+                "other_threads": request.runtime_settings
+                    .integer("worker.other_threads").unwrap_or(4),
+            }),
+            TaskCapability::ResourceExecution if self.metadata.id.as_str() == "uai" => json!({
+                "cooldown_count": request.runtime_settings
+                    .integer("worker.cooldown_count").unwrap_or(5),
+                "cooldown_seconds": request.runtime_settings
+                    .duration_seconds("worker.cooldown_seconds").unwrap_or(120),
+            }),
+            TaskCapability::ResourceExecution if self.metadata.id.as_str() == "cidaren" => json!({
+                "spend_min_time": request.runtime_settings
+                    .duration_seconds("worker.spend_min_time").unwrap_or(1),
+                "spend_max_time": request.runtime_settings
+                    .duration_seconds("worker.spend_max_time").unwrap_or(2),
             }),
             TaskCapability::ResourceExecution => json!({}),
             _ => unreachable!("capability was validated above"),
         };
+        if self.metadata.id.as_str() == "chaoxing" {
+            if let (Some(mode), Some(settings)) = (assessment_mode, settings.as_object_mut()) {
+                settings.insert("assessment_mode".to_owned(), Value::String(mode.to_owned()));
+            }
+        } else if self.metadata.id.as_str() == "uai" {
+            if let (Some(text), Some(settings)) = (assessment_mode, settings.as_object_mut()) {
+                settings.insert("generated_text".to_owned(), Value::String(text.to_owned()));
+            }
+        }
         events
             .report(ProviderProgress {
                 percent: Some(0),
@@ -1454,17 +2042,43 @@ impl UpstreamWorkerProvider {
                 metadata_sanitized: Some(json!({"worker_backed": true})),
             })
             .await?;
-        let observed = self
-            .invoke_observed(
-                "run",
-                json!({
-                    "session": self.session(context).await?,
-                    "task": {"remote_id": worker_remote_id, "native": native},
-                    "settings": settings,
-                    "answers": answers,
-                }),
+        let mut observed = self
+            .invoke_run_observed(
+                self.session(context).await?,
+                &worker_remote_id,
+                native,
+                settings,
+                answers,
             )
             .await?;
+        if combined_resource_duration {
+            let duration_observed = self
+                .invoke_observed(
+                    "run",
+                    json!({
+                        "session": self.session(context).await?,
+                        "task": {"remote_id": worker_remote_id, "native": self.task_native(context, &request.remote_task_id).await?},
+                        "settings": {
+                            "action": "duration",
+                            "duration_seconds": request.runtime_settings
+                                .duration_seconds("worker.duration_seconds")
+                                .unwrap_or(60),
+                        },
+                        "answers": [],
+                    }),
+                )
+                .await?;
+            observed.logs.extend(duration_observed.logs);
+            observed.progress.extend(duration_observed.progress);
+            if let (Some(base), Some(duration)) = (
+                observed.data.as_object_mut(),
+                duration_observed.data.as_object(),
+            ) {
+                for (key, value) in duration {
+                    base.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+        }
         for log in observed.logs {
             let Some(message) = clean_text(&log.message, 8 * 1024) else {
                 continue;
@@ -1560,6 +2174,40 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
         context: &ProviderContext,
         request: &ExecutionInvocationPreparationRequest<'_>,
     ) -> ProviderResult<PreparedProviderExecutionInvocation> {
+        if self.metadata.id.as_str() == "uai" {
+            if request.input_type != UAI_GENERATED_TEXT_INPUT_TYPE
+                || request.requested_capabilities != [TaskCapability::ResourceExecution]
+                || request.submission_draft.is_some()
+            {
+                return Err(invalid_uai_generated_text(
+                    "UAI generated-text invocation is invalid",
+                ));
+            }
+            let generated_text = decode_uai_generated_text(request.raw_input)?;
+            let native = self.task_native(context, request.remote_task_id).await?;
+            if native.get("category").and_then(Value::as_str) != Some("discussion") {
+                return Err(invalid_uai_generated_text(
+                    "UAI generated text is only accepted for a freshly bound discussion task",
+                ));
+            }
+            let private_input = ProviderExecutionPrivateInput::try_new(
+                self.metadata.id.clone(),
+                UAI_GENERATED_TEXT_INPUT_TYPE,
+                SecretValue::new(request.raw_input.expose_secret().to_vec()),
+            )?;
+            let artifact = ProviderExecutionPlanArtifact::try_new(
+                self.metadata.id.clone(),
+                UAI_GENERATED_TEXT_PLAN_TYPE,
+                json!({
+                    "schema": UAI_GENERATED_TEXT_PLAN_TYPE,
+                    "task_id": request.task_id.to_string(),
+                    "remote_task_id": request.remote_task_id,
+                    "character_count": generated_text.chars().count(),
+                    "private_input_digest": encode_digest(private_input.input_digest()),
+                }),
+            )?;
+            return PreparedProviderExecutionInvocation::try_new(artifact, private_input);
+        }
         if self.metadata.id.as_str() != "chaoxing"
             || request.input_type != CHAOXING_ANSWERS_INPUT_TYPE
             || request.requested_capabilities != [TaskCapability::ResourceExecution]
@@ -1569,8 +2217,9 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
                 "Chaoxing reviewed-answer invocation is invalid",
             ));
         }
-        let answers = decode_chaoxing_answers(request.raw_input)?;
-        let supplied = answers
+        let invocation = decode_chaoxing_answers(request.raw_input)?;
+        let supplied = invocation
+            .answers
             .iter()
             .filter_map(|row| row.get("remote_id").and_then(Value::as_str))
             .collect::<BTreeSet<_>>();
@@ -1579,14 +2228,23 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
             .iter()
             .map(|row| required_string(row, "remote_id"))
             .collect::<ProviderResult<BTreeSet<_>>>()?;
+        let coverage_millis = supplied.len().saturating_mul(1_000) / expected.len().max(1);
+        let minimum_coverage_millis = request
+            .runtime_settings
+            .decimal_millis("worker.minimum_answer_coverage")
+            .unwrap_or(900)
+            .clamp(0, 1_000) as usize;
+        let save_only = invocation.mode == "save";
         if expected.is_empty()
-            || supplied.len() != expected.len()
+            || supplied.is_empty()
+            || supplied.len() > expected.len()
             || !supplied
                 .iter()
                 .all(|remote_id| expected.contains(*remote_id))
+            || (!save_only && coverage_millis < minimum_coverage_millis)
         {
             return Err(invalid_worker_answers(
-                "Chaoxing reviewed answers do not exactly cover the fresh question inventory",
+                "Chaoxing reviewed answers do not meet the fresh question coverage policy",
             ));
         }
         let private_input = ProviderExecutionPrivateInput::try_new(
@@ -1603,6 +2261,10 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
                 "task_id": request.task_id.to_string(),
                 "remote_task_id": request.remote_task_id,
                 "question_count": expected.len(),
+                "answered_question_count": supplied.len(),
+                "answer_coverage_millis": coverage_millis,
+                "minimum_answer_coverage_millis": minimum_coverage_millis,
+                "assessment_mode": invocation.mode,
                 "private_input_digest": input_digest,
             }),
         )?;
@@ -1647,7 +2309,16 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
             TaskCapability::ResourceExecution if self.metadata.id.as_str() == "chaoxing" => json!({
                 "speed": request.runtime_settings
                     .decimal_millis("worker.playback_rate")
-                    .unwrap_or(1_000) as f64 / 1_000.0,
+                    .unwrap_or(2_000) as f64 / 1_000.0,
+                "minimum_answer_coverage": request.runtime_settings
+                    .decimal_millis("worker.minimum_answer_coverage")
+                    .unwrap_or(900) as f64 / 1_000.0,
+                "video_threads": request.runtime_settings
+                    .integer("worker.video_threads").unwrap_or(4),
+                "answer_threads": request.runtime_settings
+                    .integer("worker.answer_threads").unwrap_or(1),
+                "other_threads": request.runtime_settings
+                    .integer("worker.other_threads").unwrap_or(4),
             }),
             TaskCapability::ResourceExecution => json!({}),
             _ => unreachable!("capability was validated above"),
@@ -1671,14 +2342,12 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
             })
             .await?;
         let observed = self
-            .invoke_observed(
-                "run",
-                json!({
-                    "session": self.session(context).await?,
-                    "task": {"remote_id": worker_remote_id, "native": native},
-                    "settings": settings,
-                    "answers": [],
-                }),
+            .invoke_run_observed(
+                self.session(context).await?,
+                &worker_remote_id,
+                native,
+                settings,
+                json!([]),
             )
             .await?;
         for log in observed.logs {
@@ -1767,6 +2436,47 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
         private_input: &ProviderExecutionPrivateInput,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
+        if self.metadata.id.as_str() == "uai" {
+            if private_input.provider_id() != &self.metadata.id
+                || private_input.input_type() != UAI_GENERATED_TEXT_INPUT_TYPE
+                || request.requested_capabilities != [TaskCapability::ResourceExecution]
+            {
+                return Err(invalid_uai_generated_text(
+                    "UAI generated-text execution binding is invalid",
+                ));
+            }
+            let artifact = request.provider_plan_artifact.as_ref().ok_or_else(|| {
+                invalid_uai_generated_text("UAI generated-text plan artifact is missing")
+            })?;
+            let task_id = request.task_id.to_string();
+            let digest = encode_digest(private_input.input_digest());
+            if artifact.provider_id() != &self.metadata.id
+                || artifact.artifact_type() != UAI_GENERATED_TEXT_PLAN_TYPE
+                || artifact
+                    .payload_sanitized()
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    != Some(task_id.as_str())
+                || artifact
+                    .payload_sanitized()
+                    .get("remote_task_id")
+                    .and_then(Value::as_str)
+                    != Some(request.remote_task_id.as_str())
+                || artifact
+                    .payload_sanitized()
+                    .get("private_input_digest")
+                    .and_then(Value::as_str)
+                    != Some(digest.as_str())
+            {
+                return Err(invalid_uai_generated_text(
+                    "UAI generated-text plan binding changed",
+                ));
+            }
+            let generated_text = decode_uai_generated_text(private_input.value())?;
+            return self
+                .execute_worker(context, request, json!([]), Some(&generated_text), events)
+                .await;
+        }
         if self.metadata.id.as_str() != "chaoxing"
             || private_input.provider_id() != &self.metadata.id
             || private_input.input_type() != CHAOXING_ANSWERS_INPUT_TYPE
@@ -1802,8 +2512,15 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
                 "Chaoxing reviewed-answer plan binding changed",
             ));
         }
-        let answers = Value::Array(decode_chaoxing_answers(private_input.value())?);
-        self.execute_worker(context, request, answers, events).await
+        let invocation = decode_chaoxing_answers(private_input.value())?;
+        self.execute_worker(
+            context,
+            request,
+            Value::Array(invocation.answers),
+            Some(invocation.mode.as_str()),
+            events,
+        )
+        .await
     }
 }
 
@@ -1811,13 +2528,44 @@ fn invalid_worker_answers(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::UnsupportedTask, message)
 }
 
-fn decode_chaoxing_answers(value: &SecretValue) -> ProviderResult<Vec<Value>> {
+fn invalid_uai_generated_text(message: &'static str) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::UnsupportedTask, message)
+}
+
+fn decode_uai_generated_text(value: &SecretValue) -> ProviderResult<String> {
+    let text = std::str::from_utf8(value.expose_secret())
+        .map_err(|_| invalid_uai_generated_text("UAI generated text is not UTF-8"))?
+        .trim();
+    if text.is_empty()
+        || text.len() > 16 * 1024
+        || text.starts_with("```")
+        || text
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(invalid_uai_generated_text(
+            "UAI generated text is empty, formatted, or oversized",
+        ));
+    }
+    Ok(text.to_owned())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChaoxingWorkerAnswerInvocation {
+    answers: Vec<Value>,
+    mode: String,
+}
+
+fn decode_chaoxing_answers(value: &SecretValue) -> ProviderResult<ChaoxingWorkerAnswerInvocation> {
     let root: Value = serde_json::from_slice(value.expose_secret())
         .map_err(|_| invalid_worker_answers("Chaoxing reviewed answers are not valid JSON"))?;
     let object = root
         .as_object()
         .ok_or_else(|| invalid_worker_answers("Chaoxing reviewed answers must be an object"))?;
-    if object.len() != 1 || !object.contains_key("answers") {
+    if !(object.len() == 1 || object.len() == 2)
+        || !object.contains_key("answers")
+        || object.keys().any(|key| key != "answers" && key != "mode")
+    {
         return Err(invalid_worker_answers(
             "Chaoxing reviewed answers contain unknown fields",
         ));
@@ -1848,7 +2596,19 @@ fn decode_chaoxing_answers(value: &SecretValue) -> ProviderResult<Vec<Value>> {
             ));
         }
     }
-    Ok(rows.clone())
+    let mode = object
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("submit");
+    if !matches!(mode, "save" | "submit") {
+        return Err(invalid_worker_answers(
+            "Chaoxing assessment mode must be save or submit",
+        ));
+    }
+    Ok(ChaoxingWorkerAnswerInvocation {
+        answers: rows.clone(),
+        mode: mode.to_owned(),
+    })
 }
 
 fn valid_worker_answer_value(value: &Value, depth: usize) -> bool {
@@ -2072,6 +2832,242 @@ fn clean_text(value: &str, maximum_bytes: usize) -> Option<String> {
     }
     Some(trimmed[..boundary].to_owned())
 }
+
+fn option_identity_and_content(raw: &str, index: usize) -> (String, Option<String>) {
+    let trimmed = raw.trim();
+    let mut parts = trimmed.splitn(2, |character: char| {
+        matches!(character, '.' | '．' | '、' | ':' | '：' | ')' | '）')
+    });
+    let prefix = parts.next().unwrap_or_default().trim();
+    let remainder = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let provider_id = if remainder.is_some()
+        && !prefix.is_empty()
+        && prefix.len() <= 8
+        && prefix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        prefix.to_ascii_uppercase()
+    } else {
+        (index + 1).to_string()
+    };
+    (
+        provider_id,
+        clean_text(remainder.unwrap_or(trimmed), 32 * 1024),
+    )
+}
+
+fn worker_question_options(values: &[Value]) -> Vec<QuestionOption> {
+    let mut used_ids = BTreeSet::new();
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let (raw_provider_id, content) = if let Some(object) = value.as_object() {
+                (
+                    object
+                        .get("id")
+                        .or_else(|| object.get("key"))
+                        .map_or_else(|| (index + 1).to_string(), value_text),
+                    object
+                        .get("content")
+                        .or_else(|| object.get("text"))
+                        .or_else(|| object.get("value"))
+                        .map(value_text),
+                )
+            } else {
+                let raw = value_text(value);
+                option_identity_and_content(&raw, index)
+            };
+            let content = content.and_then(|value| clean_text(&value, 32 * 1024))?;
+            let provider_id = clean_text(&raw_provider_id, 512);
+            let base_id = provider_id
+                .clone()
+                .unwrap_or_else(|| format!("option-{}", index + 1));
+            let mut internal_id = base_id.clone();
+            let mut duplicate = 2usize;
+            while !used_ids.insert(internal_id.clone()) {
+                let suffix = format!("#{duplicate}");
+                let keep = 512usize.saturating_sub(suffix.len());
+                let truncated =
+                    clean_text(&base_id, keep).unwrap_or_else(|| format!("option-{}", index + 1));
+                internal_id = format!("{truncated}{suffix}");
+                duplicate += 1;
+            }
+            Some(QuestionOption {
+                id: internal_id,
+                attachments: rich_attachments(&content),
+                metadata_sanitized: json!({"provider_option_id": provider_id}),
+                content: Some(content),
+            })
+        })
+        .collect()
+}
+
+fn rich_attachments(text: &str) -> Vec<QuestionAttachment> {
+    const MARKERS: [(&str, QuestionAttachmentKind, &str); 5] = [
+        (
+            "[QUESTION_IMAGE:",
+            QuestionAttachmentKind::Image,
+            "question image",
+        ),
+        (
+            "[QUESTION_AUDIO:",
+            QuestionAttachmentKind::Audio,
+            "question audio",
+        ),
+        (
+            "[QUESTION_VIDEO:",
+            QuestionAttachmentKind::Video,
+            "question video",
+        ),
+        (
+            "[QUESTION_FILE:",
+            QuestionAttachmentKind::File,
+            "question file",
+        ),
+        (
+            "[QUESTION_FORMULA:",
+            QuestionAttachmentKind::Formula,
+            "question formula",
+        ),
+    ];
+    let mut attachments = Vec::new();
+    let mut remaining = text;
+    while attachments.len() < 64 {
+        let Some((start, prefix, kind, fallback_label)) = MARKERS
+            .iter()
+            .filter_map(|(prefix, kind, label)| {
+                remaining
+                    .find(prefix)
+                    .map(|start| (start, *prefix, *kind, *label))
+            })
+            .min_by_key(|(start, _, _, _)| *start)
+        else {
+            break;
+        };
+        let value = &remaining[start + prefix.len()..];
+        let Some(end) = value.find(']') else {
+            break;
+        };
+        let encoded = value[..end].trim();
+        let (reference, visible_label) = encoded
+            .split_once('|')
+            .map_or((encoded, fallback_label), |(reference, visible)| {
+                (reference.trim(), visible.trim())
+            });
+        let remote_id =
+            (reference != "embedded" && reference.len() <= 512).then(|| reference.to_owned());
+        let label =
+            clean_text(visible_label, 32 * 1024).or_else(|| Some(fallback_label.to_owned()));
+        if !encoded.is_empty()
+            && !attachments.iter().any(|item: &QuestionAttachment| {
+                item.kind == kind && item.remote_id == remote_id && item.label == label
+            })
+        {
+            attachments.push(QuestionAttachment {
+                kind,
+                remote_id,
+                label,
+                metadata_sanitized: json!({"source": "worker_question_dom"}),
+            });
+        }
+        remaining = &value[end + 1..];
+    }
+    attachments
+}
+
+fn worker_question_reference(row: &Value) -> ProviderResult<RemoteQuestionRef> {
+    let remote_id = required_string(row, "remote_id")?;
+    let position = row
+        .get("position")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(1);
+    Ok(RemoteQuestionRef {
+        remote_id: remote_id.clone(),
+        position,
+        kind_hint: map_kind(row.get("kind")),
+        metadata_sanitized: json!({
+            "remote_id": remote_id,
+            "position": position,
+            "kind": row.get("kind").cloned().unwrap_or(Value::Null),
+            "prompt": row.get("prompt").cloned().unwrap_or(Value::Null),
+            "options": row.get("options").cloned().unwrap_or_else(|| json!([])),
+            "native_shape": row.get("native_shape").cloned().unwrap_or(Value::Null),
+            "worker_backed": true,
+        }),
+        route_context: ProviderRouteContext::default(),
+    })
+}
+
+fn usable_history_row(row: &Value) -> bool {
+    let kind = map_kind(row.get("kind"));
+    let Some(facts) = row.get("answer_evidence").and_then(Value::as_object) else {
+        return false;
+    };
+    ["official_value", "submitted_value", "value"]
+        .into_iter()
+        .filter_map(|field| facts.get(field).and_then(Value::as_str))
+        .any(|value| normalize_reviewed_answer(kind, value).is_some())
+}
+
+struct WorkerHistoryCursor {
+    course_remote_id: String,
+    task_remote_id: String,
+}
+
+fn parse_worker_history_cursor(
+    cursor: Option<&AnswerHistoryCursor>,
+    provider_id: &asterism_domain::ProviderId,
+) -> ProviderResult<Option<WorkerHistoryCursor>> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    cursor.validate(provider_id).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Chaoxing worker history cursor is invalid",
+        )
+    })?;
+    let value = cursor.value_sanitized.as_object();
+    let course_remote_id = value
+        .and_then(|value| value.get("course_remote_id"))
+        .and_then(Value::as_str)
+        .and_then(|value| clean_text(value, 512));
+    let task_remote_id = value
+        .and_then(|value| value.get("task_remote_id"))
+        .and_then(Value::as_str)
+        .and_then(|value| clean_text(value, 512));
+    if cursor.version != 2
+        || cursor.cursor_type != "chaoxing.worker-history.v2"
+        || value.is_none_or(|value| value.len() != 2)
+        || course_remote_id.is_none()
+        || task_remote_id.is_none()
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Chaoxing worker history cursor changed",
+        ));
+    }
+    Ok(Some(WorkerHistoryCursor {
+        course_remote_id: course_remote_id.expect("validated above"),
+        task_remote_id: task_remote_id.expect("validated above"),
+    }))
+}
+
+fn history_digest(parts: &[&str]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    digest.finalize().into()
+}
+
 fn map_state(value: Option<&Value>) -> RemoteState {
     match value.and_then(Value::as_str) {
         Some("completed") => RemoteState::Completed,
@@ -2184,6 +3180,73 @@ fn normalize_reviewed_answer(kind: QuestionKind, value: &str) -> Option<Normaliz
     }
 }
 
+fn normalize_reviewed_answer_for_question(
+    question: &Question,
+    value: &str,
+) -> Option<NormalizedAnswer> {
+    let raw = clean_text(value, 16 * 1024)?;
+    let direct_content_matches = question
+        .options
+        .iter()
+        .filter(|option| option.content.as_deref() == Some(raw.as_str()))
+        .collect::<Vec<_>>();
+    if direct_content_matches.len() == 1 {
+        return Some(NormalizedAnswer::Selections(vec![
+            direct_content_matches[0].id.clone(),
+        ]));
+    }
+    let normalized = normalize_reviewed_answer(question.kind, value)?;
+    let NormalizedAnswer::Selections(values) = normalized else {
+        return Some(normalized);
+    };
+    let mut rebound = Vec::with_capacity(values.len());
+    for value in values {
+        if let Some(option) = question.options.iter().find(|option| option.id == value) {
+            rebound.push(option.id.clone());
+            continue;
+        }
+        if value.len() == 1 && value.as_bytes()[0].is_ascii_uppercase() {
+            let index = usize::from(value.as_bytes()[0] - b'A');
+            if let Some(option) = question.options.get(index) {
+                rebound.push(option.id.clone());
+                continue;
+            }
+        }
+        let content_matches = question
+            .options
+            .iter()
+            .filter(|option| option.content.as_deref() == Some(value.as_str()))
+            .collect::<Vec<_>>();
+        if content_matches.len() != 1 {
+            return None;
+        }
+        rebound.push(content_matches[0].id.clone());
+    }
+    Some(NormalizedAnswer::Selections(rebound))
+}
+
+fn history_answer_matches_question(question: &Question, answer: &NormalizedAnswer) -> bool {
+    if answer.validate().is_err()
+        || matches!(answer, NormalizedAnswer::Unknown | NormalizedAnswer::Skip)
+    {
+        return false;
+    }
+    match (question.kind, answer) {
+        (
+            QuestionKind::SingleChoice | QuestionKind::MultipleChoice,
+            NormalizedAnswer::Selections(selected),
+        ) => selected
+            .iter()
+            .all(|id| question.options.iter().any(|option| option.id == *id)),
+        (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_))
+        | (QuestionKind::FillBlank | QuestionKind::ShortAnswer, NormalizedAnswer::Texts(_))
+        | (QuestionKind::Matching, NormalizedAnswer::Pairs(_))
+        | (QuestionKind::Ordering, NormalizedAnswer::Ordering(_))
+        | (QuestionKind::Composite, NormalizedAnswer::Composite(_)) => true,
+        _ => false,
+    }
+}
+
 fn worker_runtime_settings_schema(
     provider_id: &asterism_domain::ProviderId,
 ) -> ProviderRuntimeSettingsSchema {
@@ -2193,19 +3256,75 @@ fn worker_runtime_settings_schema(
         ProviderSettingScope::Task,
     ]);
     let definitions = match provider_id.as_str() {
-        "chaoxing" => vec![ProviderSettingDefinition {
-            key: "worker.playback_rate".to_owned(),
-            display_name: "Playback rate".to_owned(),
-            description: "Playback multiplier passed to the audited Chaoxing donor.".to_owned(),
-            kind: ProviderSettingKind::DecimalMillis {
-                minimum: 1_000,
-                maximum: 4_000,
-                step: 250,
+        "chaoxing" => vec![
+            ProviderSettingDefinition {
+                key: "worker.playback_rate".to_owned(),
+                display_name: "Video playback rate".to_owned(),
+                description:
+                    "Video-only multiplier passed to the audited Chaoxing donor; live stays 1x."
+                        .to_owned(),
+                kind: ProviderSettingKind::DecimalMillis {
+                    minimum: 1,
+                    maximum: i64::MAX,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DecimalMillis(2_000),
+                scopes: scopes.clone(),
+                core_behavior: None,
             },
-            default: ProviderSettingValue::DecimalMillis(1_000),
-            scopes,
-            core_behavior: None,
-        }],
+            ProviderSettingDefinition {
+                key: "worker.minimum_answer_coverage".to_owned(),
+                display_name: "Minimum answer coverage".to_owned(),
+                description: "Minimum reviewed-answer fraction required for Chaoxing final submission; save-only may remain partial.".to_owned(),
+                kind: ProviderSettingKind::DecimalMillis {
+                    minimum: 0,
+                    maximum: 1_000,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DecimalMillis(900),
+                scopes: scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.video_threads".to_owned(),
+                display_name: "Video task threads".to_owned(),
+                description: "Concurrent Chaoxing video execution points.".to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: i64::MAX,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(4),
+                scopes: scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.answer_threads".to_owned(),
+                display_name: "Answer task threads".to_owned(),
+                description: "Concurrent Chaoxing chapter-answer execution points.".to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: i64::MAX,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(1),
+                scopes: scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.other_threads".to_owned(),
+                display_name: "Other task threads".to_owned(),
+                description: "Concurrent Chaoxing document/read/other execution points.".to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: i64::MAX,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(4),
+                scopes,
+                core_behavior: None,
+            },
+        ],
         "welearn" => vec![
             ProviderSettingDefinition {
                 key: "worker.correctness".to_owned(),
@@ -2236,21 +3355,78 @@ fn worker_runtime_settings_schema(
                 core_behavior: None,
             },
         ],
-        "uai" => vec![ProviderSettingDefinition {
-            key: "worker.duration_seconds".to_owned(),
-            display_name: "Course residence seconds".to_owned(),
-            description:
-                "Rendered page-residence budget passed to the audited UAI userscript donor."
-                    .to_owned(),
-            kind: ProviderSettingKind::DurationSeconds {
-                minimum: 60,
-                maximum: 3_600,
-                step: 60,
+        "uai" => vec![
+            ProviderSettingDefinition {
+                key: "worker.duration_seconds".to_owned(),
+                display_name: "Course residence seconds".to_owned(),
+                description:
+                    "Rendered page-residence budget passed to the audited UAI userscript donor."
+                        .to_owned(),
+                kind: ProviderSettingKind::DurationSeconds {
+                    minimum: 60,
+                    maximum: 3_600,
+                    step: 60,
+                },
+                default: ProviderSettingValue::DurationSeconds(60),
+                scopes: scopes.clone(),
+                core_behavior: None,
             },
-            default: ProviderSettingValue::DurationSeconds(60),
-            scopes,
-            core_behavior: None,
-        }],
+            ProviderSettingDefinition {
+                key: "worker.cooldown_count".to_owned(),
+                display_name: "Submissions before cooldown".to_owned(),
+                description: "Preserves the donor's per-account submission frequency control."
+                    .to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: i64::MAX,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(5),
+                scopes: scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.cooldown_seconds".to_owned(),
+                display_name: "Cooldown seconds".to_owned(),
+                description: "Delay after each configured UAI submission group.".to_owned(),
+                kind: ProviderSettingKind::DurationSeconds {
+                    minimum: 0,
+                    maximum: u64::MAX,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DurationSeconds(120),
+                scopes,
+                core_behavior: None,
+            },
+        ],
+        "cidaren" => vec![
+            ProviderSettingDefinition {
+                key: "worker.spend_min_time".to_owned(),
+                display_name: "Cidaren minimum answer delay".to_owned(),
+                description: "Minimum donor delay between timed Cidaren questions.".to_owned(),
+                kind: ProviderSettingKind::DurationSeconds {
+                    minimum: 0,
+                    maximum: 3_600,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DurationSeconds(1),
+                scopes: scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.spend_max_time".to_owned(),
+                display_name: "Cidaren maximum answer delay".to_owned(),
+                description: "Maximum donor delay between timed Cidaren questions.".to_owned(),
+                kind: ProviderSettingKind::DurationSeconds {
+                    minimum: 0,
+                    maximum: 3_600,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DurationSeconds(2),
+                scopes,
+                core_behavior: None,
+            },
+        ],
         _ => Vec::new(),
     };
     ProviderRuntimeSettingsSchema {
@@ -2454,10 +3630,17 @@ mod tests {
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
+        assert!(entry.task_detail.is_some());
         assert!(entry.question_inventory.is_none());
         assert!(entry.question_parse.is_none());
         assert!(entry.duration_read.is_some());
         assert!(entry.task_execution.is_some());
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::Discussion)
+        );
         assert!(entry.submission_execute.is_none());
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();
@@ -2546,6 +3729,128 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_choice_labels_rebind_to_current_provider_option_ids() {
+        let question = Question {
+            id: QuestionId::new(),
+            task_id: TaskId::new(),
+            remote_question_id: Some("history-choice".to_owned()),
+            kind: QuestionKind::MultipleChoice,
+            stem: "Choose".to_owned(),
+            options: vec![
+                QuestionOption {
+                    id: "remote-17".to_owned(),
+                    content: Some("First".to_owned()),
+                    attachments: Vec::new(),
+                    metadata_sanitized: json!({"provider_option_id": "remote-17"}),
+                },
+                QuestionOption {
+                    id: "remote-42".to_owned(),
+                    content: Some("Second".to_owned()),
+                    attachments: Vec::new(),
+                    metadata_sanitized: json!({"provider_option_id": "remote-42"}),
+                },
+            ],
+            attachments: Vec::new(),
+            metadata_sanitized: json!({}),
+            position: 1,
+        };
+        assert_eq!(
+            normalize_reviewed_answer_for_question(&question, "B"),
+            Some(NormalizedAnswer::Selections(vec!["remote-42".to_owned()]))
+        );
+        assert_eq!(
+            normalize_reviewed_answer_for_question(&question, "First"),
+            Some(NormalizedAnswer::Selections(vec!["remote-17".to_owned()]))
+        );
+        assert!(!history_answer_matches_question(
+            &question,
+            &NormalizedAnswer::Selections(vec!["remote-17".to_owned(), "remote-17".to_owned()])
+        ));
+    }
+
+    #[test]
+    fn worker_question_options_keep_duplicate_provider_ids_as_private_metadata() {
+        let options = worker_question_options(&[
+            json!({"id": "A", "content": "First"}),
+            json!({"id": "A", "content": "Second"}),
+            json!({"id": "", "content": "Third"}),
+        ]);
+
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].id, "A");
+        assert_eq!(options[1].id, "A#2");
+        assert_eq!(options[2].id, "option-3");
+        assert_eq!(options[0].metadata_sanitized["provider_option_id"], "A");
+        assert_eq!(options[1].metadata_sanitized["provider_option_id"], "A");
+        assert!(options[2].metadata_sanitized["provider_option_id"].is_null());
+        let question = Question {
+            id: QuestionId::new(),
+            task_id: TaskId::new(),
+            remote_question_id: None,
+            kind: QuestionKind::SingleChoice,
+            stem: "Choose".to_owned(),
+            options,
+            attachments: Vec::new(),
+            metadata_sanitized: json!({}),
+            position: 1,
+        };
+        question.validate().unwrap();
+    }
+
+    #[test]
+    fn rich_worker_markers_become_typed_attachments() {
+        let attachments = rich_attachments(
+            "A [QUESTION_IMAGE:https://example.test/a.png] B [QUESTION_AUDIO:https://example.test/a.mp3] C [QUESTION_FORMULA:x+y] D [QUESTION_FILE:https://example.test/a.pdf|paper]",
+        );
+        assert_eq!(attachments.len(), 4);
+        assert_eq!(attachments[0].kind, QuestionAttachmentKind::Image);
+        assert_eq!(attachments[1].kind, QuestionAttachmentKind::Audio);
+        assert_eq!(attachments[2].kind, QuestionAttachmentKind::Formula);
+        assert_eq!(attachments[2].remote_id.as_deref(), Some("x+y"));
+        assert_eq!(attachments[3].kind, QuestionAttachmentKind::File);
+        assert_eq!(attachments[3].label.as_deref(), Some("paper"));
+    }
+
+    #[test]
+    fn uai_generated_text_accepts_plain_human_content_only() {
+        assert_eq!(
+            decode_uai_generated_text(&SecretValue::new(
+                "A concise discussion reply.".as_bytes().to_vec()
+            ))
+            .unwrap(),
+            "A concise discussion reply."
+        );
+        assert!(
+            decode_uai_generated_text(&SecretValue::new(b"```markdown\nautomated\n```".to_vec()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn chaoxing_option_labels_remain_submission_identities() {
+        assert_eq!(
+            option_identity_and_content("A. alpha", 0),
+            ("A".to_owned(), Some("alpha".to_owned()))
+        );
+        assert_eq!(
+            option_identity_and_content("plain option", 1),
+            ("2".to_owned(), Some("plain option".to_owned()))
+        );
+    }
+
+    #[test]
+    fn reviewed_history_requires_a_normalizable_answer() {
+        assert!(usable_history_row(&json!({
+            "kind": "single_choice",
+            "answer_evidence": {"official_value": "B"}
+        })));
+        assert!(!usable_history_row(&json!({
+            "kind": "provider_native",
+            "answer_evidence": {"official_value": "opaque"}
+        })));
+    }
+
+    #[test]
     fn chaoxing_private_answers_are_bounded_and_exactly_shaped() {
         let input = SecretValue::new(
             serde_json::to_vec(&json!({
@@ -2557,7 +3862,13 @@ mod tests {
             }))
             .unwrap(),
         );
-        assert_eq!(decode_chaoxing_answers(&input).unwrap().len(), 3);
+        let decoded = decode_chaoxing_answers(&input).unwrap();
+        assert_eq!(decoded.answers.len(), 3);
+        assert_eq!(decoded.mode, "submit");
+        let save = SecretValue::new(
+            br#"{"answers":[{"remote_id":"q-1","value":"A"}],"mode":"save"}"#.to_vec(),
+        );
+        assert_eq!(decode_chaoxing_answers(&save).unwrap().mode, "save");
         assert!(
             decode_chaoxing_answers(&SecretValue::new(
                 br#"{"answers":[{"remote_id":"q-1","value":"A"},{"remote_id":"q-1","value":"B"}]}"#
@@ -2570,6 +3881,26 @@ mod tests {
                 br#"{"answers":[{"remote_id":"q-1","value":null}],"unsafe":true}"#.to_vec(),
             ))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn chaoxing_runtime_schema_exposes_partial_coverage_policy() {
+        let provider = ProviderId::new("chaoxing").unwrap();
+        let schema = worker_runtime_settings_schema(&provider);
+        let setting = schema
+            .definitions
+            .iter()
+            .find(|definition| definition.key == "worker.minimum_answer_coverage")
+            .unwrap();
+        assert_eq!(setting.default, ProviderSettingValue::DecimalMillis(900));
+        assert_eq!(
+            setting.kind,
+            ProviderSettingKind::DecimalMillis {
+                minimum: 0,
+                maximum: 1_000,
+                step: 1,
+            }
         );
     }
 

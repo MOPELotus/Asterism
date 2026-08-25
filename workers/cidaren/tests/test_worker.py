@@ -58,7 +58,7 @@ class InventoryTests(unittest.TestCase):
         )
         self.assertTrue(all(row["global_remote_id"] for row in result["tasks"]))
         self.assertEqual([row["source_type"] for row in result["tasks"]], ["practice", "exam"])
-        self.assertTrue(all(row["assessment_class"] == "routine" for row in result["tasks"]))
+        self.assertEqual([row["assessment_class"] for row in result["tasks"]], ["routine", "formal"])
         self.assertEqual(result["tasks"][0]["state"], "completed")
         self.assertEqual(result["tasks"][1]["progress_percent"], 40)
         self.assertNotIn("questions", result["tasks"][0]["capabilities"])

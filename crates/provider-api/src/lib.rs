@@ -15,6 +15,7 @@ pub use history_harvest::*;
 pub use metadata::{ProviderCapability, ProviderMetadata, VerificationLevel};
 pub use registry::{ProviderEntry, ProviderRegistry, RegistryError};
 pub use settings::{
+    AI_EXECUTION_PROFILE_KEY, AI_PROFILE_ECONOMY, AI_PROFILE_GPT_ONLY, AiExecutionProfile,
     ProviderExecutionConcurrency, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
     ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior, ProviderSettingDefinition,
     ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, ProviderSettingsError,

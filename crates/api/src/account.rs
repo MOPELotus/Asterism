@@ -1,4 +1,4 @@
-use std::{fmt, str::FromStr, sync::Arc};
+use std::{collections::BTreeMap, fmt, str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AuthMethod, AuthSession, AuthSessionId, AuthState, ExternalOauthState, ProviderAccount,
@@ -32,8 +32,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use chrono::{Duration, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 
 use crate::{ApiError, ApiState, ListResponse, auth::AuthContext};
 
@@ -582,6 +583,287 @@ pub(super) async fn scan_provider_account(
     .await
     .map_err(map_scan_error)?;
     Ok(crate::auth::no_store(Json(report).into_response()))
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct AnswerHistoryScanStatusResponse {
+    provider_account_id: ProviderAccountId,
+    provider_id: ProviderId,
+    generation: u32,
+    state: String,
+    scanned_task_count: u32,
+    total_task_count: Option<u32>,
+    cached_snapshot_count: u64,
+    cached_question_count: u64,
+    question_kind_counts: BTreeMap<String, u64>,
+    watermark_sanitized: serde_json::Value,
+    attempts: u32,
+    last_error_sanitized: Option<String>,
+    next_retry_at: Option<String>,
+    created_at: String,
+    started_at: Option<String>,
+    updated_at: String,
+    completed_at: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AnswerHistoryScanAction {
+    Pause,
+    Resume,
+    Retry,
+}
+
+pub(super) async fn get_answer_history_scan_status(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let authority = auth.require_provider_settings_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let account = SqliteProviderAccountRepository::new(state.database.clone())
+        .find_runtime_provider_account(account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|account| authority.permits_owner(account.owner_id))
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    if account.provider_id.as_str() != "chaoxing" {
+        return Err(ApiError::conflict(
+            "answer_history_scan_unavailable",
+            "full answer-history scanning is only enabled for Chaoxing",
+        ));
+    }
+    let response = load_answer_history_scan_status(&state.database, account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("answer_history_scan_not_found"))?;
+    Ok(crate::auth::no_store(Json(response).into_response()))
+}
+
+pub(super) async fn control_answer_history_scan(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+    payload: Result<Json<AnswerHistoryScanControlRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let authority = auth.require_provider_settings_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let request = api_json(payload)?;
+    let account = SqliteProviderAccountRepository::new(state.database.clone())
+        .find_runtime_provider_account(account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|account| authority.permits_owner(account.owner_id))
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    if account.provider_id.as_str() != "chaoxing" {
+        return Err(ApiError::conflict(
+            "answer_history_scan_unavailable",
+            "full answer-history scanning is only enabled for Chaoxing",
+        ));
+    }
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let mut transaction = state
+        .database
+        .pool()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(ApiError::internal)?;
+    let row = sqlx::query(
+        "SELECT harvest.id, harvest.schedule_id, harvest.state, job.state AS job_state \
+         FROM answer_bootstrap_harvests AS harvest \
+         INNER JOIN scheduled_jobs AS job ON job.id = harvest.schedule_id \
+         WHERE harvest.provider_account_id = ? ORDER BY harvest.generation DESC LIMIT 1",
+    )
+    .bind(account_id.to_string())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::not_found("answer_history_scan_not_found"))?;
+    let harvest_id: String = row.try_get("id").map_err(ApiError::internal)?;
+    let schedule_id: String = row.try_get("schedule_id").map_err(ApiError::internal)?;
+    let harvest_state: String = row.try_get("state").map_err(ApiError::internal)?;
+    let job_state: String = row.try_get("job_state").map_err(ApiError::internal)?;
+    match request.action {
+        AnswerHistoryScanAction::Pause => {
+            if harvest_state == "running" || job_state == "claimed" {
+                return Err(ApiError::conflict(
+                    "answer_history_scan_busy",
+                    "wait for the current bounded page to finish before pausing",
+                ));
+            }
+            if matches!(harvest_state.as_str(), "completed" | "failed" | "cancelled") {
+                return Err(ApiError::conflict(
+                    "answer_history_scan_terminal",
+                    "a terminal scan cannot be paused",
+                ));
+            }
+            sqlx::query(
+                "UPDATE answer_bootstrap_harvests SET state = 'paused', \
+                 started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(&now)
+            .bind(&harvest_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+            sqlx::query(
+                "UPDATE scheduled_jobs SET state = 'cancelled', worker_id = NULL, \
+                 lease_expires_at = NULL, updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(&schedule_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+        }
+        AnswerHistoryScanAction::Resume | AnswerHistoryScanAction::Retry => {
+            if harvest_state == "running" || job_state == "claimed" {
+                return Err(ApiError::conflict(
+                    "answer_history_scan_busy",
+                    "the scan already has a running bounded page",
+                ));
+            }
+            if harvest_state == "completed" {
+                return Err(ApiError::conflict(
+                    "answer_history_scan_completed",
+                    "the current full scan is already complete",
+                ));
+            }
+            sqlx::query(
+                "UPDATE answer_bootstrap_harvests SET state = 'paused', \
+                 started_at = COALESCE(started_at, ?), completed_at = NULL, updated_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(&now)
+            .bind(&harvest_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+            sqlx::query(
+                "UPDATE scheduled_jobs SET state = 'pending', run_at = ?, \
+                 attempts = CASE WHEN ? = 1 THEN 0 ELSE attempts END, worker_id = NULL, \
+                 lease_expires_at = NULL, last_error_sanitized = NULL, updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(i64::from(matches!(
+                request.action,
+                AnswerHistoryScanAction::Retry
+            )))
+            .bind(&now)
+            .bind(&schedule_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+        }
+    }
+    transaction.commit().await.map_err(ApiError::internal)?;
+    let response = load_answer_history_scan_status(&state.database, account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("answer_history_scan_not_found"))?;
+    Ok(crate::auth::no_store(Json(response).into_response()))
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(super) struct AnswerHistoryScanControlRequest {
+    action: AnswerHistoryScanAction,
+}
+
+async fn load_answer_history_scan_status(
+    database: &asterism_storage::Database,
+    account_id: ProviderAccountId,
+) -> Result<Option<AnswerHistoryScanStatusResponse>, ApiError> {
+    let row = sqlx::query(
+        "SELECT harvest.provider_account_id, harvest.provider_id, harvest.generation, \
+                harvest.state, harvest.scanned_task_count, harvest.total_task_count, \
+                harvest.watermark_sanitized_json, harvest.created_at, harvest.started_at, \
+                harvest.updated_at, harvest.completed_at, job.attempts, job.run_at, \
+                job.last_error_sanitized \
+         FROM answer_bootstrap_harvests AS harvest \
+         INNER JOIN scheduled_jobs AS job ON job.id = harvest.schedule_id \
+         WHERE harvest.provider_account_id = ? ORDER BY harvest.generation DESC LIMIT 1",
+    )
+    .bind(account_id.to_string())
+    .fetch_optional(database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let Some(row) = row else { return Ok(None) };
+    let (cached_snapshot_count, cached_question_count) = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT COUNT(DISTINCT snapshot.id), COUNT(question.question_id) \
+         FROM tasks AS task \
+         LEFT JOIN question_snapshots AS snapshot ON snapshot.task_id = task.id \
+         LEFT JOIN question_snapshot_items AS question ON question.snapshot_id = snapshot.id \
+         WHERE task.provider_account_id = ?",
+    )
+    .bind(account_id.to_string())
+    .fetch_one(database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let kind_rows = sqlx::query(
+        "SELECT json_extract(question.question_json, '$.kind') AS kind, COUNT(*) AS count FROM tasks AS task \
+         INNER JOIN question_snapshots AS snapshot ON snapshot.task_id = task.id \
+         INNER JOIN question_snapshot_items AS question ON question.snapshot_id = snapshot.id \
+         WHERE task.provider_account_id = ? GROUP BY kind ORDER BY kind",
+    )
+    .bind(account_id.to_string())
+    .fetch_all(database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let question_kind_counts = kind_rows
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<String, _>("kind")?,
+                u64::try_from(row.try_get::<i64, _>("count")?).unwrap_or(0),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, sqlx::Error>>()
+        .map_err(ApiError::internal)?;
+    Ok(Some(AnswerHistoryScanStatusResponse {
+        provider_account_id: account_id,
+        provider_id: ProviderId::new(
+            row.try_get::<String, _>("provider_id")
+                .map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+        generation: u32::try_from(
+            row.try_get::<i64, _>("generation")
+                .map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+        state: row.try_get("state").map_err(ApiError::internal)?,
+        scanned_task_count: u32::try_from(
+            row.try_get::<i64, _>("scanned_task_count")
+                .map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+        total_task_count: row
+            .try_get::<Option<i64>, _>("total_task_count")
+            .map_err(ApiError::internal)?
+            .map(|value| u32::try_from(value).map_err(ApiError::internal))
+            .transpose()?,
+        cached_snapshot_count: u64::try_from(cached_snapshot_count).unwrap_or(0),
+        cached_question_count: u64::try_from(cached_question_count).unwrap_or(0),
+        question_kind_counts,
+        watermark_sanitized: serde_json::from_str(
+            row.try_get::<&str, _>("watermark_sanitized_json")
+                .map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+        attempts: u32::try_from(
+            row.try_get::<i64, _>("attempts")
+                .map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+        last_error_sanitized: row
+            .try_get("last_error_sanitized")
+            .map_err(ApiError::internal)?,
+        next_retry_at: row.try_get("run_at").map_err(ApiError::internal)?,
+        created_at: row.try_get("created_at").map_err(ApiError::internal)?,
+        started_at: row.try_get("started_at").map_err(ApiError::internal)?,
+        updated_at: row.try_get("updated_at").map_err(ApiError::internal)?,
+        completed_at: row.try_get("completed_at").map_err(ApiError::internal)?,
+    }))
 }
 
 pub(super) async fn get_scan_schedule(

@@ -1,0 +1,8 @@
+{
+  "apiUrl": "http://127.0.0.1:8068",
+  "webUrl": "https://asterism.example.com",
+  "token": "ast_st_replace_me",
+  "allowedGroups": [],
+  "adminContact": "请联系群管理员",
+  "requestTimeoutMs": 180000
+}

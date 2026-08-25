@@ -181,6 +181,13 @@ async fn validate_existing_import(
     }
 
     let observed_at = decode_timestamp(row.try_get("observed_at")?)?;
+    // Releases before 0.0.1 included the local read timestamp in the content
+    // digest. Reconstruct that exact legacy digest with the stored timestamp;
+    // this permits a later read of identical parsed content without weakening
+    // content binding for a changed question, answer, score or provenance.
+    if stored_digest.as_slice() == timestamped_content_digest(request, observed_at)? {
+        return Ok(record);
+    }
     let imported_at = decode_timestamp(row.try_get("imported_at")?)?;
     let legacy_unknown = row.try_get::<Option<String>, _>("score_json")?.is_none()
         && row.try_get::<Option<String>, _>("retake_json")?.is_none()
@@ -303,7 +310,22 @@ fn content_digest(request: &AnswerHistoryIngestRequest<'_>) -> Result<[u8; 32], 
         "provenance".to_owned(),
         request.provenance_sanitized.clone(),
     );
-    values.insert("observed_at".to_owned(), json!(request.observed_at));
+    digest_material(&material)
+}
+
+fn timestamped_content_digest(
+    request: &AnswerHistoryIngestRequest<'_>,
+    observed_at: asterism_domain::Timestamp,
+) -> Result<[u8; 32], StorageError> {
+    let mut material = semantic_content_material(request)?;
+    let values = material.as_object_mut().ok_or_else(invalid_import)?;
+    values.insert("score".to_owned(), json!(request.score));
+    values.insert("retake".to_owned(), json!(request.retake));
+    values.insert(
+        "provenance".to_owned(),
+        request.provenance_sanitized.clone(),
+    );
+    values.insert("observed_at".to_owned(), json!(observed_at));
     digest_material(&material)
 }
 

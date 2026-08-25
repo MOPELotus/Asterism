@@ -7,12 +7,12 @@ use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerEvidenceClass, AnswerSource,
     CorpusProjectionEligibility, CourseId, ExecutionAttemptId, ExecutionId, PrivateAnswerEvidence,
     PrivateAnswerEvidenceId, ProviderAccountId, ProviderId, Question, QuestionContentFingerprint,
-    QuestionGroup, QuestionGroupChild, QuestionGroupId, QuestionId, QuestionSnapshotId,
-    SelectedAnswer, SubmissionAnswerCoverage, SubmissionDraft, SubmissionDraftId,
-    SubmissionDraftItem, SubmissionPayloadPreview, SubmissionQuestionVerificationStatus,
-    SubmissionReceipt, SubmissionResult, SubmissionResultId, SubmissionResultStatus,
-    SubmissionVerificationSnapshot, TaskId, Timestamp, UnmatchedEvidenceReason, UserId,
-    validate_question_groups,
+    QuestionGroup, QuestionGroupChild, QuestionGroupId, QuestionId, QuestionSemanticFingerprint,
+    QuestionSetView, QuestionSnapshotId, SelectedAnswer, SubmissionAnswerCoverage, SubmissionDraft,
+    SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadPreview,
+    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult, SubmissionResultId,
+    SubmissionResultStatus, SubmissionVerificationSnapshot, TaskId, Timestamp,
+    UnmatchedEvidenceReason, UserId, validate_question_groups,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -153,7 +153,7 @@ pub(crate) async fn save_question_snapshot_in_transaction(
         sqlx::query(
             "INSERT INTO question_snapshot_items \
              (snapshot_id, question_id, remote_question_id, position, question_json, \
-              content_fingerprint) VALUES (?, ?, ?, ?, ?, ?)",
+              content_fingerprint, semantic_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(snapshot.id.to_string())
         .bind(question.id.to_string())
@@ -161,6 +161,7 @@ pub(crate) async fn save_question_snapshot_in_transaction(
         .bind(i64::from(question.position))
         .bind(question.json)
         .bind(question.content_fingerprint.as_str())
+        .bind(question.semantic_fingerprint.as_str())
         .execute(&mut **transaction)
         .await?;
     }
@@ -290,13 +291,22 @@ impl AnswerCacheRepository for SqliteQuestionSnapshotRepository {
         target_question_snapshot_id: QuestionSnapshotId,
     ) -> Result<Vec<PriorAnswerEvidence>, StorageError> {
         let rows = sqlx::query(
-            "SELECT target_item.question_id AS target_question_id, \
+            "SELECT DISTINCT target_item.question_id AS target_question_id, \
                     target_item.remote_question_id AS target_remote_question_id, \
                     target_item.position AS target_position, \
                     target_item.question_json AS target_question_json, \
                     source_item.question_id, source_item.remote_question_id, \
                     source_item.position, source_item.question_json, \
-                    source_item.content_fingerprint, source_snapshot.id AS source_snapshot_id, \
+                    source_item.content_fingerprint, source_item.semantic_fingerprint, \
+                    COALESCE((SELECT json_group_array(json(ordered.question_json)) FROM ( \
+                        SELECT question_json FROM question_snapshot_items \
+                        WHERE snapshot_id = source_snapshot.id ORDER BY position \
+                    ) AS ordered), '[]') AS source_questions_json, \
+                    COALESCE((SELECT json_group_array(json(ordered.group_json)) FROM ( \
+                        SELECT group_json FROM question_snapshot_groups \
+                        WHERE snapshot_id = source_snapshot.id ORDER BY ordinal \
+                    ) AS ordered), '[]') AS source_groups_json, \
+                    source_snapshot.id AS source_snapshot_id, \
                     candidate.id AS candidate_id, candidate.source, candidate.candidate_json, \
                     candidate.created_at \
              FROM question_snapshots AS target_snapshot \
@@ -305,26 +315,41 @@ impl AnswerCacheRepository for SqliteQuestionSnapshotRepository {
              INNER JOIN question_snapshot_items AS target_item \
                 ON target_item.snapshot_id = target_snapshot.id \
              INNER JOIN question_snapshot_items AS source_item \
-                ON source_item.content_fingerprint = target_item.content_fingerprint \
+                ON (source_item.semantic_fingerprint IS NOT NULL \
+                    AND source_item.semantic_fingerprint = target_item.semantic_fingerprint) \
+                  OR (source_item.semantic_fingerprint IS NULL \
+                    AND target_item.semantic_fingerprint IS NULL \
+                    AND source_item.content_fingerprint = target_item.content_fingerprint \
+                    AND target_snapshot.group_count = 0) \
              INNER JOIN question_snapshots AS source_snapshot \
                 ON source_snapshot.id = source_item.snapshot_id \
-               AND source_snapshot.task_id = target_snapshot.task_id \
+               AND source_snapshot.provider_id = target_snapshot.provider_id \
+             INNER JOIN tasks AS source_task ON source_task.id = source_snapshot.task_id \
+             INNER JOIN provider_accounts AS source_account \
+                ON source_account.id = source_task.provider_account_id \
              INNER JOIN answer_candidates AS candidate \
                 ON candidate.question_snapshot_id = source_item.snapshot_id \
                AND candidate.question_id = source_item.question_id \
+             LEFT JOIN private_answer_evidence AS positive \
+                ON positive.question_snapshot_id = source_item.snapshot_id \
+               AND positive.question_id = source_item.question_id \
+               AND positive.source_candidate_id = candidate.id \
+               AND positive.provider_id = source_snapshot.provider_id \
+               AND positive.evidence_class IN ('official', 'verified_historical') \
              WHERE account.owner_user_id = ? AND target_snapshot.task_id = ? \
                AND target_snapshot.id = ? AND target_item.content_fingerprint IS NOT NULL \
-               AND target_snapshot.group_count = 0 AND source_snapshot.group_count = 0 \
                AND candidate.source <> 'local_cache' \
-               AND (source_snapshot.captured_at < target_snapshot.captured_at OR \
-                    (source_snapshot.captured_at = target_snapshot.captured_at \
-                     AND source_snapshot.id < target_snapshot.id)) \
-               AND (SELECT COUNT(*) FROM question_snapshot_items AS target_count \
-                    WHERE target_count.snapshot_id = target_snapshot.id \
-                      AND target_count.content_fingerprint = target_item.content_fingerprint) = 1 \
-               AND (SELECT COUNT(*) FROM question_snapshot_items AS source_count \
-                    WHERE source_count.snapshot_id = source_snapshot.id \
-                      AND source_count.content_fingerprint = source_item.content_fingerprint) = 1 \
+               AND (source_item.semantic_fingerprint IS NOT NULL OR source_snapshot.group_count = 0) \
+               AND (candidate.source = 'provider_native' OR positive.id IS NOT NULL) \
+               AND source_snapshot.id <> target_snapshot.id \
+               AND NOT EXISTS ( \
+                    SELECT 1 FROM private_answer_evidence AS negative \
+                    WHERE negative.provider_id = source_snapshot.provider_id \
+                      AND negative.question_content_fingerprint = source_item.content_fingerprint \
+                      AND (negative.source_candidate_id = candidate.id \
+                           OR (positive.id IS NOT NULL AND negative.answer_json = positive.answer_json)) \
+                      AND negative.evidence_class = 'negative' \
+               ) \
              ORDER BY target_item.position, source_snapshot.captured_at DESC, \
                       source_snapshot.id DESC, candidate.created_at DESC, candidate.id DESC \
              LIMIT ?",
@@ -384,9 +409,25 @@ fn decode_prior_answer_evidence(row: &SqliteRow) -> Result<PriorAnswerEvidence, 
         return Err(invalid_candidates());
     }
     let source_snapshot_id = parse_id::<QuestionSnapshotId>(row.try_get("source_snapshot_id")?)?;
+    let source_questions: Vec<Question> =
+        serde_json::from_str(row.try_get("source_questions_json")?)?;
+    let source_groups: Vec<QuestionGroup> =
+        serde_json::from_str(row.try_get("source_groups_json")?)?;
+    let source_view = QuestionSetView::try_new(question.task_id, &source_questions, &source_groups)
+        .map_err(|_| invalid_candidates())?;
+    let semantic_fingerprint = row
+        .try_get::<Option<&str>, _>("semantic_fingerprint")?
+        .map(QuestionSemanticFingerprint::from_str)
+        .transpose()
+        .map_err(|_| invalid_candidates())?
+        .map_or_else(|| source_view.semantic_fingerprint(question.id), Ok)
+        .map_err(|_| invalid_candidates())?;
     Ok(PriorAnswerEvidence {
         question_content_fingerprint: fingerprint,
+        question_semantic_fingerprint: semantic_fingerprint,
         source_question: question,
+        source_questions,
+        source_groups,
         source_candidate: AnswerCandidateRecord {
             id: parse_id::<AnswerCandidateId>(row.try_get("candidate_id")?)?,
             question_snapshot_id: source_snapshot_id,
@@ -1342,6 +1383,7 @@ const fn encode_answer_source(source: AnswerSource) -> &'static str {
         AnswerSource::Manual => "manual",
         AnswerSource::LocalCache => "local_cache",
         AnswerSource::ProviderNative => "provider_native",
+        AnswerSource::Ai => "ai",
         AnswerSource::ExternalBank => "external_bank",
         AnswerSource::Other => "other",
     }
@@ -1352,6 +1394,7 @@ fn decode_answer_source(value: &str) -> Result<AnswerSource, StorageError> {
         "manual" => Ok(AnswerSource::Manual),
         "local_cache" => Ok(AnswerSource::LocalCache),
         "provider_native" => Ok(AnswerSource::ProviderNative),
+        "ai" => Ok(AnswerSource::Ai),
         "external_bank" => Ok(AnswerSource::ExternalBank),
         "other" => Ok(AnswerSource::Other),
         _ => Err(invalid_candidates()),
@@ -1364,6 +1407,7 @@ struct EncodedQuestion {
     position: u32,
     json: String,
     content_fingerprint: QuestionContentFingerprint,
+    semantic_fingerprint: QuestionSemanticFingerprint,
 }
 
 struct EncodedSnapshot {
@@ -1392,6 +1436,9 @@ fn validate_and_encode(snapshot: &QuestionSnapshot) -> Result<EncodedSnapshot, S
     {
         return Err(invalid_snapshot());
     }
+    let semantic_view =
+        QuestionSetView::try_new(snapshot.task_id, &snapshot.questions, &snapshot.groups)
+            .map_err(|_| invalid_snapshot())?;
     let mut ids = BTreeSet::new();
     let mut remote_ids = BTreeSet::new();
     let mut positions = BTreeSet::new();
@@ -1421,6 +1468,9 @@ fn validate_and_encode(snapshot: &QuestionSnapshot) -> Result<EncodedSnapshot, S
             json,
             content_fingerprint: question
                 .content_fingerprint()
+                .map_err(|_| invalid_snapshot())?,
+            semantic_fingerprint: semantic_view
+                .semantic_fingerprint(question.id)
                 .map_err(|_| invalid_snapshot())?,
         });
     }

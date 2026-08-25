@@ -350,6 +350,14 @@ impl<'a> QuestionSetView<'a> {
         self.task_id
     }
 
+    pub const fn questions(&self) -> &'a [Question] {
+        self.questions
+    }
+
+    pub const fn groups(&self) -> &'a [QuestionGroup] {
+        self.groups
+    }
+
     pub fn question(&self, question_id: QuestionId) -> Option<&'a Question> {
         self.questions
             .iter()
@@ -438,25 +446,30 @@ impl<'a> QuestionSetView<'a> {
 struct SemanticQuestionMaterial {
     ancestors: Vec<SemanticGroupMaterial>,
     kind: QuestionKind,
+    provider_native_kind: Option<String>,
     stem: String,
     options: Vec<SemanticOptionMaterial>,
-    attachments: Vec<QuestionAttachment>,
-    metadata_sanitized: Value,
+    attachments: Vec<SemanticAttachmentMaterial>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct SemanticGroupMaterial {
     stem: Option<String>,
     options: Vec<SemanticOptionMaterial>,
-    attachments: Vec<QuestionAttachment>,
-    metadata_sanitized: Value,
+    attachments: Vec<SemanticAttachmentMaterial>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct SemanticOptionMaterial {
     content: Option<String>,
-    attachments: Vec<QuestionAttachment>,
-    metadata_sanitized: Value,
+    attachments: Vec<SemanticAttachmentMaterial>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SemanticAttachmentMaterial {
+    kind: QuestionAttachmentKind,
+    label: Option<String>,
+    content_identity: Option<String>,
 }
 
 fn semantic_question_material(
@@ -497,18 +510,82 @@ fn semantic_question_material(
         ancestors.push(SemanticGroupMaterial {
             stem: group.stem.clone(),
             options: semantic_options(&group.options)?,
-            attachments: group.attachments.clone(),
-            metadata_sanitized: group.metadata_sanitized.clone(),
+            attachments: semantic_attachments(&group.attachments),
         });
     }
     Ok(SemanticQuestionMaterial {
         ancestors,
         kind: question.kind,
+        provider_native_kind: question
+            .metadata_sanitized
+            .get("provider_kind")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         stem: question.stem.clone(),
         options: semantic_options(&question.options)?,
-        attachments: question.attachments.clone(),
-        metadata_sanitized: question.metadata_sanitized.clone(),
+        attachments: semantic_attachments(&question.attachments),
     })
+}
+
+fn semantic_attachments(attachments: &[QuestionAttachment]) -> Vec<SemanticAttachmentMaterial> {
+    attachments
+        .iter()
+        .map(|attachment| SemanticAttachmentMaterial {
+            kind: attachment.kind,
+            label: attachment.label.clone(),
+            content_identity: attachment
+                .metadata_sanitized
+                .get("content_sha256")
+                .and_then(Value::as_str)
+                .map(|digest| format!("sha256:{digest}"))
+                .or_else(|| {
+                    attachment
+                        .remote_id
+                        .as_deref()
+                        .map(stable_attachment_identity)
+                }),
+        })
+        .collect()
+}
+
+fn stable_attachment_identity(value: &str) -> String {
+    let without_fragment = value.split_once('#').map_or(value, |(base, _)| base);
+    let Some((base, query)) = without_fragment.split_once('?') else {
+        return without_fragment.to_owned();
+    };
+    if !(base.starts_with("https://") || base.starts_with("http://")) {
+        return without_fragment.to_owned();
+    }
+    let mut stable = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            let key = pair.split_once('=').map_or(*pair, |(key, _)| key);
+            let key = key.to_ascii_lowercase();
+            !matches!(
+                key.as_str(),
+                "token"
+                    | "access_token"
+                    | "auth"
+                    | "authorization"
+                    | "signature"
+                    | "sig"
+                    | "expires"
+                    | "expiry"
+                    | "timestamp"
+                    | "ts"
+                    | "t"
+                    | "nonce"
+                    | "random"
+            ) && !key.starts_with("x-amz-")
+        })
+        .collect::<Vec<_>>();
+    stable.sort_unstable();
+    if stable.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base}?{}", stable.join("&"))
+    }
 }
 
 fn semantic_options(
@@ -518,8 +595,7 @@ fn semantic_options(
     for option in options {
         let material = SemanticOptionMaterial {
             content: option.content.clone(),
-            attachments: option.attachments.clone(),
-            metadata_sanitized: option.metadata_sanitized.clone(),
+            attachments: semantic_attachments(&option.attachments),
         };
         let key = serde_json::to_string(&material)
             .map_err(|_| QuestionValidationError::InvalidFingerprint)?;
@@ -562,26 +638,70 @@ pub fn rebind_semantic_answer(
     let target_options = target
         .answer_options(target_question_id)
         .map_err(|_| SemanticAnswerRebindError::InvalidQuestionSet)?;
-    let rebound =
-        match answer {
-            NormalizedAnswer::Selections(values) => NormalizedAnswer::Selections(
-                rebind_selection_values(source_options, target_options, values, true)?,
-            ),
-            NormalizedAnswer::Ordering(values) => NormalizedAnswer::Ordering(
-                rebind_selection_values(source_options, target_options, values, false)?,
-            ),
-            NormalizedAnswer::Texts(_) | NormalizedAnswer::Boolean(_) => answer.clone(),
-            NormalizedAnswer::Pairs(_)
-            | NormalizedAnswer::Composite(_)
-            | NormalizedAnswer::Skip
-            | NormalizedAnswer::Unknown => {
-                return Err(SemanticAnswerRebindError::UnsupportedAnswer);
-            }
-        };
+    let rebound = rebind_normalized_answer(source_options, target_options, answer, 0)?;
     rebound
         .validate()
         .map_err(|_| SemanticAnswerRebindError::UnsupportedAnswer)?;
     Ok(rebound)
+}
+
+fn rebind_normalized_answer(
+    source_options: &[QuestionOption],
+    target_options: &[QuestionOption],
+    answer: &NormalizedAnswer,
+    depth: usize,
+) -> Result<NormalizedAnswer, SemanticAnswerRebindError> {
+    if depth > MAX_COMPOSITE_DEPTH {
+        return Err(SemanticAnswerRebindError::UnsupportedAnswer);
+    }
+    match answer {
+        NormalizedAnswer::Selections(values) => Ok(NormalizedAnswer::Selections(
+            rebind_selection_values(source_options, target_options, values, true)?,
+        )),
+        NormalizedAnswer::Ordering(values) => Ok(NormalizedAnswer::Ordering(
+            rebind_selection_values(source_options, target_options, values, false)?,
+        )),
+        NormalizedAnswer::Pairs(values) => {
+            let mut rebound = Vec::with_capacity(values.len());
+            for pair in values {
+                let left = rebind_selection_values(
+                    source_options,
+                    target_options,
+                    std::slice::from_ref(&pair.left),
+                    true,
+                )?;
+                let right = rebind_selection_values(
+                    source_options,
+                    target_options,
+                    std::slice::from_ref(&pair.right),
+                    true,
+                )?;
+                rebound.push(AnswerPair {
+                    left: left
+                        .into_iter()
+                        .next()
+                        .ok_or(SemanticAnswerRebindError::UnsupportedAnswer)?,
+                    right: right
+                        .into_iter()
+                        .next()
+                        .ok_or(SemanticAnswerRebindError::UnsupportedAnswer)?,
+                });
+            }
+            Ok(NormalizedAnswer::Pairs(rebound))
+        }
+        NormalizedAnswer::Composite(values) => Ok(NormalizedAnswer::Composite(
+            values
+                .iter()
+                .map(|value| {
+                    rebind_normalized_answer(source_options, target_options, value, depth + 1)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        NormalizedAnswer::Texts(_) | NormalizedAnswer::Boolean(_) => Ok(answer.clone()),
+        NormalizedAnswer::Skip | NormalizedAnswer::Unknown => {
+            Err(SemanticAnswerRebindError::UnsupportedAnswer)
+        }
+    }
 }
 
 fn rebind_selection_values(
@@ -626,8 +746,7 @@ fn rebind_selection_values(
 fn semantic_option_key(option: &QuestionOption) -> Result<String, SemanticAnswerRebindError> {
     serde_json::to_string(&SemanticOptionMaterial {
         content: option.content.clone(),
-        attachments: option.attachments.clone(),
-        metadata_sanitized: option.metadata_sanitized.clone(),
+        attachments: semantic_attachments(&option.attachments),
     })
     .map_err(|_| SemanticAnswerRebindError::InvalidQuestionSet)
 }
@@ -709,6 +828,7 @@ pub enum AnswerSource {
     Manual,
     LocalCache,
     ProviderNative,
+    Ai,
     ExternalBank,
     Other,
 }
@@ -1239,6 +1359,26 @@ mod tests {
             Ok(NormalizedAnswer::Selections(vec!["X".to_owned()]))
         );
 
+        let mut relabeled_question = target_question.clone();
+        relabeled_question.options[0].metadata_sanitized =
+            serde_json::json!({"provider_option_id": "remote-99"});
+        relabeled_question.options[1].metadata_sanitized =
+            serde_json::json!({"provider_option_id": "remote-42"});
+        let relabeled_questions = [relabeled_question.clone()];
+        let relabeled = QuestionSetView::try_new(
+            relabeled_question.task_id,
+            &relabeled_questions,
+            &target_groups,
+        )
+        .unwrap();
+        assert_eq!(
+            source.semantic_fingerprint(source_question.id).unwrap(),
+            relabeled
+                .semantic_fingerprint(relabeled_question.id)
+                .unwrap(),
+            "Provider labels and remote option IDs are submission bindings, not cache identity"
+        );
+
         let mut changed_group = target_group;
         changed_group.stem = Some("Different passage".to_owned());
         let changed_groups = [changed_group];
@@ -1273,6 +1413,26 @@ mod tests {
         assert_eq!(
             ambiguous.semantic_fingerprint(ambiguous_question.id),
             Err(QuestionValidationError::AmbiguousSemanticOptions)
+        );
+    }
+
+    #[test]
+    fn attachment_identity_ignores_volatile_url_signatures_but_keeps_resource_keys() {
+        assert_eq!(
+            stable_attachment_identity(
+                "https://cdn.example/q.png?token=first&objectId=42&expires=1#preview"
+            ),
+            "https://cdn.example/q.png?objectId=42"
+        );
+        assert_eq!(
+            stable_attachment_identity(
+                "https://cdn.example/q.png?expires=2&objectId=42&signature=second"
+            ),
+            "https://cdn.example/q.png?objectId=42"
+        );
+        assert_ne!(
+            stable_attachment_identity("https://cdn.example/q.png?objectId=42&token=a"),
+            stable_attachment_identity("https://cdn.example/q.png?objectId=43&token=a")
         );
     }
 

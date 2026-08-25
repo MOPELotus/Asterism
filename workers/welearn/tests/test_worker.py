@@ -93,16 +93,15 @@ class RunTaskTests(unittest.TestCase):
         with self.assertRaises(WORKER.WorkerFailure):
             WORKER.run_task(module_fixture(), payload("duration", duration_seconds=0), Events(), WORKER.Redactor())
 
-    def test_read_only_course_refuses_execution_before_upstream_mutation(self):
+    def test_zero_progress_course_keeps_upstream_execution_available(self):
         module = module_fixture()
         request = payload("complete")
         request["task"]["native"]["read_only"] = True
 
-        with self.assertRaises(WORKER.WorkerFailure) as caught:
-            WORKER.run_task(module, request, Events(), WORKER.Redactor())
+        result = WORKER.run_task(module, request, Events(), WORKER.Redactor())
 
-        self.assertEqual(caught.exception.code, "task_read_only")
-        self.assertFalse(hasattr(module, "way1Succeed"))
+        self.assertEqual(result["remote_state"], "completed")
+        self.assertEqual(module.way1Succeed, [(100, "sco-1")])
 
 
 if __name__ == "__main__":

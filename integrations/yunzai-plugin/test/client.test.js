@@ -34,6 +34,26 @@ test("health never sends the bearer token", async () => {
   assert.equal(authorization, null)
 })
 
+test("QQ assertion uses the gateway token and exact sender identity", async () => {
+  let request
+  const client = new AsterismClient({
+    apiUrl: "http://asterism.test",
+    token: "ast_st_gateway",
+    fetchImpl: async (url, options) => {
+      request = { url: String(url), options }
+      return new Response('{"user_id":"u1","qq":"123456","access_token":"ast_ws_user"}', { status: 200 })
+    },
+  })
+  await client.assertQq("123456")
+  assert.equal(request.url, "http://asterism.test/api/v1/integrations/qq/identity/assert")
+  assert.equal(request.options.headers.get("authorization"), "Bearer ast_st_gateway")
+  assert.deepEqual(JSON.parse(request.options.body), {
+    qq: "123456",
+    create_if_missing: true,
+    return_to: "/",
+  })
+})
+
 test("API errors expose only sanitized code and request id", async () => {
   const client = new AsterismClient({
     apiUrl: "http://asterism.test",

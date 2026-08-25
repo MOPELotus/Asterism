@@ -40,6 +40,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub scheduler: SchedulerConfig,
     pub providers: ProviderConfig,
+    pub ai: AiConfig,
 }
 
 impl Config {
@@ -99,6 +100,7 @@ impl Config {
             ));
         }
         self.scheduler.validate()?;
+        self.ai.validate()?;
         Ok(())
     }
 
@@ -118,6 +120,289 @@ impl Config {
         self.scheduler.apply(&overrides.scheduler);
         self.providers.apply(&overrides.providers);
     }
+}
+
+/// Deployment-wide model endpoints and the two built-in answer combinations.
+/// API keys are intentionally read from the named environment variables by
+/// the eventual client and never serialized into this configuration object.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiConfig {
+    pub remote_store: bool,
+    #[serde(default = "default_gpt_router_endpoint")]
+    pub gpt_router: AiEndpointConfig,
+    #[serde(default = "default_deepseek_endpoint")]
+    pub deepseek: AiEndpointConfig,
+    #[serde(default = "default_kimi_endpoint")]
+    pub kimi: AiEndpointConfig,
+    #[serde(default = "AiProfileConfig::economy")]
+    pub economy: AiProfileConfig,
+    #[serde(default = "AiProfileConfig::gpt_only")]
+    pub gpt_only: AiProfileConfig,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            remote_store: false,
+            gpt_router: default_gpt_router_endpoint(),
+            deepseek: default_deepseek_endpoint(),
+            kimi: default_kimi_endpoint(),
+            economy: AiProfileConfig::economy(),
+            gpt_only: AiProfileConfig::gpt_only(),
+        }
+    }
+}
+
+fn default_gpt_router_endpoint() -> AiEndpointConfig {
+    AiEndpointConfig {
+        base_url: String::new(),
+        api_key_env: "ASTERISM_GPT_ROUTER_API_KEY".to_owned(),
+        protocol: AiProtocol::Responses,
+    }
+}
+
+fn default_deepseek_endpoint() -> AiEndpointConfig {
+    AiEndpointConfig {
+        base_url: "https://api.deepseek.com".to_owned(),
+        api_key_env: "ASTERISM_DEEPSEEK_API_KEY".to_owned(),
+        protocol: AiProtocol::ChatCompletions,
+    }
+}
+
+fn default_kimi_endpoint() -> AiEndpointConfig {
+    AiEndpointConfig {
+        base_url: "https://api.moonshot.cn/v1".to_owned(),
+        api_key_env: "ASTERISM_KIMI_API_KEY".to_owned(),
+        protocol: AiProtocol::ChatCompletions,
+    }
+}
+
+impl AiConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        for (name, endpoint) in [
+            ("gpt_router", &self.gpt_router),
+            ("deepseek", &self.deepseek),
+            ("kimi", &self.kimi),
+        ] {
+            endpoint.validate(name)?;
+        }
+        self.economy.validate("economy")?;
+        self.gpt_only.validate("gpt_only")?;
+        if self.remote_store {
+            return Err(ConfigError::Validation(
+                "ai.remote_store must remain false; Asterism caches answers locally without asking remote model services to retain question content".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiEndpointConfig {
+    pub base_url: String,
+    pub api_key_env: String,
+    pub protocol: AiProtocol,
+}
+
+impl Default for AiEndpointConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key_env: String::new(),
+            protocol: AiProtocol::Responses,
+        }
+    }
+}
+
+impl AiEndpointConfig {
+    fn validate(&self, name: &str) -> Result<(), ConfigError> {
+        let endpoint_valid = self.base_url.is_empty()
+            || ((self.base_url.starts_with("https://")
+                || self.base_url.starts_with("http://127.0.0.1:")
+                || self.base_url.starts_with("http://localhost:"))
+                && self.base_url.trim() == self.base_url
+                && !self.base_url.chars().any(char::is_control));
+        let env_valid = !self.api_key_env.is_empty()
+            && self.api_key_env.len() <= 128
+            && self
+                .api_key_env
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+        if endpoint_valid && env_valid {
+            Ok(())
+        } else {
+            Err(ConfigError::Validation(format!(
+                "ai.{name} endpoint or api_key_env is invalid"
+            )))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiProtocol {
+    #[default]
+    Responses,
+    ChatCompletions,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiProfileConfig {
+    pub trust_verified_cache: bool,
+    pub allow_domestic_fallback: bool,
+    pub timed: AiModelRoute,
+    pub untimed: AiModelRoute,
+    pub escalation: AiModelRoute,
+    pub objective_fallback: Option<AiModelRoute>,
+    pub rich_content_fallback: Option<AiModelRoute>,
+}
+
+impl AiProfileConfig {
+    fn economy() -> Self {
+        Self {
+            trust_verified_cache: true,
+            allow_domestic_fallback: true,
+            timed: AiModelRoute::new("gpt_router", "gpt-5.6-luna", AiReasoningEffort::Low, 8),
+            untimed: AiModelRoute::new(
+                "gpt_router",
+                "gpt-5.6-terra",
+                AiReasoningEffort::Medium,
+                120,
+            ),
+            escalation: AiModelRoute::new(
+                "gpt_router",
+                "gpt-5.6-sol",
+                AiReasoningEffort::Xhigh,
+                300,
+            ),
+            objective_fallback: Some(AiModelRoute::new(
+                "deepseek",
+                "deepseek-v4-flash",
+                AiReasoningEffort::Medium,
+                90,
+            )),
+            rich_content_fallback: Some(AiModelRoute::new(
+                "kimi",
+                "kimi-k3",
+                AiReasoningEffort::High,
+                180,
+            )),
+        }
+    }
+
+    fn gpt_only() -> Self {
+        Self {
+            trust_verified_cache: false,
+            allow_domestic_fallback: false,
+            timed: AiModelRoute::new("gpt_router", "gpt-5.6-luna", AiReasoningEffort::Low, 8),
+            untimed: AiModelRoute::new("gpt_router", "gpt-5.6-sol", AiReasoningEffort::Xhigh, 300),
+            escalation: AiModelRoute::new(
+                "gpt_router",
+                "gpt-5.6-sol",
+                AiReasoningEffort::Xhigh,
+                300,
+            ),
+            objective_fallback: None,
+            rich_content_fallback: None,
+        }
+    }
+
+    fn validate(&self, name: &str) -> Result<(), ConfigError> {
+        self.timed.validate(name)?;
+        self.untimed.validate(name)?;
+        self.escalation.validate(name)?;
+        if let Some(route) = &self.objective_fallback {
+            route.validate(name)?;
+        }
+        if let Some(route) = &self.rich_content_fallback {
+            route.validate(name)?;
+        }
+        if name == "gpt_only"
+            && (self.trust_verified_cache
+                || self.allow_domestic_fallback
+                || self.objective_fallback.is_some()
+                || self.rich_content_fallback.is_some())
+        {
+            return Err(ConfigError::Validation(
+                "ai.gpt_only must recheck cache and cannot configure domestic fallbacks".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for AiProfileConfig {
+    fn default() -> Self {
+        Self::economy()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiModelRoute {
+    pub endpoint: String,
+    pub model: String,
+    pub reasoning_effort: AiReasoningEffort,
+    pub timeout_seconds: u64,
+}
+
+impl AiModelRoute {
+    fn new(
+        endpoint: &str,
+        model: &str,
+        reasoning_effort: AiReasoningEffort,
+        timeout_seconds: u64,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.to_owned(),
+            model: model.to_owned(),
+            reasoning_effort,
+            timeout_seconds,
+        }
+    }
+
+    fn validate(&self, profile: &str) -> Result<(), ConfigError> {
+        let valid_text = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value.trim() == value
+                && !value.chars().any(char::is_control)
+        };
+        if valid_text(&self.endpoint)
+            && valid_text(&self.model)
+            && (1..=600).contains(&self.timeout_seconds)
+        {
+            Ok(())
+        } else {
+            Err(ConfigError::Validation(format!(
+                "ai.{profile} contains an invalid model route"
+            )))
+        }
+    }
+}
+
+impl Default for AiModelRoute {
+    fn default() -> Self {
+        Self::new(
+            "gpt_router",
+            "gpt-5.6-terra",
+            AiReasoningEffort::Medium,
+            120,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiReasoningEffort {
+    Low,
+    #[default]
+    Medium,
+    High,
+    Xhigh,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

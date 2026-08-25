@@ -498,6 +498,7 @@ const fn encode_answer_source(source: AnswerSource) -> &'static str {
         AnswerSource::Manual => "manual",
         AnswerSource::LocalCache => "local_cache",
         AnswerSource::ProviderNative => "provider_native",
+        AnswerSource::Ai => "ai",
         AnswerSource::ExternalBank => "external_bank",
         AnswerSource::Other => "other",
     }

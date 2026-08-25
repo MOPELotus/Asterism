@@ -434,6 +434,7 @@ impl ProviderRegistry {
         entry.runtime_settings = entry
             .runtime_settings
             .with_core_completion_policy()
+            .and_then(ProviderRuntimeSettingsSchema::with_core_ai_policy)
             .map_err(|source| RegistryError::InvalidRuntimeSettingsSchema {
                 provider_id: entry.metadata.id.clone(),
                 source,

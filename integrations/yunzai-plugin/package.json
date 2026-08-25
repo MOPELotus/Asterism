@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Thin Miao-Yunzai/TRSS-Yunzai adapter for Asterism",
   "scripts": {
-    "check": "node --check index.js && node --check apps/asterism.js && node --check model/client.js && node --check model/config.js && node --check model/policy.js",
+    "check": "node --check index.js && node --check guoba.support.js && node --check apps/asterism.js && node --check model/client.js && node --check model/config.js && node --check model/policy.js",
     "test": "node --test"
   },
   "engines": {

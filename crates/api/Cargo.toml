@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 asterism-auth = { path = "../auth" }
+asterism-config = { path = "../config" }
 asterism-domain = { path = "../domain" }
 asterism-engine = { path = "../engine" }
 asterism-events = { path = "../events" }
@@ -23,6 +24,7 @@ bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 http.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -31,6 +33,7 @@ tokio.workspace = true
 tower-http.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

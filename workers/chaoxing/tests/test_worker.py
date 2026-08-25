@@ -89,6 +89,18 @@ class WorkReadParamsTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["kind"], "ordering")
 
+    def test_reviewed_result_prefers_official_answer_and_keeps_negative_evidence(self):
+        rows = WORKER.parse_completed_work_result(
+            '<div class="singleQuesId" data="q1"><div class="Zy_TItle">【单选题】Choose</div>'
+            '<div class="mark_answer">我的答案：A 正确答案：B</div></div>'
+        )
+
+        evidence = rows[0]["answer_evidence"]
+        self.assertEqual(evidence["value"], "B")
+        self.assertEqual(evidence["submitted_value"], "A")
+        self.assertEqual(evidence["official_value"], "B")
+        self.assertFalse(evidence["submitted_correct"])
+
     def test_lazy_exam_question_uses_page_type_heading(self):
         rows = WORKER.parse_completed_work_result(
             '<h3 class="tepytitH3">单选题</h3>'
@@ -129,11 +141,84 @@ class WorkReadParamsTests(unittest.TestCase):
         self.assertEqual(rows[1]["native_shape"]["provider_remote_id"], "parent-1")
         self.assertEqual(rows[1]["native_shape"]["provider_remote_id_occurrence"], 2)
 
-    def test_asterism_tiku_refuses_missing_answers(self):
-        source = WORKER.AsterismTiku({"q1": "A"})
+    def test_rich_stem_preserves_underlined_target_and_visual_blank(self):
+        rows = WORKER.parse_completed_work_result(
+            '<div class="singleQuesId" data="q1"><div class="Zy_TItle">'
+            'Replace <span style="text-decoration: underline">futuristic</span> and fill '
+            '<u>&nbsp;&nbsp;&nbsp;</u> or ____.</div></div>'
+        )
 
-        with self.assertRaises(WORKER.WorkerFailure):
-            source.query_all([{"id": "q1"}, {"id": "q2"}])
+        self.assertIn('[UNDERLINE]futuristic[/UNDERLINE]', rows[0]["prompt"])
+        self.assertEqual(rows[0]["prompt"].count("[BLANK_"), 2)
+        self.assertEqual(rows[0]["native_shape"]["underline_count"], 1)
+        self.assertEqual(rows[0]["native_shape"]["blank_count"], 2)
+
+    def test_rich_stem_preserves_input_blanks_in_order(self):
+        rows = WORKER.parse_completed_work_result(
+            '<div class="singleQuesId" data="q1"><div class="Zy_TItle">A '
+            '<input name="answer1"/> B <textarea></textarea></div></div>'
+        )
+
+        self.assertIn("A [BLANK_1] B [BLANK_2]", rows[0]["prompt"])
+
+    def test_page_level_word_bank_is_preserved_as_shared_context(self):
+        rows = WORKER.parse_completed_work_result(
+            '<div class="wordBank"><span class="word">alpha</span>'
+            '<span class="word">beta</span></div>'
+            '<div class="singleQuesId" data="q1"><div class="Zy_TItle">'
+            'Fill <u>&nbsp;</u></div></div>'
+        )
+
+        self.assertEqual(rows[0]["native_shape"]["shared_options"], ["alpha", "beta"])
+
+    def test_rich_content_keeps_media_formula_and_file_order(self):
+        rows = WORKER.parse_completed_work_result(
+            '<div class="singleQuesId" data="q1"><div class="Zy_TItle">Before'
+            '<audio><source src="//media.example/a.mp3?token=secret" type="audio/mpeg"></audio>'
+            '<span class="katex">x + y</span>'
+            '<a href="https://files.example/task.pdf?sign=secret">worksheet</a>'
+            'After</div></div>'
+        )
+
+        prompt = rows[0]["prompt"]
+        self.assertLess(prompt.index("Before"), prompt.index("[QUESTION_AUDIO:"))
+        self.assertLess(prompt.index("[QUESTION_AUDIO:"), prompt.index("[QUESTION_FORMULA:x + y]"))
+        self.assertLess(prompt.index("[QUESTION_FORMULA:x + y]"), prompt.index("[QUESTION_FILE:"))
+        self.assertNotIn("secret", prompt)
+
+    def test_grade_composition_keeps_explicit_scoring_duration_and_discussion_facts(self):
+        summary = WORKER.parse_course_grade_summary(
+            '<div>综合成绩：92.5分</div><table>'
+            '<tr><td>视频</td><td>权重 30%</td><td>完成率 100%</td></tr>'
+            '<tr><td>阅读</td><td>要求阅读 120 分钟</td><td>已读 87 分钟</td></tr>'
+            '<tr><td>直播</td><td>观看时长 45 分钟</td></tr>'
+            '<tr><td>讨论</td><td>占比 10%</td><td>得分 8分</td></tr>'
+            '</table>',
+            'https://mooc1.chaoxing.com/mooc-ans/statistic/student?token=secret',
+        )
+
+        self.assertEqual(summary["overall_score"], 92.5)
+        by_type = {component["type"]: component for component in summary["components"]}
+        self.assertEqual(by_type["video"]["weight_percent"], 30.0)
+        self.assertEqual(by_type["reading"]["required_minutes"], 120.0)
+        self.assertEqual(by_type["live"]["observed_minutes"], 45.0)
+        self.assertEqual(by_type["discussion"]["score"], 8.0)
+        self.assertEqual(summary["source_path"], "/mooc-ans/statistic/student")
+
+    def test_native_matching_routes_to_browser_without_affecting_common_choices(self):
+        html = (
+            '<div class="singleQuesId" data="q1"><div class="TiMu" data="11"></div></div>'
+            '<div class="singleQuesId" data="q2"><div class="TiMu" data="0"></div></div>'
+        )
+
+        self.assertTrue(WORKER.chapter_work_requires_browser(html, {"q1": {"1": "C"}}))
+        self.assertFalse(WORKER.chapter_work_requires_browser(html, {"q2": "A"}))
+
+    def test_asterism_tiku_preserves_missing_answers_as_empty_slots(self):
+        source = WORKER.AsterismTiku({"q1": "A"}, cover_rate=0.75)
+
+        self.assertEqual(source.COVER_RATE, 0.75)
+        self.assertEqual(source.query_all([{"id": "q1"}, {"id": "q2"}]), ["A", None])
 
     def test_asterism_tiku_returns_reviewed_answers_in_donor_order(self):
         source = WORKER.AsterismTiku({"q2": ["B", "C"], "q1": "A"})
@@ -169,6 +254,39 @@ class WorkReadParamsTests(unittest.TestCase):
         self.assertEqual(params["originJobId"], "work-abc")
         self.assertEqual(params["knowledgeid"], "native-point")
         self.assertEqual(params["cpi"], "native-cpi")
+
+    def test_formal_exam_save_mode_never_calls_final_submit(self):
+        question = types.SimpleNamespace(
+            id="q1",
+            type=types.SimpleNamespace(name="单选题"),
+            options={"A": "alpha", "B": "beta"},
+            answer=None,
+        )
+        exam = types.SimpleNamespace(
+            need_code=False,
+            session=types.SimpleNamespace(ck_dump=lambda: {"sid": "opaque"}),
+            get_meta=mock.Mock(),
+            start=mock.Mock(),
+            fetch_all=mock.Mock(return_value=[question]),
+            submit=mock.Mock(),
+            final_submit=mock.Mock(),
+        )
+        current = types.SimpleNamespace(status=types.SimpleNamespace(value="未完成"))
+        payload = {
+            "answers": [{"remote_id": "q1", "value": "A"}],
+            "settings": {"assessment_mode": "save"},
+        }
+
+        with mock.patch.object(WORKER, "cxkitty_exam", return_value=(None, None, exam, current)):
+            result = WORKER.run_course_exam(
+                payload, {}, types.SimpleNamespace(emit=lambda *_args, **_kwargs: None), WORKER.Redactor()
+            )
+
+        exam.submit.assert_called_once()
+        exam.final_submit.assert_not_called()
+        self.assertTrue(result["result"]["answers_saved"])
+        self.assertFalse(result["result"]["final_submit"])
+        self.assertEqual(result["remote_state"], "in_progress")
 
 
 if __name__ == "__main__":

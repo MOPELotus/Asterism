@@ -26,6 +26,9 @@ pub const SCORE_IMPROVEMENT_ATTEMPT_LIMIT_KEY: &str = "core.score_improvement.at
 pub const SCORE_IMPROVEMENT_TARGET_KEY: &str = "core.score_improvement.target";
 pub const STRICT_COMPLETION_TIME_LIMIT_KEY: &str = "core.strict_completion.time_limit";
 pub const SCORE_IMPROVEMENT_TIME_LIMIT_KEY: &str = "core.score_improvement.time_limit";
+pub const AI_EXECUTION_PROFILE_KEY: &str = "core.ai.execution_profile";
+pub const AI_PROFILE_ECONOMY: &str = "economy";
+pub const AI_PROFILE_GPT_ONLY: &str = "gpt_only";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +63,14 @@ pub enum ProviderSettingCoreBehavior {
     ScoreImprovementTarget,
     StrictCompletionTimeLimit,
     ScoreImprovementTimeLimit,
+    AiExecutionProfile,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiExecutionProfile {
+    Economy,
+    GptOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,6 +163,15 @@ impl ProviderRuntimeSettingsSchema {
     /// a reserved key/behavior or the combined schema exceeds its bounds.
     pub fn with_core_completion_policy(mut self) -> Result<Self, ProviderSettingsError> {
         self.definitions.extend(core_completion_definitions());
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Adds the product-owned answer execution combination. It inherits across
+    /// Provider/account/Task scopes and is frozen with the existing Job
+    /// runtime-settings snapshot.
+    pub fn with_core_ai_policy(mut self) -> Result<Self, ProviderSettingsError> {
+        self.definitions.push(core_ai_profile_definition());
         self.validate()?;
         Ok(self)
     }
@@ -385,7 +405,10 @@ impl ProviderRuntimeSettingsSchema {
             if hydrated.values.contains_key(&definition.key) {
                 continue;
             }
-            if definition.core_behavior.is_some_and(is_completion_behavior) {
+            if definition
+                .core_behavior
+                .is_some_and(is_hydratable_core_behavior)
+            {
                 hydrated
                     .values
                     .insert(definition.key.clone(), definition.default.clone());
@@ -428,6 +451,7 @@ impl ProviderRuntimeSettingsSchema {
                     | ProviderSettingCoreBehavior::ScoreImprovementTarget
                     | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
                     | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit
+                    | ProviderSettingCoreBehavior::AiExecutionProfile
             ) {
                 continue;
             }
@@ -453,7 +477,8 @@ impl ProviderRuntimeSettingsSchema {
                 | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
                 | ProviderSettingCoreBehavior::ScoreImprovementTarget
                 | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
-                | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit => unreachable!(),
+                | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit
+                | ProviderSettingCoreBehavior::AiExecutionProfile => unreachable!(),
             }
         }
         Ok(limits)
@@ -595,6 +620,23 @@ impl ProviderRuntimeSettingsSchema {
             invalid_completion_behavior(ProviderSettingCoreBehavior::StrictCompletionEnabled)
         })?;
         Ok(policy)
+    }
+
+    /// Resolves the selected answer combination from an immutable settings
+    /// snapshot. Older frozen snapshots are hydrated with the economy default.
+    pub fn ai_execution_profile(
+        &self,
+        resolved: &ResolvedProviderRuntimeSettings,
+    ) -> Result<AiExecutionProfile, ProviderSettingsError> {
+        let resolved = self.hydrate_frozen_core_defaults(resolved)?;
+        match resolved.choice(AI_EXECUTION_PROFILE_KEY) {
+            Some(AI_PROFILE_ECONOMY) => Ok(AiExecutionProfile::Economy),
+            Some(AI_PROFILE_GPT_ONLY) => Ok(AiExecutionProfile::GptOnly),
+            _ => Err(ProviderSettingsError::InvalidCoreBehavior {
+                key: AI_EXECUTION_PROFILE_KEY.to_owned(),
+                behavior: ProviderSettingCoreBehavior::AiExecutionProfile,
+            }),
+        }
     }
 }
 
@@ -865,6 +907,27 @@ fn core_completion_definitions() -> Vec<ProviderSettingDefinition> {
     ]
 }
 
+fn core_ai_profile_definition() -> ProviderSettingDefinition {
+    ProviderSettingDefinition {
+        key: AI_EXECUTION_PROFILE_KEY.to_owned(),
+        display_name: "AI answer combination".to_owned(),
+        description: "Economy trusts Provider standard answers and verified exact cache; GPT-only still trusts Provider standard answers but sends cache hits to GPT for verification.".to_owned(),
+        kind: ProviderSettingKind::Choice {
+            options: BTreeSet::from([
+                AI_PROFILE_ECONOMY.to_owned(),
+                AI_PROFILE_GPT_ONLY.to_owned(),
+            ]),
+        },
+        default: ProviderSettingValue::Choice(AI_PROFILE_ECONOMY.to_owned()),
+        scopes: BTreeSet::from([
+            ProviderSettingScope::Provider,
+            ProviderSettingScope::ProviderAccount,
+            ProviderSettingScope::Task,
+        ]),
+        core_behavior: Some(ProviderSettingCoreBehavior::AiExecutionProfile),
+    }
+}
+
 fn completion_definition(
     schema: &ProviderRuntimeSettingsSchema,
     behavior: ProviderSettingCoreBehavior,
@@ -875,7 +938,7 @@ fn completion_definition(
         .find(|definition| definition.core_behavior == Some(behavior))
 }
 
-fn is_completion_behavior(behavior: ProviderSettingCoreBehavior) -> bool {
+fn is_hydratable_core_behavior(behavior: ProviderSettingCoreBehavior) -> bool {
     matches!(
         behavior,
         ProviderSettingCoreBehavior::StrictCompletionEnabled
@@ -885,6 +948,7 @@ fn is_completion_behavior(behavior: ProviderSettingCoreBehavior) -> bool {
             | ProviderSettingCoreBehavior::ScoreImprovementTarget
             | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
             | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit
+            | ProviderSettingCoreBehavior::AiExecutionProfile
     )
 }
 
@@ -988,7 +1052,8 @@ fn valid_core_behavior_kind(
         | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
         | ProviderSettingCoreBehavior::ScoreImprovementTarget
         | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
-        | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit => 0,
+        | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit
+        | ProviderSettingCoreBehavior::AiExecutionProfile => 0,
     };
     match behavior {
         ProviderSettingCoreBehavior::ProviderExecutionConcurrency
@@ -1041,6 +1106,14 @@ fn valid_core_behavior_kind(
             } if minimum >= MIN_COMPLETION_TIME_LIMIT_SECONDS
                 && maximum <= MAX_COMPLETION_TIME_LIMIT_SECONDS
         ),
+        ProviderSettingCoreBehavior::AiExecutionProfile => matches!(
+            &definition.kind,
+            ProviderSettingKind::Choice { options }
+                if options == &BTreeSet::from([
+                    AI_PROFILE_ECONOMY.to_owned(),
+                    AI_PROFILE_GPT_ONLY.to_owned(),
+                ])
+        ),
     }
 }
 
@@ -1070,7 +1143,8 @@ fn valid_core_behavior_scopes(
         | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
         | ProviderSettingCoreBehavior::ScoreImprovementTarget
         | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
-        | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit => {
+        | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit
+        | ProviderSettingCoreBehavior::AiExecutionProfile => {
             definition.scopes
                 == BTreeSet::from([
                     ProviderSettingScope::Provider,

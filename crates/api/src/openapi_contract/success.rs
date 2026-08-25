@@ -45,6 +45,18 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("updateProviderAccount", "ProviderAccountResponse"),
     ("scanProviderAccount", "ProviderScanReport"),
     (
+        "getAnswerHistoryScanStatus",
+        "AnswerHistoryScanStatusResponse",
+    ),
+    (
+        "controlAnswerHistoryScan",
+        "AnswerHistoryScanStatusResponse",
+    ),
+    (
+        "generateAiAnswerCandidates",
+        "GenerateAiAnswerCandidatesResponse",
+    ),
+    (
         "replaceProviderAccountCredentials",
         "PutProviderCredentialsResponse",
     ),
@@ -784,6 +796,53 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 }),
             ),
         ),
+        (
+            "AnswerHistoryScanStatusResponse",
+            object(
+                &[
+                    "provider_account_id",
+                    "provider_id",
+                    "generation",
+                    "state",
+                    "scanned_task_count",
+                    "total_task_count",
+                    "cached_snapshot_count",
+                    "cached_question_count",
+                    "question_kind_counts",
+                    "watermark_sanitized",
+                    "attempts",
+                    "last_error_sanitized",
+                    "next_retry_at",
+                    "created_at",
+                    "started_at",
+                    "updated_at",
+                    "completed_at",
+                ],
+                json!({
+                    "provider_account_id": uuid(), "provider_id": provider_id(),
+                    "generation": unsigned_integer(),
+                    "state": string_enum(&["pending", "running", "paused", "completed", "failed", "cancelled"]),
+                    "scanned_task_count": unsigned_integer(), "total_task_count": nullable_unsigned_integer(),
+                    "cached_snapshot_count": unsigned_integer(), "cached_question_count": unsigned_integer(),
+                    "question_kind_counts": {"type": "object", "additionalProperties": unsigned_integer()},
+                    "watermark_sanitized": {}, "attempts": unsigned_integer(),
+                    "last_error_sanitized": nullable_string(), "next_retry_at": nullable_timestamp(),
+                    "created_at": timestamp(), "started_at": nullable_timestamp(),
+                    "updated_at": timestamp(), "completed_at": nullable_timestamp()
+                }),
+            ),
+        ),
+        (
+            "GenerateAiAnswerCandidatesResponse",
+            object(
+                &["task_id", "question_snapshot_id", "candidates"],
+                json!({
+                    "task_id": uuid(),
+                    "question_snapshot_id": uuid(),
+                    "candidates": {"type": "array", "items": schema_ref("AnswerCandidateResponse")}
+                }),
+            ),
+        ),
         ("ProviderSettingValue", provider_setting_value_schema()),
         ("ProviderSettingKind", provider_setting_kind_schema()),
         (
@@ -1184,6 +1243,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "manual",
                     "local_cache",
                     "provider_native",
+                    "ai",
                     "external_bank",
                     "other",
                 ],
@@ -1191,6 +1251,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "manual": unsigned_integer(),
                     "local_cache": unsigned_integer(),
                     "provider_native": unsigned_integer(),
+                    "ai": unsigned_integer(),
                     "external_bank": unsigned_integer(),
                     "other": unsigned_integer()
                 }),
@@ -2074,6 +2135,7 @@ fn answer_source() -> Value {
         "manual",
         "local_cache",
         "provider_native",
+        "ai",
         "external_bank",
         "other",
     ])
@@ -2302,7 +2364,12 @@ fn task_schema() -> Value {
             "discovered_at": timestamp(),
             "updated_at": timestamp(),
             "latest_snapshot_id": nullable_uuid(),
-            "capabilities": {"type": "array", "items": task_capability()}
+            "capabilities": {"type": "array", "items": task_capability()},
+            "provider_summary": {
+                "type": "object",
+                "description": "Sanitized Provider-private inventory summary when available",
+                "additionalProperties": true
+            }
         }),
     )
 }

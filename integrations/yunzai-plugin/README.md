@@ -23,10 +23,10 @@ Copy-Item -Recurse `
 
 ## 配置
 
-先在 Asterism WebUI 创建 owner-bound Service Token，建议仅授予：
+推荐在锅巴面板中配置。先在 Asterism 创建供机器人网关使用的系统 Service Token，只授予：
 
 ```text
-provider_read, provider_manage, task_read, task_execute, task_command_proxy
+qq_identity_assert
 ```
 
 把以下环境变量注入 Yunzai 进程；不要把 token 写进插件仓库：
@@ -35,13 +35,14 @@ provider_read, provider_manage, task_read, task_execute, task_command_proxy
 ASTERISM_URL=http://127.0.0.1:8068
 ASTERISM_WEB_URL=https://asterism.example.com
 ASTERISM_TOKEN=ast_st_...
-ASTERISM_ALLOWED_QQ=你的QQ号[,另一个QQ号]
-ASTERISM_ALLOW_GROUPS=false
+ASTERISM_ALLOWED_GROUPS=允许使用的群号[,另一个群号]
+ASTERISM_ADMIN_CONTACT=余额或人工处理的管理员联系方式
 ASTERISM_REQUEST_TIMEOUT_MS=180000
 ```
 
-默认只允许私聊，且 `ASTERISM_ALLOWED_QQ` 为空时插件拒绝所有请求。一个插件实例使用一个
-owner-bound token；多租户机器人应运行独立实例，后续再根据真实需求增加中心化 QQ 绑定。
+插件仅响应群聊命令，不处理私聊。`ASTERISM_ALLOWED_GROUPS` 留空表示允许所有群。机器人会把
+发送者 QQ 交给受信任的 Asterism 网关：已有绑定时使用对应用户；不存在时创建用户名等于 QQ
+号的普通用户。Provider 账号、任务、余额和执行记录因此始终按真实 QQ 用户隔离。
 
 ## 命令
 
@@ -53,11 +54,11 @@ owner-bound token；多租户机器人应运行独立实例，后续再根据真
 #星芒任务 <平台或平台:账号序号> [未完成|全部]
 #星芒扫描 <平台或平台:账号序号>
 #星芒执行 <刚才任务列表中的序号或完整任务 ID>
-#星芒确认 <六位确认码>
 ```
 
-普通资源执行需要二次确认，并在确认前重新读取任务。正式测评、答题 Draft、讨论文字、上传
-和口语输入不会在 QQ 中降级成自由文本提交，而会返回对应 WebUI 页面。
+普通且不需要人工内容的资源任务直接创建 Job。正式测评、答题补漏、讨论文字、上传和口语输入
+不会在 QQ 中降级成自由文本提交，而会返回对应 WebUI 页面；独立作业和考试仍由用户在 WebUI
+执行提交前确认。
 同一平台有多个账号时，先用 `#星芒账号` 查看诸如 `chaoxing:1` 的稳定会话内选择格式；
 未指定序号时插件会拒绝猜测账号。
 

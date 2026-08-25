@@ -4,7 +4,7 @@ import test from "node:test"
 import { executionBlockReason, recommendedExecutionCapabilities } from "../model/policy.js"
 
 test("plain upstream execution chooses the same capability as WebUI", () => {
-  assert.deepEqual(recommendedExecutionCapabilities(["progress_read", "resource_execution", "duration_report"]), ["resource_execution"])
+  assert.deepEqual(recommendedExecutionCapabilities(["progress_read", "resource_execution", "duration_report"]), ["resource_execution", "duration_report"])
   assert.equal(executionBlockReason({ assessment_class: "routine", orchestration_state: "discovered", capabilities: ["resource_execution"] }), undefined)
 })
 

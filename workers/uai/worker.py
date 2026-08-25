@@ -388,28 +388,80 @@ def prepared_course_bot(module: ModuleType, payload: Mapping[str, Any], events: 
     return bot
 
 
+def task_situation_records(bot: Any, module: ModuleType, course_native: Mapping[str, Any],
+                           groups: list[tuple[Any, Any]], events: EventWriter,
+                           redactor: Redactor) -> dict[str, Mapping[str, Any]]:
+    """Read the official required/scoring record once per unit for scheduling policy."""
+    resource_id = course_native.get("resource_id")
+    if resource_id is None:
+        return {}
+    unit_ids = []
+    for _group, ancestors in groups:
+        unit_id = next((str(node.get("id") or node.get("nodeId")) for node in ancestors
+                        if isinstance(node, Mapping) and node.get("role") == "unit"
+                        and (node.get("id") is not None or node.get("nodeId") is not None)), None)
+        if unit_id and unit_id not in unit_ids:
+            unit_ids.append(unit_id)
+    records: dict[str, Mapping[str, Any]] = {}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, Mapping):
+            node_id = value.get("nodeId")
+            if node_id is not None:
+                records[str(node_id)] = value
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    url = f"https://{module.UAI_HOST}/api/tla/learningDetail/studyRecord/unitTaskSituation"
+    for unit_id in unit_ids:
+        try:
+            with capture_donor_output(events, redactor):
+                response = bot.session.get(url, params={
+                    "nodeId": unit_id, "id": resource_id,
+                    "appUserId": bot.user_id, "ssoId": bot.sso_id,
+                })
+                data = response.json()
+            if data.get("success") is True:
+                visit(data.get("value", {}).get("list", []))
+        except Exception as error:
+            events.emit("log", level="warning", message=redactor.text(error))
+    return records
+
+
 def list_tasks(module: ModuleType, payload: Mapping[str, Any], events: EventWriter) -> dict[str, Any]:
     bot = prepared_course_bot(module, payload, events)
     course_native = dict(require_mapping(payload.get("course"), "payload.course"))
+    groups = bot.collect_groups()
+    redactor = Redactor(request_secrets(payload))
+    situations = task_situation_records(bot, module, course_native, groups, events, redactor)
     tasks = []
-    for group, ancestors in bot.collect_groups():
+    for group, ancestors in groups:
         task_id = str(group.get("id", ""))
         if not task_id:
             continue
         base = str(group.get("base", ""))
+        category = bot.classify_task(base)
+        situation = situations.get(task_id, {})
         tasks.append(
             {
                 "remote_id": task_id,
                 "title": str(group.get("name", "")) or task_path(group, ancestors),
                 "path": task_path(group, ancestors),
                 "state": "completed" if bot.task_completion.get(task_id) is True else "pending",
-                "source_type": "resource",
+                "source_type": "discussion" if category == "discussion" else "resource",
                 "capabilities": ["run", "duration_read"],
                 "native": {
                     "course": course_native,
                     "group": group,
                     "base": base,
-                    "category": bot.classify_task(base),
+                    "category": category,
+                    "required": situation.get("required"),
+                    "score_task": situation.get("scoreTaskFlag"),
+                    "finish_progress": situation.get("finishProgress"),
+                    "task_score": situation.get("taskQuesTotalScore"),
                     "question_num": group.get("question_num", 1),
                     "unit_id": next((str(node.get("id") or node.get("nodeId")) for node in ancestors
                                      if isinstance(node, Mapping) and node.get("role") == "unit"
@@ -433,6 +485,12 @@ def list_tasks(module: ModuleType, payload: Mapping[str, Any], events: EventWrit
 def inspect_task(module: ModuleType, payload: Mapping[str, Any], events: EventWriter) -> dict[str, Any]:
     bot = prepared_course_bot(module, payload, events)
     target = require_mapping(payload.get("task"), "payload.task")
+    # Older persisted tasks (and the first thin-worker fixtures) do not carry
+    # the optional situation summary yet.  Fresh inspection must remain able
+    # to rebind those tasks and simply leave the summary fields unknown.
+    target_native_value = target.get("native")
+    target_native = (require_mapping(target_native_value, "task.native")
+                     if target_native_value is not None else {})
     remote_id = require_text(target.get("remote_id"), "task.remote_id")
     selected = None
     for group, ancestors in bot.collect_groups():
@@ -457,6 +515,11 @@ def inspect_task(module: ModuleType, payload: Mapping[str, Any], events: EventWr
                 "group": group,
                 "base": base,
                 "category": bot.classify_task(base),
+                "required": target_native.get("required"),
+                "score_task": target_native.get("score_task"),
+                "finish_progress": target_native.get("finish_progress"),
+                "task_score": target_native.get("task_score"),
+                "question_num": target_native.get("question_num"),
                 "content": content,
                 "provider_native_answers": answers,
             },
@@ -565,20 +628,31 @@ def run_task(module: ModuleType, payload: Mapping[str, Any], events: EventWriter
     if selected is None:
         raise WorkerFailure("task_not_found", "fresh upstream inventory did not contain the task")
 
-    # Preserve the donor's native dispatch while making unattended execution
-    # conservative: official Provider answers remain enabled, but no AI text,
-    # empty discussion/oral/upload, or unknown-shape submission is allowed.
-    module.AI_ENABLED = False
+    settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
+    native_record = native if isinstance(native, Mapping) else {}
+    required = native_record.get("required") is True
+    generated_text = settings.get("generated_text")
+    if generated_text is not None:
+        generated_text = str(generated_text).strip()
+        if not generated_text or len(generated_text.encode("utf-8")) > 16 * 1024:
+            raise WorkerFailure("request_invalid", "generated_text is empty or oversized")
+        module.retry_call_ai = lambda *_args, **_kwargs: generated_text
+    # Keep the donor dispatch intact. Provider-native answers stay first; an
+    # Asterism-generated plain-text answer is used only when explicitly passed.
+    module.AI_ENABLED = bool(generated_text)
     module.SUBJECTIVE_ALLOW_EMPTY = False
-    module.DISCUSSION_AI = False
+    module.DISCUSSION_AI = bool(generated_text)
     module.DISCUSSION_ALLOW_EMPTY = False
     module.DISCUSSION_SKIP_CONTENT_SUBMIT_EMPTY = False
-    module.UPLOAD_EMPTY_FILE = False
-    module.SKIP_ORAL_TYPES = True
-    module.ORAL_SUBMIT_EMPTY = False
+    module.UPLOAD_EMPTY_FILE = required
+    module.SKIP_ORAL_TYPES = not required
+    module.ORAL_SUBMIT_EMPTY = required
     module.SKIP_INVALID = True
-    module.COMPOUND_ALLOW_EMPTY = False
-    module.COOLDOWN_COUNT = max(int(getattr(module, "COOLDOWN_COUNT", 5)), 1_000_000)
+    module.COMPOUND_ALLOW_EMPTY = required
+    module.COOLDOWN_COUNT = int(settings.get("cooldown_count", getattr(module, "COOLDOWN_COUNT", 5)))
+    module.COOLDOWN_SECONDS = int(settings.get("cooldown_seconds", getattr(module, "COOLDOWN_SECONDS", 120)))
+    if module.COOLDOWN_COUNT < 1 or module.COOLDOWN_SECONDS < 0:
+        raise WorkerFailure("request_invalid", "UAI cooldown settings are invalid")
     redactor = Redactor(request_secrets(payload))
     events.emit("progress", current=0, total=1)
     with capture_donor_output(events, redactor):
@@ -595,6 +669,8 @@ def run_task(module: ModuleType, payload: Mapping[str, Any], events: EventWriter
             "upstream_accepted": True,
             "fresh_completion_observed": completed,
             "category": bot.classify_task(str(selected[0].get("base", ""))),
+            "required": required,
+            "used_generated_text": bool(generated_text),
         },
         "session": serialize_session(bot),
     }

@@ -310,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
         config.server.session_ttl_seconds,
         config.server.secure_cookies,
     )
+    .with_ai_config(config.ai.clone())
     .with_event_bus(events.clone())
     .with_stream_shutdown(shutdown_receiver.clone());
     if let Some(secret_store) = secret_store.clone() {
@@ -929,7 +930,10 @@ fn start_answer_history_worker(
     let has_history_provider = providers
         .metadata()
         .any(|metadata| metadata.advertises(ProviderCapability::AnswerHistoryHarvest));
-    if !config.scheduler.enabled || !has_history_provider {
+    // Answer-history harvesting is a read-only, account-scoped background scan.
+    // It must remain available when mutation/execution scheduling is disabled;
+    // operators use that mode specifically while validating Provider accounts.
+    if !has_history_provider {
         return Ok(None);
     }
     let worker = AnswerHistoryHarvestWorker::new(

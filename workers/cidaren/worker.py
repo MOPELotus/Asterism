@@ -144,7 +144,10 @@ def tasks(modules, payload, events, redactor):
             task_type = int(item.get("task_type") or 1)
             result.append({"remote_id": f"class-task:{remote_id}", "global_remote_id": True,
                            "source_type": "exam" if task_type == 2 else "practice",
-                           "assessment_class": "routine",
+                           # Cidaren class exams are independent assessments;
+                           # preserve the upstream runner but require the same
+                           # final human-confirmation boundary as other exams.
+                           "assessment_class": "formal" if task_type == 2 else "routine",
                            "title": str(item.get("task_name") or item.get("name") or remote_id),
                            "state": "completed" if progress >= 100 or item.get("is_complete") else "pending",
                            "progress_percent": progress,
@@ -194,9 +197,27 @@ def questions(modules, payload, events, redactor):
         return {"questions": [], "scan_note": "donor reported no current question", "session": payload.get("session")}
     exam = public.exam
     prompt = exam.get("topic_title") or exam.get("question") or exam.get("word") or ""
+    # Import the donor's historical answer library into the Asterism question
+    # stream as evidence.  The Core decides whether it is reusable; this
+    # worker never treats an answer-lib hit as proof of correctness.
+    answer_evidence = None
+    try:
+        answer_lib = importlib.import_module("util.answer_lib")
+        historical = answer_lib.lookup(str(prompt).strip())
+        if isinstance(historical, list):
+            values = [str(value).strip() for value in historical if str(value).strip()]
+            if values:
+                answer_evidence = {
+                    "source": "cidaren_answer_lib",
+                    "historical_values": values,
+                    "value": "#".join(values),
+                    "verified": False,
+                }
+    except Exception as error:
+        events.emit("log", level="debug", message=redactor.text(f"answer_lib unavailable: {error}"))
     return {"questions": [{"remote_id": str(exam.get("topic_code") or exam.get("id") or "first"), "position": 1,
                             "kind": native_kind(exam), "prompt": str(prompt),
-                            "options": exam.get("options") or exam.get("option") or [], "answer_evidence": None,
+                            "options": exam.get("options") or exam.get("option") or [], "answer_evidence": answer_evidence,
                             "native_shape": {
                                 "native_type": str(exam.get("topic_mode") or exam.get("topic_type") or exam.get("type") or ""),
                                 "keys": sorted(str(key) for key in exam.keys())[:64],
@@ -245,6 +266,19 @@ def execute_task(modules, payload, entry, events, redactor):
 
     worker = runner_module.HeadlessTaskRunner(entry.resolve().parents[1], progress=progress, log=log)
     worker.public.course_id = native.get("course_id")
+    settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
+    try:
+        spend_min = int(settings.get("spend_min_time", getattr(worker.public, "spend_min_time", 1)))
+        spend_max = int(settings.get("spend_max_time", getattr(worker.public, "spend_max_time", 2)))
+    except (TypeError, ValueError) as error:
+        raise WorkerFailure("request_invalid", "Cidaren delay settings must be integers") from error
+    if spend_min < 0 or spend_max < spend_min or spend_max > 3600:
+        raise WorkerFailure("request_invalid", "Cidaren delay settings must satisfy 0 <= min <= max <= 3600")
+    if hasattr(worker.public, "set_spend_time"):
+        worker.public.set_spend_time(spend_min, spend_max)
+    else:
+        worker.public.spend_min_time = spend_min
+        worker.public.spend_max_time = spend_max
     with capture_output(events, redactor):
         if family == "unit":
             result = worker.run_unit(require_mapping(native.get("unit"), "task.native.unit"))

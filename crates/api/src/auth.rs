@@ -222,6 +222,17 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn require_qq_identity_assert(&self) -> Result<(), ApiError> {
+        match &self.identity {
+            AuthIdentity::Service(token)
+                if token.scopes.contains(&ServiceScope::QqIdentityAssert) =>
+            {
+                Ok(())
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     pub(super) fn require_user_manage(&self) -> Result<UserId, ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. } if principal.has(Permission::ManageUsers) => {
@@ -609,6 +620,25 @@ async fn create_session_response(
         .headers_mut()
         .insert(header::SET_COOKIE, cookie_header);
     Ok(no_store(response))
+}
+
+pub(super) async fn create_session_redirect_response(
+    state: &ApiState,
+    user: User,
+    now: Timestamp,
+    return_to: &str,
+) -> Result<Response, ApiError> {
+    let response = create_session_response(state, user, now).await?;
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .cloned()
+        .ok_or_else(|| ApiError::internal("created web session did not contain a cookie"))?;
+    let location = HeaderValue::from_str(return_to).map_err(ApiError::internal)?;
+    let mut redirect = StatusCode::SEE_OTHER.into_response();
+    redirect.headers_mut().insert(header::SET_COOKIE, cookie);
+    redirect.headers_mut().insert(header::LOCATION, location);
+    Ok(no_store(redirect))
 }
 
 fn api_json<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {

@@ -13,7 +13,7 @@ export function recommendedExecutionCapabilities(capabilities) {
   if (capabilities.includes("artifact_upload")) return capabilities.includes("submission_execute") ? ["submission_execute", "artifact_upload"] : ["artifact_upload"]
   if (capabilities.includes("discussion")) return ["discussion"]
   if (capabilities.includes("submission_execute")) return ["submission_execute"]
-  if (capabilities.includes("resource_execution")) return ["resource_execution"]
+  if (capabilities.includes("resource_execution")) return capabilities.includes("duration_report") ? ["resource_execution", "duration_report"] : ["resource_execution"]
   if (capabilities.includes("duration_report")) return ["duration_report"]
   if (capabilities.includes("practice")) return ["practice"]
   return []

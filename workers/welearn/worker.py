@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only WELearn adapter retaining the pinned donors' session workflow."""
+"""Thin WELearn adapter retaining the pinned donors' session workflow."""
 
 from __future__ import annotations
 
@@ -74,7 +74,6 @@ def courses(module, payload, events, redactor):
             headers={"Referer": "https://welearn.sflep.com/student/index.aspx"})).json().get("clist", [])
     return {"courses": [{"remote_id": str(x["cid"]), "title": str(x.get("name", "")),
                            "remote_status": str(x.get("per", "")),
-                           "read_only": str(x.get("per", "")).strip() == "0",
                            "native": x} for x in rows],
             "session": {"cookies": cookie_dict(module)}}
 
@@ -94,7 +93,6 @@ def course_context(module, course):
 
 def tasks(module, payload, events, redactor):
     restore(module, payload.get("session")); course = require_mapping(payload.get("course"), "payload.course")
-    read_only = str(course.get("per", "")).strip() == "0"
     with capture_output(events, redactor):
         cid, uid, classid, course_url = course_context(module, course)
         units = retry_read(lambda: module.session.post(
@@ -113,10 +111,8 @@ def tasks(module, payload, events, redactor):
                     result.append({"remote_id": str(item.get("id")), "title": str(item.get("location") or item.get("name") or item.get("id")),
                                    "state": "completed" if str(item.get("iscomplete", "")).lower() in ("true", "已完成") else "pending",
                                    "source_type": "resource",
-                                   "capabilities": [] if read_only else ["run", "duration"],
-                                   "read_only": read_only,
+                                   "capabilities": ["run", "duration"],
                                    "native": {"course": dict(course), "unit": unit,
-                                   "read_only": read_only,
                                    "unit_index": unit_index, "item": item, "uid": uid, "cid": cid, "classid": classid}})
     return {"tasks": result, "session": {"cookies": cookie_dict(module)}}
 
@@ -188,12 +184,6 @@ def run_task(module, payload, events, redactor):
     restore(module, payload.get("session"))
     task = require_mapping(payload.get("task"), "payload.task")
     native = require_mapping(task.get("native"), "task.native")
-    native_course = native.get("course")
-    if native.get("read_only") or (
-        isinstance(native_course, Mapping)
-        and str(native_course.get("per", "")).strip() == "0"
-    ):
-        raise WorkerFailure("task_read_only", "new WELearn course is configured read-only")
     item = dict(require_mapping(native.get("item"), "task.native.item"))
     settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
     action = str(settings.get("action") or "complete")

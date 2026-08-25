@@ -20,12 +20,12 @@ use asterism_domain::{
     GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel, OrchestrationState, PriceQuote,
     PrivateAnswerEvidence, PrivateAnswerEvidenceId, ProtocolObservation, ProtocolObservationKind,
     ProtocolSurface, ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId,
-    ProviderRuntimeSettingsId, Question, QuestionContentFingerprint, QuestionReadAttempt,
-    QuestionReadAttemptId, QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken,
-    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId,
-    SubmissionReceipt, SubmissionResult, SubmissionResultId, SubmissionScore, Task,
-    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
-    UserProfile, UserStatus, WebSession, WebSessionId,
+    ProviderRuntimeSettingsId, Question, QuestionContentFingerprint, QuestionGroup,
+    QuestionReadAttempt, QuestionReadAttemptId, QuestionSemanticFingerprint, QuestionSession,
+    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
+    SubmissionDraft, SubmissionDraftId, SubmissionReceipt, SubmissionResult, SubmissionResultId,
+    SubmissionScore, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
+    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
@@ -1265,12 +1265,15 @@ pub struct AnswerCandidateRecord {
     pub created_at: Timestamp,
 }
 
-/// Direct, non-cache candidate evidence from one unambiguous matching Question
-/// in a prior immutable snapshot of the same owned Task.
+/// Direct, non-cache candidate evidence from one unambiguous, positively
+/// verified matching Question in the deployment-wide Provider partition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PriorAnswerEvidence {
     pub question_content_fingerprint: QuestionContentFingerprint,
+    pub question_semantic_fingerprint: QuestionSemanticFingerprint,
     pub source_question: Question,
+    pub source_questions: Vec<Question>,
+    pub source_groups: Vec<QuestionGroup>,
     pub source_candidate: AnswerCandidateRecord,
 }
 
@@ -1350,9 +1353,11 @@ pub trait AnswerHistoryIngestionRepository: Send + Sync {
     ) -> Result<Option<AnswerHistoryTaskFact>, StorageError>;
 }
 
-/// Read boundary for conservative `LocalCache` imports. Implementations must
-/// exclude the target snapshot, later snapshots, copied `LocalCache` candidates,
-/// foreign owners/tasks, and ambiguous fingerprints on either side.
+/// Read boundary for deployment-global cache imports. Implementations retain
+/// target ownership as the authorization boundary, but source evidence may
+/// belong to any owner/account/Task in the same Provider partition. Copied
+/// cache candidates, unverified/negative/conflicted answers and ambiguous
+/// fingerprints must be excluded.
 #[async_trait]
 pub trait AnswerCacheRepository: Send + Sync {
     async fn list_owned_prior_answer_evidence(

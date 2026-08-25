@@ -103,7 +103,7 @@ pub(super) async fn list_tasks(
             "task limit must be 1-200 and offset must not exceed 1000000",
         ));
     }
-    let repository = SqliteTaskQueryRepository::new(state.database);
+    let repository = SqliteTaskQueryRepository::new(state.database.clone());
     let page = if let Some(course_id) = course_id {
         repository
             .list_owned_course_tasks(owner_id, course_id, limit, offset)
@@ -114,12 +114,13 @@ pub(super) async fn list_tasks(
             .await
     }
     .map_err(ApiError::internal)?;
+    let items = task_responses(&state.database, page.items).await?;
     Ok(crate::auth::no_store(
         Json(TaskPageResponse {
             total: page.total,
             limit,
             offset,
-            items: page.items,
+            items,
         })
         .into_response(),
     ))
@@ -133,12 +134,49 @@ pub(super) async fn get_task(
     let owner_id = auth.require_task_read()?;
     let task_id = TaskId::from_str(&task_id)
         .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
-    let task = SqliteTaskQueryRepository::new(state.database)
+    let task = SqliteTaskQueryRepository::new(state.database.clone())
         .find_owned_task(owner_id, task_id)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("task_not_found"))?;
+    let task = task_response(&state.database, task).await?;
     Ok(crate::auth::no_store(Json(task).into_response()))
+}
+
+async fn task_responses(
+    database: &asterism_storage::Database,
+    tasks: Vec<Task>,
+) -> Result<Vec<TaskResponse>, ApiError> {
+    let mut responses = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        responses.push(task_response(database, task).await?);
+    }
+    Ok(responses)
+}
+
+async fn task_response(
+    database: &asterism_storage::Database,
+    task: Task,
+) -> Result<TaskResponse, ApiError> {
+    let provider_summary = if let Some(snapshot_id) = task.latest_snapshot_id {
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT remote_raw_sanitized_json FROM task_snapshots WHERE id = ? AND task_id = ?",
+        )
+        .bind(snapshot_id.to_string())
+        .bind(task.id.to_string())
+        .fetch_optional(database.pool())
+        .await
+        .map_err(ApiError::internal)?;
+        raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|raw| raw.get("provider_summary").cloned())
+            .filter(|summary| !summary.is_null())
+    } else {
+        None
+    };
+    Ok(TaskResponse {
+        task,
+        provider_summary,
+    })
 }
 
 pub(super) async fn get_task_completion_workflows(
@@ -906,6 +944,13 @@ pub(super) async fn execute_task(
         )
     })?;
     let formal_assessment_confirmed = request.formal_assessment_confirmation.unwrap_or(false);
+    let formal_assessment_save_only = request.formal_assessment_save_only.unwrap_or(false);
+    if formal_assessment_confirmed && formal_assessment_save_only {
+        return Err(ApiError::bad_request(
+            "formal_assessment_mode_conflict",
+            "formal assessment save-only and final-submit confirmation are mutually exclusive",
+        ));
+    }
     let submission_draft_id = request
         .submission_draft_id
         .as_deref()
@@ -987,6 +1032,11 @@ pub(super) async fn execute_task(
             FormalAssessmentPolicy {
                 allow_execution: true,
                 allow_submission: true,
+            }
+        } else if formal_assessment_save_only {
+            FormalAssessmentPolicy {
+                allow_execution: true,
+                allow_submission: false,
             }
         } else {
             FormalAssessmentPolicy::default()
@@ -1277,7 +1327,7 @@ fn required_header<'a>(
     Ok(value)
 }
 
-fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
+pub(super) fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
     match error {
         ExecutionRequestError::TaskNotFound => ApiError::not_found("task_not_found"),
         ExecutionRequestError::TaskStateConflict => ApiError::conflict(
@@ -1426,7 +1476,7 @@ fn map_task_lifecycle_error(error: TaskLifecycleError) -> ApiError {
     }
 }
 
-fn map_task_detail_error(error: ProviderTaskDetailError) -> ApiError {
+pub(super) fn map_task_detail_error(error: ProviderTaskDetailError) -> ApiError {
     match error {
         ProviderTaskDetailError::TaskNotFound => ApiError::not_found("task_not_found"),
         ProviderTaskDetailError::AccountNotAuthenticated => ApiError::conflict(
@@ -2026,7 +2076,15 @@ struct TaskPageResponse {
     total: u64,
     limit: u32,
     offset: u64,
-    items: Vec<Task>,
+    items: Vec<TaskResponse>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct TaskResponse {
+    #[serde(flatten)]
+    task: Task,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_summary: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2098,6 +2156,7 @@ struct AnswerSourceCountsResponse {
     manual: u32,
     local_cache: u32,
     provider_native: u32,
+    ai: u32,
     external_bank: u32,
     other: u32,
 }
@@ -2131,6 +2190,7 @@ fn answer_source_counts(draft: &asterism_domain::SubmissionDraft) -> AnswerSourc
             AnswerSource::Manual => &mut counts.manual,
             AnswerSource::LocalCache => &mut counts.local_cache,
             AnswerSource::ProviderNative => &mut counts.provider_native,
+            AnswerSource::Ai => &mut counts.ai,
             AnswerSource::ExternalBank => &mut counts.external_bank,
             AnswerSource::Other => &mut counts.other,
         };
@@ -2251,6 +2311,7 @@ pub(super) struct ExecuteTaskRequest {
     submission_draft_id: Option<String>,
     invocation_draft_id: Option<String>,
     formal_assessment_confirmation: Option<bool>,
+    formal_assessment_save_only: Option<bool>,
     strict_completion_retry_confirmation: Option<StrictCompletionRetryConfirmationRequest>,
     score_improvement_retake_confirmation: Option<ScoreImprovementRetakeConfirmationRequest>,
 }
@@ -2322,10 +2383,10 @@ struct AnswerCandidatesResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-struct AnswerCandidateResponse {
-    id: AnswerCandidateId,
-    candidate: AnswerCandidate,
-    created_at: Timestamp,
+pub(super) struct AnswerCandidateResponse {
+    pub(super) id: AnswerCandidateId,
+    pub(super) candidate: AnswerCandidate,
+    pub(super) created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

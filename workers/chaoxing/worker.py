@@ -421,11 +421,171 @@ def courses(module, payload, events, redactor):
     module.decode_course_list = decode_with_routes
     with capture_output(events, redactor):
         rows = bot.get_course_list()
-    return {"courses": [{"remote_id": str(x["clazzId"]),
-                           "title": clean_inventory_text(x.get("title"), 512, f'Chaoxing course {x["clazzId"]}'),
-                           "teacher": clean_inventory_text(x.get("teacher"), 256, "Chaoxing") if x.get("teacher") else None,
-                           "native": x} for x in rows],
+    session = module.SessionManager.get_session()
+    result_rows = []
+    for row in rows:
+        grade_summary = discover_course_grade_summary(session, row, events, redactor)
+        result_rows.append({
+            "remote_id": str(row["clazzId"]),
+            "title": clean_inventory_text(
+                row.get("title"), 512, f'Chaoxing course {row["clazzId"]}'
+            ),
+            "teacher": clean_inventory_text(row.get("teacher"), 256, "Chaoxing")
+            if row.get("teacher") else None,
+            "provider_summary": {"grade": grade_summary} if grade_summary else {},
+            "native": row,
+        })
+    return {"courses": result_rows,
             "session": {"cookies": cookies(module.SessionManager.get_session())}}
+
+
+_GRADE_COMPONENT_LABELS = (
+    ("video", ("视频", "音视频")),
+    ("chapter_test", ("章节测验", "章节测试", "章节任务点", "任务点")),
+    ("homework", ("作业",)),
+    ("exam", ("考试",)),
+    ("reading", ("阅读",)),
+    ("live", ("直播",)),
+    ("discussion", ("讨论",)),
+    ("check_in", ("签到",)),
+    ("document", ("文档",)),
+    ("visit", ("访问",)),
+    ("class_activity", ("课堂互动", "课堂活动", "互动")),
+)
+
+
+def _bounded_grade_number(value: str, *, percent: bool = False) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    maximum = 100.0 if percent else 1000.0
+    return parsed if 0.0 <= parsed <= maximum else None
+
+
+def parse_course_grade_summary(html_text: str, source_url: str = "") -> dict[str, Any] | None:
+    """Extract only explicit learner-visible grade facts from one first-party page."""
+    from bs4 import BeautifulSoup
+    from urllib.parse import urlsplit
+
+    soup = BeautifulSoup(html_text, "lxml")
+    overall_scores = []
+    for text in soup.stripped_strings:
+        compact = " ".join(str(text).split())
+        match = re.search(
+            r"(?:综合成绩|总成绩|最终成绩)\s*[:：]?\s*(\d+(?:\.\d{1,3})?)\s*(?:分|$)",
+            compact,
+        )
+        if match:
+            value = _bounded_grade_number(match.group(1), percent=True)
+            if value is not None:
+                overall_scores.append(value)
+
+    components: dict[str, dict[str, Any]] = {}
+    for node in soup.select("tr, li, .scoreItem, .score-item, .item, .detail-item, .dataItem"):
+        text = " ".join(node.get_text(" ", strip=True).split())
+        if not text or len(text) > 1024:
+            continue
+        component = next(
+            (key for key, labels in _GRADE_COMPONENT_LABELS if any(label in text for label in labels)),
+            None,
+        )
+        if component is None:
+            continue
+        facts: dict[str, Any] = {"type": component}
+        explicit = False
+        patterns = (
+            ("weight_percent", r"(?:权重|占比)\s*[:：]?\s*(\d+(?:\.\d{1,3})?)\s*%", True),
+            ("completion_percent", r"(?:完成度|完成率|进度)\s*[:：]?\s*(\d+(?:\.\d{1,3})?)\s*%", True),
+            ("score", r"(?:得分|成绩)\s*[:：]?\s*(\d+(?:\.\d{1,3})?)\s*(?:分|$)", True),
+            ("required_minutes", r"(?:要求|满分|需|应)\D{0,8}(\d+(?:\.\d{1,2})?)\s*分钟", False),
+            ("observed_minutes", r"(?:已读|已看|观看|阅读|直播|时长)\D{0,8}(\d+(?:\.\d{1,2})?)\s*分钟", False),
+        )
+        for name, pattern, is_percent in patterns:
+            match = re.search(pattern, text)
+            if match:
+                value = _bounded_grade_number(match.group(1), percent=is_percent)
+                if value is not None:
+                    facts[name] = value
+                    explicit = True
+        if explicit:
+            facts["label"] = clean_inventory_text(text, 512, component)
+            previous = components.get(component, {})
+            components[component] = {**previous, **facts}
+
+    unique_overall = sorted(set(overall_scores))
+    if len(unique_overall) > 1:
+        # Conflicting visible totals are not safe to normalize.
+        unique_overall = []
+    if not unique_overall and not components:
+        return None
+    return {
+        "overall_score": unique_overall[0] if len(unique_overall) == 1 else None,
+        "components": list(components.values()),
+        "source_path": urlsplit(source_url).path[:512] if source_url else None,
+    }
+
+
+def discover_course_grade_summary(session, course: Mapping[str, Any], events, redactor):
+    """Follow a small set of course-local score links without mutating course state."""
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin, urlsplit
+
+    course_href = str(course.get("_asterism_course_href") or "").strip()
+    if not course_href:
+        return None
+    try:
+        with capture_output(events, redactor):
+            home = session.get(urljoin("https://mooc2-ans.chaoxing.com", course_href))
+        if home.status_code != 200:
+            return None
+        documents = [(str(home.url), home.text)]
+        soup = BeautifulSoup(home.text, "lxml")
+        candidates = []
+        for node in soup.select("a, [data-url], [data-href]"):
+            label = " ".join(node.get_text(" ", strip=True).split())
+            values = [node.get("href"), node.get("data-url"), node.get("data-href"), node.get("onclick")]
+            for raw in values:
+                raw = str(raw or "").strip()
+                if not raw:
+                    continue
+                quoted = re.search(r"['\"](https?://[^'\"]+|/[^'\"]+)['\"]", raw)
+                route = quoted.group(1) if quoted else raw
+                if "成绩" not in label and not re.search(r"(?:score|grade|statistic|achievement)", route, re.I):
+                    continue
+                target = urljoin(str(home.url), route)
+                parsed = urlsplit(target)
+                host = parsed.hostname or ""
+                if parsed.scheme == "https" and (host == "chaoxing.com" or host.endswith(".chaoxing.com")):
+                    candidates.append(target)
+        seen = {str(home.url)}
+        for target in candidates[:5]:
+            if target in seen:
+                continue
+            seen.add(target)
+            with capture_output(events, redactor):
+                response = session.get(target)
+            if response.status_code == 200:
+                documents.append((str(response.url), response.text))
+        summaries = [parse_course_grade_summary(text, url) for url, text in documents]
+        summaries = [summary for summary in summaries if summary]
+        if not summaries:
+            return None
+        overall = {summary["overall_score"] for summary in summaries if summary["overall_score"] is not None}
+        components = {}
+        for summary in summaries:
+            for component in summary["components"]:
+                components[component["type"]] = {**components.get(component["type"], {}), **component}
+        return {
+            "overall_score": next(iter(overall)) if len(overall) == 1 else None,
+            "components": list(components.values()),
+            "source_paths": sorted({summary["source_path"] for summary in summaries if summary["source_path"]}),
+        }
+    except Exception as error:
+        events.emit("log", level="warning", message=redactor.text(
+            f"Chaoxing grade composition read skipped: {clean_inventory_text(error, 256, 'read failed')}"
+        ))
+        return None
 
 
 def inventory(module, payload, events, redactor):
@@ -441,7 +601,7 @@ def inventory(module, payload, events, redactor):
         points = bot.get_course_point(course["courseId"], course["clazzId"], course["cpi"])["points"]
     tasks = []
     seen_remote_ids = set()
-    for point in points:
+    for point_index, point in enumerate(points):
         with capture_output(events, redactor):
             jobs, job_info = bot.get_job_list(course, point)
         remote_id = f'knowledge:{point["id"]}'
@@ -469,6 +629,7 @@ def inventory(module, payload, events, redactor):
             "capabilities": capabilities,
             "native": {
                 "route_kind": "knowledge_point",
+                "provider_position": point_index + 1,
                 "course": course,
                 "point": point,
                 "jobs": [
@@ -496,6 +657,10 @@ def inventory(module, payload, events, redactor):
                 "title": clean_inventory_text(exam.name, 512, f"Chaoxing exam {exam.exam_id}"),
                 "state": "completed" if completed else "pending",
                 "source_type": "exam",
+                # Independent exams are not chapter task points. Asterism must
+                # require the separate submit confirmation before this route
+                # may perform the donor's final_submit call.
+                "assessment_class": "formal",
                 "deadline": clean_inventory_text(exam.expire_time, 128, "") or None,
                 "capabilities": ["questions", "run"],
                 "native": {
@@ -605,6 +770,10 @@ def inventory(module, payload, events, redactor):
                         "title": clean_inventory_text(title, 512, f"Chaoxing homework {index + 1}"),
                         "state": state,
                         "source_type": "work",
+                        # Independent homework follows the same fill/review/
+                        # confirm boundary as an exam. Chapter workid cards stay
+                        # routine and may be submitted automatically.
+                        "assessment_class": "formal",
                         "capabilities": ["questions", "run"],
                         "native": {
                             "route_kind": "course_homework", "course": course,
@@ -651,18 +820,21 @@ class AsterismTiku:
     true_list = ["正确", "对", "true", "1"]
     false_list = ["错误", "错", "false", "0"]
 
-    def __init__(self, answers: Mapping[str, Any]):
+    def __init__(self, answers: Mapping[str, Any], cover_rate: float = 0.9):
         self.answers = {str(key): value for key, value in answers.items()}
+        self.COVER_RATE = max(0.0, min(1.0, float(cover_rate)))
 
     def query_all(self, questions, query_delay=0):
         values = []
         for question in questions:
             question_id = str(question.get("id", ""))
             if question_id not in self.answers:
-                raise WorkerFailure("answer_required", f"no reviewed answer for question {question_id}")
+                values.append(None)
+                continue
             value = self.answers[question_id]
             if value is None or value == "" or value == []:
-                raise WorkerFailure("answer_required", f"answer for question {question_id} is empty")
+                values.append(None)
+                continue
             values.append(value)
         return values
 
@@ -713,12 +885,138 @@ def _clean_node_text(node) -> str:
     return " ".join(node.get_text(" ", strip=True).split()) if node else ""
 
 
+def _rich_node_text(node) -> tuple[str, int, int]:
+    """Preserve visual blanks/underlines that plain ``get_text`` destroys."""
+    if not node:
+        return "", 0, 0
+    from bs4 import NavigableString, Tag
+
+    blank_index = 0
+    underline_count = 0
+
+    def marker() -> str:
+        nonlocal blank_index
+        blank_index += 1
+        return f" [BLANK_{blank_index}] "
+
+    def is_underlined(element: Tag) -> bool:
+        classes = " ".join(str(value).lower() for value in (element.get("class") or []))
+        style = re.sub(r"\s+", "", str(element.get("style") or "").lower())
+        return (
+            element.name in {"u", "ins"}
+            or "underline" in classes
+            or "text-decoration:underline" in style
+            or "text-decoration-line:underline" in style
+            or "border-bottom:" in style
+        )
+
+    def render(element) -> str:
+        nonlocal underline_count
+        if isinstance(element, NavigableString):
+            value = str(element).replace("\xa0", " ")
+            return re.sub(r"_{2,}|＿{2,}", lambda _match: marker(), value)
+        if not isinstance(element, Tag):
+            return ""
+        if element.name == "img":
+            from urllib.parse import urlsplit, urlunsplit
+
+            source = str(element.get("src") or element.get("data-original") or "").strip()
+            if source.startswith("//"):
+                source = f"https:{source}"
+            parsed = urlsplit(source)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                source = urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
+            elif source and not source.startswith("/"):
+                source = "embedded"
+            return f" [QUESTION_IMAGE:{source or 'embedded'}] "
+        if element.name in {"audio", "video", "source"}:
+            from urllib.parse import urlsplit, urlunsplit
+
+            source = str(element.get("src") or "").strip()
+            if not source and element.name in {"audio", "video"}:
+                nested_source = element.find("source", src=True)
+                source = str(nested_source.get("src") or "").strip() if nested_source else ""
+            if source.startswith("//"):
+                source = f"https:{source}"
+            parsed = urlsplit(source)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                source = urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
+            elif source:
+                source = "embedded"
+            media_kind = (
+                "AUDIO" if element.name == "audio"
+                or str(element.get("type") or "").startswith("audio/") else "VIDEO"
+            )
+            return f" [QUESTION_{media_kind}:{source or 'embedded'}] "
+        classes = " ".join(str(value).lower() for value in (element.get("class") or []))
+        if element.name == "math" or any(
+            marker in classes for marker in ("mathjax", "latex", "katex", "formula")
+        ):
+            formula = " ".join(element.get_text(" ", strip=True).split()).replace("]", "］")
+            return f" [QUESTION_FORMULA:{formula or 'embedded'}] "
+        if element.name == "a":
+            from urllib.parse import urlsplit, urlunsplit
+
+            href = str(element.get("href") or "").strip()
+            parsed = urlsplit(href)
+            if re.search(r"\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt|csv)(?:$|[?#])", href, re.I):
+                stable = (
+                    urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
+                    if parsed.netloc else "embedded"
+                )
+                label = " ".join(element.get_text(" ", strip=True).split()).replace("]", "］")
+                return f" [QUESTION_FILE:{stable or 'embedded'}|{label or 'file'}] "
+        if element.name in {"input", "textarea"} or element.get("contenteditable") == "true":
+            input_type = str(element.get("type") or "text").lower()
+            if input_type not in {"hidden", "radio", "checkbox", "button", "submit"}:
+                return marker()
+        if element.name == "br":
+            return "\n"
+        rendered = "".join(render(child) for child in element.children)
+        if is_underlined(element):
+            meaningful = " ".join(rendered.split())
+            if not meaningful:
+                return marker()
+            underline_count += 1
+            return f" [UNDERLINE]{meaningful}[/UNDERLINE] "
+        return rendered
+
+    value = render(node)
+    value = re.sub(r"[ \t\r\f\v]+", " ", value)
+    value = re.sub(r" *\n *", "\n", value)
+    return value.strip(), blank_index, underline_count
+
+
+def _shared_option_bank(soup) -> list[str]:
+    """Capture page-level word/option banks without mistaking navigation for answers."""
+    selectors = (
+        ".wordBank", ".word-bank", ".word_box", ".wordBox", ".wordsBox",
+        ".optionBank", ".option-bank", ".sharedOptions", ".shared-options",
+        "[class*='wordBank']", "[class*='optionBank']",
+    )
+    values: list[str] = []
+    for container in soup.select(", ".join(selectors)):
+        if container.find_parent(class_=lambda value: value and (
+            "singleQuesId" in value or "questionLi" in value
+        )):
+            continue
+        nodes = container.select("li, option, [data-option], .word, .option")
+        if not nodes:
+            nodes = [container]
+        for item in nodes:
+            text = _clean_node_text(item)
+            if text and len(text.encode("utf-8")) <= 512 and text not in values:
+                values.append(text)
+    return values[:256]
+
+
 def parse_completed_work_result(html: str) -> list[dict[str, Any]]:
     """Parse Chaoxing's reviewed-result DOM using the audited OCS selectors."""
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "lxml")
     rows = []
+    shared_options = _shared_option_bank(soup)
     page_type_text = _clean_node_text(soup.select_one(".tepytitH3, .typeTit, .questionType"))
     page_type_match = re.search(r"(?:【([^】]+)】|((?:单选|多选|判断|填空|简答|连线|排序|完形填空|阅读理解|共用选项|资料|口语|听力)题))", page_type_text)
     page_type_label = next(
@@ -741,7 +1039,7 @@ def parse_completed_work_result(html: str) -> list[dict[str, Any]]:
     seen_remote_ids: dict[str, int] = {}
     for position, root in enumerate(soup.select(".singleQuesId, .questionLi"), 1):
         title_node = root.select_one(".Zy_TItle, .tit, .mark_name")
-        title = _clean_node_text(title_node)
+        title, blank_count, underline_count = _rich_node_text(title_node)
         label_match = re.search(r"【([^】]+)】", title)
         inline_type_label = next(
             (label for label in label_kinds if label in title[:48]),
@@ -782,9 +1080,25 @@ def parse_completed_work_result(html: str) -> list[dict[str, Any]]:
             option_nodes = root.select(".answerBg .answer_p, .textDIV, .eidtDiv")
             if not option_nodes:
                 option_nodes = root.select("ul li")
-            options = [_clean_node_text(item) for item in option_nodes if _clean_node_text(item)]
-        answer_node = root.select_one(".myAnswer .answerCon")
-        answer = _clean_node_text(answer_node)
+            options = [
+                rich for item in option_nodes
+                if (rich := _rich_node_text(item)[0])
+            ]
+        answer_node = root.select_one(".myAnswer .answerCon, .my-answer")
+        submitted_answer = _clean_node_text(answer_node)
+        if submitted_answer.startswith("我的答案："):
+            submitted_answer = submitted_answer.removeprefix("我的答案：").strip()
+        mark_text = _clean_node_text(root.select_one(".mark_answer, .mark-answer"))
+        official_match = re.search(r"正确答案[：:]\s*(.+)$", mark_text)
+        submitted_match = re.search(r"我的答案[：:]\s*(.*?)(?=\s*正确答案[：:]|$)", mark_text)
+        if submitted_match:
+            submitted_answer = submitted_match.group(1).strip()
+        official_answer = official_match.group(1).strip() if official_match else ""
+        submitted_correct = None
+        if submitted_answer and official_answer:
+            normalize_for_compare = lambda value: re.sub(r"[\s、,，;；#]", "", value).lower()
+            submitted_correct = normalize_for_compare(submitted_answer) == normalize_for_compare(official_answer)
+        trusted_answer = official_answer or (submitted_answer if submitted_correct is True else "")
         hidden_id = root.select_one("input[name='questionId'], input[name^='questionId']")
         provider_remote_id = str(
             root.get("data") or (hidden_id.get("value") if hidden_id else None)
@@ -804,7 +1118,13 @@ def parse_completed_work_result(html: str) -> list[dict[str, Any]]:
             "kind": kind,
             "prompt": title,
             "options": options,
-            "answer_evidence": {"source": "chaoxing_reviewed_result", "value": answer} if answer else None,
+            "answer_evidence": ({
+                "source": "chaoxing_reviewed_result",
+                "value": trusted_answer,
+                "submitted_value": submitted_answer or None,
+                "official_value": official_answer or None,
+                "submitted_correct": submitted_correct,
+            } if submitted_answer or official_answer else None),
             "native_shape": {
                 "native_type": type_label,
                 "root_classes": sorted(root.get("class") or []),
@@ -818,13 +1138,18 @@ def parse_completed_work_result(html: str) -> list[dict[str, Any]]:
                 })[:32],
                 "first_group_count": len(first),
                 "second_group_count": len(second),
-                "historical_answer_present": bool(answer),
+                "historical_answer_present": bool(submitted_answer or official_answer),
+                "official_answer_present": bool(official_answer),
+                "blank_count": blank_count,
+                "underline_count": underline_count,
+                "shared_options": shared_options,
                 "provider_remote_id": provider_remote_id,
                 "provider_remote_id_occurrence": occurrence,
             },
             "native": {
                 "type_label": type_label,
                 "provider_remote_id": provider_remote_id,
+                "shared_options": shared_options,
                 "matching_groups": {"left": first, "right": second} if is_matching else None,
             },
         })
@@ -1472,6 +1797,8 @@ def run_course_exam(payload, native, events, redactor):
     if not answers:
         raise WorkerFailure("answer_required", "course Exam requires reviewed Asterism answers")
     events.emit("progress", current=0, total=None)
+    settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
+    final_submit = str(settings.get("assessment_mode") or "submit") == "submit"
     with capture_output(events, redactor):
         exam.get_meta()
         if exam.need_code:
@@ -1488,7 +1815,15 @@ def run_course_exam(payload, native, events, redactor):
             fill_cxkitty_answer(question, answers[question_id])
             exam.submit(index=index, question=question)
             events.emit("progress", current=index + 1, total=len(questions))
-        exam.final_submit()
+        if final_submit:
+            exam.final_submit()
+    if not final_submit:
+        return {
+            "remote_state": "in_progress", "verified": False,
+            "result": {"task_type": "course_exam", "answers_saved": True,
+                       "final_submit": False, "saved_questions": len(questions)},
+            "session": {"cookies": exam.session.ck_dump()},
+        }
     # CxKitty's course list is the donor's authoritative status endpoint.
     _cxapi, _api, fresh_exam, fresh = cxkitty_exam(payload, native, events, redactor)
     verified = str(getattr(fresh.status, "value", fresh.status)) == "已完成"
@@ -1500,7 +1835,8 @@ def run_course_exam(payload, native, events, redactor):
     }
 
 
-def run_course_homework_browser(session, route, answers, homework, events, redactor):
+def run_course_homework_browser(session, route, answers, homework, events, redactor,
+                                final_submit=True):
     """Keep new homework DOM/AJAX semantics in a real browser, as audited upstreams do."""
     browser_value = os.environ.get("ASTERISM_CHAOXING_BROWSER_EXECUTABLE")
     if not browser_value:
@@ -1539,7 +1875,7 @@ def run_course_homework_browser(session, route, answers, homework, events, redac
                     )
                 for index, (question_id, value) in enumerate(answers.items(), 1):
                     result = page.evaluate(
-                        """({questionId, value}) => {
+                        r"""({questionId, value}) => {
                           const root = document.querySelector(`div.singleQuesId[data="${questionId}"]`)
                             || document.querySelector(`div.questionLi[data="${questionId}"]`)
                             || document.getElementById(`sigleQuestionDiv_${questionId}`);
@@ -1595,22 +1931,35 @@ def run_course_homework_browser(session, route, answers, homework, events, redac
                         )
                     page.wait_for_timeout(1_500)
                     events.emit("progress", current=index, total=len(answers) + 1)
-                submit = page.get_by_text("提交", exact=True)
-                visible = [submit.nth(index) for index in range(submit.count())
-                           if submit.nth(index).is_visible()]
-                if not visible:
-                    raise WorkerFailure("browser_shape_mismatch", "Chaoxing homework submit control was absent")
-                visible[-1].click()
-                page.wait_for_timeout(1_500)
-                confirm = page.get_by_text(re.compile(r"^(提交|确定)$"))
-                visible_confirm = [confirm.nth(index) for index in range(confirm.count())
-                                   if confirm.nth(index).is_visible()]
-                if visible_confirm:
-                    visible_confirm[-1].click()
-                page.wait_for_timeout(5_000)
-                terminal_text = " ".join(page.locator("body").inner_text().split())
-                verified = any(marker in terminal_text for marker in
-                               ("提交成功", "等待教师批阅", "作业详情", "我的答案"))
+                if final_submit:
+                    submit = page.get_by_text("提交", exact=True)
+                    visible = [submit.nth(index) for index in range(submit.count())
+                               if submit.nth(index).is_visible()]
+                    if not visible:
+                        raise WorkerFailure("browser_shape_mismatch", "Chaoxing homework submit control was absent")
+                    visible[-1].click()
+                    page.wait_for_timeout(1_500)
+                    confirm = page.get_by_text(re.compile(r"^(提交|确定)$"))
+                    visible_confirm = [confirm.nth(index) for index in range(confirm.count())
+                                       if confirm.nth(index).is_visible()]
+                    if visible_confirm:
+                        visible_confirm[-1].click()
+                    page.wait_for_timeout(5_000)
+                    terminal_text = " ".join(page.locator("body").inner_text().split())
+                    verified = any(marker in terminal_text for marker in
+                                   ("提交成功", "等待教师批阅", "作业详情", "我的答案"))
+                else:
+                    # Some homework pages expose an explicit save control;
+                    # others persist on blur/navigation. Never click submit in
+                    # this branch.
+                    page.locator("body").click(position={"x": 2, "y": 2})
+                    save = page.get_by_text(re.compile(r"^(保存|暂存|保存答案)$"))
+                    saves = [save.nth(index) for index in range(save.count())
+                             if save.nth(index).is_visible()]
+                    if saves:
+                        saves[-1].click()
+                    page.wait_for_timeout(3_000)
+                    verified = False
             finally:
                 browser.close()
     except WorkerFailure:
@@ -1619,11 +1968,142 @@ def run_course_homework_browser(session, route, answers, homework, events, redac
         raise WorkerFailure("browser_execution_failed", redactor.text(error)) from error
     events.emit("progress", current=len(answers) + 1, total=len(answers) + 1)
     return {
-        "remote_state": "completed" if verified else "submitted", "verified": verified,
+        "remote_state": "completed" if verified else "in_progress", "verified": verified,
         "result": {"task_type": "course_homework", "browser_dom": True,
-                   "submitted_questions": len(answers), "work_id": str(homework["work_id"])},
+                   "submitted_questions": len(answers) if final_submit else 0,
+                   "saved_questions": len(answers), "answers_saved": not final_submit,
+                   "final_submit": final_submit,
+                   "work_id": str(homework["work_id"])},
         "session": {"cookies": cookies(session)},
     }
+
+
+def chapter_work_requires_browser(html: str, answers: Mapping[str, Any]) -> bool:
+    """Keep Samueli on its proven 0-4 types; route native shapes to the DOM."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "lxml")
+    type_by_id = {}
+    for root in soup.select(".singleQuesId[data], .questionLi[data]"):
+        question_id = str(root.get("data") or "").strip()
+        type_node = root.select_one(".TiMu[data], [name^='answertype']")
+        native_type = str(
+            (type_node.get("data") if type_node and type_node.has_attr("data") else None)
+            or (type_node.get("value") if type_node else None) or ""
+        ).strip()
+        if question_id:
+            type_by_id[question_id] = native_type
+    return any(
+        isinstance(value, Mapping)
+        or type_by_id.get(str(question_id), "") not in {"", "0", "1", "2", "3", "4"}
+        for question_id, value in answers.items()
+    )
+
+
+def run_chapter_work_browser(session, route: str, answers: Mapping[str, Any], events, redactor):
+    """Bind Provider-native chapter questions in the real Chaoxing DOM."""
+    browser_value = os.environ.get("ASTERISM_CHAOXING_BROWSER_EXECUTABLE")
+    if not browser_value:
+        raise WorkerFailure("browser_required", "Chaoxing native chapter question requires a configured browser")
+    browser_path = pathlib.Path(browser_value)
+    if not browser_path.is_absolute():
+        browser_path = pathlib.Path(__file__).resolve().parents[2] / browser_path
+    if not browser_path.is_file():
+        raise WorkerFailure("browser_unavailable", "configured Chaoxing browser executable is absent")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ModuleNotFoundError as error:
+        raise WorkerFailure("dependency_missing", "playwright") from error
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=str(browser_path), headless=True)
+            try:
+                context = browser.new_context()
+                values = [{
+                    "name": str(name), "value": str(value), "domain": ".chaoxing.com",
+                    "path": "/", "secure": True,
+                } for name, value in cookies(session).items()]
+                if values:
+                    context.add_cookies(values)
+                page = context.new_page()
+                page.goto(route, wait_until="domcontentloaded", timeout=90_000)
+                page.wait_for_timeout(2_000)
+                if "passport" in page.url or "login" in page.url:
+                    raise WorkerFailure("authentication_failed", "Chaoxing browser session was rejected")
+                for index, (question_id, value) in enumerate(answers.items(), 1):
+                    result = page.evaluate(
+                        r"""({questionId, value}) => {
+                          const root = document.querySelector(`.singleQuesId[data="${questionId}"]`)
+                            || document.querySelector(`.questionLi[data="${questionId}"]`)
+                            || document.getElementById(`question${questionId}`);
+                          if (!root) return 'question:not-found';
+                          const norm = text => String(text ?? '').replace(/[\s、,，;；:：.．()（）]/g, '').toLowerCase();
+                          const wanted = Array.isArray(value) ? value : [value];
+                          const controls = [...root.querySelectorAll('input[type=radio], input[type=checkbox]')];
+                          if (controls.length && (typeof value !== 'object' || Array.isArray(value))) {
+                            let matched = 0;
+                            for (const control of controls) {
+                              const label = control.closest('label,li,.answerBg,.option')?.innerText || control.value;
+                              if (wanted.some(item => norm(item) === norm(control.value) || norm(label).includes(norm(item)))) {
+                                if (!control.checked) control.click();
+                                matched++;
+                              }
+                            }
+                            if (matched) return `choice:${matched}`;
+                          }
+                          const selects = [...root.querySelectorAll('select')];
+                          if (selects.length) {
+                            const pairs = value && !Array.isArray(value) && typeof value === 'object'
+                              ? Object.entries(value) : wanted.map((item, offset) => [String(offset + 1), item]);
+                            let matched = 0;
+                            for (let offset = 0; offset < pairs.length; offset++) {
+                              const [left, right] = pairs[offset];
+                              const select = selects.find(candidate => norm(candidate.closest('li,tr,.line,.item')?.innerText).includes(norm(left))) || selects[offset];
+                              if (!select) continue;
+                              const option = [...select.options].find(candidate => norm(candidate.value) === norm(right) || norm(candidate.text).includes(norm(right)));
+                              if (!option) continue;
+                              select.value = option.value;
+                              select.dispatchEvent(new Event('change', { bubbles: true }));
+                              matched++;
+                            }
+                            if (matched === pairs.length) return `select:${matched}`;
+                            return 'select:no-match';
+                          }
+                          const textValues = wanted.flat(Infinity).map(item => typeof item === 'object' ? JSON.stringify(item) : String(item));
+                          const fields = [...root.querySelectorAll('textarea,input:not([type]),input[type=text],input[type=hidden][name*="answer"]')];
+                          if (fields.length) {
+                            fields.forEach((field, offset) => {
+                              field.value = textValues[Math.min(offset, textValues.length - 1)];
+                              field.dispatchEvent(new Event('input', { bubbles: true }));
+                              field.dispatchEvent(new Event('change', { bubbles: true }));
+                            });
+                            return `field:${fields.length}`;
+                          }
+                          return 'native:no-control';
+                        }""",
+                        {"questionId": question_id, "value": value},
+                    )
+                    if str(result).endswith("no-match") or result in {"question:not-found", "native:no-control"}:
+                        raise WorkerFailure("question_type_unsupported", f"Chaoxing DOM could not bind native question {question_id}")
+                    events.emit("progress", current=index, total=len(answers))
+                submit = page.get_by_text("提交", exact=True)
+                visible = [submit.nth(index) for index in range(submit.count()) if submit.nth(index).is_visible()]
+                if not visible:
+                    raise WorkerFailure("browser_shape_mismatch", "Chaoxing chapter submit control was absent")
+                visible[-1].click()
+                page.wait_for_timeout(1_000)
+                confirm = page.get_by_text(re.compile(r"^(提交|确定)$"))
+                confirms = [confirm.nth(index) for index in range(confirm.count()) if confirm.nth(index).is_visible()]
+                if confirms:
+                    confirms[-1].click()
+                page.wait_for_timeout(4_000)
+            finally:
+                browser.close()
+    except WorkerFailure:
+        raise
+    except Exception as error:
+        raise WorkerFailure("browser_execution_failed", redactor.text(error)) from error
 
 
 def run_course_homework(bot, module, payload, native, events, redactor):
@@ -1651,18 +2131,26 @@ def run_course_homework(bot, module, payload, native, events, redactor):
     answers = _provided_answers(payload.get("answers"))
     if not answers:
         raise WorkerFailure("answer_required", "course homework requires reviewed Asterism answers")
-    if "ueditor_0" in response.text or "questionLi" in response.text and "singleQuesId" not in response.text:
+    settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
+    final_submit = str(settings.get("assessment_mode") or "submit") == "submit"
+    if (not final_submit or "ueditor_0" in response.text
+            or "questionLi" in response.text and "singleQuesId" not in response.text):
         return run_course_homework_browser(
-            session, str(response.url), answers, homework, events, redactor
+            session, str(response.url), answers, homework, events, redactor,
+            final_submit=final_submit,
         )
 
     # Feed the exact server-rendered independent-homework page into Samueli's
     # established question decoding and submission order. Only its initial GET
     # is adapted; answer mapping and addStudentWorkNew remain donor-owned.
-    bot.tiku = AsterismTiku(answers)
+    cover_rate = float(settings.get("minimum_answer_coverage", 0.9))
+    bot.tiku = AsterismTiku(answers, cover_rate)
 
     def refuse_random_answer(*_args, **_kwargs):
-        raise WorkerFailure("answer_invalid", "donor could not map a reviewed answer; random fallback refused")
+        # The donor asks for a random value when an answer is absent or cannot
+        # be rebound. Preserve its partial-save/coverage flow without inventing
+        # a value: blank remains blank in the outgoing form.
+        return ""
 
     module.random_answer = refuse_random_answer
     original_get = session.get
@@ -1801,9 +2289,9 @@ def run_task(module, payload, events, redactor):
                 "session": {"cookies": cookies(module.SessionManager.get_session())}}
 
     settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
-    speed = float(settings.get("speed", 1.0))
-    if not 0 < speed <= 4:
-        raise WorkerFailure("request_invalid", "speed must be greater than 0 and at most 4")
+    speed = float(settings.get("speed", 2.0))
+    if not 0 < speed or not speed < float("inf"):
+        raise WorkerFailure("request_invalid", "speed must be a finite value greater than 0")
     events.emit("progress", current=0, total=1)
     with capture_output(events, redactor):
         if job_type == "video":
@@ -1818,13 +2306,25 @@ def run_task(module, payload, events, redactor):
             answers = _provided_answers(payload.get("answers"))
             if not answers:
                 raise WorkerFailure("answer_required", "chapter work requires reviewed Asterism answers")
-            bot.tiku = AsterismTiku(answers)
+            session = module.SessionManager.get_session()
+            response = session.get(
+                "https://mooc1.chaoxing.com/mooc-ans/api/work",
+                params=work_read_params(course, native, job, job_info),
+            )
+            if chapter_work_requires_browser(response.text, answers):
+                run_chapter_work_browser(
+                    session, str(response.url), answers, events, redactor
+                )
+                result = module.StudyResult.SUCCESS
+            else:
+                cover_rate = float(settings.get("minimum_answer_coverage", 0.9))
+                bot.tiku = AsterismTiku(answers, cover_rate)
 
-            def refuse_random_answer(*_args, **_kwargs):
-                raise WorkerFailure("answer_invalid", "donor could not map a reviewed answer; random fallback refused")
+                def refuse_random_answer(*_args, **_kwargs):
+                    return ""
 
-            module.random_answer = refuse_random_answer
-            result = bot.study_work(course, job, job_info)
+                module.random_answer = refuse_random_answer
+                result = bot.study_work(course, job, job_info)
         elif job_type == "live":
             live_module = importlib.import_module("api.live")
             live_process_module = importlib.import_module("api.live_process")
@@ -1840,7 +2340,9 @@ def run_task(module, payload, events, redactor):
             )
             thread = threading.Thread(
                 target=live_process_module.LiveProcessor.run_live,
-                args=(live, speed),
+                # Accelerated live playback can report local completion
+                # without satisfying Provider duration, so live stays 1x.
+                args=(live, 1.0),
                 daemon=True,
             )
             thread.start()

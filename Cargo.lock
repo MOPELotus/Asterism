@@ -157,6 +157,7 @@ name = "asterism-api"
 version = "0.0.1"
 dependencies = [
  "asterism-auth",
+ "asterism-config",
  "asterism-domain",
  "asterism-engine",
  "asterism-events",
@@ -172,6 +173,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "http",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -181,6 +183,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
  "zeroize",
 ]
 
@@ -264,6 +267,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -385,6 +389,7 @@ dependencies = [
  "asterism-uai-worker-client",
  "async-trait",
  "chrono",
+ "futures-util",
  "serde_json",
  "sha2",
  "tokio",

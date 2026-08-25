@@ -4,6 +4,7 @@
 
 mod account;
 mod admin;
+mod ai;
 mod auth;
 mod auth_bootstrap;
 mod batch_execution;
@@ -13,6 +14,7 @@ mod course_enrollment;
 mod credit;
 mod execution;
 mod openapi_contract;
+mod qq;
 mod rate_limit;
 mod runtime_settings;
 mod task;
@@ -20,6 +22,7 @@ mod uai_worker;
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use asterism_config::AiConfig;
 use asterism_domain::ProviderId;
 use asterism_events::EventBus;
 use asterism_provider_api::{CaptureRecipe, ProviderMetadata, ProviderRegistry};
@@ -58,6 +61,7 @@ pub struct ApiState {
     bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter,
     browser_bridge_claim_rate_limiter: rate_limit::LoginRateLimiter,
     provider_workers: BTreeMap<String, UaiWorkerClient>,
+    ai: AiConfig,
 }
 
 impl ApiState {
@@ -80,6 +84,7 @@ impl ApiState {
             bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter::default(),
             browser_bridge_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
             provider_workers: BTreeMap::new(),
+            ai: AiConfig::default(),
         }
     }
 
@@ -107,6 +112,12 @@ impl ApiState {
         self
     }
 
+    #[must_use]
+    pub fn with_ai_config(mut self, ai: AiConfig) -> Self {
+        self.ai = ai;
+        self
+    }
+
     /// Adds one configured 0.0.1 upstream-backed Provider worker.
     #[must_use]
     pub fn with_provider_worker(
@@ -127,6 +138,10 @@ pub fn build_router(state: ApiState) -> Router {
     let protected = Router::new()
         .route("/api/v1/auth/session", get(auth::current_identity))
         .route("/api/v1/auth/logout", post(auth::logout))
+        .route(
+            "/api/v1/integrations/qq/identity/assert",
+            post(qq::assert_qq_identity),
+        )
         .route("/api/v1/providers", get(list_providers))
         .route("/api/v1/providers/{provider}/worker/health", get(uai_worker::health))
         .route(
@@ -263,6 +278,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/auth/bootstrap", post(auth::bootstrap_master))
         .route("/api/v1/auth/login", post(auth::login))
         .route(
+            "/api/v1/auth/qq-login/{ticket}",
+            get(qq::consume_qq_web_login),
+        )
+        .route(
             "/api/v1/auth-bootstrap/sessions/{session_id}/claim",
             post(auth_bootstrap::claim_auth_bootstrap_session),
         )
@@ -324,6 +343,10 @@ fn credit_routes() -> Router<ApiState> {
 
 fn runtime_settings_routes() -> Router<ApiState> {
     Router::new()
+        .route(
+            "/api/v1/admin/provider-accounts/{account_id}/answer-history-scan",
+            get(account::get_answer_history_scan_status).post(account::control_answer_history_scan),
+        )
         .route(
             "/api/v1/admin/providers/{provider_id}/runtime-settings/schema",
             get(runtime_settings::get_provider_runtime_settings_schema),
@@ -408,6 +431,10 @@ fn task_routes() -> Router<ApiState> {
             post(task::resolve_provider_answer_candidates),
         )
         .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/ai-answer-candidates",
+            post(ai::generate_ai_answer_candidates),
+        )
+        .route(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
             get(task::list_answer_candidates).post(task::create_manual_answer_candidate),
         )
@@ -436,6 +463,10 @@ fn task_routes() -> Router<ApiState> {
             post(task::prepare_execution_invocation_draft).layer(DefaultBodyLimit::max(
                 task::MAX_EXECUTION_INVOCATION_INPUT_BYTES,
             )),
+        )
+        .route(
+            "/api/v1/tasks/{task_id}/ai-discussion-invocation-drafts",
+            post(ai::generate_uai_discussion_draft),
         )
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
         .route("/api/v1/tasks/{task_id}/approve", post(task::approve_task))
@@ -543,6 +574,12 @@ pub fn openapi_document() -> Value {
                 "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Credentials"}}}},
                 "responses": {"200": {"description": "Session created"}, "401": {"description": "Invalid credentials"}, "429": {"description": "Rate limited"}}
             }},
+            "/api/v1/auth/qq-login/{ticket}": {"get": {
+                "operationId": "consumeQqWebLogin",
+                "description": "Consumes a short-lived single-use QQ Web login ticket, creates an HttpOnly Web session and redirects to its bound relative WebUI path.",
+                "parameters": [{"name": "ticket", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "responses": {"303": {"description": "Web session created"}, "400": {"description": "Ticket invalid, expired or already consumed"}}
+            }},
             "/api/v1/auth/session": {"get": {
                 "operationId": "currentIdentity",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -552,6 +589,39 @@ pub fn openapi_document() -> Value {
                 "operationId": "logout",
                 "security": [{"cookieAuth": []}],
                 "responses": {"204": {"description": "Web session revoked"}, "400": {"description": "Not a Web session"}, "401": {"description": "Authentication required"}}
+            }},
+            "/api/v1/integrations/qq/identity/assert": {"post": {
+                "operationId": "assertQqIdentity",
+                "description": "Trusted QQ gateway assertion. Resolves or creates the QQ-bound user and returns a short-lived user session token.",
+                "security": [{"bearerAuth": []}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "additionalProperties": false, "required": ["qq"],
+                    "properties": {
+                        "qq": {"type": "string", "pattern": "^[0-9]{5,20}$"},
+                        "create_if_missing": {"type": "boolean", "default": true},
+                        "return_to": {"type": "string", "description": "Safe relative WebUI path bound to the one-time login ticket"}
+                    }
+                }}}},
+                "responses": {
+                    "200": {"description": "QQ-bound user session", "content": {"application/json": {"schema": {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["user_id", "username", "qq", "created", "access_token", "expires_at", "web_login_path", "web_login_expires_at"],
+                        "properties": {
+                            "user_id": {"type": "string", "format": "uuid"},
+                            "username": {"type": "string"},
+                            "qq": {"type": "string"},
+                            "created": {"type": "boolean"},
+                            "access_token": {"type": "string", "writeOnly": true},
+                            "expires_at": {"type": "string", "format": "date-time"},
+                            "web_login_path": {"type": "string", "writeOnly": true},
+                            "web_login_expires_at": {"type": "string", "format": "date-time"}
+                        }
+                    }}}},
+                    "400": {"description": "Invalid QQ identity"},
+                    "401": {"description": "Authentication required"},
+                    "403": {"description": "Service token lacks qq_identity_assert"},
+                    "404": {"description": "QQ identity is absent and creation is disabled"}
+                }
             }},
             "/api/v1/providers": {"get": {"operationId": "listProviders", "security": [{"cookieAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Registered provider metadata"}}}},
             "/api/v1/providers/uai/worker/health": {"get": {
@@ -900,6 +970,23 @@ pub fn openapi_document() -> Value {
                     "responses": {"200": {"description": "Master scan schedule configured with the explicit or Provider-default interval and Provider floor"}, "400": {"description": "Invalid interval or Provider default unavailable"}, "403": {"description": "Master Provider settings permission required"}, "404": {"description": "Provider account not found"}, "409": {"description": "Provider is not registered or stored settings no longer match its schema"}}
                 }
             },
+            "/api/v1/admin/provider-accounts/{account_id}/answer-history-scan": {
+                "get": {
+                    "operationId": "getAnswerHistoryScanStatus",
+                    "description": "Returns the durable Chaoxing full-account answer-history scan checkpoint and locally cached coverage.",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "responses": {"200": {"description": "Current durable scan state"}, "403": {"description": "Provider settings permission required"}, "404": {"description": "Account or scan not found"}, "409": {"description": "Provider does not support full answer-history scanning"}}
+                },
+                "post": {
+                    "operationId": "controlAnswerHistoryScan",
+                    "description": "Pauses, resumes, or explicitly retries the durable Chaoxing scan without discarding its checkpoint.",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["action"], "properties": {"action": {"type": "string", "enum": ["pause", "resume", "retry"]}}}}}},
+                    "responses": {"200": {"description": "Updated durable scan state"}, "403": {"description": "Provider settings permission required"}, "404": {"description": "Account or scan not found"}, "409": {"description": "Requested transition is not safe in the current state"}}
+                }
+            },
             "/api/v1/tasks": {"get": {
                 "operationId": "listTasks",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -916,6 +1003,42 @@ pub fn openapi_document() -> Value {
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
                 "parameters": [{"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
                 "responses": {"200": {"description": "Owner-scoped task"}, "400": {"description": "Invalid task ID"}, "404": {"description": "Task not found"}}
+            }},
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/ai-answer-candidates": {"post": {
+                "operationId": "generateAiAnswerCandidates",
+                "description": "Generates locally cached AI answer candidates through the selected deployment profile. Remote storage is disabled and Provider-standard answers remain separate.",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [
+                    {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                ],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "additionalProperties": false,
+                    "properties": {
+                        "profile": {"type": "string", "enum": ["economy", "gpt_only"], "default": "economy"},
+                        "route": {"type": "string", "enum": ["timed", "untimed", "escalation"], "default": "untimed"},
+                        "question_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "maxItems": 100, "default": []}
+                    }
+                }}}},
+                "responses": {"200": {"description": "AI candidates saved in the local deployment cache"}, "400": {"description": "Question selection or request is invalid"}, "404": {"description": "Snapshot not found"}, "502": {"description": "Model returned invalid output"}, "503": {"description": "Model endpoint, key, or service is unavailable"}}
+            }},
+            "/api/v1/tasks/{task_id}/ai-discussion-invocation-drafts": {"post": {
+                "operationId": "generateUaiDiscussionInvocationDraft",
+                "description": "Freshly reads a UAI discussion, generates bounded human plain text, and stores an immutable encrypted Worker invocation draft. It does not execute or submit the task.",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [
+                    {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "idempotency-key", "in": "header", "required": true, "schema": {"type": "string", "maxLength": 256}}
+                ],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "additionalProperties": false,
+                    "properties": {"profile": {"type": "string", "enum": ["economy", "gpt_only"], "default": "economy"}}
+                }}}},
+                "responses": {
+                    "200": {"description": "Idempotent invocation draft replay", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UaiDiscussionInvocationDraft"}}}},
+                    "201": {"description": "Generated encrypted invocation draft", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UaiDiscussionInvocationDraft"}}}},
+                    "409": {"description": "Task is not a current UAI discussion"}, "502": {"description": "Model returned unsafe text"}, "503": {"description": "Model endpoint, key, or encrypted draft storage is unavailable"}
+                }
             }},
             "/api/v1/service-tokens": {
                 "get": {
@@ -958,6 +1081,17 @@ pub fn openapi_document() -> Value {
                         "password": {"type": "string", "format": "password", "minLength": 1, "maxLength": 1024, "writeOnly": true}
                     },
                     "additionalProperties": false
+                },
+                "UaiDiscussionInvocationDraft": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["task_id", "invocation_draft_id", "generated_text", "created"],
+                    "properties": {
+                        "task_id": {"type": "string", "format": "uuid"},
+                        "invocation_draft_id": {"type": "string", "format": "uuid"},
+                        "generated_text": {"type": "string", "minLength": 1, "maxLength": 16384},
+                        "created": {"type": "boolean"}
+                    }
                 },
                 "CreateServiceToken": {
                     "type": "object",
@@ -1627,6 +1761,10 @@ fn task_execute_path() -> Value {
                     "formal_assessment_confirmation": {
                         "type": "boolean",
                         "description": "Explicit owner confirmation for this Formal assessment Execution. Omit or set false to keep the default deny policy."
+                    },
+                    "formal_assessment_save_only": {
+                        "type": "boolean",
+                        "description": "Allows a Formal assessment Worker to save a fully prepared answer set without final submission. Mutually exclusive with formal_assessment_confirmation."
                     },
                     "strict_completion_retry_confirmation": {
                         "type": "object",
@@ -6468,6 +6606,25 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
+        let snapshot_id = asterism_domain::TaskSnapshotId::new();
+        sqlx::query(
+            "INSERT INTO task_snapshots \
+             (id, task_id, captured_at, provider_version, normalized_json, remote_raw_sanitized_json) \
+             VALUES (?, ?, ?, 'fixture-v1', '{}', ?)",
+        )
+        .bind(snapshot_id.to_string())
+        .bind(task_id.to_string())
+        .bind(&now)
+        .bind(r#"{"provider_summary":{"required":true,"finish_progress":75}}"#)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE tasks SET latest_snapshot_id = ? WHERE id = ?")
+            .bind(snapshot_id.to_string())
+            .bind(task_id.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
 
         let listed = app
             .clone()
@@ -6489,6 +6646,11 @@ mod tests {
         assert_eq!(listed["limit"], 1);
         assert_eq!(listed["items"][0]["source_type"], "exam");
         assert_eq!(listed["items"][0]["assessment_class"], "routine");
+        assert_eq!(listed["items"][0]["provider_summary"]["required"], true);
+        assert_eq!(
+            listed["items"][0]["provider_summary"]["finish_progress"],
+            75
+        );
         assert!(listed["items"][0].get("remote_fingerprint").is_none());
 
         let course_listed = app
@@ -6536,6 +6698,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.status(), StatusCode::OK);
+        let fetched = to_bytes(fetched.into_body(), 16 * 1024).await.unwrap();
+        let fetched: Value = serde_json::from_slice(&fetched).unwrap();
+        assert_eq!(fetched["provider_summary"]["required"], true);
 
         let invalid_page = app
             .oneshot(
@@ -6980,7 +7145,7 @@ mod tests {
         );
         assert_eq!(
             cache_body["candidates"][0]["candidate"]["provenance_sanitized"]["origin"],
-            "prior_question_snapshot"
+            "deployment_global_verified_cache"
         );
 
         let cache_retry = app
@@ -8194,6 +8359,7 @@ mod tests {
         for path in [
             "/api/v1/auth/bootstrap",
             "/api/v1/auth/login",
+            "/api/v1/auth/qq-login/{ticket}",
             "/api/v1/auth/session",
             "/api/v1/auth/logout",
             "/api/v1/auth-bootstrap/sessions",
@@ -8235,6 +8401,7 @@ mod tests {
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache",
+            "/api/v1/tasks/{task_id}/ai-discussion-invocation-drafts",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}",
@@ -8417,6 +8584,97 @@ mod tests {
         let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
         let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(error.error.code, "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn qq_web_login_ticket_is_bound_single_use_and_never_exposes_the_bearer() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let master_cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let service = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-tokens")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, master_cookie)
+                    .body(Body::from(
+                        r#"{"name":"qq-gateway","scopes":["qq_identity_assert"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(service.status(), StatusCode::OK);
+        let service = response_json(service).await;
+        let service_token = service["token"].as_str().unwrap();
+        let asserted = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/identity/assert")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {service_token}"))
+                    .body(Body::from(
+                        r#"{"qq":"123456789","return_to":"/tasks/task-safe?confirm=1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(asserted.status(), StatusCode::OK);
+        let asserted = response_json(asserted).await;
+        let bearer = asserted["access_token"].as_str().unwrap();
+        let login_path = asserted["web_login_path"].as_str().unwrap();
+        assert!(!login_path.contains(bearer));
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM qq_web_login_tickets")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 32);
+        assert!(
+            !login_path
+                .as_bytes()
+                .windows(stored.len())
+                .any(|part| part == stored)
+        );
+
+        let login = app
+            .clone()
+            .oneshot(Request::get(login_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            login.headers()[header::LOCATION],
+            "/tasks/task-safe?confirm=1"
+        );
+        let qq_cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let identity = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/auth/session")
+                    .header(header::COOKIE, qq_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(identity.status(), StatusCode::OK);
+
+        let replay = app
+            .oneshot(Request::get(login_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

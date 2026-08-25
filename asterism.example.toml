@@ -9,6 +9,27 @@ secure_cookies = false
 [database]
 url = "sqlite://asterism.db"
 
+[ai]
+# Asterism caches every answer candidate locally. This flag only controls
+# remote model-provider retention and intentionally remains false.
+remote_store = false
+
+[ai.gpt_router]
+# Fill in the Responses-compatible GPT router root when it is known.
+base_url = ""
+api_key_env = "ASTERISM_GPT_ROUTER_API_KEY"
+protocol = "responses"
+
+[ai.deepseek]
+base_url = "https://api.deepseek.com"
+api_key_env = "ASTERISM_DEEPSEEK_API_KEY"
+protocol = "chat_completions"
+
+[ai.kimi]
+base_url = "https://api.moonshot.cn/v1"
+api_key_env = "ASTERISM_KIMI_API_KEY"
+protocol = "chat_completions"
+
 [providers]
 # Local validation only. These Providers remain unverified and disabled by default.
 enable_development_chaoxing = false

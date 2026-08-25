@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::{
-    AnswerResolutionDecision, AnswerResolutionPlan, AnswerResolutionStatus, NormalizedAnswer,
-    QuestionId, QuestionSnapshotId, TaskId, UserId,
+    AnswerResolutionDecision, AnswerResolutionPlan, AnswerResolutionStatus, AnswerSource,
+    NormalizedAnswer, QuestionId, QuestionSnapshotId, TaskId, UserId,
 };
 use asterism_storage::{
     AnswerCandidateRecord, AnswerCandidateRepository, QuestionSnapshotRepository, StorageError,
@@ -135,12 +135,63 @@ fn resolve_question(
             selected_answer: None,
         };
     }
-    let consensus_answer = known[0].candidate.answer.clone();
     let considered_candidate_ids = known.iter().map(|record| record.id).collect::<Vec<_>>();
-    if known
+    let provider_native = known
+        .iter()
+        .copied()
+        .filter(|record| record.candidate.source == AnswerSource::ProviderNative)
+        .collect::<Vec<_>>();
+    if !provider_native.is_empty() {
+        return select_if_source_agrees(question_id, &provider_native, considered_candidate_ids);
+    }
+
+    let consensus_answer = known[0].candidate.answer.clone();
+    let all_agree = known
         .iter()
         .skip(1)
-        .any(|record| record.candidate.answer != consensus_answer)
+        .all(|record| record.candidate.answer == consensus_answer);
+    if all_agree {
+        let selected = preferred_candidate(&known);
+        return AnswerResolutionDecision {
+            question_id,
+            status: AnswerResolutionStatus::Selected,
+            considered_candidate_ids,
+            selected_candidate_id: Some(selected.id),
+            selected_answer: Some(consensus_answer),
+        };
+    }
+
+    // AI is an arbiter only after lower-cost evidence conflicts. One or more
+    // model calls must agree with each other; merely adding an AI candidate
+    // must not hide a second model disagreement.
+    let ai = known
+        .iter()
+        .copied()
+        .filter(|record| record.candidate.source == AnswerSource::Ai)
+        .collect::<Vec<_>>();
+    if !ai.is_empty() {
+        return select_if_source_agrees(question_id, &ai, considered_candidate_ids);
+    }
+
+    AnswerResolutionDecision {
+        question_id,
+        status: AnswerResolutionStatus::Conflict,
+        considered_candidate_ids,
+        selected_candidate_id: None,
+        selected_answer: None,
+    }
+}
+
+fn select_if_source_agrees(
+    question_id: QuestionId,
+    candidates: &[&AnswerCandidateRecord],
+    considered_candidate_ids: Vec<asterism_domain::AnswerCandidateId>,
+) -> AnswerResolutionDecision {
+    let answer = candidates[0].candidate.answer.clone();
+    if candidates
+        .iter()
+        .skip(1)
+        .any(|record| record.candidate.answer != answer)
     {
         return AnswerResolutionDecision {
             question_id,
@@ -150,11 +201,23 @@ fn resolve_question(
             selected_answer: None,
         };
     }
+    let selected = preferred_candidate(candidates);
+    AnswerResolutionDecision {
+        question_id,
+        status: AnswerResolutionStatus::Selected,
+        considered_candidate_ids,
+        selected_candidate_id: Some(selected.id),
+        selected_answer: Some(answer),
+    }
+}
 
-    let selected = known
-        .into_iter()
+fn preferred_candidate<'a>(candidates: &[&'a AnswerCandidateRecord]) -> &'a AnswerCandidateRecord {
+    candidates
+        .iter()
+        .copied()
         .max_by_key(|record| {
             (
+                source_priority(record.candidate.source),
                 record
                     .candidate
                     .confidence
@@ -163,13 +226,17 @@ fn resolve_question(
                 record.id,
             )
         })
-        .expect("known candidate set is non-empty");
-    AnswerResolutionDecision {
-        question_id,
-        status: AnswerResolutionStatus::Selected,
-        considered_candidate_ids,
-        selected_candidate_id: Some(selected.id),
-        selected_answer: Some(consensus_answer),
+        .expect("candidate set is non-empty")
+}
+
+const fn source_priority(source: AnswerSource) -> u8 {
+    match source {
+        AnswerSource::ProviderNative => 6,
+        AnswerSource::LocalCache => 5,
+        AnswerSource::Manual => 4,
+        AnswerSource::Ai => 3,
+        AnswerSource::ExternalBank => 2,
+        AnswerSource::Other => 1,
     }
 }
 

@@ -3319,6 +3319,52 @@ where
                 )
                 .await
             }
+            Ok(outcome)
+                if prepared.context.provider_id.as_str() == "chaoxing"
+                    && task.assessment_class == asterism_domain::AssessmentClass::Formal
+                    && prepared.request.requested_capabilities
+                        == [TaskCapability::ResourceExecution]
+                    && outcome.remote_state == RemoteState::InProgress
+                    && !outcome.verified
+                    && outcome
+                        .result_sanitized
+                        .get("answers_saved")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && outcome
+                        .result_sanitized
+                        .get("final_submit")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false) =>
+            {
+                self.finish_saved_assessment(job, attempt, Utc::now().max(now), correlation_id)
+                    .await
+            }
+            Ok(outcome)
+                if prepared.context.provider_id.as_str() == "chaoxing"
+                    && task.assessment_class != asterism_domain::AssessmentClass::Formal
+                    && prepared.request.requested_capabilities
+                        == [TaskCapability::ResourceExecution]
+                    && matches!(
+                        outcome.remote_state,
+                        RemoteState::Pending | RemoteState::InProgress
+                    ) =>
+            {
+                let failed_at = Utc::now().max(now);
+                let disposition = match self.config.retry_policy.delay_after(attempt.attempt_no)? {
+                    Some(delay) => FailureDisposition::RetryAt(add_duration(failed_at, delay)?),
+                    None => FailureDisposition::Failed,
+                };
+                self.finish_failure(
+                    job,
+                    attempt,
+                    ProviderErrorClass::InvalidRemoteState,
+                    disposition,
+                    failed_at,
+                    correlation_id,
+                )
+                .await
+            }
             Ok(_) => {
                 self.finish_failure(
                     job,
@@ -4305,6 +4351,43 @@ where
             percent: Some(100),
             stage: ExecutionStage::Completed,
             status_text: Some("provider completion verified".to_owned()),
+            current_item: None,
+            completed_items: None,
+            total_items: None,
+            updated_at: at,
+        };
+        let execution = self
+            .executions
+            .finish_attempt(ExecutionAttemptFinishRequest {
+                execution_id: attempt.execution_id,
+                attempt_id: attempt.id,
+                scheduler_job_id: job.id,
+                worker_id: claimed_worker(job)?,
+                final_state: ExecutionState::Succeeded,
+                result: AttemptResult::Succeeded,
+                error_class: None,
+                provider_trace_id: None,
+                retry_at: None,
+                progress: &progress,
+                at,
+                correlation_id,
+            })
+            .await?;
+        Ok(ScheduledExecutionOutcome::Succeeded(execution))
+    }
+
+    async fn finish_saved_assessment(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let progress = ExecutionProgress {
+            execution_id: attempt.execution_id,
+            percent: Some(100),
+            stage: ExecutionStage::Completed,
+            status_text: Some("answers saved; awaiting final submission confirmation".to_owned()),
             current_item: None,
             completed_items: None,
             total_items: None,

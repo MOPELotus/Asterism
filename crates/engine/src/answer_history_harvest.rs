@@ -17,6 +17,7 @@ use asterism_storage::{
     ProtocolObservationRepository, ProviderAccountRuntimeRepository, QuestionSnapshot,
     StorageError, TaskRuntimeRepository,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -359,6 +360,18 @@ where
             .await
         {
             Ok(evidence) => evidence,
+            Err(error)
+                if matches!(
+                    error.kind,
+                    ProviderErrorKind::UnsupportedTask | ProviderErrorKind::RemoteChanged
+                ) =>
+            {
+                // A completed task may legitimately have no reviewed result
+                // page (video-only knowledge point, expired shell, unsupported
+                // native question). It still advances the durable page cursor;
+                // only transport/auth/protocol failures stop the scan.
+                return Ok(false);
+            }
             Err(error) => {
                 let occurrence_scope =
                     format!("answer-history:{}:task:{}", claimed.harvest.id, task.id);
@@ -376,7 +389,14 @@ where
         provider_evidence
             .validate(&request)
             .map_err(|_| PageError::InvalidProviderEvidence)?;
-        if provider_evidence.observed_at > now {
+        // A Provider read can take materially longer than one worker tick (the
+        // Chaoxing history adapter may enumerate a full course before reading
+        // the first reviewed result). Compare its observation with a fresh
+        // post-read timestamp, not the tick-start timestamp passed into this
+        // method, otherwise every honest long-running read appears to come
+        // from the future.
+        let imported_at = Utc::now();
+        if provider_evidence.observed_at > imported_at {
             return Err(PageError::InvalidProviderEvidence);
         }
         let material = build_import_material(
@@ -386,7 +406,7 @@ where
             &request.reference,
             &provider_evidence,
             &groups,
-            now,
+            imported_at,
         )?;
         self.imports
             .ingest_answer_history_task(AnswerHistoryIngestRequest {
@@ -401,7 +421,7 @@ where
                 retake: material.retake.as_ref(),
                 provenance_sanitized: &material.provenance_sanitized,
                 observed_at: material.observed_at,
-                imported_at: now,
+                imported_at,
             })
             .await
             .map_err(PageError::Storage)?;
@@ -437,6 +457,13 @@ where
         now: Timestamp,
     ) -> Result<PageOutcome, AnswerHistoryHarvestWorkerError> {
         let failure = AnswerHistoryHarvestFailure::from_error(error);
+        tracing::warn!(
+            harvest_id = %claimed.harvest.id,
+            provider_id = %claimed.harvest.provider_id,
+            failure_code = failure.code,
+            error = ?error,
+            "answer-history scan page failed"
+        );
         let retry_at = if failure.retryable {
             Some(add_seconds(
                 now,

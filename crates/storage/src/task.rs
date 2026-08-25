@@ -208,9 +208,22 @@ impl TaskRuntimeRepository for SqliteTaskQueryRepository {
         match rows.as_slice() {
             [] => Ok(None),
             [row] => decode_task(row).map(Some),
-            [..] => Err(StorageError::InvalidData(
-                "runtime remote Task identity is ambiguous across source types".to_owned(),
-            )),
+            [..] => {
+                let decoded = rows
+                    .iter()
+                    .map(decode_task)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let current = decoded
+                    .iter()
+                    .filter(|task| task.source_type != asterism_domain::SourceType::Other)
+                    .collect::<Vec<_>>();
+                match current.as_slice() {
+                    [task] => Ok(Some((*task).clone())),
+                    _ => Err(StorageError::InvalidData(
+                        "runtime remote Task identity is ambiguous across source types".to_owned(),
+                    )),
+                }
+            }
         }
     }
 }
@@ -360,6 +373,30 @@ mod tests {
                 .unwrap()
                 .id,
             first
+        );
+        let legacy_shadow = TaskId::new();
+        sqlx::query(
+            "INSERT INTO tasks (id, provider_account_id, course_id, remote_id, remote_fingerprint, \
+             source_type, assessment_class, title, remote_state, orchestration_state, opens_at, \
+             due_at, closes_at, discovered_at, updated_at, latest_snapshot_id, capabilities_json) \
+             SELECT ?, provider_account_id, course_id, remote_id, remote_fingerprint, 'other', \
+             assessment_class, title, remote_state, orchestration_state, opens_at, due_at, closes_at, \
+             discovered_at, updated_at, latest_snapshot_id, capabilities_json FROM tasks WHERE id = ?",
+        )
+        .bind(legacy_shadow.to_string())
+        .bind(first.to_string())
+        .execute(repository.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            repository
+                .find_runtime_task_by_remote_identity(account, "first")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            first,
+            "the typed current task wins over a legacy other shadow"
         );
         assert!(
             repository
