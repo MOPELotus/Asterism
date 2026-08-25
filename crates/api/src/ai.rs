@@ -151,9 +151,10 @@ pub(super) async fn generate_ai_answer_candidates(
             .collect::<Vec<_>>();
         // AI answers are deployment-local cache entries as well.  Reuse the
         // newest valid AI candidate for this immutable snapshot before making
-        // another remote request; callers can still obtain a fresh candidate
-        // by materializing a new QuestionSnapshot.
-        if !request.force_refresh
+        // another remote request. Escalation is deliberately always fresh:
+        // a high-quality fallback must not return the answer that just failed.
+        let may_reuse_ai_cache = should_reuse_ai_cache(request.force_refresh, route);
+        if may_reuse_ai_cache
             && let Some(cached) = existing.iter().rev().find(|record| {
                 record.candidate.question_id == question.id
                     && record.candidate.source == AnswerSource::Ai
@@ -315,6 +316,10 @@ async fn record_answer_bank_hit(
     .await
     .map_err(ApiError::internal)?;
     transaction.commit().await.map_err(ApiError::internal)
+}
+
+const fn should_reuse_ai_cache(force_refresh: bool, route: AiAnswerRoute) -> bool {
+    !force_refresh && !matches!(route, AiAnswerRoute::Escalation)
 }
 
 async fn record_ai_usage(
@@ -1352,6 +1357,10 @@ mod tests {
         let refreshed: GenerateAiAnswerCandidatesRequest =
             serde_json::from_value(json!({"force_refresh": true})).unwrap();
         assert!(refreshed.force_refresh);
+        assert!(should_reuse_ai_cache(false, AiAnswerRoute::Untimed));
+        assert!(should_reuse_ai_cache(false, AiAnswerRoute::Timed));
+        assert!(!should_reuse_ai_cache(true, AiAnswerRoute::Untimed));
+        assert!(!should_reuse_ai_cache(false, AiAnswerRoute::Escalation));
     }
 
     #[test]
