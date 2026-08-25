@@ -337,9 +337,13 @@ async fn estimate_ai_cost(
     let Some(rate) = rate else { return Ok(0); };
     let input_per_1k = rate.get("input_per_1k").and_then(Value::as_u64).unwrap_or(0);
     let output_per_1k = rate.get("output_per_1k").and_then(Value::as_u64).unwrap_or(0);
-    let input_cost = input_tokens.max(0) as u64 * input_per_1k;
-    let output_cost = output_tokens.max(0) as u64 * output_per_1k;
-    Ok(input_cost.div_ceil(1000).saturating_add(output_cost.div_ceil(1000)))
+    Ok(cost_from_rates(input_tokens, output_tokens, input_per_1k, output_per_1k))
+}
+
+fn cost_from_rates(input_tokens: i64, output_tokens: i64, input_per_1k: u64, output_per_1k: u64) -> u64 {
+    let input_cost = (input_tokens.max(0) as u64).saturating_mul(input_per_1k);
+    let output_cost = (output_tokens.max(0) as u64).saturating_mul(output_per_1k);
+    input_cost.div_ceil(1000).saturating_add(output_cost.div_ceil(1000))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1240,6 +1244,12 @@ mod tests {
             extract_usage(AiProtocol::Responses, &json!({})).input_tokens,
             None
         );
+    }
+
+    #[test]
+    fn ai_cost_rounds_each_token_component_up_and_ignores_negative_usage() {
+        assert_eq!(cost_from_rates(1_001, 1, 2, 3), 4);
+        assert_eq!(cost_from_rates(-1, 999, 2, 3), 3);
     }
 
     #[test]
