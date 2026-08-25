@@ -2,7 +2,8 @@
   {
     "name": "SocialSisterYi/CxKitty",
     "repository": "https://github.com/SocialSisterYi/CxKitty",
-    "revision": "7ace93c6731db0c0098d8a3a7b46808d48c93ca3",
+    "revision": "1589eac9c07c4bab71f79d762b45210643dd537d",
+    "overlay_revision": "7ace93c6731db0c0098d8a3a7b46808d48c93ca3",
     "files": {
       "cxapi/api.py": "ad550b2a34f72a614330309c0c8596e7cb98f0bccf31278a3ab972db138f34bb",
       "cxapi/classes.py": "a33166b9cda508a79ea67caebe53afbe2bd253717ba758ba80eb6315d3d989bc",
