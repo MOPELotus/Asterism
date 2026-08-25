@@ -148,6 +148,22 @@ pub(super) async fn generate_ai_answer_candidates(
             .filter(|record| record.candidate.question_id == question.id)
             .map(|record| &record.candidate)
             .collect::<Vec<_>>();
+        // AI answers are deployment-local cache entries as well.  Reuse the
+        // newest valid AI candidate for this immutable snapshot before making
+        // another remote request; callers can still obtain a fresh candidate
+        // by materializing a new QuestionSnapshot.
+        if let Some(cached) = existing
+            .iter()
+            .rev()
+            .find(|record| {
+                record.candidate.question_id == question.id
+                    && record.candidate.source == AnswerSource::Ai
+                    && record.candidate.validate().is_ok()
+            })
+        {
+            records.push(cached.clone());
+            continue;
+        }
         let (generated, usage) = match client.answer(&snapshot, question, &evidence).await {
             Ok(value) => value,
             Err(error) => {
