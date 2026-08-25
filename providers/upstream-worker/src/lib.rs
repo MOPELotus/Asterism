@@ -1614,7 +1614,7 @@ impl AnswerResolveCapability for UpstreamWorkerProvider {
         remote_task_id: &str,
         questions: &[Question],
     ) -> ProviderResult<Vec<AnswerCandidate>> {
-        if self.metadata.id.as_str() != "chaoxing" {
+        if !matches!(self.metadata.id.as_str(), "chaoxing" | "cidaren") {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
                 "this upstream worker does not expose Provider-native answers",
@@ -3644,9 +3644,7 @@ mod tests {
         assert!(entry.question_parse.is_none());
         assert!(entry.duration_read.is_some());
         assert!(entry.task_execution.is_some());
-        assert!(entry.question_inventory.is_some());
-        assert!(entry.question_parse.is_some());
-        assert!(entry.answer_resolve.is_some());
+        assert!(entry.answer_resolve.is_none());
         assert!(
             entry
                 .metadata

@@ -266,6 +266,46 @@ def execute_task(modules, payload, entry, events, redactor):
 
     worker = runner_module.HeadlessTaskRunner(entry.resolve().parents[1], progress=progress, log=log)
     worker.public.course_id = native.get("course_id")
+    supplied_answers = payload.get("answers")
+    if isinstance(supplied_answers, list) and hasattr(worker, "set_answer_override"):
+        # Keep the donor's option/tag protocol at the boundary.  Asterism
+        # supplies normalized values; this adapter resolves them against the
+        # currently displayed donor options without reimplementing submission.
+        by_remote_id = {
+            str(row.get("remote_id")): row.get("value")
+            for row in supplied_answers
+            if isinstance(row, Mapping) and row.get("remote_id") is not None
+        }
+
+        def answer_override(public, _mode):
+            exam = public.exam if isinstance(public.exam, Mapping) else {}
+            topic_code = str(exam.get("topic_code") or "")
+            value = by_remote_id.get(topic_code)
+            if value is None:
+                return None
+            options = exam.get("options") or []
+            option_rows = [row for row in options if isinstance(row, Mapping)]
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (list, tuple, dict)):
+                return value
+            text_value = str(value).strip()
+            if not text_value:
+                return None
+            for row in option_rows:
+                tag = row.get("answer_tag")
+                content = row.get("content")
+                if text_value == str(tag) or text_value == str(content).strip():
+                    return tag if tag is not None else content
+            # Normalized choice answers may be represented as A/B/C…; map
+            # those to the donor's zero-based option index only when bounded.
+            if len(text_value) == 1 and text_value.isalpha():
+                index = ord(text_value.upper()) - ord("A")
+                if 0 <= index < len(options):
+                    return index
+            return text_value
+
+        worker.set_answer_override(answer_override)
     settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
     try:
         spend_min = int(settings.get("spend_min_time", getattr(worker.public, "spend_min_time", 1)))

@@ -113,6 +113,39 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(seen["task"]["task_id"], 22)
         self.assertIn(("progress", {"current": 2, "total": 5, "message": "答题中"}), events.values)
 
+    def test_run_forwards_normalized_answers_to_donor_override_boundary(self):
+        seen = {}
+
+        class Runner:
+            def __init__(self, root, *, progress, log):
+                self.public = types.SimpleNamespace(course_id=None)
+
+            def set_answer_override(self, callback):
+                seen["override"] = callback
+
+            def run_class_task(self, task):
+                exam = {"topic_code": "topic-1", "options": [{"answer_tag": "x", "content": "Alpha"}]}
+                fake_public = types.SimpleNamespace(exam=exam)
+                seen["value"] = seen["override"](fake_public, 1)
+                return {"complete": True}
+
+        modules = session_modules(runner=types.SimpleNamespace(HeadlessTaskRunner=Runner))
+        result = WORKER.execute_task(
+            modules,
+            {
+                "session": {"token": "secret"},
+                "answers": [{"remote_id": "topic-1", "value": "Alpha"}],
+                "task": {"native": {"task_family": "class", "course_id": "course-1",
+                                      "task": {"task_id": 22, "task_type": 2}}},
+            },
+            pathlib.Path("C:/repo/api/login.py"),
+            Events(),
+            WORKER.Redactor(["secret"]),
+        )
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(seen["value"], "x")
+
 
 if __name__ == "__main__":
     unittest.main()
