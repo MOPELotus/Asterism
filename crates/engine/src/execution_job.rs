@@ -10,11 +10,11 @@ use std::{
 use asterism_domain::{
     AttemptResult, AuthState, CompletionDiagnosis, Execution, ExecutionAttempt, ExecutionId,
     ExecutionLease, ExecutionProgress, ExecutionStage, ExecutionState, HumanRequiredReason,
-    OrchestrationState, ProviderAccountId, ProviderErrorClass, ProviderId, Question, QuestionGroup,
-    QuestionSnapshotId, RemoteState, StrictCompletionState, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionResult, SubmissionResultId, SubmissionResultStatus,
-    SubmissionVerificationSnapshot, SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
-    validate_question_groups,
+    LogLevel, OrchestrationState, ProviderAccountId, ProviderErrorClass, ProviderId, Question,
+    QuestionGroup, QuestionSnapshotId, RemoteState, StrictCompletionState,
+    SubmissionAttemptReceipt, SubmissionDraft, SubmissionResult, SubmissionResultId,
+    SubmissionResultStatus, SubmissionVerificationSnapshot, SubmissionVerificationStatus, Task,
+    TaskCapability, Timestamp, validate_question_groups,
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
@@ -3321,6 +3321,41 @@ where
             }
             Ok(outcome)
                 if prepared.context.provider_id.as_str() == "chaoxing"
+                    && challenge_escalation_route(&outcome).is_some() =>
+            {
+                let failed_at = Utc::now().max(now);
+                let route = challenge_escalation_route(&outcome)
+                    .expect("guard requires a validated challenge escalation route");
+                let metadata = serde_json::json!({
+                    "challenge_escalation_requested": true,
+                    "route": route,
+                });
+                self.executions
+                    .append_log(ExecutionLogAppendRequest {
+                        execution_id: attempt.execution_id,
+                        attempt_id: attempt.id,
+                        worker_id: claimed_worker(job)?,
+                        at: failed_at,
+                        level: LogLevel::Warn,
+                        stage: ExecutionStage::Finalizing,
+                        message: "Chaoxing challenge answer retries exhausted; fresh AI escalation required",
+                        provider_trace_id: None,
+                        metadata_sanitized: Some(&metadata),
+                        correlation_id,
+                    })
+                    .await?;
+                self.finish_failure(
+                    job,
+                    attempt,
+                    ProviderErrorClass::HumanRequired,
+                    FailureDisposition::HumanRequired,
+                    failed_at,
+                    correlation_id,
+                )
+                .await
+            }
+            Ok(outcome)
+                if prepared.context.provider_id.as_str() == "chaoxing"
                     && task.assessment_class == asterism_domain::AssessmentClass::Formal
                     && prepared.request.requested_capabilities
                         == [TaskCapability::ResourceExecution]
@@ -5581,6 +5616,22 @@ fn execution_goal_verified(
         }
 }
 
+fn challenge_escalation_route(outcome: &asterism_provider_api::ExecutionOutcome) -> Option<&str> {
+    (outcome
+        .result_sanitized
+        .get("challenge_escalation_requested")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true))
+    .then(|| {
+        outcome
+            .result_sanitized
+            .get("challenge_escalation_route")
+            .and_then(serde_json::Value::as_str)
+    })
+    .flatten()
+    .filter(|route| *route == "sol_xhigh")
+}
+
 fn authorize_execution(
     task: &Task,
     requested_capabilities: &[TaskCapability],
@@ -5863,6 +5914,7 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ProviderBehavior {
         Success,
+        ChallengeEscalation,
         VerifiedPending,
         ExecuteNetworkThenCompleted,
         NetworkFailure,
@@ -6044,13 +6096,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn challenge_escalation_marker_is_exact_and_rejects_unknown_routes() {
+        let mut outcome = ExecutionOutcome {
+            remote_state: RemoteState::InProgress,
+            verified: false,
+            result_sanitized: serde_json::json!({
+                "challenge_escalation_requested": true,
+                "challenge_escalation_route": "sol_xhigh"
+            }),
+        };
+        assert_eq!(challenge_escalation_route(&outcome), Some("sol_xhigh"));
+        outcome.result_sanitized["challenge_escalation_route"] = serde_json::json!("economy");
+        assert_eq!(challenge_escalation_route(&outcome), None);
+        outcome.result_sanitized["challenge_escalation_requested"] = serde_json::json!(false);
+        assert_eq!(challenge_escalation_route(&outcome), None);
+    }
+
     #[async_trait]
     impl TaskExecutionCapability for FakeExecution {
         fn requires_execution_verification(
             &self,
             requested_capabilities: &[TaskCapability],
         ) -> bool {
-            requested_capabilities == [TaskCapability::ResourceExecution]
+            self.behavior != ProviderBehavior::ChallengeEscalation
+                && requested_capabilities == [TaskCapability::ResourceExecution]
                 || self.behavior == ProviderBehavior::CompositeSuccess
                     && requested_capabilities.len() == 2
         }
@@ -6091,6 +6161,14 @@ mod tests {
                 Some(3)
             );
             match self.behavior {
+                ProviderBehavior::ChallengeEscalation => Ok(ExecutionOutcome {
+                    remote_state: RemoteState::InProgress,
+                    verified: false,
+                    result_sanitized: serde_json::json!({
+                        "challenge_escalation_requested": true,
+                        "challenge_escalation_route": "sol_xhigh"
+                    }),
+                }),
                 ProviderBehavior::Success | ProviderBehavior::VerifiedPending => {
                     if self.behavior == ProviderBehavior::Success {
                         let artifact = request.provider_plan_artifact.as_ref();
@@ -6180,6 +6258,9 @@ mod tests {
                 Some(3)
             );
             match self.behavior {
+                ProviderBehavior::ChallengeEscalation => {
+                    panic!("challenge escalation is handled before generic verification")
+                }
                 ProviderBehavior::Success | ProviderBehavior::ExecuteNetworkThenCompleted => {
                     Ok(ExecutionOutcome {
                         remote_state: RemoteState::Completed,
@@ -6371,6 +6452,9 @@ mod tests {
         ) -> ProviderResult<RemoteProgress> {
             *self.progress_calls.lock().unwrap() += 1;
             match self.behavior {
+                ProviderBehavior::ChallengeEscalation => {
+                    panic!("challenge escalation does not enter progress verification")
+                }
                 ProviderBehavior::Success | ProviderBehavior::ExecuteNetworkThenCompleted => {
                     Ok(RemoteProgress {
                         remote_state: RemoteState::Completed,
@@ -6760,6 +6844,61 @@ mod tests {
                 None
             )
         );
+    }
+
+    #[tokio::test]
+    async fn chaoxing_challenge_escalation_is_persisted_without_blind_retry() {
+        let fixture = Fixture::new_for_provider(
+            AssessmentClass::Routine,
+            ProviderBehavior::ChallengeEscalation,
+            "chaoxing",
+        )
+        .await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::HumanRequired { ref execution, .. }
+                if execution.id == fixture.execution_id
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
+        let state = fixture.persisted_state().await;
+        assert_eq!(
+            state,
+            ("human_required".to_owned(), "human_required".to_owned(), 0)
+        );
+        let escalation_log: (String, String, String) = sqlx::query_as(
+            "SELECT level, message, metadata_sanitized_json FROM execution_logs \
+             WHERE execution_id = ? AND message LIKE 'Chaoxing challenge answer retries exhausted%'",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(escalation_log.0, "warn");
+        assert_eq!(
+            escalation_log.1,
+            "Chaoxing challenge answer retries exhausted; fresh AI escalation required"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&escalation_log.2).unwrap(),
+            serde_json::json!({
+                "challenge_escalation_requested": true,
+                "route": "sol_xhigh"
+            })
+        );
+        let retry_jobs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scheduled_jobs WHERE job_kind = 'retry' AND state = 'pending'",
+        )
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(retry_jobs, 0);
     }
 
     #[tokio::test]
@@ -8070,16 +8209,36 @@ mod tests {
             Self::new_with_config(assessment, behavior, runner_config()).await
         }
 
+        async fn new_for_provider(
+            assessment: AssessmentClass,
+            behavior: ProviderBehavior,
+            provider_id: &str,
+        ) -> Self {
+            Self::new_with_config_and_provider(assessment, behavior, runner_config(), provider_id)
+                .await
+        }
+
         async fn new_with_config(
             assessment: AssessmentClass,
             behavior: ProviderBehavior,
             config: ExecutionRunnerConfig,
         ) -> Self {
+            Self::new_with_config_and_provider(assessment, behavior, config, "provider-alpha").await
+        }
+
+        async fn new_with_config_and_provider(
+            assessment: AssessmentClass,
+            behavior: ProviderBehavior,
+            config: ExecutionRunnerConfig,
+            provider_id: &str,
+        ) -> Self {
             let database = Database::connect("sqlite::memory:").await.unwrap();
             database.migrate().await.unwrap();
             let now = Utc::now();
-            let (owner, account_id, task_id) = seed_task(&database, assessment, now).await;
-            let execution_id = schedule_and_claim(&database, owner, task_id, now).await;
+            let (owner, account_id, task_id) =
+                seed_task(&database, assessment, now, provider_id).await;
+            let execution_id =
+                schedule_and_claim(&database, owner, task_id, now, provider_id).await;
             let scheduler = SqliteSchedulerRepository::new(database.clone());
             let job = scheduler
                 .claim_due(
@@ -8093,7 +8252,7 @@ mod tests {
                 .pop()
                 .unwrap();
             let provider = Arc::new(FakeExecution {
-                metadata: provider_metadata(),
+                metadata: provider_metadata(provider_id),
                 behavior,
                 calls: Mutex::new(0),
                 progress_calls: Mutex::new(0),
@@ -8682,6 +8841,7 @@ mod tests {
         database: &Database,
         assessment: AssessmentClass,
         now: Timestamp,
+        provider_id: &str,
     ) -> (UserId, ProviderAccountId, TaskId) {
         let owner = UserId::new();
         let account_id = ProviderAccountId::new();
@@ -8702,10 +8862,11 @@ mod tests {
         sqlx::query(
             "INSERT INTO provider_accounts \
              (id, owner_user_id, provider_id, display_name, auth_state_json, created_at, updated_at) \
-             VALUES (?, ?, 'provider-alpha', 'Provider', ?, ?, ?)",
+             VALUES (?, ?, ?, 'Provider', ?, ?, ?)",
         )
         .bind(account_id.to_string())
         .bind(owner.to_string())
+        .bind(provider_id)
         .bind(serde_json::to_string(&AuthState::Authenticated).unwrap())
         .bind(&now_text)
         .bind(&now_text)
@@ -8831,6 +8992,7 @@ mod tests {
         owner: UserId,
         task_id: TaskId,
         now: Timestamp,
+        provider_id: &str,
     ) -> ExecutionId {
         let execution = Execution {
             id: ExecutionId::new(),
@@ -8850,7 +9012,7 @@ mod tests {
         let (resolved, sources) = schema.resolve_with_sources(None, None, None).unwrap();
         let completion_policy = schema.completion_policy_snapshot(&resolved, now).unwrap();
         let runtime_settings = ExecutionRuntimeSettingsSnapshot {
-            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            provider_id: ProviderId::new(provider_id).unwrap(),
             resolved,
             sources,
             completion_policy,
@@ -8908,9 +9070,9 @@ mod tests {
         }
     }
 
-    fn provider_metadata() -> ProviderMetadata {
+    fn provider_metadata(provider_id: &str) -> ProviderMetadata {
         ProviderMetadata {
-            id: ProviderId::new("provider-alpha").unwrap(),
+            id: ProviderId::new(provider_id).unwrap(),
             display_name: "Provider Alpha".to_owned(),
             implementation_version: "test".to_owned(),
             verification: VerificationLevel::Development,
