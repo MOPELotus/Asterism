@@ -194,7 +194,7 @@ async fn record_ai_usage(
     .bind(usage.endpoint.as_deref().unwrap_or(&client.route.endpoint))
     .bind(usage.model.as_deref().unwrap_or(&client.route.model))
     .bind(client.profile_name)
-    .bind(route_name(&client.route))
+    .bind(client.route_name)
     .bind(i64::try_from(input_chars).unwrap_or(i64::MAX))
     .bind(i64::try_from(output_chars).unwrap_or(i64::MAX))
     .bind(usage.input_tokens)
@@ -213,14 +213,6 @@ struct AiRemoteUsage {
     output_tokens: Option<i64>,
     endpoint: Option<String>,
     model: Option<String>,
-}
-
-fn route_name(route: &AiModelRoute) -> &'static str {
-    if route.timeout_seconds <= 30 {
-        "timed"
-    } else {
-        "untimed"
-    }
 }
 
 fn prompt_len(
@@ -254,6 +246,7 @@ struct AiAnswerClient {
     config: AiConfig,
     profile: AiProfileConfig,
     route: AiModelRoute,
+    route_name: &'static str,
     profile_name: &'static str,
 }
 
@@ -424,15 +417,16 @@ impl AiAnswerClient {
             AiAnswerProfile::Economy => ("economy", config.economy.clone()),
             AiAnswerProfile::GptOnly => ("gpt_only", config.gpt_only.clone()),
         };
-        let selected_route = match route {
-            AiAnswerRoute::Timed => selected.timed.clone(),
-            AiAnswerRoute::Untimed => selected.untimed.clone(),
-            AiAnswerRoute::Escalation => selected.escalation.clone(),
+        let (route_name, selected_route) = match route {
+            AiAnswerRoute::Timed => ("timed", selected.timed.clone()),
+            AiAnswerRoute::Untimed => ("untimed", selected.untimed.clone()),
+            AiAnswerRoute::Escalation => ("escalation", selected.escalation.clone()),
         };
         Ok(Self {
             config,
             profile: selected,
             route: selected_route,
+            route_name,
             profile_name,
         })
     }
