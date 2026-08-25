@@ -382,6 +382,22 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn low_trust_provider_native_evidence_never_selects_without_arbitration() {
+        let (service, command, question_ids) = fixture();
+        let mut candidates = service.snapshots.candidates.lock().unwrap();
+        candidates[0].candidate.source = AnswerSource::ProviderNative;
+        candidates[0].candidate.confidence = Some(AnswerConfidence::try_new(3_000).unwrap());
+        candidates[1].candidate.source = AnswerSource::ProviderNative;
+        candidates[1].candidate.confidence = Some(AnswerConfidence::try_new(3_000).unwrap());
+        drop(candidates);
+
+        let plan = service.resolve(command).await.unwrap();
+        assert_eq!(plan.decisions[0].question_id, question_ids[0]);
+        assert_eq!(plan.decisions[0].status, AnswerResolutionStatus::Conflict);
+        assert!(plan.decisions[0].selected_candidate_id.is_none());
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the fixture keeps consensus, conflict and Unknown-only evidence visible together"
