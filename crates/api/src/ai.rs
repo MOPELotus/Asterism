@@ -1669,8 +1669,8 @@ fn validate_answer_for_question(
             .iter()
             .all(|value| option_ids.contains(value.as_str())),
         (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_)) => true,
-        (QuestionKind::FillBlank, NormalizedAnswer::Texts(_)) => true,
-        (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) => {
+        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values))
+        | (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) => {
             values.iter().all(|value| safe_subjective_text(value))
         }
         (QuestionKind::Matching, NormalizedAnswer::Pairs(_)) => true,
@@ -1680,9 +1680,10 @@ fn validate_answer_for_question(
                     .iter()
                     .all(|value| option_ids.contains(value.as_str()))
         }
-        (QuestionKind::Composite, NormalizedAnswer::Composite(_)) => true,
+        (QuestionKind::Composite, NormalizedAnswer::Composite(_)) => safe_generated_answer(answer),
         (QuestionKind::Unknown, value) => {
             !matches!(value, NormalizedAnswer::Unknown | NormalizedAnswer::Skip)
+                && safe_generated_answer(value)
         }
         _ => false,
     };
@@ -1693,6 +1694,20 @@ fn validate_answer_for_question(
             "ai_answer_kind_mismatch",
             "model answer does not match the question kind or option IDs",
         ))
+    }
+}
+
+fn safe_generated_answer(answer: &NormalizedAnswer) -> bool {
+    match answer {
+        NormalizedAnswer::Texts(values) => values.iter().all(|value| safe_subjective_text(value)),
+        NormalizedAnswer::Pairs(values) => values
+            .iter()
+            .all(|pair| safe_subjective_text(&pair.left) && safe_subjective_text(&pair.right)),
+        NormalizedAnswer::Composite(values) => values.iter().all(safe_generated_answer),
+        NormalizedAnswer::Selections(_)
+        | NormalizedAnswer::Boolean(_)
+        | NormalizedAnswer::Ordering(_) => true,
+        NormalizedAnswer::Skip | NormalizedAnswer::Unknown => false,
     }
 }
 
@@ -1930,6 +1945,20 @@ mod tests {
             NormalizedAnswer::Boolean(true)
         );
         assert!(parse_normalized_answer("The answer is true").is_err());
+    }
+
+    #[test]
+    fn complex_generated_answers_recursively_reject_automation_text() {
+        assert!(safe_generated_answer(&NormalizedAnswer::Composite(vec![
+            NormalizedAnswer::Texts(vec!["A concise human answer".to_owned()]),
+            NormalizedAnswer::Boolean(true),
+        ])));
+        assert!(!safe_generated_answer(&NormalizedAnswer::Composite(vec![
+            NormalizedAnswer::Texts(vec!["As an AI, this is an automated test".to_owned()]),
+        ])));
+        assert!(!safe_generated_answer(&NormalizedAnswer::Texts(vec![
+            "自动化测试文本".to_owned(),
+        ])));
     }
 
     #[test]
