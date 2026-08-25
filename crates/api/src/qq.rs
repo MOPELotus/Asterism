@@ -16,6 +16,7 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use zeroize::Zeroize;
 
 use crate::{ApiError, ApiState, auth::AuthContext};
@@ -99,25 +100,8 @@ pub(super) async fn assert_qq_identity(
         )
         .await
         .map_err(ApiError::internal)?;
-    let ticket_service =
-        OpaqueTokenService::new("ast_qq_login").expect("fixed token prefix is valid");
-    let (ticket, ticket_digest) = ticket_service.generate();
-    let web_login_expires_at = now + Duration::minutes(10);
-    sqlx::query(
-        "INSERT INTO qq_web_login_tickets \
-         (id, user_id, token_hash, return_to, created_at, expires_at, consumed_at) \
-         VALUES (?, ?, ?, ?, ?, ?, NULL)",
-    )
-    .bind(uuid::Uuid::now_v7().to_string())
-    .bind(user.id.to_string())
-    .bind(ticket_digest.as_bytes().as_slice())
-    .bind(return_to)
-    .bind(now.to_rfc3339())
-    .bind(web_login_expires_at.to_rfc3339())
-    .execute(state.database.pool())
-    .await
-    .map_err(ApiError::internal)?;
-    let web_login_path = format!("/api/v1/auth/qq-login/{}", ticket.expose_secret());
+    let (web_login_path, web_login_expires_at) =
+        create_web_login_ticket(&state, user.id, return_to, now).await?;
     Ok(crate::auth::no_store(
         Json(AssertQqIdentityResponse {
             user_id: user.id,
@@ -131,6 +115,238 @@ pub(super) async fn assert_qq_identity(
         })
         .into_response(),
     ))
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct QqFormalNotification {
+    id: String,
+    qq: String,
+    task_id: String,
+    title: String,
+    closes_at: String,
+    message: String,
+    web_login_path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct QqFormalNotificationPage {
+    items: Vec<QqFormalNotification>,
+}
+
+pub(super) async fn claim_qq_formal_notifications(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
+    auth.require_notification_delivery()?;
+    let now = Utc::now();
+    let window_end = now + Duration::hours(24);
+    let stale_claim = now - Duration::minutes(5);
+    let mut transaction = state.database.pool().begin().await.map_err(ApiError::internal)?;
+    sqlx::query(
+        "UPDATE qq_formal_notification_deliveries \
+         SET state = 'retry', next_attempt_at = ?, updated_at = ? \
+         WHERE state = 'claimed' AND claimed_at <= ?",
+    )
+    .bind(now.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .bind(stale_claim.to_rfc3339())
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    let candidates = sqlx::query(
+        "SELECT tasks.id AS task_id, accounts.owner_user_id AS user_id, identities.qq \
+         FROM tasks \
+         INNER JOIN provider_accounts AS accounts ON accounts.id = tasks.provider_account_id \
+         INNER JOIN qq_identities AS identities ON identities.user_id = accounts.owner_user_id AND identities.is_primary = 1 \
+         WHERE tasks.assessment_class = 'formal' \
+           AND tasks.closes_at IS NOT NULL AND tasks.closes_at > ? AND tasks.closes_at <= ? \
+           AND tasks.remote_state NOT IN ('completed', 'removed')",
+    )
+    .bind(now.to_rfc3339())
+    .bind(window_end.to_rfc3339())
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    for row in candidates {
+        sqlx::query(
+            "INSERT OR IGNORE INTO qq_formal_notification_deliveries \
+             (id, task_id, user_id, qq, state, attempts, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(row.try_get::<String, _>("task_id").map_err(ApiError::internal)?)
+        .bind(row.try_get::<String, _>("user_id").map_err(ApiError::internal)?)
+        .bind(row.try_get::<i64, _>("qq").map_err(ApiError::internal)?)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    }
+    let rows = sqlx::query(
+        "SELECT delivery.id, delivery.user_id, delivery.qq, tasks.id AS task_id, tasks.title, tasks.closes_at \
+         FROM qq_formal_notification_deliveries AS delivery \
+         INNER JOIN tasks ON tasks.id = delivery.task_id \
+         WHERE delivery.state = 'pending' \
+            OR (delivery.state = 'retry' AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= ?)) \
+         ORDER BY tasks.closes_at, delivery.created_at LIMIT 50",
+    )
+    .bind(now.to_rfc3339())
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    let mut claimed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.try_get("id").map_err(ApiError::internal)?;
+        let updated = sqlx::query(
+            "UPDATE qq_formal_notification_deliveries \
+             SET state = 'claimed', attempts = attempts + 1, claimed_at = ?, updated_at = ? \
+             WHERE id = ? AND state IN ('pending', 'retry')",
+        )
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+        if updated.rows_affected() == 1 {
+            claimed.push((
+                id,
+                row.try_get::<String, _>("user_id").map_err(ApiError::internal)?,
+                row.try_get::<i64, _>("qq").map_err(ApiError::internal)?,
+                row.try_get::<String, _>("task_id").map_err(ApiError::internal)?,
+                row.try_get::<String, _>("title").map_err(ApiError::internal)?,
+                row.try_get::<String, _>("closes_at").map_err(ApiError::internal)?,
+            ));
+        }
+    }
+    transaction.commit().await.map_err(ApiError::internal)?;
+    let mut items = Vec::with_capacity(claimed.len());
+    for (id, user_id, qq, task_id, title, closes_at) in claimed {
+        let user_id = user_id
+            .parse()
+            .map_err(|_| ApiError::internal("stored notification user ID is invalid"))?;
+        let return_to = format!("/tasks/{task_id}?confirm=1");
+        let (web_login_path, _) = create_web_login_ticket(&state, user_id, &return_to, now).await?;
+        items.push(QqFormalNotification {
+            id,
+            qq: qq.to_string(),
+            task_id,
+            title: title.clone(),
+            closes_at: closes_at.clone(),
+            message: format!("独立作业/考试“{title}”尚待提交前确认，截止时间 {closes_at}。截止后不会自动提交。"),
+            web_login_path,
+        });
+    }
+    Ok(crate::auth::no_store(Json(QqFormalNotificationPage { items }).into_response()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QqNotificationDeliveryReport {
+    items: Vec<QqNotificationDeliveryResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QqNotificationDeliveryResult {
+    id: String,
+    delivered: bool,
+    error: Option<String>,
+}
+
+pub(super) async fn report_qq_formal_notifications(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    payload: Result<Json<QqNotificationDeliveryReport>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    auth.require_notification_delivery()?;
+    let report = payload.map(|Json(value)| value).map_err(|_| {
+        ApiError::bad_request("invalid_notification_report", "notification report body is invalid")
+    })?;
+    if report.items.is_empty() || report.items.len() > 100 {
+        return Err(ApiError::bad_request(
+            "invalid_notification_report",
+            "notification report must contain 1-100 items",
+        ));
+    }
+    let now = Utc::now();
+    let retry_at = now + Duration::minutes(5);
+    let mut transaction = state.database.pool().begin().await.map_err(ApiError::internal)?;
+    for item in report.items {
+        let error = item.error.as_deref().map(sanitize_delivery_error);
+        let updated = if item.delivered {
+            sqlx::query(
+                "UPDATE qq_formal_notification_deliveries \
+                 SET state = 'delivered', delivered_at = ?, last_error = NULL, updated_at = ? \
+                 WHERE id = ? AND state = 'claimed'",
+            )
+            .bind(now.to_rfc3339())
+            .bind(now.to_rfc3339())
+            .bind(&item.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?
+        } else {
+            sqlx::query(
+                "UPDATE qq_formal_notification_deliveries \
+                 SET state = 'retry', next_attempt_at = ?, last_error = ?, updated_at = ? \
+                 WHERE id = ? AND state = 'claimed'",
+            )
+            .bind(retry_at.to_rfc3339())
+            .bind(error.unwrap_or_else(|| "delivery_failed".to_owned()))
+            .bind(now.to_rfc3339())
+            .bind(&item.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?
+        };
+        if updated.rows_affected() != 1 {
+            return Err(ApiError::conflict(
+                "notification_delivery_conflict",
+                "notification is not currently claimed",
+            ));
+        }
+    }
+    transaction.commit().await.map_err(ApiError::internal)?;
+    Ok(crate::auth::no_store(axum::http::StatusCode::NO_CONTENT.into_response()))
+}
+
+async fn create_web_login_ticket(
+    state: &ApiState,
+    user_id: UserId,
+    return_to: &str,
+    now: Timestamp,
+) -> Result<(String, Timestamp), ApiError> {
+    let return_to = validate_return_to(return_to)?;
+    let ticket_service = OpaqueTokenService::new("ast_qq_login").expect("fixed token prefix is valid");
+    let (ticket, ticket_digest) = ticket_service.generate();
+    let expires_at = now + Duration::minutes(10);
+    sqlx::query(
+        "INSERT INTO qq_web_login_tickets \
+         (id, user_id, token_hash, return_to, created_at, expires_at, consumed_at) \
+         VALUES (?, ?, ?, ?, ?, ?, NULL)",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(user_id.to_string())
+    .bind(ticket_digest.as_bytes().as_slice())
+    .bind(return_to)
+    .bind(now.to_rfc3339())
+    .bind(expires_at.to_rfc3339())
+    .execute(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    Ok((format!("/api/v1/auth/qq-login/{}", ticket.expose_secret()), expires_at))
+}
+
+fn sanitize_delivery_error(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(512)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 pub(super) async fn consume_qq_web_login(

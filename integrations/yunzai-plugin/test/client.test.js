@@ -91,3 +91,22 @@ test("API errors expose only sanitized code and request id", async () => {
     return true
   })
 })
+
+test("notification claim/report stay on the gateway token and report only delivery state", async () => {
+  const calls = []
+  const client = new AsterismClient({
+    apiUrl: "http://asterism.test",
+    token: "ast_st_gateway",
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options })
+      return new Response(options.method === "POST" && String(url).endsWith("/claim") ? '{"items":[]}' : "", { status: 200 })
+    },
+  })
+  await client.claimQqNotifications()
+  await client.reportQqNotifications([{ id: "n1", delivered: true }])
+  assert.equal(calls.length, 2)
+  assert.ok(calls[0].url.endsWith("/notifications/claim"))
+  assert.ok(calls[1].url.endsWith("/notifications/report"))
+  assert.equal(calls[0].options.headers.get("authorization"), "Bearer ast_st_gateway")
+  assert.deepEqual(JSON.parse(calls[1].options.body), { items: [{ id: "n1", delivered: true }] })
+})

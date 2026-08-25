@@ -173,6 +173,14 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/integrations/qq/identity/assert",
             post(qq::assert_qq_identity),
         )
+        .route(
+            "/api/v1/integrations/qq/notifications/claim",
+            post(qq::claim_qq_formal_notifications),
+        )
+        .route(
+            "/api/v1/integrations/qq/notifications/report",
+            post(qq::report_qq_formal_notifications),
+        )
         .route("/api/v1/providers", get(list_providers))
         .route("/api/v1/providers/{provider}/worker/health", get(uai_worker::health))
         .route(
@@ -677,6 +685,22 @@ pub fn openapi_document() -> Value {
                     "403": {"description": "Service token lacks qq_identity_assert"},
                     "404": {"description": "QQ identity is absent and creation is disabled"}
                 }
+            }},
+            "/api/v1/integrations/qq/notifications/claim": {"post": {
+                "operationId": "claimQqFormalNotifications",
+                "description": "Claims bounded pending formal-assessment confirmation notifications for a Yunzai gateway.",
+                "security": [{"bearerAuth": []}],
+                "responses": {"200": {"description": "Claimed notifications", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["items"], "properties": {"items": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "qq", "task_id", "title", "closes_at", "message", "web_login_path"], "properties": {"id": {"type": "string"}, "qq": {"type": "string"}, "task_id": {"type": "string"}, "title": {"type": "string"}, "closes_at": {"type": "string", "format": "date-time"}, "message": {"type": "string"}, "web_login_path": {"type": "string"}}}}}}}}}, "403": {"description": "Service token lacks notification delivery scope"}}
+            }},
+            "/api/v1/integrations/qq/notifications/report": {"post": {
+                "operationId": "reportQqFormalNotifications",
+                "description": "Reports QQ delivery success or failure; failed deliveries are deferred for retry.",
+                "security": [{"bearerAuth": []}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "additionalProperties": false, "required": ["items"],
+                    "properties": {"items": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "object", "additionalProperties": false, "required": ["id", "delivered"], "properties": {"id": {"type": "string"}, "delivered": {"type": "boolean"}, "error": {"type": "string", "maxLength": 512}}}}}
+                }}}},
+                "responses": {"204": {"description": "Delivery report accepted"}, "409": {"description": "Notification claim conflict"}}
             }},
             "/api/v1/providers": {"get": {"operationId": "listProviders", "security": [{"cookieAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Registered provider metadata"}}}},
             "/api/v1/providers/uai/worker/health": {"get": {
@@ -8787,7 +8811,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), 256 * 1024).await.unwrap();
+        let body = to_bytes(response.into_body(), 512 * 1024).await.unwrap();
         let document: Value = serde_json::from_slice(&body).unwrap();
         if let Err(failures) = openapi_contract::validate(&document) {
             panic!("OpenAPI client-readiness validation failed: {failures:#?}");

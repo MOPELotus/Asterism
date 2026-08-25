@@ -31,6 +31,17 @@ export class AsterismClient {
     })
   }
 
+  claimQqNotifications() {
+    return this.request("/api/v1/integrations/qq/notifications/claim", { method: "POST" })
+  }
+
+  reportQqNotifications(items) {
+    return this.request("/api/v1/integrations/qq/notifications/report", {
+      method: "POST",
+      body: { items },
+    })
+  }
+
   accounts() {
     return this.request("/api/v1/provider-accounts")
   }

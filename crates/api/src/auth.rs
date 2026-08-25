@@ -242,6 +242,19 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn require_notification_delivery(&self) -> Result<(), ApiError> {
+        match &self.identity {
+            AuthIdentity::Service(token)
+                if token
+                    .scopes
+                    .contains(&ServiceScope::NotificationDeliveryReport) =>
+            {
+                Ok(())
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     pub(super) fn require_user_manage(&self) -> Result<UserId, ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. } if principal.has(Permission::ManageUsers) => {

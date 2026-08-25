@@ -27,6 +27,7 @@ Copy-Item -Recurse `
 
 ```text
 qq_identity_assert
+notification_delivery_report
 ```
 
 把以下环境变量注入 Yunzai 进程；不要把 token 写进插件仓库：
@@ -40,7 +41,9 @@ ASTERISM_ADMIN_CONTACT=余额或人工处理的管理员联系方式
 ASTERISM_REQUEST_TIMEOUT_MS=180000
 ```
 
-插件仅响应群聊命令，不处理私聊。`ASTERISM_ALLOWED_GROUPS` 留空表示允许所有群。机器人会把
+插件仅响应群聊命令，不处理私聊。通知网关接口支持按固定间隔领取待确认通知，并在允许的群内 @ 对应 QQ；发送成功/失败
+会回传 Asterism，失败通知会按服务端退避重试。当前插件已提供领取/回执客户端边界，定时群投递适配仍需在目标
+Yunzai 实例确认其群消息 API 后启用。`ASTERISM_ALLOWED_GROUPS` 留空表示允许所有群。机器人会把
 发送者 QQ 交给受信任的 Asterism 网关：已有绑定时使用对应用户；不存在时创建用户名等于 QQ
 号的普通用户。Provider 账号、任务、余额和执行记录因此始终按真实 QQ 用户隔离。
 
