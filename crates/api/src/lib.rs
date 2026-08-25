@@ -7884,6 +7884,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn formal_save_only_schedules_without_submit_confirmation() {
+        let (app, _database, _events, cookie, _, _, formal_task, _) =
+            execution_action_fixture().await;
+        let response = app
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{formal_task}/execute"))
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "formal-save-only")
+                    .header("idempotency-key", "formal-save-only")
+                    .body(Body::from(
+                        r#"{"requested_capabilities":["resource_execution"],"formal_assessment_save_only":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        assert_eq!(payload["created"], true);
+        assert_eq!(payload["execution"]["requested_capabilities"], json!(["resource_execution"]));
+    }
+
+    #[tokio::test]
     async fn formal_strict_retry_api_requires_current_workflow_revision() {
         let (app, database, _, cookie, _, _, formal_task, _) = execution_action_fixture().await;
         let (owner_id, account_id): (UserId, ProviderAccountId) = {
