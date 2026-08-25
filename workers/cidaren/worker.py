@@ -392,6 +392,8 @@ def execute_task(modules, payload, entry, events, redactor):
         raise WorkerFailure("request_invalid", "Cidaren timed answer budgets are outside the supported bounds")
     bridge = _answer_bridge_settings(settings)
     total_answer_budget = max(1, instant_timeout + fallback_grace)
+    decision_budget = max(1, (total_answer_budget * 85) // 100)
+    submission_reserve = max(1, total_answer_budget - decision_budget)
     bridge_timeout = min(
         10,
         max(
@@ -443,7 +445,7 @@ def execute_task(modules, payload, entry, events, redactor):
             except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
                 response = None
             if response is None and answer_route == "timed" and fallback_grace > 0:
-                remaining = max(1, int(total_answer_budget - (time.monotonic() - started_at)))
+                remaining = max(0, int(decision_budget - (time.monotonic() - started_at)))
                 if remaining > 0:
                     retry_request = dict(request)
                     retry_request["route"] = "escalation"
@@ -538,8 +540,8 @@ def execute_task(modules, payload, entry, events, redactor):
             "instant_timeout_seconds": instant_timeout,
             "instant_fallback_grace_seconds": fallback_grace,
             "model_budget_seconds": bridge_timeout,
-            "fallback_decision_seconds": max(bridge_timeout, (total_answer_budget * 85) // 100),
-            "submission_reserve_seconds": max(1, total_answer_budget - ((total_answer_budget * 85) // 100)),
+            "fallback_decision_seconds": max(bridge_timeout, decision_budget),
+            "submission_reserve_seconds": submission_reserve,
         },
         "result": result,
         "session": payload.get("session"),
