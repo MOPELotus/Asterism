@@ -2238,6 +2238,11 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
             ));
         }
         let invocation = decode_worker_answers(request.raw_input)?;
+        if is_cidaren && invocation.mode == "save" {
+            return Err(invalid_worker_answers(
+                "Cidaren donor does not expose a save-only assessment operation",
+            ));
+        }
         let supplied = invocation
             .answers
             .iter()
