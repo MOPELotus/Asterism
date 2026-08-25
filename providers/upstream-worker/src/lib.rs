@@ -2011,6 +2011,12 @@ impl UpstreamWorkerProvider {
                 "other_threads": request.runtime_settings
                     .integer("worker.other_threads").unwrap_or(4),
             }),
+            TaskCapability::ResourceExecution if self.metadata.id.as_str() == "uai" => json!({
+                "cooldown_count": request.runtime_settings
+                    .integer("worker.cooldown_count").unwrap_or(5),
+                "cooldown_seconds": request.runtime_settings
+                    .duration_seconds("worker.cooldown_seconds").unwrap_or(120),
+            }),
             TaskCapability::ResourceExecution if self.metadata.id.as_str() == "cidaren" => json!({
                 "spend_min_time": request.runtime_settings
                     .duration_seconds("worker.spend_min_time").unwrap_or(1),
