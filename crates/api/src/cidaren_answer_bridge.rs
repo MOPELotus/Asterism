@@ -1,15 +1,18 @@
 use std::str::FromStr;
 
 use asterism_domain::{
-    AnswerResolutionStatus, NormalizedAnswer, Question, QuestionId, QuestionKind, QuestionOption,
-    TaskId,
+    AnswerCandidate, AnswerCandidateId, AnswerEvidenceClass, AnswerResolutionStatus,
+    CorpusProjectionEligibility, CourseId, ExecutionAttemptId, NormalizedAnswer,
+    PrivateAnswerEvidence, PrivateAnswerEvidenceId, ProviderAccountId, ProviderId, Question,
+    QuestionId, QuestionKind, QuestionOption, QuestionSnapshotId, TaskId,
 };
 use asterism_engine::{
     ConservativeAnswerResolverService, ImportLocalAnswerCandidatesCommand, LocalAnswerCacheService,
     ResolveAnswerCandidatesCommand,
 };
 use asterism_storage::{
-    QuestionSnapshot, QuestionSnapshotRepository, SqliteQuestionSnapshotRepository,
+    AnswerEvidenceRepository, QuestionSnapshot, QuestionSnapshotRepository,
+    SqliteAnswerEvidenceRepository, SqliteQuestionSnapshotRepository,
 };
 use axum::{
     Json,
@@ -143,6 +146,18 @@ pub(super) async fn handle(
         .execute(state.database.pool())
         .await
         .map_err(ApiError::internal)?;
+        if matches!(correctness, "correct" | "wrong") {
+            record_observed_answer_evidence(
+                &state,
+                owner,
+                task_id,
+                execution_id,
+                request.remote_id.as_deref(),
+                correctness,
+                request.submitted.as_ref(),
+            )
+            .await?;
+        }
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
     let exam = request.exam.ok_or_else(|| {
@@ -203,13 +218,25 @@ pub(super) async fn handle(
         })
         .await
         .map_err(ApiError::internal)?;
-    if let Some(answer) = cached_plan
+    if let Some(decision) = cached_plan
         .decisions
         .first()
         .filter(|decision| decision.status == AnswerResolutionStatus::Selected)
-        .and_then(|decision| decision.selected_answer.as_ref())
     {
+        let answer = decision.selected_answer.as_ref().expect("selected answer");
         let donor_value = donor_value(&question, answer);
+        if donor_value.is_some() {
+            persist_bridge_selection(
+                &state,
+                execution_id,
+                task_id,
+                request.remote_id.as_deref(),
+                snapshot.id,
+                question.id,
+                decision.selected_candidate_id,
+            )
+            .await?;
+        }
         return Ok(Json(BridgeResponse {
             protocol: PROTOCOL,
             answer_available: donor_value.is_some(),
@@ -218,22 +245,35 @@ pub(super) async fn handle(
         })
         .into_response());
     }
+    let profile = ai_profile_for_execution(&state, execution_id).await?;
     let route = match request.route.as_deref().unwrap_or("untimed") {
         "timed" => AiAnswerRoute::Timed,
         "escalation" => AiAnswerRoute::Escalation,
         _ => AiAnswerRoute::Untimed,
     };
-    generate_ai_records(
+    let requested_questions = [&snapshot.questions[0]];
+    let generation = generate_ai_records(
         &state,
         owner,
         task_id,
         &snapshot,
-        &[&snapshot.questions[0]],
-        AiAnswerProfile::Economy,
+        &requested_questions,
+        profile,
         route,
         false,
-    )
-    .await?;
+    );
+    if let Some(timeout_seconds) = request.timeout_seconds {
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_seconds), generation)
+            .await
+            .map_err(|_| {
+                ApiError::service_unavailable(
+                    "cidaren_bridge_timeout",
+                    "Cidaren answer bridge model budget expired",
+                )
+            })??;
+    } else {
+        generation.await?;
+    }
     let resolved = ConservativeAnswerResolverService::new(repository)
         .resolve(ResolveAnswerCandidatesCommand {
             owner_id: owner,
@@ -242,11 +282,10 @@ pub(super) async fn handle(
         })
         .await
         .map_err(ApiError::internal)?;
-    let Some(answer) = resolved
+    let Some(decision) = resolved
         .decisions
         .first()
         .filter(|decision| decision.status == AnswerResolutionStatus::Selected)
-        .and_then(|decision| decision.selected_answer.as_ref())
     else {
         return Ok(Json(BridgeResponse {
             protocol: PROTOCOL,
@@ -256,7 +295,20 @@ pub(super) async fn handle(
         })
         .into_response());
     };
+    let answer = decision.selected_answer.as_ref().expect("selected answer");
     let donor_value = donor_value(&question, answer);
+    if donor_value.is_some() {
+        persist_bridge_selection(
+            &state,
+            execution_id,
+            task_id,
+            request.remote_id.as_deref(),
+            snapshot.id,
+            question.id,
+            decision.selected_candidate_id,
+        )
+        .await?;
+    }
     Ok(Json(BridgeResponse {
         protocol: PROTOCOL,
         answer_available: donor_value.is_some(),
@@ -264,6 +316,205 @@ pub(super) async fn handle(
         source: "ai",
     })
     .into_response())
+}
+
+async fn ai_profile_for_execution(
+    state: &ApiState,
+    execution_id: asterism_domain::ExecutionId,
+) -> Result<AiAnswerProfile, ApiError> {
+    let profile: Option<String> =
+        sqlx::query_scalar("SELECT profile FROM execution_ai_selections WHERE execution_id = ?")
+            .bind(execution_id.to_string())
+            .fetch_optional(state.database.pool())
+            .await
+            .map_err(ApiError::internal)?;
+    match profile.as_deref().unwrap_or("economy") {
+        "economy" => Ok(AiAnswerProfile::Economy),
+        "gpt_only" => Ok(AiAnswerProfile::GptOnly),
+        _ => Err(ApiError::internal("stored AI profile is invalid")),
+    }
+}
+
+async fn persist_bridge_selection(
+    state: &ApiState,
+    execution_id: asterism_domain::ExecutionId,
+    task_id: TaskId,
+    remote_question_id: Option<&str>,
+    question_snapshot_id: QuestionSnapshotId,
+    question_id: QuestionId,
+    answer_candidate_id: Option<AnswerCandidateId>,
+) -> Result<(), ApiError> {
+    let (Some(remote_question_id), Some(answer_candidate_id)) =
+        (remote_question_id, answer_candidate_id)
+    else {
+        return Ok(());
+    };
+    if remote_question_id.is_empty() || remote_question_id.len() > 512 {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO cidaren_answer_bridge_selections \
+         (execution_id, remote_question_id, task_id, question_snapshot_id, question_id, answer_candidate_id, selected_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(execution_id, remote_question_id) DO UPDATE SET \
+           task_id = excluded.task_id, question_snapshot_id = excluded.question_snapshot_id, \
+           question_id = excluded.question_id, answer_candidate_id = excluded.answer_candidate_id, \
+           selected_at = excluded.selected_at \
+         WHERE cidaren_answer_bridge_selections.observed_at IS NULL",
+    )
+    .bind(execution_id.to_string())
+    .bind(remote_question_id)
+    .bind(task_id.to_string())
+    .bind(question_snapshot_id.to_string())
+    .bind(question_id.to_string())
+    .bind(answer_candidate_id.to_string())
+    .bind(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    .execute(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+async fn record_observed_answer_evidence(
+    state: &ApiState,
+    owner: asterism_domain::UserId,
+    task_id: TaskId,
+    execution_id: asterism_domain::ExecutionId,
+    remote_question_id: Option<&str>,
+    correctness: &str,
+    submitted: Option<&Value>,
+) -> Result<(), ApiError> {
+    let Some(remote_question_id) = remote_question_id else {
+        return Ok(());
+    };
+    type EvidenceRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<EvidenceRow> = sqlx::query_as(
+        "SELECT selection.question_snapshot_id, selection.question_id, \
+                selection.answer_candidate_id, candidate.candidate_json, question.question_json, \
+                task.provider_account_id, task.course_id, \
+                (SELECT attempt.id FROM execution_attempts AS attempt \
+                 WHERE attempt.execution_id = selection.execution_id \
+                 ORDER BY attempt.attempt_no DESC LIMIT 1) \
+         FROM cidaren_answer_bridge_selections AS selection \
+         INNER JOIN answer_candidates AS candidate \
+           ON candidate.question_snapshot_id = selection.question_snapshot_id \
+          AND candidate.question_id = selection.question_id \
+          AND candidate.id = selection.answer_candidate_id \
+         INNER JOIN question_snapshot_items AS question \
+           ON question.snapshot_id = selection.question_snapshot_id \
+          AND question.question_id = selection.question_id \
+         INNER JOIN tasks AS task ON task.id = selection.task_id \
+         INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         WHERE selection.execution_id = ? AND selection.remote_question_id = ? \
+           AND selection.task_id = ? AND account.owner_user_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .bind(remote_question_id)
+    .bind(task_id.to_string())
+    .bind(owner.to_string())
+    .fetch_optional(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let Some((
+        snapshot_id,
+        question_id,
+        candidate_id,
+        candidate_json,
+        question_json,
+        account_id,
+        course_id,
+        attempt_id,
+    )) = row
+    else {
+        return Ok(());
+    };
+    let Some(attempt_id) = attempt_id else {
+        return Ok(());
+    };
+    let candidate: AnswerCandidate =
+        serde_json::from_str(&candidate_json).map_err(ApiError::internal)?;
+    let question: Question = serde_json::from_str(&question_json).map_err(ApiError::internal)?;
+    let observed_at = chrono::Utc::now();
+    let result_digest: [u8; 32] = Sha256::digest(
+        serde_json::to_vec(&json!({
+            "protocol": PROTOCOL,
+            "execution_id": execution_id,
+            "remote_question_id": remote_question_id,
+            "correctness": correctness,
+            "submitted_shape": submitted.map(value_shape),
+        }))
+        .map_err(ApiError::internal)?,
+    )
+    .into();
+    let evidence = PrivateAnswerEvidence {
+        id: PrivateAnswerEvidenceId::new(),
+        owner_user_id: owner,
+        provider_id: ProviderId::new("cidaren").map_err(ApiError::internal)?,
+        provider_account_id: ProviderAccountId::from_str(&account_id)
+            .map_err(ApiError::internal)?,
+        course_id: course_id
+            .map(|value| CourseId::from_str(&value).map_err(ApiError::internal))
+            .transpose()?,
+        task_id,
+        question_snapshot_id: QuestionSnapshotId::from_str(&snapshot_id)
+            .map_err(ApiError::internal)?,
+        question_id: QuestionId::from_str(&question_id).map_err(ApiError::internal)?,
+        execution_attempt_id: Some(
+            ExecutionAttemptId::from_str(&attempt_id).map_err(ApiError::internal)?,
+        ),
+        provider_attempt_digest: None,
+        source_candidate_id: Some(
+            AnswerCandidateId::from_str(&candidate_id).map_err(ApiError::internal)?,
+        ),
+        question_content_fingerprint: question.content_fingerprint().map_err(ApiError::internal)?,
+        question: question.clone(),
+        answer: candidate.answer.clone(),
+        answer_source: candidate.source,
+        evidence_class: if correctness == "correct" {
+            AnswerEvidenceClass::VerifiedHistorical
+        } else {
+            AnswerEvidenceClass::Negative
+        },
+        result_digest: Some(result_digest),
+        provenance_sanitized: json!({
+            "source": "cidaren_answer_bridge_observation",
+            "execution_id": execution_id,
+            "remote_question_id_digest": Sha256::digest(remote_question_id.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "correctness": correctness,
+            "submitted_shape": submitted.map(value_shape),
+        }),
+        projection: CorpusProjectionEligibility::for_question_answer(&question, &candidate.answer),
+        observed_at,
+        verified_at: observed_at,
+    };
+    SqliteAnswerEvidenceRepository::new(state.database.clone())
+        .record_answer_evidence(&evidence)
+        .await
+        .map_err(ApiError::internal)?;
+    sqlx::query(
+        "UPDATE cidaren_answer_bridge_selections SET correctness = ?, observed_at = ? \
+         WHERE execution_id = ? AND remote_question_id = ? AND observed_at IS NULL",
+    )
+    .bind(correctness)
+    .bind(observed_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    .bind(execution_id.to_string())
+    .bind(remote_question_id)
+    .execute(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
 }
 
 fn value_shape(value: &Value) -> &'static str {

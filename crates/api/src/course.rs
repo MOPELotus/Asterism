@@ -179,7 +179,7 @@ pub(super) async fn configure_course_automation(
     Path(course_id): Path<String>,
     payload: Result<Json<ConfigureCourseAutomationRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let owner_id = auth.require_task_read()?;
+    let (owner_id, _) = auth.require_task_execute()?;
     let course_id = CourseId::from_str(&course_id)
         .map_err(|_| ApiError::bad_request("invalid_course_id", "course ID is invalid"))?;
     let request = payload.map(|Json(value)| value).map_err(|_| {
