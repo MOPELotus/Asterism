@@ -6187,6 +6187,19 @@ mod tests {
         let automation_json = response_json(automation).await;
         assert_eq!(automation_json["enabled"], true);
         assert_eq!(automation_json["ai_profile"], "gpt_only");
+        let automation = app
+            .clone()
+            .oneshot(
+                Request::put(&automation_path)
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"enabled":true,"ai_profile":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(automation.status(), StatusCode::OK);
+        assert!(response_json(automation).await["ai_profile"].is_null());
 
         let foreign = app
             .oneshot(
