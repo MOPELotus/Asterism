@@ -2011,6 +2011,18 @@ impl UpstreamWorkerProvider {
                 "other_threads": request.runtime_settings
                     .integer("worker.other_threads").unwrap_or(4),
             }),
+            TaskCapability::ResourceExecution if self.metadata.id.as_str() == "cidaren" => json!({
+                "spend_min_time": request.runtime_settings
+                    .duration_seconds("worker.spend_min_time").unwrap_or(1),
+                "spend_max_time": request.runtime_settings
+                    .duration_seconds("worker.spend_max_time").unwrap_or(2),
+                "answer_route": request.runtime_settings
+                    .choice("worker.answer_route").unwrap_or("timed"),
+                "instant_timeout_seconds": request.runtime_settings
+                    .duration_seconds("worker.instant_timeout_seconds").unwrap_or(8),
+                "instant_fallback_grace_seconds": request.runtime_settings
+                    .duration_seconds("worker.instant_fallback_grace_seconds").unwrap_or(2),
+            }),
             TaskCapability::ResourceExecution if self.metadata.id.as_str() == "uai" => json!({
                 "cooldown_count": request.runtime_settings
                     .integer("worker.cooldown_count").unwrap_or(5),
@@ -2022,6 +2034,12 @@ impl UpstreamWorkerProvider {
                     .duration_seconds("worker.spend_min_time").unwrap_or(1),
                 "spend_max_time": request.runtime_settings
                     .duration_seconds("worker.spend_max_time").unwrap_or(2),
+                "answer_route": request.runtime_settings
+                    .choice("worker.answer_route").unwrap_or("timed"),
+                "instant_timeout_seconds": request.runtime_settings
+                    .duration_seconds("worker.instant_timeout_seconds").unwrap_or(8),
+                "instant_fallback_grace_seconds": request.runtime_settings
+                    .duration_seconds("worker.instant_fallback_grace_seconds").unwrap_or(2),
             }),
             TaskCapability::ResourceExecution => json!({}),
             _ => unreachable!("capability was validated above"),
@@ -3444,6 +3462,45 @@ fn worker_runtime_settings_schema(
         ],
         "cidaren" => vec![
             ProviderSettingDefinition {
+                key: "worker.answer_route".to_owned(),
+                display_name: "Cidaren answer route".to_owned(),
+                description: "Selects the Asterism AI route frozen for this Cidaren task; timed is the safe default for per-question deadlines.".to_owned(),
+                kind: ProviderSettingKind::Choice {
+                    options: BTreeSet::from([
+                        "timed".to_owned(), "untimed".to_owned(), "escalation".to_owned(),
+                    ]),
+                },
+                default: ProviderSettingValue::Choice("timed".to_owned()),
+                scopes: scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.instant_timeout_seconds".to_owned(),
+                display_name: "Cidaren Instant timeout".to_owned(),
+                description: "Maximum wait for the configured Instant model on a timed question.".to_owned(),
+                kind: ProviderSettingKind::DurationSeconds {
+                    minimum: 1,
+                    maximum: 300,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DurationSeconds(8),
+                scopes: scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.instant_fallback_grace_seconds".to_owned(),
+                display_name: "Cidaren fallback grace".to_owned(),
+                description: "Bounded grace period before the donor fallback must answer to preserve completion.".to_owned(),
+                kind: ProviderSettingKind::DurationSeconds {
+                    minimum: 0,
+                    maximum: 120,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DurationSeconds(2),
+                scopes: scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
                 key: "worker.spend_min_time".to_owned(),
                 display_name: "Cidaren minimum answer delay".to_owned(),
                 description: "Minimum donor delay between timed Cidaren questions.".to_owned(),
@@ -3946,6 +4003,34 @@ mod tests {
                 step: 1,
             }
         );
+    }
+
+    #[test]
+    fn cidaren_runtime_schema_freezes_delay_and_answer_budgets() {
+        let provider = ProviderId::new("cidaren").unwrap();
+        let schema = worker_runtime_settings_schema(&provider);
+        let value = |key: &str| {
+            schema
+                .definitions
+                .iter()
+                .find(|definition| definition.key == key)
+                .unwrap()
+                .default
+                .clone()
+        };
+        assert_eq!(
+            value("worker.answer_route"),
+            ProviderSettingValue::Choice("timed".to_owned())
+        );
+        assert_eq!(
+            value("worker.instant_timeout_seconds"),
+            ProviderSettingValue::DurationSeconds(8)
+        );
+        assert_eq!(
+            value("worker.instant_fallback_grace_seconds"),
+            ProviderSettingValue::DurationSeconds(2)
+        );
+        schema.validate().unwrap();
     }
 
     #[test]
