@@ -1715,6 +1715,72 @@ mod tests {
         assert!(!should_reuse_ai_cache(false, AiAnswerRoute::Escalation));
     }
 
+    #[tokio::test]
+    async fn ai_cache_hits_are_audited_without_billing_or_answer_bank_usage() {
+        let database = asterism_storage::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = asterism_domain::UserId::new();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO users \
+             (id, username, password_hash, status, roles_json, permissions_json, created_at, updated_at) \
+             VALUES (?, 'cache-test', 'not-a-real-password-hash', 'active', '[]', '[]', ?, ?)",
+        )
+        .bind(owner_id.to_string())
+        .bind(now)
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let state = ApiState::new(
+            database.clone(),
+            std::sync::Arc::new(asterism_provider_api::ProviderRegistry::default()),
+            3600,
+            false,
+        );
+        let client = AiAnswerClient::new(
+            AiConfig::default(),
+            AiAnswerProfile::Economy,
+            AiAnswerRoute::Untimed,
+        )
+        .unwrap();
+
+        record_ai_usage(
+            &state,
+            owner_id,
+            None,
+            &client,
+            0,
+            0,
+            "cached",
+            AiRemoteUsage::default(),
+        )
+        .await
+        .unwrap();
+
+        let row =
+            sqlx::query("SELECT outcome, estimated_cost, settlement_status FROM ai_usage_records")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(row.get::<String, _>("outcome"), "cached");
+        assert_eq!(row.get::<i64, _>("estimated_cost"), 0);
+        assert_eq!(row.get::<String, _>("settlement_status"), "not_billable");
+        let answer_bank_usage: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM answer_bank_usage_records")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(answer_bank_usage, 0);
+        let credit_accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credit_accounts")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(credit_accounts, 0);
+    }
+
     #[test]
     fn extracts_both_supported_protocols() {
         let responses = json!({"output":[{"content":[{"type":"output_text","text":"{\"type\":\"boolean\",\"value\":true}"}]}]});
