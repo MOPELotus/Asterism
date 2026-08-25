@@ -6,11 +6,11 @@ from live account evidence and is safe to keep in the repository.
 ## Local acceptance
 
 - Branch is `0.0.1`; `master` and `0.1.0` remain unchanged.
-- Daemon health: `ok`; database schema: 105; four Providers registered; no
+- Daemon health: `ok`; database schema: 109; four Providers registered; no
   outbox backlog or dead-letter outbox entries.
 - Full Rust workspace: green, including API 80, Engine 163, Storage 173,
   Chaoxing 204, WELearn 255, UAI 308, Cidaren 214, and all remaining crates.
-- Python Worker fixture smoke: Chaoxing 44/44 and Cidaren 8/8 green with declared
+- Python Worker fixture smoke: Chaoxing 44/44 and Cidaren 9/9 green with declared
   parser and Answer Bridge coverage
   dependencies installed.
 - Yunzai plugin: `npm test` 10/10 and `npm run check` green.
