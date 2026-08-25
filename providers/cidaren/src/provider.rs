@@ -328,7 +328,7 @@ mod tests {
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_some());
         assert_eq!(entry.runtime_settings.version, 2);
-        assert_eq!(entry.runtime_settings.definitions.len(), 8);
+        assert_eq!(entry.runtime_settings.definitions.len(), 10);
 
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();
