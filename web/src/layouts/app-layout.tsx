@@ -66,6 +66,7 @@ export function AppLayout() {
           ) : null}
           {canManageSystem ? <NavItem to="/admin/protocol-observations" label="协议观察" icon={Radar} onNavigate={() => setMobileOpen(false)} /> : null}
           {canManageSystem ? <NavItem to="/admin/ai-config" label="AI 配置" icon={Settings2} onNavigate={() => setMobileOpen(false)} /> : null}
+          {permissions.data?.includes("manage_pricing") ? <NavItem to="/admin/pricing-catalog" label="点数定价" icon={CreditCard} onNavigate={() => setMobileOpen(false)} /> : null}
           {canManageUsers ? <NavItem to="/admin/users" label="用户管理" icon={Users} onNavigate={() => setMobileOpen(false)} /> : null}
           {canReadAudit ? <NavItem to="/admin/audit" label="审计" icon={ScrollText} onNavigate={() => setMobileOpen(false)} /> : null}
           {canManageSystem ? <NavItem to="/admin/service-tokens" label="服务令牌" icon={KeyRound} onNavigate={() => setMobileOpen(false)} /> : null}
