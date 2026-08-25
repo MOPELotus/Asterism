@@ -33,6 +33,7 @@ export function TaskDetailPage() {
   const queryClient = useQueryClient();
   const permissions = usePermissions<string[]>({});
   const canManageSystem = permissions.data?.includes("manage_system") ?? false;
+  const canManagePricing = permissions.data?.includes("manage_pricing") ?? false;
   const [requestedCapabilities, setRequestedCapabilities] = useState<ExecutableCapability[]>([]);
   // Submission Drafts are created by the dedicated answer-review page.  The
   // task page deliberately has no free-form Draft-id input.
@@ -40,6 +41,7 @@ export function TaskDetailPage() {
   const [invocationDraftId, setInvocationDraftId] = useState("");
   const [discussionContent, setDiscussionContent] = useState("");
   const [aiProfile, setAiProfile] = useState<"economy" | "gpt_only">("economy");
+  const [aiRoute, setAiRoute] = useState<"timed" | "untimed" | "escalation">("untimed");
   const [artifactFile, setArtifactFile] = useState<File>();
   const [browserSession, setBrowserSession] = useState<BrowserBridgeCreateResponse>();
   const [formalAssessmentConfirmed, setFormalAssessmentConfirmed] = useState(false);
@@ -117,6 +119,7 @@ export function TaskDetailPage() {
         ...(task.data?.assessment_class === "formal" && formalAssessmentConfirmed ? { formal_assessment_confirmation: true } : {}),
         ...(strictRetryRequired && completionWorkflows.data?.strict_completion ? { strict_completion_retry_confirmation: { workflow_id: completionWorkflows.data.strict_completion.workflow.id, expected_revision: completionWorkflows.data.strict_completion.revision } } : {}),
         ...(scoreImprovementCanBind && completionWorkflows.data?.score_improvement ? { score_improvement_retake_confirmation: { workflow_id: completionWorkflows.data.score_improvement.workflow.id, expected_revision: completionWorkflows.data.score_improvement.revision } } : {}),
+        ...(canManagePricing ? { ai_profile: aiProfile, ai_route: aiRoute } : {}),
       },
     })),
     onSuccess: ({ execution }) => {
@@ -207,6 +210,7 @@ export function TaskDetailPage() {
         {!invocationShapeSupported ? <p className="text-sm text-destructive">当前任务还不能自动准备，请重新同步后再试。</p> : null}
         <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="outline" disabled={!invocationShapeSupported || prepareInvocation.isPending || ((requestedCapabilities.includes("discussion") || isUaiWorkerDiscussion) && !discussionContent.trim()) || (requestedCapabilities.includes("artifact_upload") && !artifactFile) || (needsDraft && !submissionDraftId.trim())} onClick={() => prepareInvocation.mutate()}>{prepareInvocation.isPending ? "正在准备…" : invocationDraftId ? "按当前文本重新准备" : "准备提交内容"}</Button>{invocationDraftId ? <Badge variant="secondary">内容已准备</Badge> : null}</div>
       </div> : null}
+      {canManagePricing && executable ? <div className="flex flex-wrap items-end gap-2 rounded-lg border bg-muted/20 p-3"><div className="space-y-1"><Label htmlFor="execution-ai-profile">本次执行 AI 组合</Label><select id="execution-ai-profile" className="h-9 rounded-md border bg-background px-3 text-sm" value={aiProfile} onChange={(event) => setAiProfile(event.target.value as "economy" | "gpt_only")}><option value="economy">默认省钱组合</option><option value="gpt_only">GPT-only 保质组合</option></select></div><div className="space-y-1"><Label htmlFor="execution-ai-route">本次执行路由</Label><select id="execution-ai-route" className="h-9 rounded-md border bg-background px-3 text-sm" value={aiRoute} onChange={(event) => setAiRoute(event.target.value as "timed" | "untimed" | "escalation")}><option value="timed">限时</option><option value="untimed">不限时</option><option value="escalation">升级/仲裁</option></select></div><p className="max-w-md text-xs text-muted-foreground">选择会随 Execution 冻结；不会修改部署默认组合。</p></div> : null}
       <div className="flex flex-wrap gap-2">
         {!needsDraft && !needsReviewedWorkerAnswers ? <Button disabled={!executable || requestedCapabilities.length === 0 || !canExecuteState || policyBlocked || execute.isPending || lifecyclePending || (needsInvocation && !invocationDraftId.trim())} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在开始…" : scoreImprovementCanBind ? "继续重做" : "开始执行"}</Button> : null}
         <Button variant="outline" disabled={!canApprove || lifecyclePending || execute.isPending} onClick={() => approve.mutate()}><CheckCircle2 className="size-4" />{approve.isPending ? "批准中…" : "批准"}</Button>
