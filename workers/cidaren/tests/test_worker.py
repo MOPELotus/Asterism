@@ -28,6 +28,26 @@ def session_modules(*, runner=None):
 
 
 class InventoryTests(unittest.TestCase):
+    def test_answer_lib_word_history_is_identity_bound_and_unverified(self):
+        original = WORKER.importlib.import_module
+        try:
+            WORKER.importlib.import_module = lambda name: types.SimpleNamespace(
+                lookup=lambda _value: None,
+                lookup_word=lambda value: ["capacity"] if value == "碳汇能力" else None,
+            ) if name == "util.answer_lib" else original(name)
+            evidence = WORKER.historical_answer_evidence(
+                {"topic_title": "Choose the word", "remark": "碳汇能力"},
+                Events(),
+                WORKER.Redactor([]),
+            )
+        finally:
+            WORKER.importlib.import_module = original
+
+        self.assertEqual(evidence["value"], "capacity")
+        self.assertEqual(evidence["lookup_family"], "word")
+        self.assertEqual(evidence["import_mode"], "identity_bound_lazy")
+        self.assertFalse(evidence["verified"])
+
     def test_inventory_reads_donor_task_list_and_records_shapes(self):
         modules = session_modules()
 

@@ -29,7 +29,11 @@ class WorkReadParamsTests(unittest.TestCase):
         session = Session()
         WORKER._configure_verification_policy(
             session,
-            {"settings": {"verification_attempt_budget": 4, "verification_time_budget_seconds": 30}},
+            {"settings": {
+                "verification_attempt_budget": 4,
+                "verification_time_budget_seconds": 30,
+                "verification_source": "assessment",
+            }},
             events,
         )
 
@@ -39,6 +43,7 @@ class WorkReadParamsTests(unittest.TestCase):
         session.face_after("https://secret.example/face?token=SECRET")
         session.face_before("SECRET-OBJECT", pathlib.Path("SECRET-FACE.jpg"))
         serialized = repr(messages)
+        self.assertIn("source=assessment", serialized)
         self.assertIn("image_captcha succeeded", serialized)
         self.assertIn("face succeeded", serialized)
         self.assertNotIn("SECRET", serialized)

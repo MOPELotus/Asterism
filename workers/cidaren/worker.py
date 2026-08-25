@@ -264,6 +264,36 @@ def native_kind(exam):
     return "provider_native"
 
 
+def historical_answer_evidence(exam, events, redactor):
+    """Bind donor history to a freshly read question before Core import."""
+    prompt = str(exam.get("topic_title") or exam.get("question") or exam.get("word") or "").strip()
+    remark = str(exam.get("remark") or exam.get("word_zh") or "").strip()
+    try:
+        answer_lib = importlib.import_module("util.answer_lib")
+        historical = answer_lib.lookup(prompt) if prompt else None
+        lookup_key = prompt
+        lookup_family = "phrase"
+        if not historical and remark:
+            historical = answer_lib.lookup_word(remark)
+            lookup_key = remark
+            lookup_family = "word"
+        if isinstance(historical, list):
+            values = [str(value).strip() for value in historical if str(value).strip()]
+            if values:
+                return {
+                    "source": "cidaren_answer_lib",
+                    "historical_values": values,
+                    "value": "#".join(values),
+                    "verified": False,
+                    "import_mode": "identity_bound_lazy",
+                    "lookup_family": lookup_family,
+                    "lookup_key_present": bool(lookup_key),
+                }
+    except Exception as error:
+        events.emit("log", level="debug", message=redactor.text(f"answer_lib unavailable: {error}"))
+    return None
+
+
 def questions(modules, payload, events, redactor):
     _, request_header, basic, main, decoder, _, _ = modules; token = restore(request_header, decoder, payload.get("session"))
     task = require_mapping(payload.get("task"), "payload.task"); native = require_mapping(task.get("native"), "task.native")
@@ -297,21 +327,7 @@ def questions(modules, payload, events, redactor):
     # Import the donor's historical answer library into the Asterism question
     # stream as evidence.  The Core decides whether it is reusable; this
     # worker never treats an answer-lib hit as proof of correctness.
-    answer_evidence = None
-    try:
-        answer_lib = importlib.import_module("util.answer_lib")
-        historical = answer_lib.lookup(str(prompt).strip())
-        if isinstance(historical, list):
-            values = [str(value).strip() for value in historical if str(value).strip()]
-            if values:
-                answer_evidence = {
-                    "source": "cidaren_answer_lib",
-                    "historical_values": values,
-                    "value": "#".join(values),
-                    "verified": False,
-                }
-    except Exception as error:
-        events.emit("log", level="debug", message=redactor.text(f"answer_lib unavailable: {error}"))
+    answer_evidence = historical_answer_evidence(exam, events, redactor)
     return {"questions": [{"remote_id": str(exam.get("topic_code") or exam.get("id") or "first"), "position": 1,
                             "kind": native_kind(exam), "prompt": str(prompt),
                             "options": exam.get("options") or exam.get("option") or [], "answer_evidence": answer_evidence,

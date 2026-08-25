@@ -122,6 +122,15 @@ def cxkitty_for(payload, events, redactor):
     return cxapi, api, classes
 
 
+def _with_verification_source(payload, source):
+    """Annotate a fresh donor call without changing its protocol payload."""
+    copied = dict(payload)
+    settings = dict(payload.get("settings")) if isinstance(payload.get("settings"), Mapping) else {}
+    settings["verification_source"] = source
+    copied["settings"] = settings
+    return copied
+
+
 def _configure_verification_policy(session, payload, events):
     settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
     try:
@@ -131,6 +140,9 @@ def _configure_verification_policy(session, payload, events):
         raise WorkerFailure("request_invalid", "Chaoxing verification budgets must be integers") from error
     if attempt_budget < 1 or attempt_budget > 12 or time_budget < 10 or time_budget > 600:
         raise WorkerFailure("request_invalid", "Chaoxing verification budgets are outside supported bounds")
+    source = str(settings.get("verification_source") or "execution")
+    if source not in {"execution", "scan", "question_read", "assessment"}:
+        source = "execution"
 
     # chaoxing-exam exposes bounded callbacks but not public setters for its
     # retry count. Keep the donor state machine and adjust only its documented
@@ -144,27 +156,27 @@ def _configure_verification_policy(session, payload, events):
 
     def captcha_attempt(attempt):
         ensure_time_budget()
-        events.emit("log", level="info", message=f"verification image_captcha attempt {int(attempt)} started")
+        events.emit("log", level="info", message=f"verification source={source} image_captcha attempt {int(attempt)} started")
 
     def captcha_result(succeeded, _code):
         ensure_time_budget()
         events.emit("log", level="info" if succeeded else "warning",
-                    message=f"verification image_captcha {'succeeded' if succeeded else 'failed'}")
+                    message=f"verification source={source} image_captcha {'succeeded' if succeeded else 'failed'}")
 
     def face_started(_source_url):
         ensure_time_budget()
-        events.emit("log", level="info", message="verification face started")
+        events.emit("log", level="info", message=f"verification source={source} face started")
 
     def face_succeeded(_object_id, _image_path):
         ensure_time_budget()
-        events.emit("log", level="info", message="verification face succeeded")
+        events.emit("log", level="info", message=f"verification source={source} face succeeded")
 
     session.reg_captcha_after(captcha_attempt)
     session.reg_captcha_before(captcha_result)
     session.reg_face_after(face_started)
     session.reg_face_before(face_succeeded)
     events.emit("log", level="debug",
-                message=f"verification policy configured attempts={attempt_budget} time_budget_seconds={time_budget}")
+                message=f"verification source={source} policy configured attempts={attempt_budget} time_budget_seconds={time_budget}")
 
 
 def cxkitty_class_index(classes, course: Mapping[str, Any]) -> int:
@@ -659,6 +671,7 @@ def discover_course_grade_summary(session, course: Mapping[str, Any], events, re
 
 
 def inventory(module, payload, events, redactor):
+    payload = _with_verification_source(payload, "scan")
     bot = bot_for(module, payload)
     include_completed_cards(module)
     # The donor treats an empty card page as something to "study" and calls a
@@ -1291,9 +1304,12 @@ def work_read_params(course: Mapping[str, Any], native: Mapping[str, Any],
 
 
 def questions(module, payload, events, redactor):
-    bot = bot_for(module, payload)
     task = require_mapping(payload.get("task"), "payload.task")
     native = require_mapping(task.get("native"), "task.native")
+    payload = _with_verification_source(
+        payload, "assessment" if native.get("route_kind") == "course_exam" else "question_read"
+    )
+    bot = bot_for(module, payload)
     if native.get("route_kind") == "course_exam":
         _cxapi, api, exam, exam_module = cxkitty_exam(payload, native, events, redactor)
         completed = str(getattr(exam_module.status, "value", exam_module.status)) == "已完成"
@@ -2397,9 +2413,12 @@ def run_knowledge_point(bot, module, payload, native, events, redactor):
 
 def run_task(module, payload, events, redactor):
     """Run one chapter attachment through Samueli's original task methods."""
-    bot = bot_for(module, payload)
     task = require_mapping(payload.get("task"), "payload.task")
     native = require_mapping(task.get("native"), "task.native")
+    payload = _with_verification_source(
+        payload, "assessment" if native.get("route_kind") in {"course_exam", "course_homework"} else "execution"
+    )
+    bot = bot_for(module, payload)
     if native.get("route_kind") == "course_exam":
         return run_course_exam(payload, native, events, redactor)
     if native.get("route_kind") == "course_homework":
