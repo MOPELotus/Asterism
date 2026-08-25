@@ -58,6 +58,7 @@ pub(super) struct GenerateAiAnswerCandidatesRequest {
     route: AiAnswerRoute,
     question_ids: Vec<String>,
     execution_id: Option<String>,
+    force_refresh: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,22 +153,15 @@ pub(super) async fn generate_ai_answer_candidates(
         // newest valid AI candidate for this immutable snapshot before making
         // another remote request; callers can still obtain a fresh candidate
         // by materializing a new QuestionSnapshot.
-        if let Some(cached) = existing
-            .iter()
-            .rev()
-            .find(|record| {
+        if !request.force_refresh
+            && let Some(cached) = existing.iter().rev().find(|record| {
                 record.candidate.question_id == question.id
                     && record.candidate.source == AnswerSource::Ai
                     && record.candidate.validate().is_ok()
             })
         {
-            record_answer_bank_hit(
-                &state,
-                owner_id,
-                Some(task_id),
-                cached.candidate.source,
-            )
-            .await?;
+            record_answer_bank_hit(&state, owner_id, Some(task_id), cached.candidate.source)
+                .await?;
             records.push(cached.clone());
             continue;
         }
@@ -251,8 +245,17 @@ async fn record_answer_bank_hit(
         .and_then(|json| serde_json::from_str::<Value>(&json).ok())
         .and_then(|catalog| catalog.get("answer_bank_unit_cost").and_then(Value::as_u64))
         .unwrap_or(0);
-    let settlement_status = if unit_cost == 0 { "not_billable" } else { "settled" };
-    let mut transaction = state.database.pool().begin().await.map_err(ApiError::internal)?;
+    let settlement_status = if unit_cost == 0 {
+        "not_billable"
+    } else {
+        "settled"
+    };
+    let mut transaction = state
+        .database
+        .pool()
+        .begin()
+        .await
+        .map_err(ApiError::internal)?;
     if unit_cost > 0 {
         sqlx::query(
             "INSERT INTO credit_accounts (user_id, available, reserved, updated_at) \
@@ -326,13 +329,14 @@ async fn record_ai_usage(
 ) -> Result<(), ApiError> {
     let estimated_cost = estimate_ai_cost(&state.database, &usage, client).await?;
     let billable = estimated_cost > 0 && outcome == "succeeded";
-    let settlement_status = if !billable {
-        "not_billable"
-    } else {
-        "settled"
-    };
+    let settlement_status = if !billable { "not_billable" } else { "settled" };
     let usage_id = asterism_domain::AnswerCandidateId::new().to_string();
-    let mut transaction = state.database.pool().begin().await.map_err(ApiError::internal)?;
+    let mut transaction = state
+        .database
+        .pool()
+        .begin()
+        .await
+        .map_err(ApiError::internal)?;
     if billable {
         sqlx::query(
             "INSERT INTO credit_accounts (user_id, available, reserved, updated_at) \
@@ -407,8 +411,12 @@ async fn estimate_ai_cost(
     usage: &AiRemoteUsage,
     client: &AiAnswerClient,
 ) -> Result<u64, ApiError> {
-    let Some(input_tokens) = usage.input_tokens else { return Ok(0); };
-    let Some(output_tokens) = usage.output_tokens else { return Ok(0); };
+    let Some(input_tokens) = usage.input_tokens else {
+        return Ok(0);
+    };
+    let Some(output_tokens) = usage.output_tokens else {
+        return Ok(0);
+    };
     let row = sqlx::query(
         "SELECT catalog_json FROM pricing_catalog_revisions \
          WHERE effective_from <= ? AND (expires_at IS NULL OR expires_at > ?) \
@@ -419,23 +427,56 @@ async fn estimate_ai_cost(
     .fetch_optional(database.pool())
     .await
     .map_err(ApiError::internal)?;
-    let Some(row) = row else { return Ok(0); };
-    let catalog_json: String = sqlx::Row::try_get(&row, "catalog_json").map_err(ApiError::internal)?;
+    let Some(row) = row else {
+        return Ok(0);
+    };
+    let catalog_json: String =
+        sqlx::Row::try_get(&row, "catalog_json").map_err(ApiError::internal)?;
     let catalog: Value = serde_json::from_str(&catalog_json).map_err(ApiError::internal)?;
     let rate = catalog
         .get("ai_rates")
-        .and_then(|rates| rates.get(format!("{}:{}", usage.endpoint.as_deref().unwrap_or(&client.route.endpoint), usage.model.as_deref().unwrap_or(&client.route.model))))
-        .or_else(|| catalog.get("ai_rates").and_then(|rates| rates.get("default")));
-    let Some(rate) = rate else { return Ok(0); };
-    let input_per_1k = rate.get("input_per_1k").and_then(Value::as_u64).unwrap_or(0);
-    let output_per_1k = rate.get("output_per_1k").and_then(Value::as_u64).unwrap_or(0);
-    Ok(cost_from_rates(input_tokens, output_tokens, input_per_1k, output_per_1k))
+        .and_then(|rates| {
+            rates.get(format!(
+                "{}:{}",
+                usage.endpoint.as_deref().unwrap_or(&client.route.endpoint),
+                usage.model.as_deref().unwrap_or(&client.route.model)
+            ))
+        })
+        .or_else(|| {
+            catalog
+                .get("ai_rates")
+                .and_then(|rates| rates.get("default"))
+        });
+    let Some(rate) = rate else {
+        return Ok(0);
+    };
+    let input_per_1k = rate
+        .get("input_per_1k")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_per_1k = rate
+        .get("output_per_1k")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Ok(cost_from_rates(
+        input_tokens,
+        output_tokens,
+        input_per_1k,
+        output_per_1k,
+    ))
 }
 
-fn cost_from_rates(input_tokens: i64, output_tokens: i64, input_per_1k: u64, output_per_1k: u64) -> u64 {
+fn cost_from_rates(
+    input_tokens: i64,
+    output_tokens: i64,
+    input_per_1k: u64,
+    output_per_1k: u64,
+) -> u64 {
     let input_cost = (input_tokens.max(0) as u64).saturating_mul(input_per_1k);
     let output_cost = (output_tokens.max(0) as u64).saturating_mul(output_per_1k);
-    input_cost.div_ceil(1000).saturating_add(output_cost.div_ceil(1000))
+    input_cost
+        .div_ceil(1000)
+        .saturating_add(output_cost.div_ceil(1000))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1302,6 +1343,16 @@ const fn answer_source_name(value: AnswerSource) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_candidate_refresh_is_explicit_and_defaults_to_cache_reuse() {
+        let defaulted: GenerateAiAnswerCandidatesRequest =
+            serde_json::from_value(json!({})).unwrap();
+        assert!(!defaulted.force_refresh);
+        let refreshed: GenerateAiAnswerCandidatesRequest =
+            serde_json::from_value(json!({"force_refresh": true})).unwrap();
+        assert!(refreshed.force_refresh);
+    }
 
     #[test]
     fn extracts_both_supported_protocols() {
