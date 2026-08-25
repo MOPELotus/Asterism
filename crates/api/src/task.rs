@@ -12,7 +12,7 @@ use asterism_domain::{
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
     ConservativeAnswerResolverService, CreateManualAnswerCandidateCommand, ExecuteTaskCommand,
-    ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
+    ExecutionBillingInput, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
     ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
     ManualAnswerCandidateError, ManualAnswerCandidateService, OptInScoreImprovementCommand,
     PrepareExecutionInvocationCommand, ProviderAnswerResolveError, ProviderAnswerResolveService,
@@ -1017,6 +1017,44 @@ pub(super) async fn execute_task(
             })
         })
         .transpose()?;
+    let billing = match (
+        request.billing_amount,
+        request.billing_pricing_revision,
+        request.billing_reason,
+    ) {
+        (None, None, None) => None,
+        (Some(amount), Some(pricing_revision), Some(reason)) => {
+            if amount == 0 {
+                return Err(ApiError::bad_request(
+                    "invalid_billing_amount",
+                    "billing amount must be positive",
+                ));
+            }
+            if pricing_revision.is_empty() || pricing_revision.len() > 128 {
+                return Err(ApiError::bad_request(
+                    "invalid_billing_pricing_revision",
+                    "billing pricing revision must be 1-128 bytes",
+                ));
+            }
+            if reason.is_empty() || reason.len() > 512 {
+                return Err(ApiError::bad_request(
+                    "invalid_billing_reason",
+                    "billing reason must be 1-512 bytes",
+                ));
+            }
+            Some(ExecutionBillingInput {
+                amount: asterism_domain::CreditAmount::new(amount),
+                pricing_revision,
+                reason,
+            })
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "incomplete_billing_input",
+                "billing amount, pricing revision and reason must be supplied together",
+            ));
+        }
+    };
     let invocation_store = state.secret_store.clone();
     let mut service = ExecutionRequestService::new(
         SqliteTaskQueryRepository::new(state.database.clone()),
@@ -1054,6 +1092,7 @@ pub(super) async fn execute_task(
             invocation_draft_id,
             strict_completion_retry,
             score_improvement_retake,
+            billing,
             request_source,
             actor: auth.audit_actor(),
             idempotency_key: idempotency_key.to_owned(),
@@ -2314,6 +2353,9 @@ pub(super) struct ExecuteTaskRequest {
     formal_assessment_save_only: Option<bool>,
     strict_completion_retry_confirmation: Option<StrictCompletionRetryConfirmationRequest>,
     score_improvement_retake_confirmation: Option<ScoreImprovementRetakeConfirmationRequest>,
+    billing_amount: Option<u64>,
+    billing_pricing_revision: Option<String>,
+    billing_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

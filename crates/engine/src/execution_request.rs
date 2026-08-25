@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use asterism_domain::{
-    AuditActor, Execution, ExecutionId, ExecutionInvocationDraftId, ExecutionState,
-    OrchestrationState, RemoteState, RequestSource, ScoreImprovementState, StrictCompletionState,
-    SubmissionDraft, SubmissionDraftId, Task, TaskCapability, TaskId, Timestamp, UserId,
+    AuditActor, CreditAmount, CreditReservation, CreditReservationId, CreditReservationState,
+    Execution, ExecutionId, ExecutionInvocationDraftId, ExecutionState, OrchestrationState,
+    PriceQuote, PriceQuoteId, RemoteState, RequestSource, ScoreImprovementState,
+    StrictCompletionState, SubmissionDraft, SubmissionDraftId, Task, TaskCapability, TaskId,
+    Timestamp, UserId,
 };
 use asterism_provider_api::{
     ExecutionInvocationPreparationRequest, ExecutionPlanningRequest,
@@ -12,9 +14,9 @@ use asterism_provider_api::{
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretValue};
 use asterism_storage::{
-    CompletionWorkflowRepository, ExecutionInvocationDraftCreateOutcome,
-    ExecutionInvocationDraftCreateRequest, ExecutionInvocationDraftRecord,
-    ExecutionInvocationDraftRepositoryFactory, ExecutionRepository,
+    CompletionWorkflowRepository, ExecutionBillingReservation,
+    ExecutionInvocationDraftCreateOutcome, ExecutionInvocationDraftCreateRequest,
+    ExecutionInvocationDraftRecord, ExecutionInvocationDraftRepositoryFactory, ExecutionRepository,
     ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
     ExecutionScheduleRequest, ExecutionScoreImprovementRetakeRequest,
     ExecutionStrictCompletionRetryRequest, ProviderAccountRuntimeRepository,
@@ -36,11 +38,19 @@ pub struct ExecuteTaskCommand {
     pub invocation_draft_id: Option<ExecutionInvocationDraftId>,
     pub strict_completion_retry: Option<ExecutionStrictCompletionRetryRequest>,
     pub score_improvement_retake: Option<ExecutionScoreImprovementRetakeRequest>,
+    pub billing: Option<ExecutionBillingInput>,
     pub request_source: RequestSource,
     pub actor: AuditActor,
     pub idempotency_key: String,
     pub correlation_id: String,
     pub requested_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionBillingInput {
+    pub amount: CreditAmount,
+    pub pricing_revision: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -444,7 +454,7 @@ where
             submission_draft_id: submission_draft.as_ref().map(|draft| draft.id),
             requested_by: Some(command.owner_id),
             request_source: command.request_source,
-            quote_id: None,
+            quote_id: command.billing.as_ref().map(|_| PriceQuoteId::new()),
             state: ExecutionState::Requested,
             scheduled_at: None,
             started_at: None,
@@ -457,6 +467,28 @@ where
             command.requested_at,
         )?;
         execution.scheduled_at = Some(command.requested_at);
+        let quote = command.billing.as_ref().map(|billing| PriceQuote {
+            id: execution.quote_id.expect("billing quote id is set above"),
+            task_id: task.id,
+            amount: billing.amount,
+            pricing_revision: billing.pricing_revision.clone(),
+            reason: billing.reason.clone(),
+            created_at: command.requested_at,
+        });
+        let reservation = quote.as_ref().map(|quote| CreditReservation {
+            id: CreditReservationId::new(),
+            user_id: command.owner_id,
+            quote_id: quote.id,
+            execution_id,
+            amount: quote.amount,
+            state: CreditReservationState::Reserved,
+            created_at: command.requested_at,
+            updated_at: command.requested_at,
+        });
+        let billing = quote
+            .as_ref()
+            .zip(reservation.as_ref())
+            .map(|(quote, reservation)| ExecutionBillingReservation { quote, reservation });
         match self
             .executions
             .schedule_execution(ExecutionScheduleRequest {
@@ -465,7 +497,7 @@ where
                 capability_call_starts: &capability_call_starts,
                 provider_plan_artifact: provider_plan_artifact.as_ref(),
                 invocation_draft_id: command.invocation_draft_id,
-                billing: None,
+                billing,
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,
                     schema: &runtime_settings_schema,
