@@ -12,6 +12,7 @@ import re
 import random
 import sys
 import threading
+import time
 from types import ModuleType
 from typing import Any, Mapping
 
@@ -112,12 +113,58 @@ def cxkitty_for(payload, events, redactor):
     if not isinstance(jar, Mapping):
         raise WorkerFailure("request_invalid", "session.cookies must be an object")
     api = cxapi.ChaoXingAPI()
+    _configure_verification_policy(api.session, payload, events)
     api.session.ck_load({str(key): str(value) for key, value in jar.items()})
     with capture_output(events, redactor):
         if not api.accinfo():
             raise WorkerFailure("authentication_failed", "CxKitty rejected the restored Chaoxing session")
         classes = api.fetch_classes()
     return cxapi, api, classes
+
+
+def _configure_verification_policy(session, payload, events):
+    settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
+    try:
+        attempt_budget = int(settings.get("verification_attempt_budget", 3))
+        time_budget = int(settings.get("verification_time_budget_seconds", 90))
+    except (TypeError, ValueError) as error:
+        raise WorkerFailure("request_invalid", "Chaoxing verification budgets must be integers") from error
+    if attempt_budget < 1 or attempt_budget > 12 or time_budget < 10 or time_budget > 600:
+        raise WorkerFailure("request_invalid", "Chaoxing verification budgets are outside supported bounds")
+
+    # chaoxing-exam exposes bounded callbacks but not public setters for its
+    # retry count. Keep the donor state machine and adjust only its documented
+    # constructor value on this fresh per-request SessionWraper instance.
+    setattr(session, "_SessionWraper__captcha_max_retry", attempt_budget)
+    started = time.monotonic()
+
+    def ensure_time_budget():
+        if time.monotonic() - started > time_budget:
+            raise WorkerFailure("verification_budget_exhausted", "Chaoxing verification time budget was exhausted")
+
+    def captcha_attempt(attempt):
+        ensure_time_budget()
+        events.emit("log", level="info", message=f"verification image_captcha attempt {int(attempt)} started")
+
+    def captcha_result(succeeded, _code):
+        ensure_time_budget()
+        events.emit("log", level="info" if succeeded else "warning",
+                    message=f"verification image_captcha {'succeeded' if succeeded else 'failed'}")
+
+    def face_started(_source_url):
+        ensure_time_budget()
+        events.emit("log", level="info", message="verification face started")
+
+    def face_succeeded(_object_id, _image_path):
+        ensure_time_budget()
+        events.emit("log", level="info", message="verification face succeeded")
+
+    session.reg_captcha_after(captcha_attempt)
+    session.reg_captcha_before(captcha_result)
+    session.reg_face_after(face_started)
+    session.reg_face_before(face_succeeded)
+    events.emit("log", level="debug",
+                message=f"verification policy configured attempts={attempt_budget} time_budget_seconds={time_budget}")
 
 
 def cxkitty_class_index(classes, course: Mapping[str, Any]) -> int:

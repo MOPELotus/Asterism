@@ -15,6 +15,44 @@ SPEC.loader.exec_module(WORKER)
 
 
 class WorkReadParamsTests(unittest.TestCase):
+    def test_verification_policy_is_bounded_and_redacts_material(self):
+        class Session:
+            def reg_captcha_after(self, callback): self.captcha_after = callback
+            def reg_captcha_before(self, callback): self.captcha_before = callback
+            def reg_face_after(self, callback): self.face_after = callback
+            def reg_face_before(self, callback): self.face_before = callback
+
+        messages = []
+        events = types.SimpleNamespace(
+            emit=lambda kind, **payload: messages.append((kind, payload))
+        )
+        session = Session()
+        WORKER._configure_verification_policy(
+            session,
+            {"settings": {"verification_attempt_budget": 4, "verification_time_budget_seconds": 30}},
+            events,
+        )
+
+        self.assertEqual(getattr(session, "_SessionWraper__captcha_max_retry"), 4)
+        session.captcha_after(1)
+        session.captcha_before(True, "SECRET-CODE")
+        session.face_after("https://secret.example/face?token=SECRET")
+        session.face_before("SECRET-OBJECT", pathlib.Path("SECRET-FACE.jpg"))
+        serialized = repr(messages)
+        self.assertIn("image_captcha succeeded", serialized)
+        self.assertIn("face succeeded", serialized)
+        self.assertNotIn("SECRET", serialized)
+
+    def test_verification_policy_rejects_unbounded_values(self):
+        session = types.SimpleNamespace()
+        events = types.SimpleNamespace(emit=lambda *_args, **_kwargs: None)
+        with self.assertRaises(WORKER.WorkerFailure):
+            WORKER._configure_verification_policy(
+                session,
+                {"settings": {"verification_attempt_budget": 0}},
+                events,
+            )
+
     def test_challenge_marker_accepts_donor_variants(self):
         self.assertTrue(WORKER._is_challenge_point({"need_unlock": True, "challengeMode": True}))
         self.assertTrue(WORKER._is_challenge_point({"mode": "闯关"}))

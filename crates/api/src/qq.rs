@@ -177,8 +177,8 @@ pub(super) async fn claim_qq_formal_notifications(
     for row in candidates {
         sqlx::query(
             "INSERT OR IGNORE INTO qq_formal_notification_deliveries \
-             (id, task_id, user_id, qq, notification_kind, state, attempts, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, 'confirmation_due', 'pending', 0, ?, ?)",
+             (id, task_id, user_id, qq, notification_kind, deduplication_key, state, attempts, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'confirmation_due', ?, 'pending', 0, ?, ?)",
         )
         .bind(uuid::Uuid::now_v7().to_string())
         .bind(
@@ -190,6 +190,7 @@ pub(super) async fn claim_qq_formal_notifications(
                 .map_err(ApiError::internal)?,
         )
         .bind(row.try_get::<i64, _>("qq").map_err(ApiError::internal)?)
+        .bind(row.try_get::<String, _>("task_id").map_err(ApiError::internal)?)
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
         .execute(&mut *transaction)
@@ -213,13 +214,56 @@ pub(super) async fn claim_qq_formal_notifications(
     for row in missed {
         sqlx::query(
             "INSERT OR IGNORE INTO qq_formal_notification_deliveries \
-             (id, task_id, user_id, qq, notification_kind, state, attempts, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, 'deadline_missed', 'pending', 0, ?, ?)",
+             (id, task_id, user_id, qq, notification_kind, deduplication_key, state, attempts, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'deadline_missed', ?, 'pending', 0, ?, ?)",
         )
         .bind(uuid::Uuid::now_v7().to_string())
         .bind(row.try_get::<String, _>("task_id").map_err(ApiError::internal)?)
         .bind(row.try_get::<String, _>("user_id").map_err(ApiError::internal)?)
         .bind(row.try_get::<i64, _>("qq").map_err(ApiError::internal)?)
+        .bind(row.try_get::<String, _>("task_id").map_err(ApiError::internal)?)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    }
+    let terminal_executions = sqlx::query(
+        "SELECT execution.id AS execution_id, tasks.id AS task_id, accounts.owner_user_id AS user_id, identities.qq, execution.state \
+         FROM executions AS execution \
+         INNER JOIN tasks ON tasks.id = execution.task_id \
+         INNER JOIN provider_accounts AS accounts ON accounts.id = tasks.provider_account_id \
+         INNER JOIN qq_identities AS identities ON identities.user_id = accounts.owner_user_id AND identities.is_primary = 1 \
+         WHERE execution.state IN ('succeeded', 'failed') \
+           AND execution.finished_at IS NOT NULL AND execution.finished_at > ?",
+    )
+    .bind(recent_deadline_start.to_rfc3339())
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    for row in terminal_executions {
+        let execution_id: String = row.try_get("execution_id").map_err(ApiError::internal)?;
+        let notification_kind = if row
+            .try_get::<String, _>("state")
+            .map_err(ApiError::internal)?
+            == "succeeded"
+        {
+            "execution_succeeded"
+        } else {
+            "execution_failed"
+        };
+        sqlx::query(
+            "INSERT OR IGNORE INTO qq_formal_notification_deliveries \
+             (id, task_id, execution_id, user_id, qq, notification_kind, deduplication_key, state, attempts, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(row.try_get::<String, _>("task_id").map_err(ApiError::internal)?)
+        .bind(&execution_id)
+        .bind(row.try_get::<String, _>("user_id").map_err(ApiError::internal)?)
+        .bind(row.try_get::<i64, _>("qq").map_err(ApiError::internal)?)
+        .bind(notification_kind)
+        .bind(&execution_id)
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
         .execute(&mut *transaction)
@@ -227,12 +271,14 @@ pub(super) async fn claim_qq_formal_notifications(
         .map_err(ApiError::internal)?;
     }
     let rows = sqlx::query(
-        "SELECT delivery.id, delivery.notification_kind, delivery.user_id, delivery.qq, tasks.id AS task_id, tasks.title, tasks.closes_at \
+        "SELECT delivery.id, delivery.notification_kind, delivery.execution_id, delivery.user_id, delivery.qq, tasks.id AS task_id, tasks.title, \
+                COALESCE(tasks.closes_at, execution.finished_at, delivery.created_at) AS event_at \
          FROM qq_formal_notification_deliveries AS delivery \
          INNER JOIN tasks ON tasks.id = delivery.task_id \
+         LEFT JOIN executions AS execution ON execution.id = delivery.execution_id \
          WHERE delivery.state = 'pending' \
             OR (delivery.state = 'retry' AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= ?)) \
-         ORDER BY tasks.closes_at, delivery.created_at LIMIT 50",
+         ORDER BY event_at, delivery.created_at LIMIT 50",
     )
     .bind(now.to_rfc3339())
     .fetch_all(&mut *transaction)
@@ -257,6 +303,8 @@ pub(super) async fn claim_qq_formal_notifications(
                 id,
                 row.try_get::<String, _>("notification_kind")
                     .map_err(ApiError::internal)?,
+                row.try_get::<Option<String>, _>("execution_id")
+                    .map_err(ApiError::internal)?,
                 row.try_get::<String, _>("user_id")
                     .map_err(ApiError::internal)?,
                 row.try_get::<i64, _>("qq").map_err(ApiError::internal)?,
@@ -264,21 +312,23 @@ pub(super) async fn claim_qq_formal_notifications(
                     .map_err(ApiError::internal)?,
                 row.try_get::<String, _>("title")
                     .map_err(ApiError::internal)?,
-                row.try_get::<String, _>("closes_at")
+                row.try_get::<String, _>("event_at")
                     .map_err(ApiError::internal)?,
             ));
         }
     }
     transaction.commit().await.map_err(ApiError::internal)?;
     let mut items = Vec::with_capacity(claimed.len());
-    for (id, kind, user_id, qq, task_id, title, closes_at) in claimed {
+    for (id, kind, execution_id, user_id, qq, task_id, title, closes_at) in claimed {
         let user_id = user_id
             .parse()
             .map_err(|_| ApiError::internal("stored notification user ID is invalid"))?;
-        let return_to = if kind == "confirmation_due" {
-            format!("/tasks/{task_id}?confirm=1")
-        } else {
-            format!("/tasks/{task_id}")
+        let return_to = match (kind.as_str(), execution_id.as_deref()) {
+            ("confirmation_due", _) => format!("/tasks/{task_id}?confirm=1"),
+            ("execution_succeeded" | "execution_failed", Some(execution_id)) => {
+                format!("/executions/{execution_id}")
+            }
+            _ => format!("/tasks/{task_id}"),
         };
         let (web_login_path, _) = create_web_login_ticket(&state, user_id, &return_to, now).await?;
         items.push(QqFormalNotification {
@@ -288,10 +338,12 @@ pub(super) async fn claim_qq_formal_notifications(
             task_id,
             title: title.clone(),
             closes_at: closes_at.clone(),
-            message: if kind == "confirmation_due" {
-                format!("独立作业/考试“{title}”尚待提交前确认，截止时间 {closes_at}。截止后不会自动提交。")
-            } else {
-                format!("独立作业/考试“{title}”已于 {closes_at} 截止且未确认提交；Asterism 已保留草稿且没有自动提交。")
+            message: match kind.as_str() {
+                "confirmation_due" => format!("独立作业/考试“{title}”尚待提交前确认，截止时间 {closes_at}。截止后不会自动提交。"),
+                "deadline_missed" => format!("独立作业/考试“{title}”已于 {closes_at} 截止且未确认提交；Asterism 已保留草稿且没有自动提交。"),
+                "execution_succeeded" => format!("任务“{title}”已完成，可打开执行详情查看进度和日志。"),
+                "execution_failed" => format!("任务“{title}”执行失败，请打开执行详情查看原因和重试状态。"),
+                _ => "Asterism 任务状态已更新。".to_owned(),
             },
             web_login_path,
         });

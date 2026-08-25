@@ -7,6 +7,8 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
+// Keep the embedded migrator tied to the repository migration directory so
+// newly added numbered migrations are re-embedded on every storage rebuild.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 #[derive(Clone, Debug)]
@@ -154,7 +156,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 105);
+        assert_eq!(migration_count, 106);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())

@@ -2014,6 +2014,10 @@ impl UpstreamWorkerProvider {
                     .integer("worker.challenge_retry_attempts").unwrap_or(3),
                 "challenge_escalation_route": request.runtime_settings
                     .choice("worker.challenge_escalation_route").unwrap_or("sol_xhigh"),
+                "verification_attempt_budget": request.runtime_settings
+                    .integer("worker.verification_attempt_budget").unwrap_or(3),
+                "verification_time_budget_seconds": request.runtime_settings
+                    .duration_seconds("worker.verification_time_budget_seconds").unwrap_or(90),
             }),
             TaskCapability::ResourceExecution if self.metadata.id.as_str() == "uai" => json!({
                 "cooldown_count": request.runtime_settings
@@ -3431,6 +3435,40 @@ fn worker_runtime_settings_schema(
                 ]),
                 core_behavior: None,
             },
+            ProviderSettingDefinition {
+                key: "worker.verification_attempt_budget".to_owned(),
+                display_name: "Verification attempt budget".to_owned(),
+                description: "Maximum automatic attempts for one Chaoxing image verification sequence.".to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: 12,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(3),
+                scopes: BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                    ProviderSettingScope::Task,
+                ]),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: "worker.verification_time_budget_seconds".to_owned(),
+                display_name: "Verification time budget".to_owned(),
+                description: "Maximum elapsed time for one Chaoxing automatic verification sequence before bounded failure.".to_owned(),
+                kind: ProviderSettingKind::DurationSeconds {
+                    minimum: 10,
+                    maximum: 600,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DurationSeconds(90),
+                scopes: BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                    ProviderSettingScope::Task,
+                ]),
+                core_behavior: None,
+            },
         ],
         "welearn" => vec![
             ProviderSettingDefinition {
@@ -4077,6 +4115,31 @@ mod tests {
         assert_eq!(
             route.default,
             ProviderSettingValue::Choice("sol_xhigh".to_owned())
+        );
+    }
+
+    #[test]
+    fn chaoxing_runtime_schema_exposes_bounded_verification_policy() {
+        let provider = ProviderId::new("chaoxing").unwrap();
+        let schema = worker_runtime_settings_schema(&provider);
+        let value = |key: &str| {
+            schema
+                .definitions
+                .iter()
+                .find(|definition| definition.key == key)
+                .unwrap()
+        };
+        assert_eq!(
+            value("worker.verification_attempt_budget").kind,
+            ProviderSettingKind::Integer {
+                minimum: 1,
+                maximum: 12,
+                step: 1,
+            }
+        );
+        assert_eq!(
+            value("worker.verification_time_budget_seconds").default,
+            ProviderSettingValue::DurationSeconds(90)
         );
     }
 

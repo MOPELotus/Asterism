@@ -692,6 +692,21 @@ pub(super) async fn get_chaoxing_verification_status(
             "Chaoxing verification status is only available for Chaoxing accounts",
         ));
     }
+    let provider = state.providers.get(&account.provider_id).ok_or_else(|| {
+        ApiError::service_unavailable(
+            "provider_not_registered",
+            "Chaoxing Provider is not registered",
+        )
+    })?;
+    let resolved_settings = resolve_account_runtime_settings(&state, provider, account.id).await?;
+    let automatic_attempt_budget = resolved_settings
+        .integer("worker.verification_attempt_budget")
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(3);
+    let automatic_time_budget_seconds = resolved_settings
+        .duration_seconds("worker.verification_time_budget_seconds")
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(90);
     let rows = sqlx::query(
         "SELECT logs.timestamp, logs.stage, logs.message \
          FROM execution_logs AS logs \
@@ -724,8 +739,8 @@ pub(super) async fn get_chaoxing_verification_status(
         Json(ChaoxingVerificationStatusResponse {
             provider_account_id: account_id,
             provider_id: account.provider_id,
-            automatic_attempt_budget: 3,
-            automatic_time_budget_seconds: 90,
+            automatic_attempt_budget,
+            automatic_time_budget_seconds,
             recent_attempts,
         })
         .into_response(),
@@ -1304,6 +1319,29 @@ async fn resolve_account_scan_default(
     provider: &ProviderEntry,
     account_id: ProviderAccountId,
 ) -> Result<u64, ApiError> {
+    let resolved = resolve_account_runtime_settings(state, provider, account_id).await?;
+    provider
+        .runtime_settings
+        .account_scan_interval(&resolved)
+        .map_err(|_| {
+            ApiError::conflict(
+                "runtime_settings_schema_mismatch",
+                "the Provider scan interval setting is incompatible",
+            )
+        })?
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "scan_default_unavailable",
+                "desired_interval_seconds is required because this Provider declares no scan default",
+            )
+        })
+}
+
+async fn resolve_account_runtime_settings(
+    state: &ApiState,
+    provider: &ProviderEntry,
+    account_id: ProviderAccountId,
+) -> Result<asterism_provider_api::ResolvedProviderRuntimeSettings, ApiError> {
     let repository = SqliteProviderRuntimeSettingsRepository::new(state.database.clone());
     let provider_settings = repository
         .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::Provider {
@@ -1318,7 +1356,7 @@ async fn resolve_account_scan_default(
         })
         .await
         .map_err(ApiError::internal)?;
-    let resolved = provider
+    provider
         .runtime_settings
         .resolve(
             provider_settings.as_ref().map(|record| &record.patch),
@@ -1329,21 +1367,6 @@ async fn resolve_account_scan_default(
             ApiError::conflict(
                 "runtime_settings_schema_mismatch",
                 "stored Provider settings no longer match the registered schema",
-            )
-        })?;
-    provider
-        .runtime_settings
-        .account_scan_interval(&resolved)
-        .map_err(|_| {
-            ApiError::conflict(
-                "runtime_settings_schema_mismatch",
-                "the Provider scan interval setting is incompatible",
-            )
-        })?
-        .ok_or_else(|| {
-            ApiError::bad_request(
-                "scan_default_unavailable",
-                "desired_interval_seconds is required because this Provider declares no scan default",
             )
         })
 }
