@@ -20,7 +20,10 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::{ApiError, ApiState, auth::AuditAuthority, auth::AuthContext};
+use crate::{
+    ApiError, ApiState,
+    auth::{AuditAuthority, AuthContext, ProviderSettingsAuthority},
+};
 
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
@@ -41,7 +44,10 @@ pub(super) async fn put_ai_config(
     Extension(auth): Extension<AuthContext>,
     payload: Result<Json<AiConfig>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    auth.require_provider_settings_manage()?;
+    let actor_id = match auth.require_provider_settings_manage()? {
+        ProviderSettingsAuthority::System => None,
+        ProviderSettingsAuthority::Owner(user_id) => Some(user_id),
+    };
     let Json(config) = payload.map_err(|_| {
         ApiError::bad_request("invalid_ai_config", "AI configuration body is invalid")
     })?;
@@ -55,6 +61,25 @@ pub(super) async fn put_ai_config(
     )
     .bind(encoded)
     .bind(Utc::now())
+    .execute(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let metadata = serde_json::json!({
+        "remote_store": config.remote_store,
+        "gpt_router_base_url_configured": !config.gpt_router.base_url.is_empty(),
+        "profiles": ["economy", "gpt_only"],
+    });
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'user', ?, 'ai_config_updated', 'deployment', 'ai', ?, 'succeeded', ?)",
+    )
+    .bind(asterism_domain::AuditRecordId::new().to_string())
+    .bind(Utc::now())
+    .bind(actor_id.map(|id| id.to_string()))
+    .bind(asterism_domain::AuditRecordId::new().to_string())
+    .bind(serde_json::to_string(&metadata).map_err(ApiError::internal)?)
     .execute(state.database.pool())
     .await
     .map_err(ApiError::internal)?;
