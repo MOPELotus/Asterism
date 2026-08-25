@@ -7616,6 +7616,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_execution_can_reserve_an_explicit_one_shot_quote_atomically() {
+        let (app, database, _events, cookie, routine_task, _, _, _) =
+            execution_action_fixture().await;
+        sqlx::query("UPDATE credit_accounts SET available = 25, reserved = 0")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let response = app
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{routine_task}/execute"))
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", "quoted-execution-1")
+                    .header("x-request-id", "quoted-execution-request")
+                    .body(Body::from(
+                        r#"{"requested_capabilities":["resource_execution"],"billing_amount":7,"billing_pricing_revision":"test-v1","billing_reason":"test execution"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        let execution_id = payload["execution"]["id"].as_str().unwrap();
+        assert!(!payload["execution"]["quote_id"].is_null());
+        let account: (i64, i64) =
+            sqlx::query_as("SELECT available, reserved FROM credit_accounts LIMIT 1")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(account, (18, 7));
+        let reservation: (String, i64, String) = sqlx::query_as(
+            "SELECT execution_id, amount, state FROM credit_reservations WHERE execution_id = ?",
+        )
+        .bind(execution_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            reservation,
+            (execution_id.to_owned(), 7, "reserved".to_owned())
+        );
+    }
+
+    #[tokio::test]
     async fn formal_execution_requires_and_accepts_explicit_owner_confirmation() {
         let (app, _database, _events, cookie, _, _, formal_task, _) =
             execution_action_fixture().await;
