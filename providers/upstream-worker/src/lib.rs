@@ -41,6 +41,8 @@ use sha2::{Digest, Sha256};
 
 const CHAOXING_ANSWERS_INPUT_TYPE: &str = "chaoxing.worker.answers.v1";
 const CHAOXING_ANSWERS_PLAN_TYPE: &str = "chaoxing.worker.answers-plan.v1";
+const CIDAREN_ANSWERS_INPUT_TYPE: &str = "cidaren.worker.answers.v1";
+const CIDAREN_ANSWERS_PLAN_TYPE: &str = "cidaren.worker.answers-plan.v1";
 const UAI_GENERATED_TEXT_INPUT_TYPE: &str = "uai.worker.generated-text.v1";
 const UAI_GENERATED_TEXT_PLAN_TYPE: &str = "uai.worker.generated-text-plan.v1";
 
@@ -2217,8 +2219,17 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
             )?;
             return PreparedProviderExecutionInvocation::try_new(artifact, private_input);
         }
-        if self.metadata.id.as_str() != "chaoxing"
-            || request.input_type != CHAOXING_ANSWERS_INPUT_TYPE
+        let is_chaoxing = self.metadata.id.as_str() == "chaoxing";
+        let is_cidaren = self.metadata.id.as_str() == "cidaren";
+        let expected_input = if is_chaoxing {
+            CHAOXING_ANSWERS_INPUT_TYPE
+        } else if is_cidaren {
+            CIDAREN_ANSWERS_INPUT_TYPE
+        } else {
+            ""
+        };
+        if (!is_chaoxing && !is_cidaren)
+            || request.input_type != expected_input
             || request.requested_capabilities != [TaskCapability::ResourceExecution]
             || request.submission_draft.is_some()
         {
@@ -2226,7 +2237,7 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
                 "Chaoxing reviewed-answer invocation is invalid",
             ));
         }
-        let invocation = decode_chaoxing_answers(request.raw_input)?;
+        let invocation = decode_worker_answers(request.raw_input)?;
         let supplied = invocation
             .answers
             .iter()
@@ -2258,15 +2269,19 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
         }
         let private_input = ProviderExecutionPrivateInput::try_new(
             self.metadata.id.clone(),
-            CHAOXING_ANSWERS_INPUT_TYPE,
+            expected_input,
             SecretValue::new(request.raw_input.expose_secret().to_vec()),
         )?;
         let input_digest = encode_digest(private_input.input_digest());
         let artifact = ProviderExecutionPlanArtifact::try_new(
             self.metadata.id.clone(),
-            CHAOXING_ANSWERS_PLAN_TYPE,
+            if is_chaoxing {
+                CHAOXING_ANSWERS_PLAN_TYPE
+            } else {
+                CIDAREN_ANSWERS_PLAN_TYPE
+            },
             json!({
-                "schema": CHAOXING_ANSWERS_PLAN_TYPE,
+                "schema": if is_chaoxing { CHAOXING_ANSWERS_PLAN_TYPE } else { CIDAREN_ANSWERS_PLAN_TYPE },
                 "task_id": request.task_id.to_string(),
                 "remote_task_id": request.remote_task_id,
                 "question_count": expected.len(),
@@ -2486,9 +2501,18 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
                 .execute_worker(context, request, json!([]), Some(&generated_text), events)
                 .await;
         }
-        if self.metadata.id.as_str() != "chaoxing"
+        let is_chaoxing = self.metadata.id.as_str() == "chaoxing";
+        let is_cidaren = self.metadata.id.as_str() == "cidaren";
+        let expected_input = if is_chaoxing {
+            CHAOXING_ANSWERS_INPUT_TYPE
+        } else if is_cidaren {
+            CIDAREN_ANSWERS_INPUT_TYPE
+        } else {
+            ""
+        };
+        if (!is_chaoxing && !is_cidaren)
             || private_input.provider_id() != &self.metadata.id
-            || private_input.input_type() != CHAOXING_ANSWERS_INPUT_TYPE
+            || private_input.input_type() != expected_input
             || request.requested_capabilities != [TaskCapability::ResourceExecution]
         {
             return Err(invalid_worker_answers(
@@ -2500,7 +2524,12 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
         })?;
         let digest = encode_digest(private_input.input_digest());
         if artifact.provider_id() != &self.metadata.id
-            || artifact.artifact_type() != CHAOXING_ANSWERS_PLAN_TYPE
+            || artifact.artifact_type()
+                != if is_chaoxing {
+                    CHAOXING_ANSWERS_PLAN_TYPE
+                } else {
+                    CIDAREN_ANSWERS_PLAN_TYPE
+                }
             || artifact
                 .payload_sanitized()
                 .get("task_id")
@@ -2521,12 +2550,12 @@ impl TaskExecutionCapability for UpstreamWorkerProvider {
                 "Chaoxing reviewed-answer plan binding changed",
             ));
         }
-        let invocation = decode_chaoxing_answers(private_input.value())?;
+        let invocation = decode_worker_answers(private_input.value())?;
         self.execute_worker(
             context,
             request,
             Value::Array(invocation.answers),
-            Some(invocation.mode.as_str()),
+            is_chaoxing.then_some(invocation.mode.as_str()),
             events,
         )
         .await
@@ -2565,7 +2594,7 @@ struct ChaoxingWorkerAnswerInvocation {
     mode: String,
 }
 
-fn decode_chaoxing_answers(value: &SecretValue) -> ProviderResult<ChaoxingWorkerAnswerInvocation> {
+fn decode_worker_answers(value: &SecretValue) -> ProviderResult<ChaoxingWorkerAnswerInvocation> {
     let root: Value = serde_json::from_slice(value.expose_secret())
         .map_err(|_| invalid_worker_answers("Chaoxing reviewed answers are not valid JSON"))?;
     let object = root
@@ -2618,6 +2647,10 @@ fn decode_chaoxing_answers(value: &SecretValue) -> ProviderResult<ChaoxingWorker
         answers: rows.clone(),
         mode: mode.to_owned(),
     })
+}
+
+fn decode_chaoxing_answers(value: &SecretValue) -> ProviderResult<ChaoxingWorkerAnswerInvocation> {
+    decode_worker_answers(value)
 }
 
 fn valid_worker_answer_value(value: &Value, depth: usize) -> bool {
