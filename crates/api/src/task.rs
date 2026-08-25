@@ -1554,6 +1554,10 @@ pub(super) fn map_execution_request_error(error: ExecutionRequestError) -> ApiEr
             "score_improvement_retake_conflict",
             "Score Improvement retake confirmation is missing, stale, or invalid",
         ),
+        ExecutionRequestError::Assessment(asterism_engine::AssessmentGuardError::FormalSubmissionWindowClosed) => ApiError::conflict(
+            "formal_assessment_window_closed",
+            "formal assessment submission window is closed; the saved draft was not submitted",
+        ),
         ExecutionRequestError::Assessment(_) => ApiError::conflict(
             "formal_assessment_blocked",
             "formal assessment execution is disabled by Core policy",

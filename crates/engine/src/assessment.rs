@@ -34,6 +34,12 @@ pub fn authorize_task_action(
         return Ok(());
     }
 
+    if action == TaskAction::Submit
+        && task.closes_at.is_some_and(|closes_at| closes_at <= chrono::Utc::now())
+    {
+        return Err(AssessmentGuardError::FormalSubmissionWindowClosed);
+    }
+
     match action {
         TaskAction::Inventory
         | TaskAction::ReadStatus
@@ -55,6 +61,8 @@ pub enum AssessmentGuardError {
     FormalExecutionNotAllowed,
     #[error("formal assessment submission requires an explicit policy")]
     FormalSubmissionNotAllowed,
+    #[error("formal assessment submission window is closed")]
+    FormalSubmissionWindowClosed,
 }
 
 #[cfg(test)]
@@ -118,6 +126,23 @@ mod tests {
                 FormalAssessmentPolicy::default()
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn formal_submission_after_close_is_rejected_even_when_daemon_policy_allows_it() {
+        let mut task = task(SourceType::Work, AssessmentClass::Formal);
+        task.closes_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        assert_eq!(
+            authorize_task_action(
+                &task,
+                TaskAction::Submit,
+                FormalAssessmentPolicy {
+                    allow_execution: true,
+                    allow_submission: true,
+                }
+            ),
+            Err(AssessmentGuardError::FormalSubmissionWindowClosed)
         );
     }
 }
