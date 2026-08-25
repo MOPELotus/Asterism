@@ -2583,10 +2583,11 @@ fn task_duration_path() -> Value {
 fn task_questions_path() -> Value {
     json!({"get": {
         "operationId": "getTaskQuestions",
-        "description": "Runs the Provider Question flow with durable non-idempotent operation tracking, then atomically persists one fresh complete Question snapshot; no partial set is returned or stored.",
+        "description": "Runs the Provider Question flow with durable non-idempotent operation tracking, then atomically persists one fresh complete Question snapshot; formal assessments require an explicit per-request read confirmation because opening them may start or consume a remote attempt.",
         "security": [{"cookieAuth": []}, {"bearerAuth": []}],
         "parameters": [
-            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "confirm_formal_read", "in": "query", "required": false, "schema": {"type": "boolean", "default": false}, "description": "Explicitly confirms that reading a formal assessment may start or consume a remote attempt."}
         ],
         "responses": {
             "200": {"description": "Fresh bounded, sanitized and deterministically ordered Provider Questions with immutable snapshot identity"},

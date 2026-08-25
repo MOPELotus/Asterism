@@ -539,12 +539,19 @@ pub(super) async fn get_task_questions(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,
     Path(task_id): Path<String>,
+    query: Result<Query<TaskQuestionsQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let owner_id = auth.require_task_read()?;
     let task_id = TaskId::from_str(&task_id)
         .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
     let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let query = query.map(|Query(query)| query).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_task_questions_query",
+            "task Question query parameters have an invalid format",
+        )
+    })?;
     let mut service = ProviderQuestionReadService::new(
         state.providers.clone(),
         SqliteTaskQueryRepository::new(state.database.clone()),
@@ -571,6 +578,7 @@ pub(super) async fn get_task_questions(
             owner_id,
             task_id,
             correlation_id: correlation_id.to_owned(),
+            confirm_formal_read: query.confirm_formal_read,
         })
         .await
         .map_err(map_task_questions_error)?;
@@ -2074,6 +2082,12 @@ fn map_task_questions_error(error: ProviderQuestionReadError) -> ApiError {
             "question_read_operation_limit",
             "the Provider Question flow exceeded its bounded operation count",
         ),
+        ProviderQuestionReadError::Assessment(
+            asterism_engine::AssessmentGuardError::FormalQuestionReadNotConfirmed,
+        ) => ApiError::conflict(
+            "formal_assessment_read_confirmation_required",
+            "reading these formal assessment Questions may start or consume a remote attempt; confirm before continuing",
+        ),
         ProviderQuestionReadError::Assessment(_) => ApiError::conflict(
             "formal_assessment_blocked",
             "formal assessment Question reading is disabled by Core policy",
@@ -2374,6 +2388,13 @@ struct TaskCompletionWorkflowsResponse {
 pub(super) struct TaskAttemptHistoryQuery {
     limit: Option<u32>,
     offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TaskQuestionsQuery {
+    #[serde(default)]
+    confirm_formal_read: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

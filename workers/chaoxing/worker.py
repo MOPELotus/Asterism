@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import random
 import sys
 import threading
 from types import ModuleType
@@ -69,10 +70,29 @@ def load_cxkitty(events: Events, redactor: Redactor):
     except ImportError as error:
         raise WorkerFailure("dependency_missing", "ddddocr is required for Chaoxing CAPTCHA handling") from error
     sys.modules["ddddocr"] = ddddocr_module
-    # Face upload is another explicitly user-mediated gate. Avoid importing
-    # CxKitty's top-level persistence/config helper just to construct the DTO.
+    # Keep the donor's automatic face path lookup enabled without importing its
+    # interactive config module. Deployments may point this at the donor face
+    # directory (or a mounted per-account directory); no image bytes are ever
+    # emitted in worker events.
     utility_module = ModuleType("utils")
-    utility_module.get_face_path_by_puid = lambda _puid: None
+    face_root_value = os.environ.get("ASTERISM_CHAOXING_FACE_DIRECTORY")
+    face_root = pathlib.Path(face_root_value) if face_root_value else root / "faces"
+    if not face_root.is_absolute():
+        face_root = (pathlib.Path(__file__).resolve().parents[2] / face_root).resolve()
+
+    def get_face_path_by_puid(puid):
+        try:
+            puid_text = str(int(puid))
+        except (TypeError, ValueError):
+            return None
+        matches = [
+            path
+            for path in face_root.glob(f"{puid_text}*.jpg")
+            if re.fullmatch(rf"{re.escape(puid_text)}(?:_\d+)?", path.stem)
+        ]
+        return random.choice(matches) if matches else None
+
+    utility_module.get_face_path_by_puid = get_face_path_by_puid
     sys.modules["utils"] = utility_module
     sys.path.insert(0, str(root))
     try:

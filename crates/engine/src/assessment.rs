@@ -35,7 +35,9 @@ pub fn authorize_task_action(
     }
 
     if action == TaskAction::Submit
-        && task.closes_at.is_some_and(|closes_at| closes_at <= chrono::Utc::now())
+        && task
+            .closes_at
+            .is_some_and(|closes_at| closes_at <= chrono::Utc::now())
     {
         return Err(AssessmentGuardError::FormalSubmissionWindowClosed);
     }
@@ -57,6 +59,8 @@ pub fn authorize_task_action(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AssessmentGuardError {
+    #[error("reading formal assessment questions requires an explicit confirmation")]
+    FormalQuestionReadNotConfirmed,
     #[error("formal assessment execution requires an explicit policy")]
     FormalExecutionNotAllowed,
     #[error("formal assessment submission requires an explicit policy")]

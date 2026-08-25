@@ -6,9 +6,9 @@ from live account evidence and is safe to keep in the repository.
 ## Local acceptance
 
 - Branch is `0.0.1`; `master` and `0.1.0` remain unchanged.
-- Daemon health: `ok`; database schema: 101; four Providers registered; no
+- Daemon health: `ok`; database schema: 105; four Providers registered; no
   outbox backlog or dead-letter outbox entries.
-- Full Rust workspace: green, including API 70, Engine 158, Storage 170,
+- Full Rust workspace: green, including API 75, Engine 160, Storage 170,
   Chaoxing 204, WELearn 255, UAI 308, Cidaren 214, and all remaining crates.
 - Python Worker fixture smoke: 42/42 green with declared Chaoxing HTML parser
   dependencies installed.
@@ -28,8 +28,9 @@ from live account evidence and is safe to keep in the repository.
   draft-preserved stages are persisted, claim/report scoped, idempotent and
   retryable.
 - Chaoxing challenge contract: only answer points retry, maximum three times,
-  then one `sol_xhigh` escalation marker; no repeated video/live/document
-  mutation.
+  then one durable GPT-only `sol_xhigh` escalation that creates a fresh
+  Candidate/Draft/Execution; no repeated video/live/document mutation and no
+  blind reuse of the failed Draft.
 
 ## Live validation still required
 

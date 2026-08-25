@@ -43,6 +43,7 @@ pub struct ReadTaskQuestionsCommand {
     pub owner_id: UserId,
     pub task_id: TaskId,
     pub correlation_id: String,
+    pub confirm_formal_read: bool,
 }
 
 fn result_from_snapshot(snapshot: QuestionSnapshot) -> ProviderQuestionReadResult {
@@ -237,6 +238,13 @@ where
             .contains(&TaskCapability::QuestionInventory)
         {
             return Err(ProviderQuestionReadError::TaskCapabilityUnavailable);
+        }
+        if task.assessment_class == asterism_domain::AssessmentClass::Formal
+            && !command.confirm_formal_read
+        {
+            return Err(ProviderQuestionReadError::Assessment(
+                AssessmentGuardError::FormalQuestionReadNotConfirmed,
+            ));
         }
         authorize_task_action(&task, TaskAction::Parse, FormalAssessmentPolicy::default())?;
         let account = self
@@ -1315,6 +1323,7 @@ mod tests {
                 owner_id: fixture.owner_id,
                 task_id: fixture.task_id,
                 correlation_id: "question-read-1".to_owned(),
+                confirm_formal_read: true,
             })
             .await
             .unwrap();
@@ -1341,6 +1350,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn formal_question_read_requires_confirmation_before_provider_access() {
+        let fixture = fixture(true);
+        assert!(matches!(
+            fixture
+                .service
+                .read(ReadTaskQuestionsCommand {
+                    owner_id: fixture.owner_id,
+                    task_id: fixture.task_id,
+                    correlation_id: "formal-question-read-without-confirmation".to_owned(),
+                    confirm_formal_read: false,
+                })
+                .await,
+            Err(ProviderQuestionReadError::Assessment(
+                AssessmentGuardError::FormalQuestionReadNotConfirmed
+            ))
+        ));
+        assert!(fixture.capability.parsed_task_id.lock().unwrap().is_none());
+        assert!(fixture.snapshots.snapshots.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn structured_question_set_is_persisted_and_returned_without_flattening() {
         let fixture = fixture(true);
         fixture.capability.structured.store(true, Ordering::Relaxed);
@@ -1350,6 +1380,7 @@ mod tests {
                 owner_id: fixture.owner_id,
                 task_id: fixture.task_id,
                 correlation_id: "question-read-structured".to_owned(),
+                confirm_formal_read: true,
             })
             .await
             .unwrap();
@@ -1382,6 +1413,7 @@ mod tests {
                     owner_id: fixture.owner_id,
                     task_id: fixture.task_id,
                     correlation_id: "question-read-2".to_owned(),
+                    confirm_formal_read: true,
                 })
                 .await,
             Err(ProviderQuestionReadError::ProviderResponseInvalid)
@@ -1400,6 +1432,7 @@ mod tests {
                     owner_id: fixture.owner_id,
                     task_id: fixture.task_id,
                     correlation_id: "question-read-3".to_owned(),
+                    confirm_formal_read: true,
                 })
                 .await,
             Err(ProviderQuestionReadError::TaskCapabilityUnavailable)
@@ -1419,6 +1452,7 @@ mod tests {
                     owner_id: fixture.owner_id,
                     task_id: fixture.task_id,
                     correlation_id: "question-read-storage-failure".to_owned(),
+                    confirm_formal_read: true,
                 })
                 .await,
             Err(ProviderQuestionReadError::Storage(_))
@@ -1446,6 +1480,7 @@ mod tests {
                     owner_id: fixture.owner_id,
                     task_id: fixture.task_id,
                     correlation_id: "question-read-drift".to_owned(),
+                    confirm_formal_read: true,
                 })
                 .await,
             Err(ProviderQuestionReadError::Provider(error))
@@ -1701,6 +1736,7 @@ mod tests {
                 owner_id,
                 task_id,
                 correlation_id: "durable-question-read".to_owned(),
+                confirm_formal_read: true,
             })
             .await
             .unwrap();

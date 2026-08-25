@@ -228,7 +228,46 @@ fn answer_matches_question(question: &Question, answer: &NormalizedAnswer) -> bo
         (QuestionKind::Ordering, NormalizedAnswer::Ordering(values)) => {
             values.len() == question.options.len() && selections_exist(question, values)
         }
+        // Global cache evidence is allowed to bind only objective, option-based
+        // answers. Subjective text must be regenerated per execution/user so a
+        // prior person's response is never submitted verbatim to another task.
+        (QuestionKind::Matching, NormalizedAnswer::Pairs(values)) => {
+            !values.is_empty()
+                && values.iter().all(|pair| {
+                    selections_exist(question, std::slice::from_ref(&pair.left))
+                        && selections_exist(question, std::slice::from_ref(&pair.right))
+                })
+        }
+        (QuestionKind::Composite, NormalizedAnswer::Composite(values)) => {
+            !values.is_empty()
+                && values
+                    .iter()
+                    .all(|value| composite_objective_answer_is_valid(question, value))
+        }
+        (QuestionKind::FillBlank | QuestionKind::ShortAnswer, _) => false,
         _ => false,
+    }
+}
+
+fn composite_objective_answer_is_valid(question: &Question, answer: &NormalizedAnswer) -> bool {
+    match answer {
+        NormalizedAnswer::Selections(values) => selections_exist(question, values),
+        NormalizedAnswer::Ordering(values) => selections_exist(question, values),
+        NormalizedAnswer::Pairs(values) => {
+            !values.is_empty()
+                && values.iter().all(|pair| {
+                    selections_exist(question, std::slice::from_ref(&pair.left))
+                        && selections_exist(question, std::slice::from_ref(&pair.right))
+                })
+        }
+        NormalizedAnswer::Composite(values) => {
+            !values.is_empty()
+                && values
+                    .iter()
+                    .all(|value| composite_objective_answer_is_valid(question, value))
+        }
+        NormalizedAnswer::Boolean(_) => true,
+        NormalizedAnswer::Texts(_) | NormalizedAnswer::Skip | NormalizedAnswer::Unknown => false,
     }
 }
 
@@ -387,6 +426,84 @@ mod tests {
         );
         assert_eq!(service.import(command).await.unwrap(), Vec::new());
         assert_eq!(service.snapshots.saved.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn randomized_option_ids_are_rebound_by_complete_option_content() {
+        let (mut service, command) = fixture();
+        let source_fingerprint = service.snapshots.evidence.lock().unwrap()[0]
+            .source_question
+            .content_fingerprint()
+            .unwrap();
+        service.snapshots.snapshot.questions[0].options = vec![
+            QuestionOption {
+                id: "Y".to_owned(),
+                content: Some("Second".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({"provider_option_id": "next-y"}),
+            },
+            QuestionOption {
+                id: "X".to_owned(),
+                content: Some("First".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({"provider_option_id": "next-x"}),
+            },
+        ];
+        let source_questions = service.snapshots.evidence.lock().unwrap()[0]
+            .source_questions
+            .clone();
+        let semantic_fingerprint =
+            QuestionSetView::try_new(service.snapshots.snapshot.task_id, &source_questions, &[])
+                .unwrap()
+                .semantic_fingerprint(source_questions[0].id)
+                .unwrap();
+        {
+            let mut evidence = service.snapshots.evidence.lock().unwrap();
+            evidence[0].question_content_fingerprint = source_fingerprint;
+            evidence[0].question_semantic_fingerprint = semantic_fingerprint;
+        }
+
+        let imported = service.import(command).await.unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(
+            imported[0].candidate.answer,
+            NormalizedAnswer::Selections(vec!["X".to_owned()])
+        );
+    }
+
+    #[test]
+    fn matching_and_composite_cache_answers_validate_option_references() {
+        let task_id = TaskId::new();
+        let mut matching = question(task_id, "matching", 1);
+        matching.kind = QuestionKind::Matching;
+        let pairs = NormalizedAnswer::Pairs(vec![asterism_domain::AnswerPair {
+            left: "A".to_owned(),
+            right: "B".to_owned(),
+        }]);
+        assert!(answer_matches_question(&matching, &pairs));
+
+        let mut composite = matching;
+        composite.kind = QuestionKind::Composite;
+        assert!(answer_matches_question(
+            &composite,
+            &NormalizedAnswer::Composite(vec![
+                NormalizedAnswer::Selections(vec!["A".to_owned()]),
+                pairs,
+                NormalizedAnswer::Texts(vec!["human answer".to_owned()]),
+            ])
+        ));
+        assert!(!answer_matches_question(
+            &composite,
+            &NormalizedAnswer::Composite(vec![NormalizedAnswer::Selections(vec![
+                "missing".to_owned(),
+            ])])
+        ));
+        let mut subjective = composite;
+        subjective.kind = QuestionKind::ShortAnswer;
+        assert!(!answer_matches_question(
+            &subjective,
+            &NormalizedAnswer::Texts(vec!["prior person's text".to_owned()])
+        ));
     }
 
     #[tokio::test]

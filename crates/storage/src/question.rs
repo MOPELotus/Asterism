@@ -291,11 +291,12 @@ impl AnswerCacheRepository for SqliteQuestionSnapshotRepository {
         target_question_snapshot_id: QuestionSnapshotId,
     ) -> Result<Vec<PriorAnswerEvidence>, StorageError> {
         let rows = sqlx::query(
-            "SELECT DISTINCT target_item.question_id AS target_question_id, \
-                    target_item.remote_question_id AS target_remote_question_id, \
-                    target_item.position AS target_position, \
-                    target_item.question_json AS target_question_json, \
-                    source_item.question_id, source_item.remote_question_id, \
+             "SELECT DISTINCT target_item.question_id AS target_question_id, \
+                     target_item.remote_question_id AS target_remote_question_id, \
+                     target_item.position AS target_position, \
+                     target_item.question_json AS target_question_json, \
+                     target_item.content_fingerprint AS target_content_fingerprint, \
+                     source_item.question_id, source_item.remote_question_id, \
                     source_item.position, source_item.question_json, \
                     source_item.content_fingerprint, source_item.semantic_fingerprint, \
                     COALESCE((SELECT json_group_array(json(ordered.question_json)) FROM ( \
@@ -369,8 +370,12 @@ impl AnswerCacheRepository for SqliteQuestionSnapshotRepository {
 }
 
 fn decode_prior_answer_evidence(row: &SqliteRow) -> Result<PriorAnswerEvidence, StorageError> {
-    let fingerprint = QuestionContentFingerprint::from_str(row.try_get("content_fingerprint")?)
-        .map_err(|_| invalid_candidates())?;
+    let source_fingerprint =
+        QuestionContentFingerprint::from_str(row.try_get("content_fingerprint")?)
+            .map_err(|_| invalid_candidates())?;
+    let target_fingerprint =
+        QuestionContentFingerprint::from_str(row.try_get("target_content_fingerprint")?)
+            .map_err(|_| invalid_candidates())?;
     let target_question: Question = serde_json::from_str(row.try_get("target_question_json")?)?;
     let target_question_id = parse_id::<QuestionId>(row.try_get("target_question_id")?)?;
     let target_remote_id: Option<String> = row.try_get("target_remote_question_id")?;
@@ -380,7 +385,7 @@ fn decode_prior_answer_evidence(row: &SqliteRow) -> Result<PriorAnswerEvidence, 
         || target_question.remote_question_id != target_remote_id
         || target_question.position != target_position
         || target_question.validate().is_err()
-        || target_question.content_fingerprint().as_ref() != Ok(&fingerprint)
+        || target_question.content_fingerprint().as_ref() != Ok(&target_fingerprint)
     {
         return Err(invalid_candidates());
     }
@@ -394,7 +399,7 @@ fn decode_prior_answer_evidence(row: &SqliteRow) -> Result<PriorAnswerEvidence, 
         || question.remote_question_id != stored_remote_id
         || question.position != stored_position
         || question.validate().is_err()
-        || question.content_fingerprint().as_ref() != Ok(&fingerprint)
+        || question.content_fingerprint().as_ref() != Ok(&source_fingerprint)
     {
         return Err(invalid_candidates());
     }
@@ -423,7 +428,7 @@ fn decode_prior_answer_evidence(row: &SqliteRow) -> Result<PriorAnswerEvidence, 
         .map_or_else(|| source_view.semantic_fingerprint(question.id), Ok)
         .map_err(|_| invalid_candidates())?;
     Ok(PriorAnswerEvidence {
-        question_content_fingerprint: fingerprint,
+        question_content_fingerprint: source_fingerprint,
         question_semantic_fingerprint: semantic_fingerprint,
         source_question: question,
         source_questions,
@@ -1764,7 +1769,7 @@ mod tests {
         assert_eq!(evidence[0].source_candidate, direct);
         assert_eq!(
             evidence[0].question_content_fingerprint,
-            target.questions[0].content_fingerprint().unwrap()
+            prior.questions[0].content_fingerprint().unwrap()
         );
         assert!(
             repository
@@ -1779,6 +1784,124 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn prior_answer_evidence_matches_reordered_options_by_semantics_not_ids() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let mut prior = fixture.snapshot("Randomized option question", fixture.now);
+        prior.questions[0].attachments = vec![QuestionAttachment {
+            kind: QuestionAttachmentKind::Image,
+            remote_id: Some("https://cdn.example/stem.png?token=old&objectId=stem-1".to_owned()),
+            label: Some("stem image".to_owned()),
+            metadata_sanitized: serde_json::json!({"content_sha256": "stem-hash"}),
+        }];
+        prior.questions[0].options = vec![
+            QuestionOption {
+                id: "A".to_owned(),
+                content: Some("Alpha".to_owned()),
+                attachments: vec![QuestionAttachment {
+                    kind: QuestionAttachmentKind::Image,
+                    remote_id: Some(
+                        "https://cdn.example/alpha.png?signature=old&objectId=alpha-1".to_owned(),
+                    ),
+                    label: Some("alpha image".to_owned()),
+                    metadata_sanitized: serde_json::json!({"content_sha256": "alpha-hash"}),
+                }],
+                metadata_sanitized: serde_json::json!({"provider_option_id": "old-a"}),
+            },
+            QuestionOption {
+                id: "B".to_owned(),
+                content: Some("Beta".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({"provider_option_id": "old-b"}),
+            },
+        ];
+        prior.groups.push(QuestionGroup {
+            id: QuestionGroupId::new(),
+            task_id: fixture.task,
+            remote_group_id: Some("prior-shared-material".to_owned()),
+            stem: Some("Read the shared mixed-format material.".to_owned()),
+            options: Vec::new(),
+            attachments: vec![QuestionAttachment {
+                kind: QuestionAttachmentKind::File,
+                remote_id: Some("https://cdn.example/material.pdf?token=old".to_owned()),
+                label: Some("shared file".to_owned()),
+                metadata_sanitized: serde_json::json!({"content_sha256": "material-hash"}),
+            }],
+            metadata_sanitized: serde_json::json!({"provider_group_id": "old-group"}),
+            children: vec![QuestionGroupChild::Question(prior.questions[0].id)],
+        });
+        let mut target = prior.clone();
+        target.id = QuestionSnapshotId::new();
+        target.captured_at = fixture.now + Duration::seconds(1);
+        target.questions[0].id = QuestionId::new();
+        target.questions[0].remote_question_id = Some("randomized-next-attempt".to_owned());
+        target.questions[0].attachments[0].remote_id =
+            Some("https://cdn.example/stem.png?token=new&objectId=stem-1".to_owned());
+        target.questions[0].options = vec![
+            QuestionOption {
+                id: "Y".to_owned(),
+                content: Some("Beta".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({"provider_option_id": "new-y"}),
+            },
+            QuestionOption {
+                id: "X".to_owned(),
+                content: Some("Alpha".to_owned()),
+                attachments: vec![QuestionAttachment {
+                    kind: QuestionAttachmentKind::Image,
+                    remote_id: Some(
+                        "https://cdn.example/alpha.png?signature=new&objectId=alpha-1".to_owned(),
+                    ),
+                    label: Some("alpha image".to_owned()),
+                    metadata_sanitized: serde_json::json!({"content_sha256": "alpha-hash"}),
+                }],
+                metadata_sanitized: serde_json::json!({"provider_option_id": "new-x"}),
+            },
+        ];
+        target.groups[0].id = QuestionGroupId::new();
+        target.groups[0].remote_group_id = Some("target-shared-material".to_owned());
+        target.groups[0].attachments[0].remote_id =
+            Some("https://cdn.example/material.pdf?token=new".to_owned());
+        target.groups[0].metadata_sanitized = serde_json::json!({"provider_group_id": "new-group"});
+        target.groups[0].children = vec![QuestionGroupChild::Question(target.questions[0].id)];
+        assert_ne!(
+            prior.questions[0].content_fingerprint().unwrap(),
+            target.questions[0].content_fingerprint().unwrap()
+        );
+        let prior_view =
+            QuestionSetView::try_new(fixture.task, &prior.questions, &prior.groups).unwrap();
+        let target_view =
+            QuestionSetView::try_new(fixture.task, &target.questions, &target.groups).unwrap();
+        assert_eq!(
+            prior_view
+                .semantic_fingerprint(prior.questions[0].id)
+                .unwrap(),
+            target_view
+                .semantic_fingerprint(target.questions[0].id)
+                .unwrap()
+        );
+
+        repository.save_question_snapshot(&prior).await.unwrap();
+        repository.save_question_snapshot(&target).await.unwrap();
+        let candidate = Fixture::candidate(&prior, AnswerSource::ProviderNative, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&candidate))
+            .await
+            .unwrap();
+
+        let evidence = repository
+            .list_owned_prior_answer_evidence(fixture.owner, fixture.task, target.id)
+            .await
+            .unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].source_question.options[0].id, "A");
+        assert_eq!(
+            evidence[0].question_content_fingerprint,
+            prior.questions[0].content_fingerprint().unwrap()
         );
     }
 

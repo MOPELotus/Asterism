@@ -45,6 +45,7 @@ export function TaskDetailPage() {
   const [aiRoute, setAiRoute] = useState<"timed" | "untimed" | "escalation">("untimed");
   const [artifactFile, setArtifactFile] = useState<File>();
   const [browserSession, setBrowserSession] = useState<BrowserBridgeCreateResponse>();
+  const [formalQuestionReadConfirmed, setFormalQuestionReadConfirmed] = useState(false);
   const [formalAssessmentConfirmed, setFormalAssessmentConfirmed] = useState(false);
   const [delayedUntil, setDelayedUntil] = useState(() => new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString().slice(0, 16));
   const [actionNotice, setActionNotice] = useState<string>();
@@ -60,7 +61,15 @@ export function TaskDetailPage() {
   const detail = useQuery({ queryKey: ["tasks", taskId, "remote-detail"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskDetail({ path: { task_id: taskId } })) });
   const progress = useQuery({ queryKey: ["tasks", taskId, "progress"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskProgress({ path: { task_id: taskId } })) });
   const duration = useQuery({ queryKey: ["tasks", taskId, "duration"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskDuration({ path: { task_id: taskId } })) });
-  const questions = useQuery({ queryKey: ["tasks", taskId, "questions"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskQuestions({ path: { task_id: taskId } })) });
+  const questions = useQuery({
+    queryKey: ["tasks", taskId, "questions", formalQuestionReadConfirmed],
+    enabled: false,
+    retry: false,
+    queryFn: async () => requireData(await getTaskQuestions({
+      path: { task_id: taskId },
+      query: task.data?.assessment_class === "formal" ? { confirm_formal_read: formalQuestionReadConfirmed } : undefined,
+    })),
+  });
   const browserSnapshot = useQuery({
     queryKey: ["browser-bridge-sessions", browserSession?.session.id],
     enabled: false,
@@ -186,6 +195,7 @@ export function TaskDetailPage() {
   const scoreImprovementRetakeReady = scoreImprovement?.workflow.state === "ready" && task.data.orchestration_state === "succeeded";
   const scoreImprovementCanBind = scoreImprovementRetakeReady && ["pending", "in_progress"].includes(task.data.remote_state);
   const policyBlocked = isFormalAssessment && !formalAssessmentConfirmed;
+  const questionReadBlocked = isFormalAssessment && !formalQuestionReadConfirmed;
   const lifecyclePending = approve.isPending || cancel.isPending || delay.isPending || ignore.isPending;
   const canApprove = task.data.orchestration_state === "waiting_approval";
   const canCancel = ["waiting_approval", "scheduled", "credit_blocked", "human_required", "retry_waiting", "failed"].includes(task.data.orchestration_state);
@@ -206,9 +216,10 @@ export function TaskDetailPage() {
     <Card><CardHeader><CardTitle>任务操作</CardTitle></CardHeader><CardContent className="space-y-4">
       {executable ? <p className="text-sm text-muted-foreground">系统已根据平台和任务类型准备好执行方式，无需选择内部能力。</p> : null}
       {actionNotice ? <Alert><AlertTitle>操作已提交</AlertTitle><AlertDescription>{actionNotice}</AlertDescription></Alert> : null}
+      {isFormalAssessment && task.data.capabilities.includes("question_inventory") ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>读取正式作业/考试前需要确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalQuestionReadConfirmed} onChange={(event) => setFormalQuestionReadConfirmed(event.target.checked)} /><span>我确认本次读取可能在远端开始倒计时或消耗一次作答机会；该确认只用于本次页面读取，不会自动保存或提交答案。</span></label></AlertDescription></Alert> : null}
       {isFormalAssessment && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评需要本次明确确认</AlertTitle><AlertDescription><label className="mt-2 flex items-start gap-2"><input className="mt-1" type="checkbox" checked={formalAssessmentConfirmed} onChange={(event) => setFormalAssessmentConfirmed(event.target.checked)} /><span>我确认由当前账号执行所选能力；该确认只随本次请求提交，默认仍为拒绝。确认链接只帮助打开本页，不会自动提交。</span></label></AlertDescription></Alert> : null}
       {scoreImprovementRetakeReady ? <Alert><AlertTitle>{scoreImprovementCanBind ? "远端重做已就绪" : "先在远端创建新重做 Attempt"}</AlertTitle><AlertDescription>{scoreImprovementCanBind ? <>Core 会把 workflow {shortId(scoreImprovement!.workflow.id)} 的 revision {scoreImprovement!.revision} 与这次 Execution 原子绑定并消耗一次重试；测评提交仍需选择重做后的新快照和 Draft。</> : <><p>当前远端仍是 completed，Core 不会复用旧答卷。请用下方 BrowserBridge 打开结果页并明确点击“重做”，再立即巡查；状态刷新为 pending/in_progress 后读取新题目。</p><Button className="mt-3" type="button" variant="outline" disabled={scanAccount.isPending} onClick={() => scanAccount.mutate()}><RefreshCw className="size-4" />{scanAccount.isPending ? "巡查中…" : "已重做，立即巡查并刷新"}</Button></>}</AlertDescription></Alert> : null}
-      {needsDraft || needsReviewedWorkerAnswers ? <Alert><AlertTitle>先读取题目</AlertTitle><AlertDescription className="space-y-3"><p>系统会读取当前题目、准备答案并在提交前展示审核结果，不需要填写任何内部编号。</p><Button variant="outline" disabled={questions.isFetching} onClick={async () => { const result = await questions.refetch(); if (result.data) navigate(`/tasks/${taskId}/question-snapshots/${result.data.snapshot_id}`); }}><FileQuestion className="size-4" />{questions.isFetching ? "正在读取…" : "读取题目并开始作答"}</Button></AlertDescription></Alert> : null}
+      {needsDraft || needsReviewedWorkerAnswers ? <Alert><AlertTitle>先读取题目</AlertTitle><AlertDescription className="space-y-3"><p>系统会读取当前题目、准备答案并在提交前展示审核结果，不需要填写任何内部编号。</p><Button variant="outline" disabled={questions.isFetching || questionReadBlocked} onClick={async () => { const result = await questions.refetch(); if (result.data) navigate(`/tasks/${taskId}/question-snapshots/${result.data.snapshot_id}`); }}><FileQuestion className="size-4" />{questions.isFetching ? "正在读取…" : "读取题目并开始作答"}</Button></AlertDescription></Alert> : null}
       {needsInvocation ? <div className="max-w-2xl space-y-3 rounded-lg border p-4">
         <div><p className="font-medium">完成任务所需内容</p><p className="text-sm text-muted-foreground">填写或选择平台要求的内容后，系统会安全保存并提交本次任务。</p></div>
         {requestedCapabilities.includes("discussion") || isUaiWorkerDiscussion ? <div className="space-y-2"><Label htmlFor="discussion-content">讨论回复</Label><textarea id="discussion-content" className="min-h-28 w-full rounded-md border bg-background px-3 py-2 text-sm" value={discussionContent} onChange={(event) => { setDiscussionContent(event.target.value); setInvocationDraftId(""); }} placeholder="输入将提交的完整回复内容" />{isUaiWorkerDiscussion ? <div className="flex flex-wrap items-end gap-2"><div className="space-y-1"><Label htmlFor="discussion-ai-profile">生成组合</Label><select id="discussion-ai-profile" className="h-9 rounded-md border bg-background px-3 text-sm" value={aiProfile} onChange={(event) => setAiProfile(event.target.value as "economy" | "gpt_only")}><option value="economy">默认省钱组合</option><option value="gpt_only">GPT-only 保质组合</option></select></div><Button type="button" variant="outline" disabled={generateDiscussion.isPending} onClick={() => generateDiscussion.mutate()}>{generateDiscussion.isPending ? "正在读取题目并生成…" : "AI 读取题目并生成草稿"}</Button></div> : null}</div> : null}
@@ -251,7 +262,7 @@ export function TaskDetailPage() {
       <ReadCard title="学习时长" icon={Clock3} loading={duration.isFetching} onRead={() => void duration.refetch()}>{duration.data ? <div><div className="text-3xl font-semibold">{duration.data.duration.duration_seconds}<span className="ml-1 text-sm font-normal text-muted-foreground">秒</span></div><p className="mt-2 text-sm text-muted-foreground">{formatTimestamp(duration.data.duration.updated_at)}</p></div> : <EmptyRead />}</ReadCard>
     </div>
 
-    {task.data.capabilities.includes("question_inventory") ? <Card><CardHeader className="flex-row items-center justify-between"><CardTitle className="flex items-center gap-2"><FileQuestion className="size-5" />题目快照</CardTitle><Button variant="outline" disabled={questions.isFetching} onClick={() => void questions.refetch()}>{questions.isFetching ? "读取中…" : "读取并解析"}</Button></CardHeader><CardContent>{questions.data ? <div className="space-y-4"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">snapshot {shortId(questions.data.snapshot_id)}</Badge><Badge variant="secondary">{questions.data.questions.length} 题</Badge><span className="text-sm text-muted-foreground">{formatTimestamp(questions.data.captured_at)}</span><Link className={buttonVariants({ variant: "default", size: "sm" })} to={`/tasks/${taskId}/question-snapshots/${questions.data.snapshot_id}`}>进入答案审核</Link></div>{questions.data.questions.map((question) => <div key={question.id} className="rounded-lg border p-4"><div className="mb-2 flex items-center gap-2"><Badge variant="outline">#{question.position}</Badge><Badge variant="secondary">{question.kind}</Badge></div><p className="whitespace-pre-wrap text-sm">{question.stem}</p></div>)}</div> : <p className="text-sm text-muted-foreground">尚未读取当前题目快照。</p>}</CardContent></Card> : null}
+    {task.data.capabilities.includes("question_inventory") ? <Card><CardHeader className="flex-row items-center justify-between"><CardTitle className="flex items-center gap-2"><FileQuestion className="size-5" />题目快照</CardTitle><Button variant="outline" disabled={questions.isFetching || questionReadBlocked} onClick={() => void questions.refetch()}>{questions.isFetching ? "读取中…" : "读取并解析"}</Button></CardHeader><CardContent>{questions.data ? <div className="space-y-4"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">snapshot {shortId(questions.data.snapshot_id)}</Badge><Badge variant="secondary">{questions.data.questions.length} 题</Badge><span className="text-sm text-muted-foreground">{formatTimestamp(questions.data.captured_at)}</span><Link className={buttonVariants({ variant: "default", size: "sm" })} to={`/tasks/${taskId}/question-snapshots/${questions.data.snapshot_id}`}>进入答案审核</Link></div>{questions.data.questions.map((question) => <div key={question.id} className="rounded-lg border p-4"><div className="mb-2 flex items-center gap-2"><Badge variant="outline">#{question.position}</Badge><Badge variant="secondary">{question.kind}</Badge></div><p className="whitespace-pre-wrap text-sm">{question.stem}</p></div>)}</div> : <p className="text-sm text-muted-foreground">尚未读取当前题目快照。</p>}</CardContent></Card> : null}
   </PageShell>;
 }
 
