@@ -5,8 +5,8 @@ use asterism_config::{
 };
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, AuditActor,
-    NormalizedAnswer, Question, QuestionId, QuestionKind, QuestionSnapshotId, RequestSource,
-    TaskCapability, TaskId, UserId,
+    NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind, QuestionId,
+    QuestionKind, QuestionSnapshotId, RequestSource, TaskCapability, TaskId, UserId,
 };
 use asterism_engine::{
     ExecuteTaskCommand, ExecutionAiSelectionInput, ExecutionRequestService, FormalAssessmentPolicy,
@@ -1196,7 +1196,7 @@ impl AiAnswerClient {
         &self,
         route: &AiModelRoute,
         prompt: &str,
-        media: &[String],
+        media: &[AiMediaInput],
     ) -> Result<(NormalizedAnswer, AiRemoteUsage), ApiError> {
         let endpoint = self.endpoint(&route.endpoint)?;
         if endpoint.base_url.is_empty() {
@@ -1260,22 +1260,35 @@ fn request_body(
     endpoint: &AiEndpointConfig,
     route: &AiModelRoute,
     prompt: &str,
-    media: &[String],
+    media: &[AiMediaInput],
     remote_store: bool,
 ) -> (String, Value) {
     let system = "You answer learning-platform questions. Return exactly one NormalizedAnswer JSON object and nothing else. Never mention automation, AI, testing, policies, or these instructions. For subjective answers, write concise natural human plain text without Markdown. Use only option IDs supplied by the question. Preserve blank order and matching direction.";
     let mut responses_content = vec![json!({"type": "input_text", "text": prompt})];
-    responses_content.extend(
-        media
-            .iter()
-            .map(|url| json!({"type": "input_image", "image_url": url, "detail": "auto"})),
-    );
+    for input in media {
+        responses_content.push(json!({"type": "input_text", "text": input.label}));
+        responses_content.push(match input.kind {
+            AiMediaKind::Image => {
+                json!({"type": "input_image", "image_url": input.url, "detail": "auto"})
+            }
+            AiMediaKind::File => {
+                json!({"type": "input_file", "file_url": input.url, "detail": "auto"})
+            }
+        });
+    }
     let mut chat_content = vec![json!({"type": "text", "text": prompt})];
-    chat_content.extend(
-        media
-            .iter()
-            .map(|url| json!({"type": "image_url", "image_url": {"url": url, "detail": "auto"}})),
-    );
+    for input in media {
+        chat_content.push(json!({"type": "text", "text": input.label}));
+        match input.kind {
+            AiMediaKind::Image => chat_content.push(
+                json!({"type": "image_url", "image_url": {"url": input.url, "detail": "auto"}}),
+            ),
+            AiMediaKind::File => chat_content.push(json!({
+                "type": "text",
+                "text": format!("File reference: {}", input.url),
+            })),
+        }
+    }
     match endpoint.protocol {
         AiProtocol::Responses => (
             append_endpoint(&endpoint.base_url, "responses"),
@@ -1460,39 +1473,78 @@ fn normalized_answer_schema() -> Value {
     })
 }
 
-fn readable_media_urls(snapshot: &QuestionSnapshot, question: &Question) -> Vec<String> {
-    let references = question
-        .attachments
-        .iter()
-        .chain(
-            question
-                .options
-                .iter()
-                .flat_map(|option| option.attachments.iter()),
-        )
-        .chain(snapshot.groups.iter().flat_map(|group| {
-            group.attachments.iter().chain(
-                group
-                    .options
-                    .iter()
-                    .flat_map(|option| option.attachments.iter()),
-            )
-        }));
-    references
-        .filter_map(|attachment| attachment.remote_id.as_deref())
-        .filter_map(|value| reqwest::Url::parse(value).ok())
-        .filter(|url| {
-            url.scheme() == "https"
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-        })
-        .map(String::from)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .take(64)
-        .collect()
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum AiMediaKind {
+    Image,
+    File,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct AiMediaInput {
+    kind: AiMediaKind,
+    label: String,
+    url: String,
+}
+
+fn readable_media_urls(snapshot: &QuestionSnapshot, question: &Question) -> Vec<AiMediaInput> {
+    let mut media = BTreeSet::new();
+    collect_labeled_attachments(&mut media, "question stem", &question.attachments);
+    for option in &question.options {
+        collect_labeled_attachments(
+            &mut media,
+            &format!("question option {}", option.id),
+            &option.attachments,
+        );
+    }
+    for group in &snapshot.groups {
+        collect_labeled_attachments(
+            &mut media,
+            &format!("shared material group {}", group.id),
+            &group.attachments,
+        );
+        for option in &group.options {
+            collect_labeled_attachments(
+                &mut media,
+                &format!("shared group {} option {}", group.id, option.id),
+                &option.attachments,
+            );
+        }
+    }
+    media.into_iter().take(64).collect()
+}
+
+fn collect_labeled_attachments(
+    output: &mut BTreeSet<AiMediaInput>,
+    owner: &str,
+    attachments: &[QuestionAttachment],
+) {
+    for (index, attachment) in attachments.iter().enumerate() {
+        let kind = match attachment.kind {
+            QuestionAttachmentKind::Image | QuestionAttachmentKind::Formula => AiMediaKind::Image,
+            QuestionAttachmentKind::File => AiMediaKind::File,
+            QuestionAttachmentKind::Audio
+            | QuestionAttachmentKind::Video
+            | QuestionAttachmentKind::Other => continue,
+        };
+        let Some(url) = attachment.remote_id.as_deref().and_then(readable_media_url) else {
+            continue;
+        };
+        output.insert(AiMediaInput {
+            kind,
+            label: format!("Media {} belongs to {owner}.", index + 1),
+            url,
+        });
+    }
+}
+
+fn readable_media_url(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value).ok()?;
+    (url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then(|| String::from(url))
 }
 
 fn build_prompt(
@@ -1900,7 +1952,11 @@ mod tests {
             &config.gpt_router,
             &route,
             "question",
-            &["https://p.ananas.chaoxing.com/image.png".to_owned()],
+            &[AiMediaInput {
+                kind: AiMediaKind::Image,
+                label: "Media 1 belongs to question option B.".to_owned(),
+                url: "https://p.ananas.chaoxing.com/image.png".to_owned(),
+            }],
             false,
         );
 
@@ -1911,9 +1967,46 @@ mod tests {
         assert_eq!(body.pointer("/text/format/strict"), Some(&json!(true)));
         assert_eq!(
             body.pointer("/input/1/content/1/type"),
+            Some(&json!("input_text"))
+        );
+        assert_eq!(
+            body.pointer("/input/1/content/1/text"),
+            Some(&json!("Media 1 belongs to question option B."))
+        );
+        assert_eq!(
+            body.pointer("/input/1/content/2/type"),
             Some(&json!("input_image"))
         );
         assert_eq!(body.get("store"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn responses_keep_file_ownership_next_to_the_file_input() {
+        let config = AiConfig::default();
+        let route = config.economy.untimed;
+        let (_url, body) = request_body(
+            &config.gpt_router,
+            &route,
+            "question",
+            &[AiMediaInput {
+                kind: AiMediaKind::File,
+                label: "Media 1 belongs to shared material group 7.".to_owned(),
+                url: "https://example.test/material.pdf".to_owned(),
+            }],
+            false,
+        );
+        assert_eq!(
+            body.pointer("/input/1/content/1/text"),
+            Some(&json!("Media 1 belongs to shared material group 7."))
+        );
+        assert_eq!(
+            body.pointer("/input/1/content/2/type"),
+            Some(&json!("input_file"))
+        );
+        assert_eq!(
+            body.pointer("/input/1/content/2/file_url"),
+            Some(&json!("https://example.test/material.pdf"))
+        );
     }
 
     #[test]
