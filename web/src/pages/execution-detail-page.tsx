@@ -15,7 +15,7 @@ import { formatTimestamp, shortId } from "@/lib/format.ts";
 export function ExecutionDetailPage() {
   const { executionId = "" } = useParams();
   const queryClient = useQueryClient();
-  const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting">("connecting");
+  const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "reconnecting">("idle");
   const detail = useQuery({
     queryKey: ["executions", executionId],
     enabled: Boolean(executionId),
@@ -28,7 +28,10 @@ export function ExecutionDetailPage() {
   });
 
   useEffect(() => {
-    if (!executionId) return;
+    if (!executionId || !detail.data) {
+      setStreamState("idle");
+      return;
+    }
     const controller = new AbortController();
     let active = true;
 
@@ -59,7 +62,7 @@ export function ExecutionDetailPage() {
 
     void consume().catch(() => { if (active) setStreamState("reconnecting"); });
     return () => { active = false; controller.abort(); };
-  }, [executionId, queryClient]);
+  }, [detail.data?.execution.id, executionId, queryClient]);
 
   return (
     <PageShell title="执行详情" description={`执行 ${shortId(executionId)} 的状态、尝试与 Core 日志。`}>
@@ -79,7 +82,7 @@ export function ExecutionDetailPage() {
           {detail.data.next_question_snapshot_id ? <Card><CardHeader><CardTitle>连续题目已就绪</CardTitle></CardHeader><CardContent className="flex flex-wrap items-center gap-3"><p className="text-sm text-muted-foreground">本次提交已物化下一道不可变题目快照，可继续审核并提交。</p><Link className={buttonVariants()} to={`/tasks/${detail.data.execution.task_id}/question-snapshots/${detail.data.next_question_snapshot_id}`}>进入下一题</Link></CardContent></Card> : null}
         </>
       ) : null}
-      <Card><CardHeader className="flex-row items-center justify-between"><CardTitle>运行日志</CardTitle><div className="flex items-center gap-2 text-xs text-muted-foreground"><span className={`size-2 rounded-full ${streamState === "live" ? "bg-emerald-500" : streamState === "reconnecting" ? "bg-amber-500" : "bg-slate-400"}`} />{streamState === "live" ? "Core SSE 实时" : streamState === "reconnecting" ? "正在重连并重同步" : "正在连接"}</div></CardHeader><CardContent>
+      <Card><CardHeader className="flex-row items-center justify-between"><CardTitle>运行日志</CardTitle><div className="flex items-center gap-2 text-xs text-muted-foreground"><span className={`size-2 rounded-full ${streamState === "live" ? "bg-emerald-500" : streamState === "reconnecting" ? "bg-amber-500" : "bg-slate-400"}`} />{streamState === "live" ? "Core SSE 实时" : streamState === "reconnecting" ? "正在重连并重同步" : streamState === "connecting" ? "正在连接" : "等待有效执行"}</div></CardHeader><CardContent>
         <div className="max-h-[32rem] overflow-auto rounded-lg bg-slate-950 p-4 font-mono text-xs text-slate-100">
           {logs.data?.items.map((event, index) => <div key={`${event.timestamp}-${index}`} className="grid gap-2 border-b border-slate-800 py-2 sm:grid-cols-[10rem_5rem_9rem_1fr]"><span className="text-slate-400">{formatTimestamp(event.timestamp)}</span><span>{event.level}</span><span className="text-cyan-300">{event.stage}</span><span className="whitespace-pre-wrap break-words">{event.message}</span></div>)}
           {!logs.data?.items.length ? <div className="text-slate-400">暂无日志；页面会自动刷新。</div> : null}
