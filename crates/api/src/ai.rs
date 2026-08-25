@@ -233,13 +233,62 @@ async fn record_ai_usage(
     usage: AiRemoteUsage,
 ) -> Result<(), ApiError> {
     let estimated_cost = estimate_ai_cost(&state.database, &usage, client).await?;
-    let settlement_status = if estimated_cost == 0 { "not_billable" } else { "pending" };
+    let billable = estimated_cost > 0 && outcome == "succeeded";
+    let settlement_status = if !billable {
+        "not_billable"
+    } else {
+        "settled"
+    };
+    let usage_id = asterism_domain::AnswerCandidateId::new().to_string();
+    let mut transaction = state.database.pool().begin().await.map_err(ApiError::internal)?;
+    if billable {
+        sqlx::query(
+            "INSERT INTO credit_accounts (user_id, available, reserved, updated_at) \
+             VALUES (?, 0, 0, ?) ON CONFLICT(user_id) DO NOTHING",
+        )
+        .bind(owner_id.to_string())
+        .bind(Utc::now())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+        let changed = sqlx::query(
+            "UPDATE credit_accounts SET available = available - ?, updated_at = ? \
+             WHERE user_id = ? AND available >= ?",
+        )
+        .bind(i64::try_from(estimated_cost).unwrap_or(i64::MAX))
+        .bind(Utc::now())
+        .bind(owner_id.to_string())
+        .bind(i64::try_from(estimated_cost).unwrap_or(i64::MAX))
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+        if changed.rows_affected() != 1 {
+            return Err(ApiError::conflict(
+                "insufficient_credits",
+                "insufficient credits for the AI request",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO credit_transactions \
+             (id, user_id, amount, transaction_type, task_id, execution_id, operator_id, reason, created_at) \
+             VALUES (?, ?, ?, 'ai_usage', ?, NULL, NULL, ?, ?)",
+        )
+        .bind(asterism_domain::CreditTransactionId::new().to_string())
+        .bind(owner_id.to_string())
+        .bind(-i64::try_from(estimated_cost).unwrap_or(i64::MAX))
+        .bind(task_id.map(|id| id.to_string()))
+        .bind(format!("AI usage: {}", client.route.model))
+        .bind(Utc::now())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    }
     sqlx::query(
         "INSERT INTO ai_usage_records \
          (id, owner_user_id, task_id, provider_endpoint, model, profile, route, input_chars, output_chars, remote_input_tokens, remote_output_tokens, outcome, created_at, estimated_cost, settlement_status) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(asterism_domain::AnswerCandidateId::new().to_string())
+    .bind(usage_id)
     .bind(owner_id.to_string())
     .bind(task_id.map(|id| id.to_string()))
     .bind(usage.endpoint.as_deref().unwrap_or(&client.route.endpoint))
@@ -254,9 +303,10 @@ async fn record_ai_usage(
     .bind(Utc::now())
     .bind(i64::try_from(estimated_cost).unwrap_or(i64::MAX))
     .bind(settlement_status)
-    .execute(state.database.pool())
+    .execute(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
+    transaction.commit().await.map_err(ApiError::internal)?;
     Ok(())
 }
 
