@@ -116,6 +116,18 @@ pub(super) async fn generate_ai_answer_candidates(
             .map(|record| &record.candidate)
             .collect::<Vec<_>>();
         let generated = client.answer(&snapshot, question, &evidence).await?;
+        record_ai_usage(
+            &state,
+            owner_id,
+            Some(task_id),
+            &client,
+            prompt_len(&snapshot, question, &evidence),
+            serde_json::to_string(&generated.answer)
+                .map(|value| value.len())
+                .unwrap_or_default(),
+            "succeeded",
+        )
+        .await?;
         records.push(AnswerCandidateRecord {
             id: AnswerCandidateId::new(),
             question_snapshot_id: snapshot.id,
@@ -142,6 +154,55 @@ pub(super) async fn generate_ai_answer_candidates(
         })
         .into_response(),
     ))
+}
+
+async fn record_ai_usage(
+    state: &ApiState,
+    owner_id: asterism_domain::UserId,
+    task_id: Option<TaskId>,
+    client: &AiAnswerClient,
+    input_chars: usize,
+    output_chars: usize,
+    outcome: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO ai_usage_records \
+         (id, owner_user_id, task_id, provider_endpoint, model, profile, route, input_chars, output_chars, outcome, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(asterism_domain::AnswerCandidateId::new().to_string())
+    .bind(owner_id.to_string())
+    .bind(task_id.map(|id| id.to_string()))
+    .bind(&client.route.endpoint)
+    .bind(&client.route.model)
+    .bind(client.profile_name)
+    .bind(route_name(&client.route))
+    .bind(i64::try_from(input_chars).unwrap_or(i64::MAX))
+    .bind(i64::try_from(output_chars).unwrap_or(i64::MAX))
+    .bind(outcome)
+    .bind(Utc::now())
+    .execute(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+fn route_name(route: &AiModelRoute) -> &'static str {
+    if route.timeout_seconds <= 30 {
+        "timed"
+    } else {
+        "untimed"
+    }
+}
+
+fn prompt_len(
+    snapshot: &QuestionSnapshot,
+    question: &Question,
+    evidence: &[&AnswerCandidate],
+) -> usize {
+    build_prompt(snapshot, question, evidence)
+        .map(|value| value.len())
+        .unwrap_or_default()
 }
 
 fn parse_question_ids(values: &[String]) -> Result<BTreeSet<QuestionId>, ApiError> {
