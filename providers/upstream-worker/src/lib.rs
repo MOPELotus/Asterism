@@ -2649,10 +2649,6 @@ fn decode_worker_answers(value: &SecretValue) -> ProviderResult<ChaoxingWorkerAn
     })
 }
 
-fn decode_chaoxing_answers(value: &SecretValue) -> ProviderResult<ChaoxingWorkerAnswerInvocation> {
-    decode_worker_answers(value)
-}
-
 fn valid_worker_answer_value(value: &Value, depth: usize) -> bool {
     if depth > 4 {
         return false;
@@ -3905,22 +3901,22 @@ mod tests {
             }))
             .unwrap(),
         );
-        let decoded = decode_chaoxing_answers(&input).unwrap();
+        let decoded = decode_worker_answers(&input).unwrap();
         assert_eq!(decoded.answers.len(), 3);
         assert_eq!(decoded.mode, "submit");
         let save = SecretValue::new(
             br#"{"answers":[{"remote_id":"q-1","value":"A"}],"mode":"save"}"#.to_vec(),
         );
-        assert_eq!(decode_chaoxing_answers(&save).unwrap().mode, "save");
+        assert_eq!(decode_worker_answers(&save).unwrap().mode, "save");
         assert!(
-            decode_chaoxing_answers(&SecretValue::new(
+            decode_worker_answers(&SecretValue::new(
                 br#"{"answers":[{"remote_id":"q-1","value":"A"},{"remote_id":"q-1","value":"B"}]}"#
                     .to_vec(),
             ))
             .is_err()
         );
         assert!(
-            decode_chaoxing_answers(&SecretValue::new(
+            decode_worker_answers(&SecretValue::new(
                 br#"{"answers":[{"remote_id":"q-1","value":null}],"unsafe":true}"#.to_vec(),
             ))
             .is_err()
