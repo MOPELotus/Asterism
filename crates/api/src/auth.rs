@@ -200,6 +200,31 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn require_scan_schedule_manage(
+        &self,
+    ) -> Result<ProviderSettingsAuthority, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::ManageSystem) => {
+                Ok(ProviderSettingsAuthority::System)
+            }
+            AuthIdentity::Web { principal, .. }
+                if principal.has(Permission::ManageOwnAccounts)
+                    || principal.has(Permission::ManageProviders) =>
+            {
+                Ok(ProviderSettingsAuthority::Owner(principal.user_id))
+            }
+            AuthIdentity::Service(token)
+                if token.scopes.contains(&ServiceScope::ProviderManage) =>
+            {
+                token
+                    .owner_user_id
+                    .map(ProviderSettingsAuthority::Owner)
+                    .ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     pub(super) fn require_task_read(&self) -> Result<UserId, ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. } if principal.has(Permission::ReadOwnTasks) => {
@@ -1015,5 +1040,21 @@ mod tests {
         let other_owner_id = UserId::new();
         assert!(ProviderSettingsAuthority::System.permits_owner(other_owner_id));
         assert!(!ProviderSettingsAuthority::Owner(owner_id).permits_owner(other_owner_id));
+    }
+
+    #[test]
+    fn account_owners_can_manage_their_scan_schedule_but_not_global_provider_settings() {
+        let owner_id = UserId::new();
+        let auth = AuthContext {
+            identity: AuthIdentity::Web {
+                session_id: WebSessionId::new(),
+                principal: Principal::from_roles(owner_id, [Role::User], []),
+            },
+        };
+        assert_eq!(
+            auth.require_scan_schedule_manage().unwrap(),
+            ProviderSettingsAuthority::Owner(owner_id)
+        );
+        assert!(auth.require_provider_settings_manage().is_err());
     }
 }
