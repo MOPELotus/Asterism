@@ -1060,7 +1060,8 @@ pub fn openapi_document() -> Value {
                     "properties": {
                         "profile": {"type": "string", "enum": ["economy", "gpt_only"], "default": "economy"},
                         "route": {"type": "string", "enum": ["timed", "untimed", "escalation"], "default": "untimed"},
-                        "question_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "maxItems": 100, "default": []}
+                        "question_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "maxItems": 100, "default": []},
+                        "execution_id": {"type": "string", "format": "uuid", "description": "Optional owner/task-bound Execution whose frozen AI profile and route override this request."}
                     }
                 }}}},
                 "responses": {"200": {"description": "AI candidates saved in the local deployment cache"}, "400": {"description": "Question selection or request is invalid"}, "404": {"description": "Snapshot not found"}, "502": {"description": "Model returned invalid output"}, "503": {"description": "Model endpoint, key, or service is unavailable"}}

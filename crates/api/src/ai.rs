@@ -57,6 +57,7 @@ pub(super) struct GenerateAiAnswerCandidatesRequest {
     profile: AiAnswerProfile,
     route: AiAnswerRoute,
     question_ids: Vec<String>,
+    execution_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -107,7 +108,39 @@ pub(super) async fn generate_ai_answer_candidates(
         .list_owned_answer_candidates(owner_id, snapshot_id)
         .await
         .map_err(ApiError::internal)?;
-    let client = AiAnswerClient::new(state.ai_config().await, request.profile, request.route)?;
+    let (profile, route) = if let Some(execution_id) = request.execution_id.as_deref() {
+        let execution_id = asterism_domain::ExecutionId::from_str(execution_id).map_err(|_| {
+            ApiError::bad_request("invalid_execution_id", "execution ID is invalid")
+        })?;
+        let selection = sqlx::query_as::<_, (String, String)>(
+            "SELECT selection.profile, selection.route \
+             FROM execution_ai_selections AS selection \
+             INNER JOIN executions AS execution ON execution.id = selection.execution_id \
+             WHERE selection.execution_id = ? AND execution.task_id = ? AND execution.requested_by = ?",
+        )
+        .bind(execution_id.to_string())
+        .bind(task_id.to_string())
+        .bind(owner_id.to_string())
+        .fetch_optional(state.database.pool())
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("execution_ai_selection_not_found"))?;
+        let profile = match selection.0.as_str() {
+            "economy" => AiAnswerProfile::Economy,
+            "gpt_only" => AiAnswerProfile::GptOnly,
+            _ => return Err(ApiError::internal("stored AI profile is invalid")),
+        };
+        let route = match selection.1.as_str() {
+            "timed" => AiAnswerRoute::Timed,
+            "untimed" => AiAnswerRoute::Untimed,
+            "escalation" => AiAnswerRoute::Escalation,
+            _ => return Err(ApiError::internal("stored AI route is invalid")),
+        };
+        (profile, route)
+    } else {
+        (request.profile, request.route)
+    };
+    let client = AiAnswerClient::new(state.ai_config().await, profile, route)?;
     let mut records = Vec::with_capacity(questions.len());
     for question in questions {
         let evidence = existing
