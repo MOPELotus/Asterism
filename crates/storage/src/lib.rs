@@ -124,7 +124,7 @@ pub use repository::{
     CourseEnrollmentRepository, CourseEnrollmentRepositoryFactory, CourseProgressRepository,
     CourseRuntimeRepository, CreditQueryRepository, CreditRepository, CreditReservationDetail,
     CreditReservationPage, CreditTransactionPage, DispatchedBrowserBridgeCommand,
-    ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
+    ExecutionAiSelection, ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
     ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationPlanRecord,
     ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,

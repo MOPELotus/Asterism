@@ -2773,6 +2773,13 @@ pub struct ExecutionBillingReservation<'a> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionAiSelection {
+    pub profile: String,
+    pub route: String,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRuntimeSettingsSnapshot {
     pub provider_id: ProviderId,
     pub resolved: ResolvedProviderRuntimeSettings,
@@ -2835,6 +2842,7 @@ pub struct ExecutionScheduleRequest<'a> {
     /// the Execution and its capability plan.
     pub invocation_draft_id: Option<ExecutionInvocationDraftId>,
     pub billing: Option<ExecutionBillingReservation<'a>>,
+    pub ai_selection: Option<ExecutionAiSelection>,
     pub runtime_settings: Option<ExecutionRuntimeSettingsResolution<'a>>,
     pub strict_completion_retry: Option<ExecutionStrictCompletionRetryRequest>,
     pub score_improvement_retake: Option<ExecutionScoreImprovementRetakeRequest>,

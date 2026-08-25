@@ -342,6 +342,18 @@ impl ExecutionRepository for SqliteExecutionRepository {
         if let Some(billing) = request.billing.as_ref() {
             insert_credit_reservation(&mut transaction, billing, request.correlation_id).await?;
         }
+        if let Some(selection) = request.ai_selection.as_ref() {
+            sqlx::query(
+                "INSERT INTO execution_ai_selections (execution_id, profile, route, created_at) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(execution.id.to_string())
+            .bind(&selection.profile)
+            .bind(&selection.route)
+            .bind(encode_timestamp(selection.created_at))
+            .execute(&mut *transaction)
+            .await?;
+        }
 
         let job_id = ScheduleId::new();
         let job_kind = ScheduledJobKind::Execution {
@@ -5342,6 +5354,7 @@ mod tests {
             provider_plan_artifact: None,
             invocation_draft_id: None,
             billing: None,
+            ai_selection: None,
             runtime_settings: None,
             strict_completion_retry: None,
             score_improvement_retake: None,
@@ -7956,6 +7969,7 @@ mod tests {
             provider_plan_artifact: None,
             invocation_draft_id: None,
             billing: None,
+            ai_selection: None,
             runtime_settings: None,
             strict_completion_retry: None,
             score_improvement_retake: None,

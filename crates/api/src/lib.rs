@@ -1873,6 +1873,16 @@ fn task_execute_path() -> Value {
                         "minLength": 1,
                         "maxLength": 512,
                         "description": "Human-readable billing reason persisted with the quote."
+                    },
+                    "ai_profile": {
+                        "type": "string",
+                        "enum": ["economy", "gpt_only"],
+                        "description": "Optional administrator-only AI combination override frozen onto this Execution."
+                    },
+                    "ai_route": {
+                        "type": "string",
+                        "enum": ["timed", "untimed", "escalation"],
+                        "description": "Optional administrator-only AI route override frozen onto this Execution."
                     }
                 }
             }}}

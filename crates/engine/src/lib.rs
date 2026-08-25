@@ -111,9 +111,9 @@ pub use execution_job::{
     ScheduledExecutionRunner,
 };
 pub use execution_request::{
-    ExecuteTaskCommand, ExecutionBillingInput, ExecutionInvocationDraftResult,
-    ExecutionRequestError, ExecutionRequestResult, ExecutionRequestService,
-    PrepareExecutionInvocationCommand,
+    ExecuteTaskCommand, ExecutionAiSelectionInput, ExecutionBillingInput,
+    ExecutionInvocationDraftResult, ExecutionRequestError, ExecutionRequestResult,
+    ExecutionRequestService, PrepareExecutionInvocationCommand,
 };
 pub use execution_worker::{
     ExecutionSchedulerConfig, ExecutionSchedulerTickReport, ExecutionSchedulerWorker,

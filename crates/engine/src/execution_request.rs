@@ -39,6 +39,7 @@ pub struct ExecuteTaskCommand {
     pub strict_completion_retry: Option<ExecutionStrictCompletionRetryRequest>,
     pub score_improvement_retake: Option<ExecutionScoreImprovementRetakeRequest>,
     pub billing: Option<ExecutionBillingInput>,
+    pub ai_selection: Option<ExecutionAiSelectionInput>,
     pub request_source: RequestSource,
     pub actor: AuditActor,
     pub idempotency_key: String,
@@ -51,6 +52,12 @@ pub struct ExecutionBillingInput {
     pub amount: CreditAmount,
     pub pricing_revision: String,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionAiSelectionInput {
+    pub profile: String,
+    pub route: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -498,6 +505,13 @@ where
                 provider_plan_artifact: provider_plan_artifact.as_ref(),
                 invocation_draft_id: command.invocation_draft_id,
                 billing,
+                ai_selection: command.ai_selection.as_ref().map(|selection| {
+                    asterism_storage::ExecutionAiSelection {
+                        profile: selection.profile.clone(),
+                        route: selection.route.clone(),
+                        created_at: command.requested_at,
+                    }
+                }),
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,
                     schema: &runtime_settings_schema,

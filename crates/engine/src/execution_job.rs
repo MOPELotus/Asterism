@@ -8867,6 +8867,7 @@ mod tests {
                 provider_plan_artifact: None,
                 invocation_draft_id: None,
                 billing: None,
+                ai_selection: None,
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,
                     schema: &schema,

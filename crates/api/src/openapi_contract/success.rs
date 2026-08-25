@@ -1364,12 +1364,14 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "progress",
                     "attempts",
                     "next_question_snapshot_id",
+                    "ai_selection",
                 ],
                 json!({
                     "execution": schema_ref("Execution"),
                     "progress": {"oneOf": [schema_ref("ExecutionProgress"), {"type": "null"}]},
                     "attempts": {"type": "array", "items": schema_ref("ExecutionAttempt")},
-                    "next_question_snapshot_id": {"type": ["string", "null"], "format": "uuid", "description": "The immutable next Question snapshot materialized by a successful stepwise submission."}
+                    "next_question_snapshot_id": {"type": ["string", "null"], "format": "uuid", "description": "The immutable next Question snapshot materialized by a successful stepwise submission."},
+                    "ai_selection": {"type": ["array", "null"], "description": "Frozen administrator-selected AI combination and route.", "items": {"type": "string"}}
                 }),
             ),
         ),

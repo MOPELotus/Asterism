@@ -12,18 +12,19 @@ use asterism_domain::{
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
     ConservativeAnswerResolverService, CreateManualAnswerCandidateCommand, ExecuteTaskCommand,
-    ExecutionBillingInput, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
-    ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
-    ManualAnswerCandidateError, ManualAnswerCandidateService, OptInScoreImprovementCommand,
-    PrepareExecutionInvocationCommand, ProviderAnswerResolveError, ProviderAnswerResolveService,
-    ProviderQuestionReadError, ProviderQuestionReadResult, ProviderQuestionReadService,
-    ProviderTaskBrowserSessionError, ProviderTaskBrowserSessionService, ProviderTaskDetailError,
-    ProviderTaskDetailService, ProviderTaskDurationError, ProviderTaskDurationService,
-    ProviderTaskProgressError, ProviderTaskProgressService, ReadTaskBrowserSessionCommand,
-    ReadTaskDetailCommand, ReadTaskDurationCommand, ReadTaskProgressCommand,
-    ReadTaskQuestionsCommand, ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand,
-    ScoreImprovementOptInError, ScoreImprovementOptInService, SubmissionDraftBuildError,
-    SubmissionDraftBuildService, TaskLifecycleCommand, TaskLifecycleError, TaskLifecycleService,
+    ExecutionAiSelectionInput, ExecutionBillingInput, ExecutionRequestError,
+    ExecutionRequestService, FormalAssessmentPolicy, ImportLocalAnswerCandidatesCommand,
+    LocalAnswerCacheError, LocalAnswerCacheService, ManualAnswerCandidateError,
+    ManualAnswerCandidateService, OptInScoreImprovementCommand, PrepareExecutionInvocationCommand,
+    ProviderAnswerResolveError, ProviderAnswerResolveService, ProviderQuestionReadError,
+    ProviderQuestionReadResult, ProviderQuestionReadService, ProviderTaskBrowserSessionError,
+    ProviderTaskBrowserSessionService, ProviderTaskDetailError, ProviderTaskDetailService,
+    ProviderTaskDurationError, ProviderTaskDurationService, ProviderTaskProgressError,
+    ProviderTaskProgressService, ReadTaskBrowserSessionCommand, ReadTaskDetailCommand,
+    ReadTaskDurationCommand, ReadTaskProgressCommand, ReadTaskQuestionsCommand,
+    ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand, ScoreImprovementOptInError,
+    ScoreImprovementOptInService, SubmissionDraftBuildError, SubmissionDraftBuildService,
+    TaskLifecycleCommand, TaskLifecycleError, TaskLifecycleService,
 };
 use asterism_provider_api::{
     BrowserSessionSpec, MAX_PROVIDER_EXECUTION_PRIVATE_INPUT_BYTES, ProviderErrorKind,
@@ -1059,6 +1060,31 @@ pub(super) async fn execute_task(
             ));
         }
     };
+    let ai_selection = match (request.ai_profile, request.ai_route) {
+        (None, None) => Some(ExecutionAiSelectionInput {
+            profile: "economy".to_owned(),
+            route: "untimed".to_owned(),
+        }),
+        (Some(profile), Some(route)) => {
+            auth.require_pricing_manage()
+                .map_err(|_| ApiError::forbidden())?;
+            if !matches!(profile.as_str(), "economy" | "gpt_only")
+                || !matches!(route.as_str(), "timed" | "untimed" | "escalation")
+            {
+                return Err(ApiError::bad_request(
+                    "invalid_ai_selection",
+                    "AI profile or route is invalid",
+                ));
+            }
+            Some(ExecutionAiSelectionInput { profile, route })
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "incomplete_ai_selection",
+                "AI profile and route must be supplied together",
+            ));
+        }
+    };
     let invocation_store = state.secret_store.clone();
     let mut service = ExecutionRequestService::new(
         SqliteTaskQueryRepository::new(state.database.clone()),
@@ -1097,6 +1123,7 @@ pub(super) async fn execute_task(
             strict_completion_retry,
             score_improvement_retake,
             billing,
+            ai_selection,
             request_source,
             actor: auth.audit_actor(),
             idempotency_key: idempotency_key.to_owned(),
@@ -2421,6 +2448,8 @@ pub(super) struct ExecuteTaskRequest {
     billing_amount: Option<u64>,
     billing_pricing_revision: Option<String>,
     billing_reason: Option<String>,
+    ai_profile: Option<String>,
+    ai_route: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

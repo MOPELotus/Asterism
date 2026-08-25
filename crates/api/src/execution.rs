@@ -82,12 +82,20 @@ pub(super) async fn get_execution(
         .ok_or_else(|| ApiError::not_found("execution_not_found"))?;
     let next_question_snapshot_id =
         find_next_question_snapshot_id(&state.database, execution_id).await?;
+    let ai_selection = sqlx::query_as::<_, (String, String)>(
+        "SELECT profile, route FROM execution_ai_selections WHERE execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
     Ok(crate::auth::no_store(
         Json(ExecutionDetailResponse {
             execution: detail.execution,
             progress: detail.progress,
             attempts: detail.attempts,
             next_question_snapshot_id,
+            ai_selection,
         })
         .into_response(),
     ))
@@ -151,11 +159,19 @@ pub(super) async fn stream_execution(
         .ok_or_else(|| ApiError::not_found("execution_not_found"))?;
     let next_question_snapshot_id =
         find_next_question_snapshot_id(&state.database, execution_id).await?;
+    let ai_selection = sqlx::query_as::<_, (String, String)>(
+        "SELECT profile, route FROM execution_ai_selections WHERE execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(state.database.pool())
+    .await
+    .map_err(ApiError::internal)?;
     let snapshot = ExecutionDetailResponse {
         execution: detail.execution,
         progress: detail.progress,
         attempts: detail.attempts,
         next_question_snapshot_id,
+        ai_selection,
     };
     let snapshot = Event::default()
         .event("snapshot")
@@ -246,6 +262,7 @@ struct ExecutionDetailResponse {
     progress: Option<ExecutionProgress>,
     attempts: Vec<ExecutionAttempt>,
     next_question_snapshot_id: Option<QuestionSnapshotId>,
+    ai_selection: Option<(String, String)>,
 }
 
 async fn find_next_question_snapshot_id(
