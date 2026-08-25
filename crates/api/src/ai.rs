@@ -1556,10 +1556,10 @@ fn collect_labeled_attachments(
     for (index, attachment) in attachments.iter().enumerate() {
         let kind = match attachment.kind {
             QuestionAttachmentKind::Image | QuestionAttachmentKind::Formula => AiMediaKind::Image,
-            QuestionAttachmentKind::File => AiMediaKind::File,
-            QuestionAttachmentKind::Audio
+            QuestionAttachmentKind::File
+            | QuestionAttachmentKind::Audio
             | QuestionAttachmentKind::Video
-            | QuestionAttachmentKind::Other => continue,
+            | QuestionAttachmentKind::Other => AiMediaKind::File,
         };
         let Some(url) = attachment.remote_id.as_deref().and_then(readable_media_url) else {
             continue;
