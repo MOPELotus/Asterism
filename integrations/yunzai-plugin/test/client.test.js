@@ -41,7 +41,7 @@ test("QQ assertion uses the gateway token and exact sender identity", async () =
     token: "ast_st_gateway",
     fetchImpl: async (url, options) => {
       request = { url: String(url), options }
-      return new Response('{"user_id":"u1","qq":"123456","access_token":"ast_ws_user"}', { status: 200 })
+      return new Response('{"user_id":"u1","qq":"123456","access_token":"ast_ws_user","web_login_path":"/auth/qq/ticket"}', { status: 200 })
     },
   })
   await client.assertQq("123456")
@@ -52,6 +52,26 @@ test("QQ assertion uses the gateway token and exact sender identity", async () =
     create_if_missing: true,
     return_to: "/",
   })
+})
+
+test("QQ assertion preserves the safe confirmation deep-link without exposing the user bearer", async () => {
+  let request
+  const client = new AsterismClient({
+    apiUrl: "http://asterism.test",
+    token: "ast_st_gateway",
+    fetchImpl: async (url, options) => {
+      request = { url: String(url), options }
+      return new Response(JSON.stringify({
+        user_id: "u1",
+        qq: "123456",
+        access_token: "ast_ws_user",
+        web_login_path: "/api/v1/integrations/qq/web-login/ticket-secret",
+      }), { status: 200 })
+    },
+  })
+  const result = await client.assertQq("123456", true, "/tasks/formal-1?confirm=1")
+  assert.equal(JSON.parse(request.options.body).return_to, "/tasks/formal-1?confirm=1")
+  assert.equal(result.web_login_path.includes(result.access_token), false)
 })
 
 test("API errors expose only sanitized code and request id", async () => {

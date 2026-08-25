@@ -321,4 +321,23 @@ mod tests {
             assert!(parse_qq(invalid).is_err(), "accepted {invalid}");
         }
     }
+
+    #[test]
+    fn qq_login_return_to_is_relative_and_never_external() {
+        assert_eq!(validate_return_to("/").unwrap(), "/");
+        assert_eq!(
+            validate_return_to("/tasks/task-1?confirm=1").unwrap(),
+            "/tasks/task-1?confirm=1"
+        );
+        for invalid in [
+            "https://evil.example/steal",
+            "//evil.example/steal",
+            "tasks/task-1",
+            "/tasks/\nnext",
+            "/tasks/🚀",
+        ] {
+            assert!(validate_return_to(invalid).is_err(), "accepted {invalid:?}");
+        }
+        assert!(validate_return_to(&format!("/{}", "x".repeat(2048))).is_err());
+    }
 }
