@@ -61,6 +61,9 @@ export function PricingCatalogPage() {
   return <div className="mx-auto max-w-5xl space-y-6">
     <div><h1 className="text-2xl font-semibold">点数定价目录</h1><p className="mt-1 text-sm text-muted-foreground">仅具备定价管理权限的管理员可见。API key、用户余额和历史报价不会写入这里。</p></div>
     {status ? <Alert><AlertTitle>定价状态</AlertTitle><AlertDescription>{status}</AlertDescription></Alert> : null}
+    <Card><CardHeader><CardTitle>充值联系信息</CardTitle></CardHeader><CardContent>
+      <p className="text-sm text-muted-foreground">可在下方 JSON 的 <code>recharge_contact</code> 字段填写管理员联系方式；普通用户页面只展示这段文本，不会暴露凭据。</p>
+    </CardContent></Card>
     <Card><CardHeader><CardTitle>部署级定价版本（JSON）</CardTitle></CardHeader><CardContent className="space-y-3">
       <p className="text-sm text-muted-foreground">支持 <code>default_amount</code>、按 capability 的 <code>capability_amounts</code>、<code>reason</code> 和生效时间。金额为部署内部点数，不是人民币。</p>
       <textarea className="min-h-[28rem] w-full rounded-md border bg-muted/20 p-3 font-mono text-xs" value={value} disabled={loading} onChange={(event) => setValue(event.target.value)} spellCheck={false} />
