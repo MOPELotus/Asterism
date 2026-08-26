@@ -25,17 +25,23 @@ IDENTIFIER_KEYS = {
     "letter",
     "key",
 }
-SEMANTIC_TOP_LEVEL = {
-    "kind",
-    "prompt",
-    "material",
-    "materials",
-    "context",
-    "shared_context",
-    "attachments",
-    "options",
-    "native_shape",
+EPHEMERAL_KEYS = {
+    "answer",
+    "answer_evidence",
+    "correct_answer",
+    "learner_response",
+    "submitted",
+    "submitted_answer",
+    "submitted_value",
+    "score",
+    "status",
+    "session",
+    "credentials",
+    "password",
+    "cookie",
+    "token",
 }
+OPTION_KEYS = {"options", "choices", "choice", "option_list"}
 SIGNED_URL_KEYS = {
     "token",
     "sign",
@@ -76,7 +82,11 @@ def _semantic_value(value: Any, *, option: bool = False) -> Any:
         for raw_key, item in sorted(value.items(), key=lambda pair: str(pair[0]).casefold()):
             key = str(raw_key)
             lowered = key.casefold().replace("-", "_")
-            if lowered in IDENTIFIER_KEYS or lowered in SIGNED_URL_KEYS:
+            if (
+                lowered in IDENTIFIER_KEYS
+                or lowered in SIGNED_URL_KEYS
+                or lowered in EPHEMERAL_KEYS
+            ):
                 continue
             result[key] = _semantic_value(item, option=option)
         return result
@@ -95,17 +105,20 @@ def option_semantics(options: Any) -> list[Any]:
 
 def canonical_question(question: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for key in SEMANTIC_TOP_LEVEL:
-        if key not in question:
+    for raw_key, value in question.items():
+        key = str(raw_key)
+        lowered = key.casefold().replace("-", "_")
+        if lowered in IDENTIFIER_KEYS or lowered in EPHEMERAL_KEYS:
             continue
-        if key == "options":
+        if lowered in OPTION_KEYS:
             result[key] = sorted(
-                option_semantics(question[key]),
+                option_semantics(value),
                 key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
             )
         else:
-            result[key] = _semantic_value(question[key])
-    if not normalize_text(str(result.get("prompt") or "")):
+            result[key] = _semantic_value(value)
+    prompt = result.get("prompt") or result.get("question") or result.get("stem")
+    if not normalize_text(str(prompt or "")):
         raise ValueError("question prompt must not be empty")
     return result
 
@@ -309,7 +322,9 @@ class AnswerRepository:
                 (question_id,),
             ).fetchall()
         reusable = [row for row in rows if int(row[2] or 0) > 0 and int(row[3] or 0) == 0]
-        conflicted = any(int(row[2] or 0) > 0 and int(row[3] or 0) > 0 for row in rows)
+        has_correct = any(int(row[2] or 0) > 0 for row in rows)
+        has_incorrect = any(int(row[3] or 0) > 0 for row in rows)
+        conflicted = has_correct and has_incorrect
         unique_answers = {str(row[1]) for row in reusable}
         if conflicted or len(unique_answers) > 1:
             return ResolvedAnswer("conflict")

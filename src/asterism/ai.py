@@ -9,9 +9,11 @@ from typing import Any
 
 import httpx
 
-from .answers import AnswerRepository, question_identity
+from .answers import AnswerRepository, canonical_answer, question_identity, rebind_answer
 from .config import LocalConfigStore
 from .database import QuestionBank
+
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
 @dataclass(frozen=True)
@@ -72,9 +74,15 @@ class AIAnswerService:
         fallback_name = str(route_value.get("fallback") or "").strip()
         if fallback_name:
             try:
-                fallback = self._choice_from_route(
-                    {**route_value, "primary": fallback_name}, endpoints, "primary"
-                )
+                fallback_route = {**route_value, "primary": fallback_name}
+                # A domestic endpoint normally uses a different model name.  Do
+                # not accidentally send the primary GPT model to the fallback;
+                # use an explicit fallback_model or the endpoint's own model.
+                if route_value.get("fallback_model"):
+                    fallback_route["model"] = route_value["fallback_model"]
+                else:
+                    fallback_route.pop("model", None)
+                fallback = self._choice_from_route(fallback_route, endpoints, "primary")
                 primary = ModelChoice(
                     primary.endpoint, primary.model, primary.reasoning_effort, fallback
                 )
@@ -96,7 +104,10 @@ class AIAnswerService:
         model = str(route_value.get("model") or endpoint_value.get("model") or "")
         if not model:
             raise ValueError(f"model is not configured for endpoint: {endpoint_name}")
-        return ModelChoice(endpoint, model, str(route_value.get("reasoning_effort") or "medium"))
+        reasoning_effort = str(route_value.get("reasoning_effort") or "medium").casefold()
+        if reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(f"unsupported reasoning effort: {reasoning_effort}")
+        return ModelChoice(endpoint, model, reasoning_effort)
 
     def answer(
         self,
@@ -117,7 +128,10 @@ class AIAnswerService:
             exact = self.answers.resolve_exact(provider, identity_hash)
             if exact.status == "exact":
                 return {
-                    "answer": {"answer": exact.answer, "confidence": 1.0},
+                    "answer": {
+                        "answer": rebind_answer(exact.answer, question.get("options")),
+                        "confidence": 1.0,
+                    },
                     "source": "local_cache",
                     "cached": True,
                     "usage": {},
@@ -126,29 +140,69 @@ class AIAnswerService:
         if not force_refresh:
             cached = self.bank.get_ai_cache(cache_key)
             if cached is not None:
-                return {"answer": cached["response"], "cached": True, "usage": cached["usage"]}
-        if not choice.endpoint.base_url:
-            raise RuntimeError(f"AI endpoint {choice.endpoint.name} has no base_url configured")
-        key = choice.endpoint.resolved_key()
-        if not key:
-            raise RuntimeError(f"AI endpoint {choice.endpoint.name} has no API key")
+                response = dict(cached["response"])
+                if "answer" in response:
+                    response["answer"] = rebind_answer(response["answer"], question.get("options"))
+                return {
+                    "answer": response,
+                    "source": "ai_cache",
+                    "cached": True,
+                    "usage": cached["usage"],
+                }
+        used_choice = choice
         try:
+            if not choice.endpoint.base_url:
+                raise RuntimeError(f"AI endpoint {choice.endpoint.name} has no base_url configured")
+            key = choice.endpoint.resolved_key()
+            if not key:
+                raise RuntimeError(f"AI endpoint {choice.endpoint.name} has no API key")
             parsed, usage = self._request(question, choice, key, timeout)
-        except (httpx.HTTPError, RuntimeError):
-            if choice.fallback is None:
-                raise
+        except (httpx.HTTPError, RuntimeError) as error:
+            primary_error = RuntimeError(
+                f"AI endpoint {choice.endpoint.name} request failed or is unavailable"
+            )
             fallback = choice.fallback
+            if fallback is None:
+                raise primary_error from error
+            if not fallback.endpoint.base_url:
+                raise primary_error from error
             fallback_key = fallback.endpoint.resolved_key()
-            if not fallback.endpoint.base_url or not fallback_key:
-                raise
-            parsed, usage = self._request(question, fallback, fallback_key, timeout)
-        self.bank.put_ai_cache(cache_key, choice.endpoint.name + ":" + choice.model, parsed, usage)
+            if not fallback_key:
+                raise primary_error from error
+            try:
+                parsed, usage = self._request(question, fallback, fallback_key, timeout)
+            except (httpx.HTTPError, RuntimeError) as fallback_error:
+                raise RuntimeError(
+                    f"AI primary and fallback endpoints failed: {fallback_error}"
+                ) from fallback_error
+            used_choice = fallback
+        normalized = dict(parsed)
+        normalized["answer"] = canonical_answer(parsed.get("answer"), question.get("options"))
+        self.bank.put_ai_cache(
+            cache_key,
+            used_choice.endpoint.name + ":" + used_choice.model,
+            normalized,
+            usage,
+        )
         question_id = self.bank.question_id(provider, identity_hash)
         if question_id is not None:
             self.answers.record_candidate(
-                question_id, parsed.get("answer"), "ai", "unverified", source_ref=choice.model
+                question_id,
+                normalized["answer"],
+                "ai",
+                "unverified",
+                source_ref=used_choice.endpoint.name + ":" + used_choice.model,
             )
-        return {"answer": parsed, "cached": False, "usage": usage}
+        return {
+            "answer": {
+                **normalized,
+                "answer": rebind_answer(normalized["answer"], question.get("options")),
+            },
+            "source": "ai",
+            "model": used_choice.endpoint.name + ":" + used_choice.model,
+            "cached": False,
+            "usage": usage,
+        }
 
     def _request(
         self, question: dict[str, Any], choice: ModelChoice, key: str, timeout: float
@@ -197,7 +251,9 @@ class AIAnswerService:
             "You answer an educational question. Return only one JSON object with keys "
             "answer and confidence. answer must be the exact content needed by the question, "
             "not an explanation. Preserve blank order, matching pairs, ordering and rich-media "
-            "references. If uncertain, set confidence to 0 and answer to null."
+            "references. For subjective/discussion answers, use relevant natural plain text only: "
+            "no Markdown, labels, system commentary, test phrases, or fabricated citations. "
+            "If uncertain, set confidence to 0 and answer to null."
         )
         content = [
             {"type": "input_text", "text": json.dumps(question, ensure_ascii=False, sort_keys=True)}
@@ -212,18 +268,11 @@ class AIAnswerService:
                 "reasoning": {"effort": choice.reasoning_effort},
                 "text": {
                     "format": {
-                        "type": "json_schema",
-                        "name": "answer_candidate",
-                        "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "answer": {},
-                                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                            },
-                            "required": ["answer", "confidence"],
-                            "additionalProperties": False,
-                        },
+                        # The answer payload is intentionally provider-native
+                        # (string/list/object for different question kinds).
+                        # JSON mode keeps that shape open; parse_response still
+                        # requires the fixed outer answer/confidence envelope.
+                        "type": "json_object",
                     }
                 },
                 "store": False,
@@ -234,19 +283,7 @@ class AIAnswerService:
                 {"role": "system", "content": instruction},
                 {"role": "user", "content": cls._chat_content(question)},
             ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "answer_candidate",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {"answer": {}, "confidence": {"type": "number"}},
-                        "required": ["answer", "confidence"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
+            "response_format": {"type": "json_object"},
             "temperature": 0,
         }
 
@@ -272,18 +309,27 @@ class AIAnswerService:
                         isinstance(child, str)
                         and name in {"image", "image_url", "image_src"}
                         and child.startswith(("http://", "https://", "data:"))
-                    ) or (
-                        isinstance(child, str)
-                        and name == "url"
-                        and local_hint == "image"
-                        and child.startswith(("http://", "https://", "data:"))
                     ):
                         found.append({"type": "input_image", "image_url": child, "detail": "auto"})
                     elif (
                         isinstance(child, str)
-                        and name in {"file", "file_url", "file_data"}
-                        and child
+                        and name == "url"
+                        and local_hint in {"image", "file"}
+                        and child.startswith(("http://", "https://", "data:"))
                     ):
+                        if local_hint == "file":
+                            found.append({"type": "input_file", "file_url": child})
+                        else:
+                            found.append(
+                                {"type": "input_image", "image_url": child, "detail": "auto"}
+                            )
+                    elif (
+                        isinstance(child, str)
+                        and name in {"file", "file_url", "attachment", "attachment_url"}
+                        and child.startswith(("http://", "https://"))
+                    ):
+                        found.append({"type": "input_file", "file_url": child})
+                    elif isinstance(child, str) and name == "file_data" and child:
                         found.append({"type": "input_file", "file_data": child})
                     else:
                         visit(child, local_hint)
@@ -322,4 +368,11 @@ class AIAnswerService:
             raise RuntimeError("AI response was not valid JSON") from error
         if not isinstance(value, dict) or "answer" not in value:
             raise RuntimeError("AI response JSON must contain answer")
+        confidence = value.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0 <= confidence <= 1
+        ):
+            raise RuntimeError("AI response confidence must be a number between 0 and 1")
         return value

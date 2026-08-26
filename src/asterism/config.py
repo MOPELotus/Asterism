@@ -18,12 +18,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "primary": "gpt_router",
                     "model": "gpt-5.6-luna",
                     "fallback": "domestic_backup",
+                    "fallback_model": "deepseek-chat",
                     "reasoning_effort": "low",
                 },
                 "untimed": {
                     "primary": "gpt_router",
                     "model": "gpt-5.6-terra",
                     "fallback": "domestic_backup",
+                    "fallback_model": "deepseek-chat",
                     "reasoning_effort": "medium",
                 },
             },
@@ -54,6 +56,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "domestic_backup": {
                 "base_url": "",
                 "protocol": "responses",
+                "model": "deepseek-chat",
                 "api_key_env": "ASTERISM_DOMESTIC_AI_API_KEY",
             },
         },

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -132,3 +133,12 @@ class ProfileStateStore:
 
     def save(self, profile: Profile, name: str, value: dict[str, Any]) -> None:
         atomic_write_json(self._path(profile, name), value)
+
+    def delete_profile(self, profile: Profile) -> None:
+        """Remove generated session/state for a profile, never the account file."""
+        target = (self.paths.state / profile.provider / profile.id).resolve()
+        expected_parent = (self.paths.state / profile.provider).resolve()
+        if target.parent != expected_parent:
+            raise ValueError("refusing to remove state outside the profile directory")
+        if target.exists():
+            shutil.rmtree(target)

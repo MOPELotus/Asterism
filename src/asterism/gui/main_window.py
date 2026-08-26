@@ -111,6 +111,12 @@ class ProviderPage(QWidget):
         self.new_profile = PushButton("新建 Profile")
         self.new_profile.clicked.connect(self.create_profile)
         header.addWidget(self.new_profile)
+        self.edit_profile_button = PushButton("编辑 Profile")
+        self.edit_profile_button.clicked.connect(self.edit_profile)
+        header.addWidget(self.edit_profile_button)
+        self.delete_profile_button = PushButton("删除 Profile")
+        self.delete_profile_button.clicked.connect(self.delete_profile)
+        header.addWidget(self.delete_profile_button)
         root.addLayout(header)
 
         actions = QGridLayout()
@@ -127,6 +133,8 @@ class ProviderPage(QWidget):
             action_items.extend([("scan all", self.scan_all), ("scan status", self.scan_status)])
         if provider == "uai":
             action_items.extend([("inspect", self.inspect_task), ("duration", self.read_duration)])
+        elif provider == "welearn":
+            action_items.append(("duration", self.read_duration))
         if provider == "cidaren":
             action_items.extend(
                 [("oauth begin", self.oauth_begin), ("oauth exchange", self.oauth_exchange)]
@@ -224,6 +232,74 @@ class ProviderPage(QWidget):
             )
             dialog.close()
             self.reload_profiles()
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, self.provider, str(error))
+
+    def edit_profile(self) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog.setWindowTitle(f"{self.provider} Profile")
+        form = QFormLayout(dialog)
+        label = LineEdit(profile.label)
+        username = LineEdit(str(profile.credentials.get("username") or ""))
+        password = LineEdit()
+        password.setEchoMode(LineEdit.EchoMode.Password)
+        password.setPlaceholderText("留空则保持现有密码")
+        form.addRow("label", label)
+        form.addRow("username", username)
+        form.addRow("password", password)
+        save = PrimaryPushButton("保存")
+        form.addRow(save)
+        save.clicked.connect(
+            lambda: self._save_profile_edit(
+                dialog, profile, label.text(), username.text(), password.text()
+            )
+        )
+        dialog.resize(460, 190)
+        dialog.show()
+
+    def _save_profile_edit(
+        self, dialog, profile: Profile, label: str, username: str, password: str
+    ) -> None:
+        try:
+            if not label.strip():
+                raise ValueError("Profile 名称不能为空")
+            credentials = dict(profile.credentials)
+            if username.strip() or "username" in credentials:
+                credentials["username"] = username.strip()
+            if password:
+                credentials["password"] = password
+            self.controller.save_profile(
+                profile.provider,
+                label,
+                credentials,
+                settings=profile.settings,
+                profile_id=profile.id,
+            )
+            dialog.close()
+            self.reload_profiles()
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, self.provider, str(error))
+
+    def delete_profile(self) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                self.provider,
+                "删除本地 Profile 及其会话状态？日志和草稿会保留。",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            self.controller.delete_profile(profile)
+            self.reload_profiles()
+            self.log.append(f"[profile] deleted {profile.id}")
         except (OSError, ValueError) as error:
             QMessageBox.critical(self, self.provider, str(error))
 

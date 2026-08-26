@@ -20,6 +20,7 @@ from asterism.profiles import ProfileStateStore, ProfileStore
 from asterism.providers import ProviderRegistry, WorkerSpec
 from asterism.runner import RunnerError, RunnerManager
 from asterism.scan import ReadOnlyScanCoordinator
+from workers.common.runtime import payload_secrets
 
 
 class LocalStoreTests(unittest.TestCase):
@@ -51,6 +52,22 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(states.load(profile, "session"), {"jwt": "session-value"})
         profile_text = profiles.path_for("uai", profile.id).read_text(encoding="utf-8")
         self.assertNotIn("session-value", profile_text)
+
+    def test_worker_secret_collection_recurses_through_nested_credentials(self) -> None:
+        values = payload_secrets(
+            {"credentials": {"password": "p", "nested": [{"value": "cookie-value"}]}}
+        )
+        self.assertIn("p", values)
+        self.assertIn("cookie-value", values)
+
+    def test_profile_state_delete_does_not_touch_account_file(self) -> None:
+        profiles = ProfileStore(self.paths)
+        states = ProfileStateStore(self.paths)
+        profile = profiles.create("chaoxing", "delete-me")
+        states.save(profile, "session", {"cookie": "session-only"})
+        states.delete_profile(profile)
+        self.assertTrue(profiles.path_for(profile.provider, profile.id).exists())
+        self.assertIsNone(states.load(profile, "session"))
 
     def test_question_bank_schema_contains_no_service_tables(self) -> None:
         bank = QuestionBank(self.paths.database)
@@ -92,6 +109,10 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(loaded["providers"]["chaoxing"]["verification_attempt_budget"], 5)
         self.assertEqual(loaded["models"]["default"], "economy")
         self.assertIn("gpt_router", loaded["models"]["endpoints"])
+        self.assertEqual(
+            loaded["models"]["combinations"]["economy"]["timed"]["fallback_model"],
+            "deepseek-chat",
+        )
 
     def test_ai_default_combinations_build_responses_multimodal_request(self) -> None:
         config = LocalConfigStore(self.paths.config)
@@ -110,9 +131,64 @@ class LocalStoreTests(unittest.TestCase):
             choice,
         )
         self.assertEqual(request["store"], False)
-        self.assertEqual(request["text"]["format"]["type"], "json_schema")
+        self.assertEqual(request["text"]["format"]["type"], "json_object")
         self.assertTrue(
             any(item["type"] == "input_image" for item in request["input"][0]["content"])
+        )
+        file_question = {
+            "kind": "provider_native",
+            "prompt": "附件",
+            "attachments": [{"type": "attachment", "url": "https://example.test/a.pdf"}],
+        }
+        file_request = service.build_request(file_question, choice)
+        self.assertTrue(
+            any(item["type"] == "input_file" for item in file_request["input"][0]["content"])
+        )
+        generic_question = {
+            "kind": "single_choice",
+            "prompt": "link",
+            "reference": "https://example.test/page",
+        }
+        generic_request = service.build_request(generic_question, choice)
+        self.assertFalse(
+            any(
+                item.get("type") in {"input_image", "input_file"}
+                for item in generic_request["input"][0]["content"]
+            )
+        )
+
+    def test_ai_fallback_uses_its_own_model_when_primary_is_unavailable(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        value = config.ensure()
+        value["models"]["endpoints"]["gpt_router"].update(
+            {"base_url": "https://router.test", "api_key": "router-key"}
+        )
+        value["models"]["endpoints"]["domestic_backup"].update(
+            {"base_url": "https://domestic.test", "api_key": "domestic-key"}
+        )
+        config.save(value)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        service = AIAnswerService(config, bank)
+        calls = []
+
+        def fake_request(question, choice, key, timeout):
+            calls.append((choice.endpoint.name, choice.model, key))
+            if choice.endpoint.name == "gpt_router":
+                raise RuntimeError("router unavailable")
+            return {"answer": "B", "confidence": 0.7}, {"total_tokens": 2}
+
+        service._request = fake_request
+        result = service.answer(
+            "chaoxing", {"kind": "single_choice", "prompt": "Fallback", "options": ["A", "B"]}
+        )
+        self.assertEqual(result["answer"]["answer"], "B")
+        self.assertEqual(
+            calls,
+            [
+                ("gpt_router", "gpt-5.6-terra", "router-key"),
+                ("domestic_backup", "deepseek-chat", "domestic-key"),
+            ],
         )
 
     def test_ai_cache_round_trip(self) -> None:
@@ -127,6 +203,12 @@ class LocalStoreTests(unittest.TestCase):
                 "usage": {"total_tokens": 3},
             },
         )
+
+    def test_ai_response_requires_bounded_confidence(self) -> None:
+        with self.assertRaises(RuntimeError):
+            AIAnswerService.parse_response(
+                {"output_text": '{"answer":"A","confidence":2}'}, "responses"
+            )
 
     def test_ai_service_prefers_exact_local_candidate_before_remote_request(self) -> None:
         config = LocalConfigStore(self.paths.config)
@@ -144,6 +226,37 @@ class LocalStoreTests(unittest.TestCase):
         result = service.answer("chaoxing", question)
         self.assertEqual(result["source"], "local_cache")
         self.assertTrue(result["cached"])
+        self.assertEqual(result["answer"]["answer"], "A")
+
+    def test_ai_cache_rebinds_canonical_option_content_to_current_order(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question = {
+            "kind": "single_choice",
+            "prompt": "Pick",
+            "options": ["Alpha", "Beta"],
+        }
+        question_id, identity = repository.ingest_question(
+            "chaoxing",
+            {
+                **question,
+                "answer_evidence": {"source": "provider_native", "value": "A", "verified": True},
+            },
+        )
+        self.assertGreater(question_id, 0)
+        service = AIAnswerService(config, bank)
+        result = service.answer(
+            "chaoxing",
+            {**question, "options": ["Beta", "Alpha"]},
+        )
+        self.assertEqual(result["source"], "local_cache")
+        self.assertEqual(result["answer"]["answer"], "B")
+        self.assertEqual(
+            identity,
+            question_identity("chaoxing", {**question, "options": ["Beta", "Alpha"]})[0],
+        )
 
     def test_notifications_are_disabled_by_default(self) -> None:
         config = LocalConfigStore(self.paths.config)
@@ -194,6 +307,31 @@ class LocalStoreTests(unittest.TestCase):
         )
         self.assertNotIn("remote_id", canonical_question(first))
 
+    def test_question_identity_keeps_mixed_native_content_but_ignores_answer_state(self) -> None:
+        first = {
+            "kind": "provider_native",
+            "prompt": "挖空 __ 与图片",
+            "material": [{"text": "材料", "image": "https://cdn.test/a.png?token=one"}],
+            "native": {
+                "question": "挖空 __ 与图片",
+                "attachments": [{"url": "https://cdn.test/a.png?token=one", "id": "x"}],
+                "learner_response": "old-answer",
+            },
+        }
+        second = {
+            "kind": "provider_native",
+            "prompt": "挖空 __ 与图片",
+            "material": [{"text": "材料", "image": "https://cdn.test/a.png?token=two"}],
+            "native": {
+                "question": "挖空 __ 与图片",
+                "attachments": [{"url": "https://CDN.TEST/a.png?token=three", "id": "y"}],
+                "learner_response": "new-answer",
+            },
+        }
+        self.assertEqual(
+            question_identity("chaoxing", first)[0], question_identity("chaoxing", second)[0]
+        )
+
     def test_option_answer_rebinds_by_content_after_random_order(self) -> None:
         original_options = ["Alpha", "Beta", "Gamma"]
         rotated_options = ["Gamma", "Alpha", "Beta"]
@@ -223,6 +361,17 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(repository.resolve_exact("cidaren", identity).status, "exact")
         repository.record_candidate(question_id, {"text": "Beta"}, "ai", "correct")
         self.assertEqual(repository.resolve_exact("cidaren", identity).status, "conflict")
+
+    def test_answer_repository_conflicts_when_candidates_have_mixed_outcomes(self) -> None:
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question_id, identity = repository.ingest_question(
+            "chaoxing", {"kind": "single_choice", "prompt": "Mixed", "options": ["A", "B"]}
+        )
+        repository.record_candidate(question_id, {"text": "A"}, "native", "correct")
+        repository.record_candidate(question_id, {"text": "B"}, "native", "incorrect")
+        self.assertEqual(repository.resolve_exact("chaoxing", identity).status, "conflict")
 
 
 class RunnerTests(unittest.TestCase):

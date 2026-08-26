@@ -103,6 +103,10 @@ class DesktopController:
         self.profiles.save(profile)
         return profile
 
+    def delete_profile(self, profile: Profile) -> None:
+        self.states.delete_profile(profile)
+        self.profiles.delete(profile.provider, profile.id)
+
     def sync_courses(
         self, profile: Profile, *, cancel: threading.Event | None = None
     ) -> list[dict[str, Any]]:

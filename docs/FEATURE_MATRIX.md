@@ -78,14 +78,14 @@
 | 功能 | 必须保留的行为 | 状态 |
 |---|---|---|
 | 范围 | 当前部署环境全局复用，并按 Provider 分区 | `desktop-wired + fixture-verified` |
-| 题目身份 | 保存完整题干祖先、共享材料、混编内容、附件、挖空/下划线和原生题型 | `desktop-wired + fixture-verified` |
+| 题目身份 | 保存完整题干祖先、共享材料、混编内容、附件、挖空/下划线和原生题型；过滤答案/状态等易变字段 | `desktop-wired + fixture-verified` |
 | 排除项 | 题号、远端题目 ID、选项 ID/字母和显示顺序不得定义可复用身份 | `desktop-wired + fixture-verified` |
 | 选项绑定 | 按规范化选项内容和媒体语义保存，唯一时才绑定回本次 Provider ID | `desktop-wired + fixture-verified` |
 | 富媒体 | 保留文本、图片、公式、音视频、文件、共享选项、下划线和编号空格的顺序与归属 | `desktop-wired + fixture-verified` |
 | 复杂题 | 连线、排序、组合、阅读、完形、计算、口语/听力和 Provider-native 题可操作 | `upstream-proven + desktop-wired` |
 | 证据 | 保存平台、历史、人工和 AI 候选及每次正确/错误/未验证观察 | `desktop-wired + fixture-verified` |
 | 复用 | 全部观察为正确时可复用；有对有错或多个正解时进入仲裁；纯错误为负证据 | `desktop-wired + fixture-verified` |
-| 省钱组合 | Native、精确缓存、可选便宜验证、Luna 限时、Terra 不限时、Sol 升级；Router 失败才国内灾备 | `desktop-wired + fixture-verified` |
+| 省钱组合 | Native、精确缓存、可选便宜验证、Luna 限时、Terra 不限时；Router 失败才使用配置的 DeepSeek 国内灾备 | `desktop-wired + fixture-verified` |
 | GPT-only | Native 标答直接使用；精确缓存作为证据；限时 Luna，不限时 Sol xhigh，无国内灾备 | `desktop-wired + fixture-verified` |
 | 模型输入 | 包含全部文本、材料、媒体归属、附件、原生题型、空格/下划线和已有证据 | `desktop-wired + fixture-verified` |
 | 主观文本 | 相关、自然的纯文本；无 Markdown/系统/测试痕迹；差异化并检测重复 | `ported-unverified + desktop-wired` |

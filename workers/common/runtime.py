@@ -87,17 +87,20 @@ class Redactor:
 
 def payload_secrets(payload: Mapping[str, Any]) -> list[str]:
     values: list[str] = []
-    callback_url = payload.get("callback_url")
-    if isinstance(callback_url, str):
-        values.append(callback_url)
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            if value:
+                values.append(value)
+        elif isinstance(value, Mapping):
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(payload.get("callback_url"))
     for container_name in ("credentials", "session"):
-        container = payload.get(container_name)
-        if isinstance(container, Mapping):
-            for value in container.values():
-                if isinstance(value, str):
-                    values.append(value)
-                elif isinstance(value, list):
-                    values.extend(str(item.get("value")) for item in value if isinstance(item, Mapping) and item.get("value"))
+        collect(payload.get(container_name))
     return values
 
 

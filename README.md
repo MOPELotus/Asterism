@@ -16,6 +16,7 @@ Asterism 正在重构为一款 Windows 优先的本地桌面工具，用于统�
 - 使用 PyQt6 与 PyQt6-Fluent-Widgets 构建模块化 Fluent 桌面界面。
 - 支持跟随系统、浅色、深色主题和 Windows 高 DPI 显示缩放。
 - 原样复用现有 Provider、Worker、题型解析、答案策略和平台私有执行顺序。
+- 题库按题干、材料、选项内容和媒体语义匹配，忽略随机选项顺序及远端 ID；答案和 AI 响应只写入本机缓存。
 - 保留课程、任务、题库、AI、复杂题、历史扫描、作业/考试草稿与提交前确认。
 - 移除用户管理、代操作、QQ 绑定、点数计费、Service Token、公开 API 和自动巡检。
 - 提供无需安装 Python、Node、Rust 或编译工具的 Windows x64/ARM64 便携 ZIP。
