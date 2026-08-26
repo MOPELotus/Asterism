@@ -125,14 +125,15 @@ jobs:
               artifacts = @($artifactPaths | ForEach-Object { [ordered]@{ path = $_; sha256 = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant() } })
             }
             $stamp | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $installRoot 'build-stamp.json') -Encoding UTF8
-            $installOutput = .\installer\install.ps1 `
+            $installOutput = @(& .\installer\install.ps1 `
               -InstallRoot $installRoot `
               -SourceRoot $PWD.Path `
               -YunzaiRoot $yunzaiRoot `
               -MasterPasswordFile $passwordFile `
               -SkipDependencyInstall `
-              -NonInteractive 2>&1 | Tee-Object -Variable installerLines
-            if (($installerLines -join "`n") -notmatch '检测到有效现有构建产物') {
+              -NonInteractive 2>&1)
+            $installOutput | Out-Host
+            if (($installOutput | Out-String) -notmatch '检测到有效现有构建产物') {
               throw 'Installer did not automatically reuse the matching release build stamp.'
             }
             .\installer\validate.ps1 -InstallRoot $installRoot -SourceRoot $PWD.Path
