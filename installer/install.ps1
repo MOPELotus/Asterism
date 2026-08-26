@@ -295,7 +295,8 @@ Write-Step "运行数据库迁移和初始账号向导"
 if (-not (Test-Path (Join-Path $SourceRoot "target\release\asterismctl.exe"))) { throw "未找到 asterismctl.exe。请不要使用 -SkipBuild，或先完成构建。" }
 $bootstrapOut = Join-Path $InstallRoot "logs\bootstrap.stdout.log"
 $bootstrapErr = Join-Path $InstallRoot "logs\bootstrap.stderr.log"
-$daemonProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $SourceRoot -WindowStyle Hidden -RedirectStandardOutput $bootstrapOut -RedirectStandardError $bootstrapErr -PassThru
+$runScriptArgument = '"' + $runScript + '"'
+$daemonProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScriptArgument) -WorkingDirectory $SourceRoot -WindowStyle Hidden -RedirectStandardOutput $bootstrapOut -RedirectStandardError $bootstrapErr -PassThru
 for ($attempt = 0; $attempt -lt 120; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri ("http://" + $Bind + "/api/v1/system/health") -TimeoutSec 2
