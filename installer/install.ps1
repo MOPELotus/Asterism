@@ -24,6 +24,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+$env:PIP_NO_COLOR = "1"
 
 if ($SkipBuild -and ($ForceBuild -or $SourceBuild)) {
     throw "-SkipBuild 不能与 -ForceBuild/-SourceBuild 同时使用。"

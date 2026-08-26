@@ -74,7 +74,7 @@ foreach ($file in @(Get-ChildItem -LiteralPath $SourceRoot -Filter "*.ps1" -File
     $tokens = $null
     $parseErrors = $null
     [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
-    Check "PowerShell parser: $($file.FullName.Substring($SourceRoot.Length).TrimStart('\\','/'))" ($parseErrors.Count -eq 0) $(if ($parseErrors.Count -eq 0) { "parse ok" } else { ($parseErrors | Out-String).Trim() })
+    Check "PowerShell parser: $($file.FullName.Substring($SourceRoot.Length).TrimStart([char]'\',[char]'/'))" ($parseErrors.Count -eq 0) $(if ($parseErrors.Count -eq 0) { "parse ok" } else { ($parseErrors | Out-String).Trim() })
 }
 
 $stampPath = Join-Path $InstallRoot "build-stamp.json"
