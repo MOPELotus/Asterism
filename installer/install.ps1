@@ -16,6 +16,11 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 function Write-Step([string]$Message) { Write-Host "`n==> $Message" -ForegroundColor Cyan }
+function Refresh-ProcessPath {
+    $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $user = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machine;$user"
+}
 function Require-Command([string]$Name) {
     $command = Get-Command $Name -ErrorAction SilentlyContinue
     if (-not $command) { throw "未找到依赖 $Name。请安装后重新运行，或允许安装器使用 winget。" }
@@ -42,6 +47,7 @@ function Install-WithWinget([string]$Id, [string]$DisplayName) {
     Write-Host "安装 $DisplayName ..."
     & winget install --id $Id --exact --accept-source-agreements --accept-package-agreements
     if ($LASTEXITCODE -ne 0) { throw "$DisplayName 安装失败（winget exit $LASTEXITCODE）。" }
+    Refresh-ProcessPath
 }
 function Ensure-Dependency([string]$Command, [string]$WingetId, [string]$DisplayName) {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
