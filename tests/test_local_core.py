@@ -416,6 +416,16 @@ class LocalStoreTests(unittest.TestCase):
             {"option": "Alpha"},
         )
 
+    def test_numeric_native_answer_canonicalizes_cidaren_answer_tag(self) -> None:
+        options = [
+            {"answer_tag": 0, "content": "Alpha"},
+            {"answer_tag": 1, "content": "Beta"},
+        ]
+        self.assertEqual(canonical_answer(1, options), {"option": {"content": "Beta"}})
+        self.assertEqual(
+            rebind_answer({"option": {"content": "Beta"}}, list(reversed(options))), "1"
+        )
+
     def test_answer_repository_reuses_only_unconflicted_correct_candidate(self) -> None:
         bank = QuestionBank(self.paths.database)
         bank.initialize()

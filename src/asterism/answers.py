@@ -24,6 +24,7 @@ IDENTIFIER_KEYS = {
     "order",
     "letter",
     "key",
+    "answer_tag",
 }
 EPHEMERAL_KEYS = {
     "answer",
@@ -142,7 +143,7 @@ def _option_bindings(options: Any) -> tuple[dict[str, Any], dict[str, str]]:
                 explicit = next(
                     (
                         value.get(name)
-                        for name in ("key", "letter", "code", "value", "id")
+                        for name in ("key", "letter", "code", "value", "answer_tag", "id")
                         if value.get(name) not in (None, "")
                     ),
                     None,
@@ -174,6 +175,18 @@ def canonical_answer(answer: Any, options: Any) -> Any:
             semantic_by_encoded[encoded] = semantic
 
     def convert(value: Any) -> Any:
+        if isinstance(value, int) and not isinstance(value, bool):
+            direct = by_key.get(str(value).casefold())
+            if direct is not None:
+                return {"option": direct}
+            if isinstance(options, list) and 0 <= value < len(options):
+                semantic = _semantic_value(options[value], option=True)
+                encoded = json.dumps(
+                    semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                if key_by_semantic.get(encoded):
+                    return {"option": semantic}
+            return value
         if isinstance(value, str):
             text = normalize_text(value)
             direct = by_key.get(text.casefold())
