@@ -128,6 +128,7 @@ function Ensure-UpstreamSubmodules([string]$Root) {
     if ($missing.Count -eq 0) { return }
     if (Test-Path -LiteralPath (Join-Path $Root ".gitmodules")) {
         Write-Host "检测到上游 submodule 尚未完整检出，正在初始化..." -ForegroundColor Yellow
+        Invoke-NativeCommand "同步上游 submodule 地址" "git" @("-C", $Root, "submodule", "sync", "--recursive")
         Invoke-NativeCommand "初始化上游 submodule" "git" @("-C", $Root, "submodule", "update", "--init", "--recursive")
     }
     $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Root $_)) })

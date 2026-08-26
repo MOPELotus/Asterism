@@ -99,9 +99,36 @@ def load_cxkitty(events: Events, redactor: Redactor):
     try:
         with capture_output(events, redactor):
             cxapi = importlib.import_module("cxapi")
+            session_module = importlib.import_module("cxapi.session")
+        install_cxkitty_numpy_compatibility(session_module)
         return cxapi
     except ModuleNotFoundError as error:
         raise WorkerFailure("dependency_missing", error.name or str(error)) from error
+
+
+def install_cxkitty_numpy_compatibility(session_module):
+    """Keep the pinned public CxKitty revision working with NumPy 2.
+
+    The former overlay commit only replaced ndarray.tostring() with
+    ndarray.tobytes(), but that commit is no longer advertised by the donor
+    remote. Preserve the exact donor flow as a thin runtime compatibility
+    shim while pinning the submodule to the reproducibly fetchable revision.
+    """
+    cv2 = session_module.cv2
+    np = session_module.np
+    ocr = session_module.ocr
+
+    def identify_captcha(captcha_img):
+        img = np.frombuffer(captcha_img, np.uint8)
+        img = cv2.imdecode(img, cv2.IMREAD_GRAYSCALE)
+        _, img = cv2.threshold(img, 190, 255, cv2.THRESH_BINARY)
+        img = cv2.bitwise_not(img)
+        kernal = np.ones([3, 2], np.uint8)
+        img = cv2.dilate(img, kernal, iterations=1)
+        _, img_data = cv2.imencode(".png", img)
+        return ocr.classification(img_data.tobytes())
+
+    session_module.identify_captcha = identify_captcha
 
 
 def cxkitty_for(payload, events, redactor):

@@ -52,7 +52,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 四个 Python Worker 会通过同一个安装器创建的 `.venv-workers` 启动；daemon 启动脚本显式传入该 Python 路径，不依赖系统 Python 的当前目录或 PATH。
 
-四个平台 donor 使用 Git submodule。安装器会在创建 Worker 环境前检查所需入口；缺失时自动执行 `git submodule update --init --recursive`，仍不完整则在启动服务前停止并列出缺失文件。不要使用 GitHub 的源码 ZIP 部署，因为 ZIP 不包含 submodule。至少应存在：
+四个平台 donor 使用 Git submodule。安装器会在创建 Worker 环境前检查所需入口；缺失时先执行 `git submodule sync --recursive`，再执行 `git submodule update --init --recursive`，仍不完整则在启动服务前停止并列出缺失文件。不要使用 GitHub 的源码 ZIP 部署，因为 ZIP 不包含 submodule。仓库只固定远端仍可重现获取的 revision；必要的兼容修复保留在 Asterism 薄适配层，不把 gitlink 指向上游未发布或已回收的 commit。至少应存在：
 
 - `upstreams\chaoxing-exam\cxapi\api.py`
 - `upstreams\chaoxing\api\base.py`

@@ -15,6 +15,41 @@ SPEC.loader.exec_module(WORKER)
 
 
 class WorkReadParamsTests(unittest.TestCase):
+    def test_cxkitty_numpy_compatibility_uses_tobytes(self):
+        class Encoded:
+            def tobytes(self):
+                return b"encoded-png"
+
+            def tostring(self):
+                raise AssertionError("removed NumPy compatibility path was used")
+
+        cv2 = types.SimpleNamespace(
+            IMREAD_GRAYSCALE=1,
+            THRESH_BINARY=2,
+            frombuffer=None,
+            imdecode=lambda value, _mode: value,
+            threshold=lambda value, *_args: (None, value),
+            bitwise_not=lambda value: value,
+            dilate=lambda value, *_args, **_kwargs: value,
+            imencode=lambda *_args: (True, Encoded()),
+        )
+        np = types.SimpleNamespace(
+            uint8="uint8",
+            frombuffer=lambda value, _dtype: value,
+            ones=lambda *_args: "kernel",
+        )
+        observed = []
+        session_module = types.SimpleNamespace(
+            cv2=cv2,
+            np=np,
+            ocr=types.SimpleNamespace(classification=lambda value: observed.append(value) or "1234"),
+        )
+
+        WORKER.install_cxkitty_numpy_compatibility(session_module)
+
+        self.assertEqual(session_module.identify_captcha(b"image"), "1234")
+        self.assertEqual(observed, [b"encoded-png"])
+
     def test_verification_policy_is_bounded_and_redacts_material(self):
         class Session:
             def reg_captcha_after(self, callback): self.captcha_after = callback
