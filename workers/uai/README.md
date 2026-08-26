@@ -66,13 +66,13 @@ Python Adapter 已实现：
 - `tasks`：复用 donor 结构、完成状态和递归遍历；
 - `inspect`：读取一个新鲜 Task 的 content 和 ProviderNative 标准答案。
 
-Rust 侧的通用进程客户端和 upstream-backed read-only Provider 已接入现有
-Provider Account、SecretStore、Course/Task scan 与 QuestionSnapshot 链；JWT/Cookie
+Rust 侧的通用进程客户端和 upstream-backed Provider 已接入现有
+Provider Account、SecretStore、Course/Task scan 与执行链；JWT/Cookie
 只作为加密的 `ProviderCompositeSession` 保存，不暴露给 WebUI。API 公开受保护的
 worker health，账号认证和扫描继续使用现有 Provider Account API。
 
-离线 fixture 已跑通 `authenticate -> courses -> tasks -> questions`，但仓库环境没有授权
-真实账号凭据，因此真实 UAI shape 仍需用 `workers/read_only_probe.py` 验证。
+离线 fixture 已跑通 `authenticate -> courses -> tasks -> questions`；真实账号验证仍属于
+部署者现场验收，不把本地 fixture 误记为线上保证。
 
 普通日志不得包含密码、JWT、Cookie、annotator token、题目/答案原文或完整 native
 payload。真实验证数据不提交到仓库。

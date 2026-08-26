@@ -6,9 +6,9 @@
 [![Last commit](https://img.shields.io/github/last-commit/MOPELotus/Asterism)](https://github.com/MOPELotus/Asterism/commits/master/)
 [![GitHub stars](https://img.shields.io/github/stars/MOPELotus/Asterism?style=flat)](https://github.com/MOPELotus/Asterism/stargazers)
 
-**Unified learning task orchestration across multiple platforms, powered by Rust.**
+**Unified learning task control plane across multiple platforms, powered by Rust and upstream workers.**
 
-Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。它把平台账号、课程、任务、进度、执行、验证、审计和恢复统一到同一套 Core 中，并通过 HTTP API、CLI 与 WebUI 提供一致的操作入口。
+Asterism 是一个以 Rust 控制面为核心、接入 Python/浏览器等 upstream Worker 的多平台学习任务聚合与调度服务。它把平台账号、课程、任务、进度、执行、验证、审计和恢复统一到同一套产品入口中，并通过 HTTP API、CLI 与 WebUI 提供一致的操作入口；Provider 的实际协议和页面逻辑继续由各自 donor/Worker 负责。
 
 > [!WARNING]
 > Asterism 仍处于 pre-release 前的开发阶段。当前 Provider 均为 `Development`，默认关闭，尚未获得生产可用或 `Verified` 承诺。请勿在没有授权、备份和风险评估的情况下对真实平台任务执行写入操作。

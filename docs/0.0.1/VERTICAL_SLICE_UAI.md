@@ -234,7 +234,7 @@ SingleChoice、MultipleChoice、Ordering、口语、讨论、上传等 native sh
 - `workers/uai/worker.py` 可直接加载外部固定 donor 入口，不复制或重写其协议逻辑；
 - `SOURCE.json` 固定 donor revision、Apache-2.0 来源和入口 SHA-256，文件不匹配时拒绝启动；
 - 已实现 `health`、`authenticate`、`courses`、`tasks` 和 `inspect` 的 Python Adapter
-  操作，其中后四项等待授权真实账号验证；
+  操作；本地 fixture、daemon 边界和已授权部署记录分别标注，真实账号仍需现场复验；
 - donor stdout/stderr 被转换为结构化事件，已知凭据在日志和意外 traceback 中脱敏；
 - UAI 起步的 Rust 子进程客户端现只抽取了四个平台都需要的协议绑定、超时与输出限制；
   各 Provider 登录和扫描逻辑仍分别保留在自己的 Python Adapter；
@@ -245,6 +245,6 @@ SingleChoice、MultipleChoice、Ordering、口语、讨论、上传等 native sh
 - 隔离 Python 环境已成功加载真实固定 donor，实际 daemon/API 只读冒烟也返回相同
   revision 和可用操作。
 
-真实账号已经验证登录、2 门课程和 558 个任务读取。100-task 诊断样本读取 246 个内容
-节点且零失败，但根据真实产品执行方式，UAI 的 `questions` 不再注册到 Asterism 题库链。
-直接完成、独立时长和新鲜完成状态回读仍在当前只读停止线之后。
+真实账号曾验证登录、课程和任务读取。根据真实产品执行方式，UAI 的 `questions` 不注册到
+Asterism 题库链；直接完成和独立时长保持由 donor Adapter 分开的执行阶段，完成状态回读
+作为独立验证事实，不再以“只读停止线”描述当前实现边界。
