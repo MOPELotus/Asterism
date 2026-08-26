@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..ai import AIAnswerService
-from ..answers import AnswerRepository
+from ..answers import AnswerRepository, question_identity, rebind_answer
 from ..batch import ManualBatchExecutor
 from ..config import LocalConfigStore
 from ..database import QuestionBank
@@ -171,6 +171,57 @@ class DesktopController:
         return self.service.run_task(
             profile, task, answers=answers, settings=settings, cancel=cancel, on_event=on_event
         )
+
+    def prepare_answers(
+        self,
+        profile: Profile,
+        task: dict[str, Any],
+        *,
+        combination: str | None = None,
+        route: str = "untimed",
+        allow_read_that_starts_attempt: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Resolve local/AI answers into the Worker wire shape.
+
+        Provider Workers continue to own encoding and submission; this helper
+        only joins the global question bank to current remote question IDs.
+        """
+        if profile.provider not in {"chaoxing", "cidaren"}:
+            return []
+        questions = self.service.questions(
+            profile,
+            task,
+            allow_read_that_starts_attempt=allow_read_that_starts_attempt,
+        ).data.get("questions", [])
+        if not isinstance(questions, list):
+            return []
+        resolved: list[dict[str, Any]] = []
+        repository = self.answer_repository()
+        for question in questions:
+            if not isinstance(question, dict) or not question.get("remote_id"):
+                continue
+            try:
+                identity, _canonical = question_identity(profile.provider, question)
+            except ValueError:
+                continue
+            exact = repository.resolve_exact(profile.provider, identity)
+            if exact.status == "exact":
+                answer = rebind_answer(exact.answer, question.get("options"))
+            else:
+                try:
+                    response = self.answer_question(
+                        profile.provider,
+                        question,
+                        combination=combination,
+                        route=route,
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                value = response.get("answer", {})
+                answer = value.get("answer") if isinstance(value, dict) else None
+            if answer is not None:
+                resolved.append({"remote_id": str(question["remote_id"]), "value": answer})
+        return resolved
 
     def run_batch(
         self,

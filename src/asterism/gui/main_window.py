@@ -577,7 +577,15 @@ class ProviderPage(QWidget):
             )
             self.log.append(f"[draft] {draft.id}")
             return
-        self._call(lambda: self.controller.run_task(profile, task, cancel=self.cancel_event), "run")
+        self._call(lambda: self._execute_task(profile, task), "run")
+
+    def _execute_task(self, profile: Profile, task: dict[str, Any]) -> Any:
+        answers = None
+        if self.provider == "chaoxing":
+            native = task.get("native") if isinstance(task.get("native"), dict) else {}
+            route = "timed" if native.get("route_kind") == "course_exam" else "untimed"
+            answers = self.controller.prepare_answers(profile, task, route=route)
+        return self.controller.run_task(profile, task, answers=answers, cancel=self.cancel_event)
 
     def run_batch(self) -> None:
         profile = self.profile()
