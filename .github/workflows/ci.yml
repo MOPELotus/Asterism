@@ -66,6 +66,7 @@ jobs:
 
   windows-installer:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
@@ -87,7 +88,7 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) { throw ($errors | Out-String) }
           }
-      - run: cargo build --release --workspace
+      - run: cargo build --release -p asterismd -p asterismctl
       - run: npm ci
         working-directory: web
       - run: npm run build
