@@ -9,7 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from asterism.ai import AIAnswerService
-from asterism.answers import AnswerRepository, canonical_question, question_identity, rebind_answer
+from asterism.answers import (
+    AnswerRepository,
+    canonical_answer,
+    canonical_question,
+    question_identity,
+    rebind_answer,
+)
 from asterism.config import LocalConfigStore
 from asterism.database import QuestionBank
 from asterism.drafts import DraftRepository
@@ -346,6 +352,12 @@ class LocalStoreTests(unittest.TestCase):
         )[0]
         self.assertTrue(identity)
         self.assertEqual(rebind_answer({"option": "Alpha"}, rotated_options), "B")
+
+    def test_option_answer_canonicalizes_content_as_well_as_provider_key(self) -> None:
+        self.assertEqual(
+            canonical_answer("Alpha", ["Alpha", "Beta"]),
+            {"option": "Alpha"},
+        )
 
     def test_answer_repository_reuses_only_unconflicted_correct_candidate(self) -> None:
         bank = QuestionBank(self.paths.database)

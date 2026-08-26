@@ -166,7 +166,12 @@ def _option_bindings(options: Any) -> tuple[dict[str, Any], dict[str, str]]:
 
 
 def canonical_answer(answer: Any, options: Any) -> Any:
-    by_key, _ = _option_bindings(options)
+    by_key, key_by_semantic = _option_bindings(options)
+    semantic_by_encoded: dict[str, Any] = {}
+    for _option_key, semantic in by_key.items():
+        encoded = json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if key_by_semantic.get(encoded):
+            semantic_by_encoded[encoded] = semantic
 
     def convert(value: Any) -> Any:
         if isinstance(value, str):
@@ -174,6 +179,11 @@ def canonical_answer(answer: Any, options: Any) -> Any:
             direct = by_key.get(text.casefold())
             if direct is not None:
                 return {"option": direct}
+            semantic = semantic_by_encoded.get(
+                json.dumps(text, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
+            if semantic is not None:
+                return {"option": semantic}
             if len(text) > 1 and text.isalpha() and all(char.casefold() in by_key for char in text):
                 return {"options": [by_key[char.casefold()] for char in text]}
             return {"text": text}
