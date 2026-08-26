@@ -135,8 +135,15 @@ Write-Step "准备源码和 Python Worker 环境"
 if ((Resolve-Path $SourceRoot).Path -ne $SourceRoot) { throw "源码目录解析失败。" }
 $venv = Join-Path $InstallRoot ".venv-workers"
 if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
-    & $pythonLauncher @pythonLauncherArgs -m venv $venv
+    $venvArgs = @($pythonLauncherArgs) + @("-m", "venv", "--copies", $venv)
+    & $pythonLauncher @venvArgs
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
+        $pyFallback = Get-Command py -ErrorAction SilentlyContinue
+        if ($pyFallback -and $pythonLauncher -ne $pyFallback.Source) {
+            & $pyFallback.Source @("-3", "-m", "venv", "--copies", $venv)
+        }
+    }
+    if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
         throw "Python venv 创建失败：$venv"
     }
 }
