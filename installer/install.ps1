@@ -151,7 +151,10 @@ $python = Join-Path $venv "Scripts\python.exe"
 if (-not (Test-Path $python)) { throw "未找到 Worker Python：$python" }
 foreach ($requirements in @("workers\chaoxing\requirements.txt", "workers\welearn\requirements.txt", "workers\uai\requirements.txt", "workers\cidaren\requirements.txt")) {
     $file = Join-Path $SourceRoot $requirements
-    if (Test-Path $file) { & $python -m pip install -r $file }
+    if (Test-Path $file) {
+        & $python -m pip install --disable-pip-version-check --progress-bar off -r $file
+        if ($LASTEXITCODE -ne 0) { throw "Python Worker 依赖安装失败：$file" }
+    }
 }
 
 Write-Step "检测 Chromium 兼容浏览器"
@@ -273,7 +276,9 @@ if ($YunzaiRoot -and (Test-Path $YunzaiRoot)) {
     $pluginTarget = Join-Path $YunzaiRoot "plugins\asterism-plugin"
     New-Item -ItemType Directory -Force (Split-Path -Parent $pluginTarget) | Out-Null
     if (Test-Path $pluginTarget) { Copy-Item $pluginTarget "$pluginTarget.before-install-$(Get-Date -Format yyyyMMdd-HHmmss)" -Recurse }
-    Copy-Item (Join-Path $SourceRoot "integrations\yunzai-plugin\*") $pluginTarget -Recurse -Force
+    Get-ChildItem -LiteralPath (Join-Path $SourceRoot "integrations\yunzai-plugin") -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $pluginTarget $_.Name) -Recurse -Force
+    }
     $AllowedGroups = if ($AllowedGroups) { $AllowedGroups } else { Ask "允许使用 Asterism 的群号（逗号分隔，留空表示全部）" "" }
     $NotificationGroups = if ($NotificationGroups) { $NotificationGroups } else { Ask "通知群号（逗号分隔，留空表示不投递）" "" }
     $AdminContact = if ($AdminContact) { $AdminContact } else { Ask "管理员联系方式" "" }
