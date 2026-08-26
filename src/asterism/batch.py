@@ -31,7 +31,7 @@ class ManualBatchExecutor:
         *,
         concurrency: int = 1,
         settings: dict[str, Any] | None = None,
-        answer_provider: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+        answer_provider: Callable[[dict[str, Any]], list[dict[str, Any]] | None] | None = None,
         cancel: threading.Event | None = None,
     ) -> list[BatchItemResult]:
         if concurrency < 1:

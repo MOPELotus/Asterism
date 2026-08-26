@@ -232,10 +232,16 @@ class DesktopController:
         *,
         concurrency: int = 1,
         settings: dict[str, Any] | None = None,
+        answer_provider: Callable[[dict[str, Any]], list[dict[str, Any]] | None] | None = None,
         cancel: threading.Event | None = None,
     ):
         return self.batch.run(
-            profile, tasks, concurrency=concurrency, settings=settings, cancel=cancel
+            profile,
+            tasks,
+            concurrency=concurrency,
+            settings=settings,
+            answer_provider=answer_provider,
+            cancel=cancel,
         )
 
     def read_duration(

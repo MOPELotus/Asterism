@@ -630,7 +630,26 @@ class ProviderPage(QWidget):
             return
         self._call(
             lambda: self.controller.run_batch(
-                profile, routine, concurrency=concurrency, cancel=self.cancel_event
+                profile,
+                routine,
+                concurrency=concurrency,
+                answer_provider=(
+                    lambda task: (
+                        self.controller.prepare_answers(
+                            profile,
+                            task,
+                            route=(
+                                "timed"
+                                if isinstance(task.get("native"), dict)
+                                and task["native"].get("route_kind") == "course_exam"
+                                else "untimed"
+                            ),
+                        )
+                        if self.provider == "chaoxing"
+                        else None
+                    )
+                ),
+                cancel=self.cancel_event,
             ),
             "batch run",
         )

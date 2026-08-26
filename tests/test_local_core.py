@@ -16,6 +16,7 @@ from asterism.answers import (
     question_identity,
     rebind_answer,
 )
+from asterism.batch import ManualBatchExecutor
 from asterism.config import LocalConfigStore
 from asterism.database import QuestionBank
 from asterism.drafts import DraftRepository
@@ -466,6 +467,33 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(RunnerError) as raised:
             self.manager.invoke(self.spec, "sleep", timeout=5, cancel=cancelled)
         self.assertEqual(raised.exception.code, "cancelled")
+
+
+class BatchTests(unittest.TestCase):
+    def test_batch_passes_answer_lists_and_serializes_uai(self) -> None:
+        calls = []
+
+        class FakeService:
+            def run_task(self, profile, task, *, answers=None, settings=None, cancel=None):
+                calls.append((profile.provider, task["remote_id"], answers))
+                return SimpleNamespace(data={"remote_state": "completed"})
+
+        profile = SimpleNamespace(provider="uai")
+        tasks = [{"remote_id": "one"}, {"remote_id": "two"}]
+        results = ManualBatchExecutor(FakeService()).run(
+            profile,
+            tasks,
+            concurrency=32,
+            answer_provider=lambda task: [{"remote_id": task["remote_id"], "value": "A"}],
+        )
+        self.assertEqual([item.error_code for item in results], [None, None])
+        self.assertEqual(
+            calls,
+            [
+                ("uai", "one", [{"remote_id": "one", "value": "A"}]),
+                ("uai", "two", [{"remote_id": "two", "value": "A"}]),
+            ],
+        )
 
 
 class ScanTests(unittest.TestCase):
