@@ -11,6 +11,7 @@ param(
     [string]$NotificationGroups,
     [string]$AdminContact,
     [string]$MasterUsername = "master",
+    [string]$MasterPasswordFile,
     [int]$GatewayTokenTtlSeconds = 31536000,
     [switch]$SkipDependencyInstall,
     [switch]$SkipBuild,
@@ -101,6 +102,9 @@ if (-not $DatabasePath -and $inputConfig.databasePath) { $DatabasePath = [string
 if (-not $AllowedGroups -and $inputConfig.allowedGroups) { $AllowedGroups = @($inputConfig.allowedGroups) -join "," }
 if (-not $NotificationGroups -and $inputConfig.notificationGroups) { $NotificationGroups = @($inputConfig.notificationGroups) -join "," }
 if (-not $AdminContact -and $inputConfig.adminContact) { $AdminContact = [string]$inputConfig.adminContact }
+if (-not $PSBoundParameters.ContainsKey("MasterUsername") -and $inputConfig.masterUsername) { $MasterUsername = [string]$inputConfig.masterUsername }
+if (-not $MasterPasswordFile -and $inputConfig.masterPasswordFile) { $MasterPasswordFile = [string]$inputConfig.masterPasswordFile }
+if (-not $PSBoundParameters.ContainsKey("GatewayTokenTtlSeconds") -and $inputConfig.gatewayTokenTtlSeconds) { $GatewayTokenTtlSeconds = [int]$inputConfig.gatewayTokenTtlSeconds }
 if (-not $PSBoundParameters.ContainsKey("RegisterTask") -and $inputConfig.registerTask) { $RegisterTask = $true }
 
 Write-Step "收集安装参数"
@@ -110,6 +114,7 @@ $InstallRoot = if ($InstallRoot) { [IO.Path]::GetFullPath($InstallRoot) } else {
 $YunzaiRoot = if ($YunzaiRoot) { [IO.Path]::GetFullPath($YunzaiRoot) } else { Ask "Yunzai 根目录（可留空跳过插件安装）" "" }
 $WebUrl = if ($WebUrl) { $WebUrl } else { Ask "Web URL（反代地址可稍后填写）" ("http://" + $Bind) }
 $DatabasePath = if ($DatabasePath) { [IO.Path]::GetFullPath($DatabasePath) } else { Join-Path $InstallRoot "asterism.db" }
+$MasterPasswordFile = if ($MasterPasswordFile) { (Resolve-Path $MasterPasswordFile).Path } else { $null }
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 New-Item -ItemType Directory -Force $InstallRoot | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $InstallRoot "logs") | Out-Null
@@ -119,13 +124,17 @@ Ensure-Dependency git Git.Git "Git"
 Ensure-Dependency cargo Rustlang.Rustup "Rust/Cargo"
 Ensure-Dependency node OpenJS.NodeJS.LTS "Node.js"
 Ensure-Dependency npm OpenJS.NodeJS.LTS "npm"
-Ensure-Dependency py Python.Python.3.12 "Python"
+if (-not (Get-Command py -ErrorAction SilentlyContinue) -and -not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Install-WithWinget Python.Python.3.12 "Python"
+}
+$pythonLauncher = if (Get-Command py -ErrorAction SilentlyContinue) { (Get-Command py).Source } else { Require-Command python }
+$pythonLauncherArgs = if ((Split-Path -Leaf $pythonLauncher) -like "py*") { @("-3") } else { @() }
 if (-not (Get-Command schtasks -ErrorAction SilentlyContinue)) { Write-Warning "未找到 schtasks；将跳过 Windows 任务注册。"; $RegisterTask = $false }
 
 Write-Step "准备源码和 Python Worker 环境"
 if ((Resolve-Path $SourceRoot).Path -ne $SourceRoot) { throw "源码目录解析失败。" }
 $venv = Join-Path $InstallRoot ".venv-workers"
-if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) { & py -m venv $venv }
+if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) { & $pythonLauncher @pythonLauncherArgs -m venv $venv }
 $python = Join-Path $venv "Scripts\python.exe"
 foreach ($requirements in @("workers\chaoxing\requirements.txt", "workers\welearn\requirements.txt", "workers\uai\requirements.txt", "workers\cidaren\requirements.txt")) {
     $file = Join-Path $SourceRoot $requirements
@@ -278,16 +287,29 @@ $env:ASTERISM_CONFIG = $configPath
 $cli = Join-Path $SourceRoot "target\release\asterismctl.exe"
 $apiUrl = "http://" + $Bind
 $pluginConfigPath = if ($pluginTarget) { Join-Path $pluginTarget "config\asterism.json" } else { $null }
-$needsGatewayToken = $pluginTarget -and -not (Test-Path $pluginConfigPath)
+$needsGatewayToken = $pluginTarget -and ((-not $health.master_initialized) -or -not (Test-Path $pluginConfigPath))
 $needsAdminAuthentication = (-not $health.master_initialized) -or $needsGatewayToken
 $adminToken = $null
 $adminTokenId = $null
 $createdInitialMaster = $false
 if ($needsAdminAuthentication) {
+    if ($NonInteractive -and -not $MasterPasswordFile) {
+        throw "无人值守安装需要通过 -MasterPasswordFile（或配置文件的 masterPasswordFile）提供 Master 密码；安装器不接受命令行明文密码。"
+    }
     $authCommand = if ($health.master_initialized) { @("auth", "login") } else { @("init") }
     $createdInitialMaster = -not $health.master_initialized
-    Write-Host (if ($createdInitialMaster) { "请为首次 Master 输入并确认密码：" } else { "请为现有 Master 输入密码，以创建缺失的 Yunzai 网关令牌：" })
-    $adminOutput = & $cli --url $apiUrl @authCommand --username $MasterUsername
+    if ($MasterPasswordFile) {
+        $passwordLine = (Get-Content -LiteralPath $MasterPasswordFile -Raw).TrimEnd("`r", "`n")
+        if ([string]::IsNullOrWhiteSpace($passwordLine)) { throw "Master 密码文件为空。" }
+        try {
+            $adminOutput = $passwordLine | & $cli --url $apiUrl @authCommand --username $MasterUsername --password-stdin
+        } finally {
+            $passwordLine = $null
+        }
+    } else {
+        Write-Host (if ($createdInitialMaster) { "请为首次 Master 输入并确认密码：" } else { "请为现有 Master 输入密码，以创建缺失的 Yunzai 网关令牌：" })
+        $adminOutput = & $cli --url $apiUrl @authCommand --username $MasterUsername
+    }
     if ($LASTEXITCODE -ne 0) { throw "Master 初始化或认证失败。" }
     $adminResult = ($adminOutput -join "`n") | ConvertFrom-Json
     $adminToken = $adminResult.token

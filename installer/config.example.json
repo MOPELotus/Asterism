@@ -8,6 +8,9 @@
   "allowedGroups": ["123456789"],
   "notificationGroups": ["123456789"],
   "adminContact": "QQ 123456789",
+  "masterUsername": "master",
+  "masterPasswordFile": "C:\\Asterism\\bootstrap-password.txt",
+  "gatewayTokenTtlSeconds": 31536000,
   "providers": {
     "chaoxing": true,
     "welearn": true,

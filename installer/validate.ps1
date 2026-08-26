@@ -24,6 +24,8 @@ Check "Yunzai plugin" (Test-Path (Join-Path $SourceRoot "integrations\yunzai-plu
 try {
     $health = Invoke-RestMethod -Uri ("http://" + $Bind + "/api/v1/system/health") -TimeoutSec 5
     Check "API health" ($health.status -eq "ok") ("status=" + $health.status)
+    Check "master initialized" ($health.master_initialized -eq $true) ("master_initialized=" + $health.master_initialized)
+    Check "secret store" ($health.secret_store_configured -eq $true) ("secret_store_configured=" + $health.secret_store_configured)
 } catch {
     Check "API health" $false $_.Exception.Message
 }

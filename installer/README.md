@@ -19,13 +19,24 @@ Set-ExecutionPolicy -Scope Process Bypass
   -RegisterTask
 ```
 
-可使用 `-NonInteractive` 配合显式参数执行无人值守安装；`-SkipDependencyInstall` 只允许在依赖已经由管理员准备好时使用；`-SkipBuild` 只适用于已有 release 构建产物的升级/重配置。
+可使用 `-NonInteractive` 配合显式参数执行无人值守安装。首次初始化或补建 Yunzai 网关令牌时，还必须通过 `-MasterPasswordFile` 提供只含一行密码的本地文件；安装器刻意不接受命令行明文密码。`-SkipDependencyInstall` 只允许在依赖已经由管理员准备好时使用；`-SkipBuild` 只适用于已有 release 构建产物的升级/重配置。
 
 也可以从 JSON 读取路径、Provider、群号和联系方式：
 
 ```powershell
 .\installer\install.ps1 -ConfigFile .\installer\config.example.json
 ```
+
+无人值守示例：
+
+```powershell
+.\installer\install.ps1 `
+  -ConfigFile .\installer\config.example.json `
+  -MasterPasswordFile C:\Asterism\bootstrap-password.txt `
+  -NonInteractive
+```
+
+密码文件只用于向 `asterismctl --password-stdin` 传递密码，不会复制进安装目录或写入日志。部署后应删除该临时文件，或至少将 ACL 限制为管理员和 SYSTEM。
 
 首次安装会提示设置 Master 密码，并只显示一次初始管理令牌。配置了 Yunzai 目录时，安装器会自动创建仅含 `qq_identity_assert`、`task_command_proxy`、`notification_delivery_report` 的网关令牌并写入插件配置；重复安装会保留已存在的网关配置，不会重复创建令牌。
 

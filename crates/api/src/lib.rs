@@ -4179,8 +4179,9 @@ mod tests {
 
     #[tokio::test]
     async fn health_is_versioned_and_has_a_request_id() {
-        let response = test_router()
-            .await
+        let app = test_router().await;
+        let response = app
+            .clone()
             .oneshot(
                 Request::get("/api/v1/system/health")
                     .body(Body::empty())
@@ -4196,6 +4197,19 @@ mod tests {
         assert_eq!(health.status, "ok");
         assert!(!health.secret_store_configured);
         assert!(!health.master_initialized);
+
+        bootstrap(&app).await;
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/system/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let health: HealthResponse = serde_json::from_slice(&body).unwrap();
+        assert!(health.master_initialized);
     }
 
     #[tokio::test]
@@ -4343,7 +4357,7 @@ mod tests {
 
     #[tokio::test]
     async fn master_target_owner_header_controls_cross_user_account_scope() {
-        let (app, _) = test_app(false, None).await;
+        let (app, database) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;
         let master_cookie = bootstrap.headers()[header::SET_COOKIE]
             .to_str()
@@ -4384,6 +4398,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(account.status(), StatusCode::CREATED);
+        let account_id = response_json(account).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let own_list = app
             .clone()
             .oneshot(
@@ -4396,6 +4414,7 @@ mod tests {
             .unwrap();
         assert_eq!(response_json(own_list).await["total"], 0);
         let delegated_list = app
+            .clone()
             .oneshot(
                 Request::get("/api/v1/provider-accounts")
                     .header(header::COOKIE, &master_cookie)
@@ -4407,6 +4426,60 @@ mod tests {
             .unwrap();
         let delegated_list = response_json(delegated_list).await;
         assert_eq!(delegated_list["total"], 1);
+
+        let task_id = TaskId::new();
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+              assessment_class, title, remote_state, orchestration_state, discovered_at, \
+              updated_at, capabilities_json) \
+             VALUES (?, ?, 'delegated-task', 'delegated-task-fingerprint', 'work', \
+                     'routine', 'Delegated task', 'pending', 'ready', ?, ?, '[]')",
+        )
+        .bind(task_id.to_string())
+        .bind(&account_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let ignored = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{task_id}/ignore"))
+                    .header(header::COOKIE, &master_cookie)
+                    .header("x-asterism-target-owner", &user_id)
+                    .header("idempotency-key", "delegated-ignore")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ignored.status(), StatusCode::CREATED);
+        assert_eq!(response_json(ignored).await["task_state"], "ignored");
+        let persisted_state: String =
+            sqlx::query_scalar("SELECT orchestration_state FROM tasks WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(persisted_state, "ignored");
+        let master_id: String =
+            sqlx::query_scalar("SELECT id FROM users WHERE username = 'master'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        let audit_actor: String = sqlx::query_scalar(
+            "SELECT actor_id FROM audit_records \
+             WHERE resource_id = ? AND action = 'task_ignore'",
+        )
+        .bind(task_id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_actor, master_id);
+        assert_ne!(audit_actor, user_id);
     }
 
     #[tokio::test]
