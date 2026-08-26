@@ -293,7 +293,9 @@ if ($RegisterTask) {
 
 Write-Step "运行数据库迁移和初始账号向导"
 if (-not (Test-Path (Join-Path $SourceRoot "target\release\asterismctl.exe"))) { throw "未找到 asterismctl.exe。请不要使用 -SkipBuild，或先完成构建。" }
-$daemonProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $SourceRoot -WindowStyle Hidden -PassThru
+$bootstrapOut = Join-Path $InstallRoot "logs\bootstrap.stdout.log"
+$bootstrapErr = Join-Path $InstallRoot "logs\bootstrap.stderr.log"
+$daemonProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $SourceRoot -WindowStyle Hidden -RedirectStandardOutput $bootstrapOut -RedirectStandardError $bootstrapErr -PassThru
 for ($attempt = 0; $attempt -lt 30; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri ("http://" + $Bind + "/api/v1/system/health") -TimeoutSec 2
@@ -301,7 +303,8 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
     } catch { Start-Sleep -Seconds 1 }
     if ($attempt -eq 29) {
         $daemonLog = Join-Path $InstallRoot "logs\asterismd.log"
-        $diagnostic = if (Test-Path $daemonLog) { (Get-Content -LiteralPath $daemonLog -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { "（尚未生成 daemon 日志）" }
+        $diagnosticFiles = @($daemonLog, $bootstrapOut, $bootstrapErr) | Where-Object { Test-Path $_ }
+        $diagnostic = if ($diagnosticFiles) { ($diagnosticFiles | ForEach-Object { "--- $_ ---"; Get-Content -LiteralPath $_ -Tail 40 -ErrorAction SilentlyContinue }) -join "`n" } else { "（尚未生成 daemon/启动日志）" }
         throw "asterismd 未能在 30 秒内通过健康检查（PID $($daemonProcess.Id)，进程状态 $((Get-Process -Id $daemonProcess.Id -ErrorAction SilentlyContinue).HasExited)）。`n$diagnostic"
     }
 }
