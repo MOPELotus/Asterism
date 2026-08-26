@@ -100,6 +100,23 @@ foreach ($requirements in @("workers\chaoxing\requirements.txt", "workers\welear
     if (Test-Path $file) { & $python -m pip install -r $file }
 }
 
+Write-Step "检测 Chromium 兼容浏览器"
+$browserCandidates = @(
+    (Get-Command msedge.exe -ErrorAction SilentlyContinue).Source,
+    (Get-Command chrome.exe -ErrorAction SilentlyContinue).Source,
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+    "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+    "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+) | Where-Object { $_ -and (Test-Path $_) }
+$browser = $browserCandidates | Select-Object -First 1
+if (-not $browser) {
+    if (Ask-YesNo "未找到 Edge/Chrome，是否尝试通过 winget 安装 Edge" $true) {
+        Install-WithWinget "Microsoft.Edge" "Microsoft Edge"
+        $browser = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+}
+if (-not $browser) { Write-Warning "未配置 Chromium 浏览器；Chaoxing/UAI 的浏览器兜底能力将保持不可用。" }
+
 Write-Step "生成本地配置"
 $configPath = Join-Path $InstallRoot "asterism.toml"
 $dbUrl = "sqlite://" + ($DatabasePath -replace '\\', '/')
@@ -187,6 +204,8 @@ $envLines = Get-Content $secretPath | Where-Object { $_ -match '^ASTERISM_' } | 
 $runContent = @"
 `$ErrorActionPreference = "Stop"
 $($envLines -join "`n")
+`$env:ASTERISM_UAI_WORKER_PYTHON = "$python"
+$(if ($browser) { "`$env:ASTERISM_CHAOXING_BROWSER_EXECUTABLE = `"$browser`"`n`$env:ASTERISM_UAI_BROWSER_EXECUTABLE = `"$browser`"" } else { "" })
 & "$daemon" --config "$configPath" --web-dist "$(Join-Path $SourceRoot 'web\dist')" *>> "$(Join-Path $InstallRoot 'logs\asterismd.log')"
 "@
 Set-PrivateFile $runScript $runContent
