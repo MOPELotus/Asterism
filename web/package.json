@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "pregenerate:api": "cargo run --manifest-path ../Cargo.toml -q -p asterism-api --example export_openapi -- .openapi/asterism.json",
+    "pregenerate:api": "cargo run --locked --release --manifest-path ../Cargo.toml -q -p asterism-api --example export_openapi -- .openapi/asterism.json",
     "generate:api": "openapi-ts -i .openapi/asterism.json -o src/api/generated",
     "typecheck:api": "tsc -p tsconfig.api.json",
     "pretypecheck": "npm run generate:api",

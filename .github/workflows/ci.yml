@@ -80,12 +80,15 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Parse installer scripts
-        shell: pwsh
+        shell: powershell
         run: |
-          foreach ($file in @('installer/install.ps1', 'installer/validate.ps1')) {
+          $files = Get-ChildItem -Path . -Filter *.ps1 -File -Recurse | Where-Object {
+            $_.FullName -notmatch '[\\/]node_modules[\\/]' -and $_.FullName -notmatch '[\\/]target[\\/]'
+          }
+          foreach ($file in $files) {
             $tokens = $null
             $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) { throw ($errors | Out-String) }
           }
       - run: cargo build --release -p asterismd -p asterismctl
@@ -100,8 +103,45 @@ jobs:
           $yunzaiRoot = Join-Path $env:RUNNER_TEMP 'Miao Yunzai'
           $passwordFile = Join-Path $env:RUNNER_TEMP 'asterism-bootstrap-password.txt'
           New-Item -ItemType Directory -Force $yunzaiRoot | Out-Null
+          New-Item -ItemType Directory -Force $installRoot | Out-Null
           'Asterism-CI-Password-2026!' | Set-Content -LiteralPath $passwordFile -Encoding UTF8
           try {
+            $head = (& git rev-parse HEAD).Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to read Git HEAD for build stamp.' }
+            $artifactPaths = @(
+              (Join-Path $PWD.Path 'target\release\asterismd.exe'),
+              (Join-Path $PWD.Path 'target\release\asterismctl.exe'),
+              (Join-Path $PWD.Path 'web\dist\index.html')
+            )
+            $stamp = [ordered]@{
+              schema = 1
+              profile = 'release'
+              builtAtUtc = [DateTime]::UtcNow.ToString('o')
+              sourceRoot = $PWD.Path
+              gitHead = $head
+              cargoLock = (Get-FileHash (Join-Path $PWD.Path 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+              webLock = (Get-FileHash (Join-Path $PWD.Path 'web\package-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+              dirty = $false
+              artifacts = @($artifactPaths | ForEach-Object { [ordered]@{ path = $_; sha256 = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant() } })
+            }
+            $stamp | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $installRoot 'build-stamp.json') -Encoding UTF8
+            $installOutput = .\installer\install.ps1 `
+              -InstallRoot $installRoot `
+              -SourceRoot $PWD.Path `
+              -YunzaiRoot $yunzaiRoot `
+              -MasterPasswordFile $passwordFile `
+              -SkipDependencyInstall `
+              -NonInteractive 2>&1 | Tee-Object -Variable installerLines
+            if (($installerLines -join "`n") -notmatch '检测到有效现有构建产物') {
+              throw 'Installer did not automatically reuse the matching release build stamp.'
+            }
+            .\installer\validate.ps1 -InstallRoot $installRoot -SourceRoot $PWD.Path
+            $pluginConfig = Join-Path $yunzaiRoot 'plugins\asterism-plugin\config\asterism.json'
+            if (-not (Test-Path $pluginConfig)) {
+              throw 'Yunzai gateway configuration was not created.'
+            }
+            $secretHash = (Get-FileHash (Join-Path $installRoot 'secrets.env') -Algorithm SHA256).Hash
+            $pluginHash = (Get-FileHash $pluginConfig -Algorithm SHA256).Hash
             .\installer\install.ps1 `
               -InstallRoot $installRoot `
               -SourceRoot $PWD.Path `
@@ -110,9 +150,11 @@ jobs:
               -SkipDependencyInstall `
               -SkipBuild `
               -NonInteractive
-            .\installer\validate.ps1 -InstallRoot $installRoot -SourceRoot $PWD.Path
-            if (-not (Test-Path (Join-Path $yunzaiRoot 'plugins\asterism-plugin\config\asterism.json'))) {
-              throw 'Yunzai gateway configuration was not created.'
+            if ((Get-FileHash (Join-Path $installRoot 'secrets.env') -Algorithm SHA256).Hash -ne $secretHash) {
+              throw 'Idempotent rerun replaced secrets.env.'
+            }
+            if ((Get-FileHash $pluginConfig -Algorithm SHA256).Hash -ne $pluginHash) {
+              throw 'Idempotent rerun replaced the Yunzai gateway token/configuration.'
             }
           } finally {
             Get-Process asterismd -ErrorAction SilentlyContinue | Stop-Process -Force
