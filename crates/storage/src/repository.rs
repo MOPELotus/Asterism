@@ -619,6 +619,7 @@ pub struct CourseAutomationPlanWriteRequest {
     pub updated_at: Timestamp,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CourseAutomationPlanWriteOutcome {
     Stored(AutomationPlan),

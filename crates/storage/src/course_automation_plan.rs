@@ -322,7 +322,7 @@ fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
         .map_err(invalid_data)
 }
 
-fn invalid_data(error: impl ToString) -> StorageError {
+fn invalid_data(error: &impl ToString) -> StorageError {
     StorageError::InvalidData(error.to_string())
 }
 

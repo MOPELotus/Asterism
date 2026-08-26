@@ -1294,6 +1294,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn semantic_fingerprint_rebinds_only_unique_reordered_options() {
         let source_question = valid_question();
         let source_group = QuestionGroup {

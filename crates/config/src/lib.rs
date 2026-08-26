@@ -69,6 +69,10 @@ impl Config {
     /// # Errors
     ///
     /// Returns [`ConfigError::Validation`] for invalid or unsafe values.
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a configured value is invalid or required
+    /// configuration is missing.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !self.server.bind.ip().is_loopback() {
             return Err(ConfigError::Validation(
@@ -192,6 +196,11 @@ impl AiConfig {
     ///
     /// API keys are never part of this value; only endpoint names, model
     /// routing and environment-variable names are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a profile, endpoint, model, or environment
+    /// variable name is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !matches!(self.default_profile.as_str(), "economy" | "gpt_only") {
             return Err(ConfigError::Validation(

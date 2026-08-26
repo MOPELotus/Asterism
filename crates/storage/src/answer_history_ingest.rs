@@ -507,9 +507,7 @@ fn decode_digest(value: Vec<u8>) -> Result<[u8; 32], StorageError> {
 }
 
 fn valid_private_provenance(value: &serde_json::Value) -> bool {
-    serde_json::to_vec(value)
-        .ok()
-        .is_some_and(|bytes| !bytes.is_empty() && bytes.len() <= 256 * 1_024)
+    serde_json::to_vec(value).is_ok_and(|bytes| !bytes.is_empty() && bytes.len() <= 256 * 1_024)
         && !contains_sensitive_key(value)
 }
 
