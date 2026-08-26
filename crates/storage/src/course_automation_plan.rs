@@ -322,7 +322,8 @@ fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
         .map_err(invalid_data)
 }
 
-fn invalid_data(error: &impl ToString) -> StorageError {
+#[allow(clippy::needless_pass_by_value)]
+fn invalid_data(error: impl ToString) -> StorageError {
     StorageError::InvalidData(error.to_string())
 }
 

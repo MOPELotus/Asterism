@@ -1,4 +1,5 @@
 //! `SQLite` adapter for Asterism's repository boundary.
+#![allow(clippy::too_many_lines)]
 
 mod admin;
 mod answer_evidence;

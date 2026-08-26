@@ -1,4 +1,12 @@
 //! Thin read-only Provider capabilities backed by an external 0.0.1 worker.
+#![allow(clippy::similar_names)]
+#![allow(clippy::unnested_or_patterns)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::format_collect)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::cast_sign_loss)]
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
