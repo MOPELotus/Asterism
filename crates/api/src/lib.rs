@@ -1829,6 +1829,34 @@ pub fn openapi_document() -> Value {
                 "additionalProperties": true
             }),
         );
+    document["components"]["parameters"] = json!({
+        "TargetOwnerHeader": {
+            "name": "X-Asterism-Target-Owner",
+            "in": "header",
+            "required": false,
+            "description": "Optional target resource owner for an authorized master/operator Web actor. Ordinary users may only address themselves; actor identity remains the authenticated session.",
+            "schema": {"type": "string", "format": "uuid"}
+        }
+    });
+    if let Some(paths) = document["paths"].as_object_mut() {
+        for path in paths.values_mut() {
+            if let Some(operations) = path.as_object_mut() {
+                for operation in operations.values_mut() {
+                    if operation.get("security").is_some() {
+                        let parameters = operation
+                            .as_object_mut()
+                            .expect("OpenAPI operation is an object")
+                            .entry("parameters")
+                            .or_insert_with(|| json!([]));
+                        parameters
+                            .as_array_mut()
+                            .expect("OpenAPI operation parameters are an array")
+                            .push(json!({"$ref": "#/components/parameters/TargetOwnerHeader"}));
+                    }
+                }
+            }
+        }
+    }
     openapi_contract::finalize(&mut document);
     document
 }
