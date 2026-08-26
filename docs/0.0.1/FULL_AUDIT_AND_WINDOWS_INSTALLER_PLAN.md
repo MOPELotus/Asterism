@@ -25,13 +25,13 @@
 | Web 注册、登录、会话、退出 | 已实现/需回归 | `crates/api/src/auth.rs`、Web 登录页 | 密码、会话失效、CSRF/权限边界保持一致 | 新用户、旧用户、过期会话测试 |
 | 密码首次设置、修改、管理员重置 | 已实现 | migration `111_user_password_lifecycle.sql`、Web 设置页 | QQ 新用户首次进入设置密码；重置后旧会话失效策略明确 | Web/API/错误密码/重置回归 |
 | QQ 注册 | 部分实现 | `crates/api/src/qq.rs`、`integrations/yunzai-plugin/model/client.js` | `assertQq` 幂等创建普通用户并发放一次性 Web 登录票据 | 同 QQ 重复注册、票据过期/复用 |
-| QQ master 提权 | 待补全 | Yunzai `apps/asterism.js` 当前只检查群权限，未传 `e.isMaster` | 受信任插件将 `e.isMaster` 作为不可伪造的 master assertion；服务端校验 Service Token、来源和审计事件；普通 QQ 请求永不自带可提升字段 | master/非 master、伪造字段、重放测试 |
+| QQ master 提权 | 已实现/自动化验证 | Yunzai `apps/asterism.js`、`crates/api/src/auth.rs`、API/Yunzai tests | 受信任插件将 `e.isMaster` 作为 master assertion；服务端校验 Service Token scope、目标 owner 和审计事件；普通 QQ 请求永不自带可提升字段 | master/非 master、伪造字段、重放测试已覆盖；真实 Miao/TRSS 事件仍现场验收 |
 | 角色与权限 | 部分实现 | `crates/auth/src/permission.rs` | master/operator/user 的权限矩阵与产品文档一致；权限检查不得仅依赖前端 | 每个敏感 API 逐权限 403/200 测试 |
 | Service Token | 已实现/需审计 | Yunzai 配置、API token 校验 | owner 绑定、scope 最小化、轮换和撤销；不得用 token 直接冒充任意用户 | scope、撤销、轮换、审计日志 |
 
 ### 2.2 管理员代用户与所有权边界
 
-这是当前最高优先级的语义审计项。现在 WebUI 可以在创建 Provider Account 时填写 `owner_user_id`，但后续许多 account/course/task/execution 路由仍以当前 principal 作为 owner；因此“创建给别人”与“继续操作别人资源”尚未形成完整闭环，不能宣称已完成。
+这是本轮已完成代码审计和自动化边界验证的语义项。WebUI、API 和 Yunzai 都已显式传递/解析 target owner，并保持 actor 与 owner 分离；真实逐页代操作仍属于现场验收。
 
 必须统一审计并补齐以下对象：
 
@@ -131,7 +131,7 @@ Yunzai 插件使用统一注册入口：`#星芒状态`、账号、课程、任�
 
 ## 4. 实施顺序与检查点
 
-1. 完成本文档所列全仓审计，逐路由/服务/Worker 建立证据表，先修 owner/actor 和 QQ master 信任边界（代码审计与自动化边界已完成，现场仍待验收）。
+1. 完成本文档所列全仓审计，逐路由/服务/Worker 建立证据表，收口 owner/actor 和 QQ master 信任边界（代码审计与自动化边界已完成，现场仍待验收）。
 2. 收口四 Provider 的只读与扫描状态，再补 Chaoxing 任务执行、题型、验证码、挑战模式和确认/截止语义。
 3. 收口全局题库规范化、混编/挖空/共享材料和缓存信任状态。
 4. 收口调度、并发、重试、通知、计费和管理员代用户流程。
