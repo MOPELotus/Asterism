@@ -218,7 +218,7 @@ $runContent = @"
 $($envLines -join "`n")
 `$env:ASTERISM_UAI_WORKER_PYTHON = "$python"
 $(if ($browser) { "`$env:ASTERISM_CHAOXING_BROWSER_EXECUTABLE = `"$browser`"`n`$env:ASTERISM_UAI_BROWSER_EXECUTABLE = `"$browser`"" } else { "" })
-& "$daemon" --config "$configPath" --web-dist "$(Join-Path $SourceRoot 'web\dist')" *>> "$(Join-Path $InstallRoot 'logs\asterismd.log')"
+& "$daemon" --config "$configPath" --web-dist "$(Join-Path $SourceRoot 'web\dist')" --uai-worker-python "$python" *>> "$(Join-Path $InstallRoot 'logs\asterismd.log')"
 "@
 Set-PrivateFile $runScript $runContent
 
