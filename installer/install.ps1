@@ -73,10 +73,14 @@ function New-SecretKey {
     [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     try { return [Convert]::ToBase64String($bytes) } finally { [Array]::Clear($bytes, 0, $bytes.Length) }
 }
-function Set-PrivateFile([string]$Path, [string]$Content) {
+function Set-PrivateFile([string]$Path, [string]$Content, [switch]$WithBom) {
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Force $parent | Out-Null
-    $Content | Set-Content -LiteralPath $Path -Encoding UTF8 -NoNewline
+    if ($WithBom) {
+        [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($true))
+    } else {
+        [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false))
+    }
     $acl = Get-Acl -LiteralPath $Path
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($identity in @(
@@ -268,7 +272,7 @@ $($envLines -join "`n")
 $(if ($browser) { "`$env:ASTERISM_CHAOXING_BROWSER_EXECUTABLE = `"$browser`"`n`$env:ASTERISM_UAI_BROWSER_EXECUTABLE = `"$browser`"" } else { "" })
 & "$daemon" --config "$configPath" --web-dist "$(Join-Path $SourceRoot 'web\dist')" --uai-worker-python "$python" *>> "$(Join-Path $InstallRoot 'logs\asterismd.log')"
 "@
-Set-PrivateFile $runScript $runContent
+Set-PrivateFile $runScript $runContent -WithBom
 
 $pluginTarget = $null
 if ($YunzaiRoot -and (Test-Path $YunzaiRoot)) {
