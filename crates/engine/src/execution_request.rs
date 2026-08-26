@@ -308,6 +308,11 @@ where
     /// Returns [`ExecutionRequestError`] for ownership, capability, remote or
     /// orchestration conflicts, formal-assessment policy, idempotency reuse, or
     /// persistence failures.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal billing invariant is violated after a quote
+    /// has been established.
     // Keep authorization, fresh Task validation, frozen settings, pricing and
     // the single atomic scheduling request adjacent so no preflight result is
     // accidentally reused across a mutation boundary.

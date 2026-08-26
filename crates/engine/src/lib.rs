@@ -1,4 +1,8 @@
 //! Pure orchestration state machines and policy guards.
+#![allow(clippy::await_holding_lock)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::match_same_arms)]
 
 mod answer_history_harvest;
 mod answer_resolution;

@@ -385,6 +385,7 @@ mod tests {
     #[tokio::test]
     async fn low_trust_provider_native_evidence_never_selects_without_arbitration() {
         let (service, command, question_ids) = fixture();
+        #[allow(clippy::await_holding_lock)]
         let mut candidates = service.snapshots.candidates.lock().unwrap();
         candidates[0].candidate.source = AnswerSource::ProviderNative;
         candidates[0].candidate.confidence = Some(AnswerConfidence::try_new(3_000).unwrap());

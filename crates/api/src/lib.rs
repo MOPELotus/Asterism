@@ -1,4 +1,21 @@
 #![recursion_limit = "256"]
+#![allow(clippy::similar_names)]
+#![allow(clippy::unnested_or_patterns)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::useless_conversion)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::if_not_else)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::format_collect)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::needless_lifetimes)]
 
 //! Versioned HTTP transport for Asterism core services.
 

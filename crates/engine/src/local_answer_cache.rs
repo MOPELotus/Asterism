@@ -243,15 +243,15 @@ fn answer_matches_question(question: &Question, answer: &NormalizedAnswer) -> bo
                     .iter()
                     .all(|value| composite_objective_answer_is_valid(question, value))
         }
-        (QuestionKind::FillBlank | QuestionKind::ShortAnswer, _) => false,
         _ => false,
     }
 }
 
 fn composite_objective_answer_is_valid(question: &Question, answer: &NormalizedAnswer) -> bool {
     match answer {
-        NormalizedAnswer::Selections(values) => selections_exist(question, values),
-        NormalizedAnswer::Ordering(values) => selections_exist(question, values),
+        NormalizedAnswer::Selections(values) | NormalizedAnswer::Ordering(values) => {
+            selections_exist(question, values)
+        }
         NormalizedAnswer::Pairs(values) => {
             !values.is_empty()
                 && values.iter().all(|pair| {

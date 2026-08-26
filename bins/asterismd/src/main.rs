@@ -1334,6 +1334,7 @@ async fn run_scan_scheduler(
     tracing::info!("scan scheduler stopped");
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_course_automation_tick(
     database: &Database,
     providers: Arc<ProviderRegistry>,
@@ -1500,11 +1501,11 @@ async fn run_course_automation_tick(
                     .await;
                 match result {
                     Ok(result) if result.created => {
-                        tracing::info!(course_id = %course_id, task_id = %task.id, execution_id = %result.execution.id, "course patrol scheduled task")
+                        tracing::info!(course_id = %course_id, task_id = %task.id, execution_id = %result.execution.id, "course patrol scheduled task");
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        tracing::warn!(course_id = %course_id, task_id = %task.id, %error, "course patrol skipped unschedulable task")
+                        tracing::warn!(course_id = %course_id, task_id = %task.id, %error, "course patrol skipped unschedulable task");
                     }
                 }
                 if split_welearn_duration {
