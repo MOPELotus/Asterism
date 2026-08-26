@@ -286,6 +286,10 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 $env:ASTERISM_CONFIG = $configPath
 $cli = Join-Path $SourceRoot "target\release\asterismctl.exe"
 $apiUrl = "http://" + $Bind
+$health = Invoke-RestMethod -Uri ("http://" + $Bind + "/api/v1/system/health") -TimeoutSec 5
+if ($null -eq $health.master_initialized) {
+    throw "健康端点不是当前 Asterism 版本，或监听地址已被其他实例占用；请更换 -Bind 或先停止占用端口的服务。"
+}
 $pluginConfigPath = if ($pluginTarget) { Join-Path $pluginTarget "config\asterism.json" } else { $null }
 $needsGatewayToken = $pluginTarget -and ((-not $health.master_initialized) -or -not (Test-Path $pluginConfigPath))
 $needsAdminAuthentication = (-not $health.master_initialized) -or $needsGatewayToken

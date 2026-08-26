@@ -58,3 +58,4 @@ Set-ExecutionPolicy -Scope Process Bypass
 - 不会把密钥写入 Git、前端构建产物或普通日志。
 - 卸载/回滚默认不删除 SQLite、题库和日志；请先备份再清理。
 - 缺失依赖优先通过 winget 官方包安装；无 winget 或网络失败时，安装器会停止并给出人工安装提示，不下载未知二进制。
+- 安装器会校验健康端点包含当前版本的 `master_initialized` 字段；如果监听端口已有旧版本或其他 Asterism 实例，会明确停止，避免把凭据写入错误实例。
