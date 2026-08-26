@@ -125,3 +125,18 @@ test("notification claim/report stay on the gateway token and report only delive
   assert.equal(calls[0].options.headers.get("authorization"), "Bearer ast_st_gateway")
   assert.deepEqual(JSON.parse(calls[1].options.body), { items: [{ id: "n1", delivered: true }] })
 })
+
+test("delegated gateway clients bind the explicit target owner header", async () => {
+  let targetOwner
+  const client = new AsterismClient({
+    apiUrl: "http://asterism.test",
+    token: "ast_st_gateway",
+    targetOwnerId: "owner-2",
+    fetchImpl: async (_url, options) => {
+      targetOwner = options.headers.get("x-asterism-target-owner")
+      return new Response('{"total":0,"items":[]}', { status: 200 })
+    },
+  })
+  await client.accounts()
+  assert.equal(targetOwner, "owner-2")
+})

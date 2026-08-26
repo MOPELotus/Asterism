@@ -9,9 +9,10 @@ export class AsterismApiError extends Error {
 }
 
 export class AsterismClient {
-  constructor({ apiUrl, token, requestTimeoutMs = 180_000, fetchImpl = globalThis.fetch }) {
+  constructor({ apiUrl, token, targetOwnerId, requestTimeoutMs = 180_000, fetchImpl = globalThis.fetch }) {
     this.apiUrl = apiUrl.replace(/\/$/, "")
     this.token = token
+    this.targetOwnerId = targetOwnerId
     this.requestTimeoutMs = requestTimeoutMs
     this.fetchImpl = fetchImpl
   }
@@ -93,6 +94,7 @@ export class AsterismClient {
     const headers = new Headers(options.headers)
     headers.set("Accept", "application/json")
     if (options.authenticated !== false) headers.set("Authorization", `Bearer ${this.token}`)
+    if (this.targetOwnerId) headers.set("X-Asterism-Target-Owner", String(this.targetOwnerId))
     if (options.body !== undefined) headers.set("Content-Type", "application/json")
     try {
       const response = await this.fetchImpl(url, {

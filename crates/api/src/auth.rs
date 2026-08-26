@@ -101,6 +101,19 @@ impl AuthContext {
         }
     }
 
+    fn resolve_service_target(&self, token: &ServiceToken) -> Result<UserId, ApiError> {
+        let owner_id = token.owner_user_id;
+        match (self.target_owner_id, owner_id) {
+            (Some(target), Some(owner)) if target == owner => Ok(target),
+            (Some(target), _) if token.scopes.contains(&ServiceScope::TaskCommandProxy) => {
+                Ok(target)
+            }
+            (Some(_), _) => Err(ApiError::forbidden()),
+            (None, Some(owner)) => Ok(owner),
+            (None, None) => Err(ApiError::forbidden()),
+        }
+    }
+
     pub(super) fn audit_actor(&self) -> AuditActor {
         match &self.identity {
             AuthIdentity::Web { principal, .. } => AuditActor::User(principal.user_id),
@@ -127,7 +140,7 @@ impl AuthContext {
                 if token.scopes.contains(&ServiceScope::ProviderRead)
                     || token.scopes.contains(&ServiceScope::ProviderManage) =>
             {
-                token.owner_user_id.ok_or_else(ApiError::forbidden)
+                self.resolve_service_target(token)
             }
             AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }
@@ -144,7 +157,7 @@ impl AuthContext {
             AuthIdentity::Service(token)
                 if token.scopes.contains(&ServiceScope::ProviderManage) =>
             {
-                token.owner_user_id.ok_or_else(ApiError::forbidden)
+                self.resolve_service_target(token)
             }
             AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }
@@ -235,7 +248,7 @@ impl AuthContext {
                 self.resolve_web_target(principal, Permission::ExecuteAnyTask)
             }
             AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::TaskRead) => {
-                token.owner_user_id.ok_or_else(ApiError::forbidden)
+                self.resolve_service_target(token)
             }
             AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }
@@ -247,7 +260,7 @@ impl AuthContext {
                 self.resolve_web_target(principal, Permission::ManageCredits)
             }
             AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::CreditRead) => {
-                token.owner_user_id.ok_or_else(ApiError::forbidden)
+                self.resolve_service_target(token)
             }
             AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }
@@ -283,7 +296,7 @@ impl AuthContext {
                 ))
             }
             AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::TaskExecute) => {
-                let owner_id = token.owner_user_id.ok_or_else(ApiError::forbidden)?;
+                let owner_id = self.resolve_service_target(token)?;
                 let source = if token.scopes.contains(&ServiceScope::TaskCommandProxy) {
                     RequestSource::Yunzai
                 } else {

@@ -4,7 +4,7 @@
 >
 > 目标：在不扩大 Provider 重写范围的前提下，把现有 WebUI、统一题库、调度、Job/日志/状态和四个上游 Worker 收口为可部署产品；首个安装目标为 Windows Server/Windows 10/11，反向代理不由安装向导处理。
 
-实现进度以提交和测试为准；当前已落地 QQ master assertion、Web target-owner 上下文、Windows 安装器初版及其文档，但四 Provider 的真实账号现场验证、完整 Windows Server 安装回归和全部逐路由代用户验收仍不能仅凭代码测试宣称完成。
+实现进度以提交和测试为准；当前已落地 QQ master assertion、Web/Yunzai target-owner 上下文、Windows 安装器及其无人值守密码文件入口、Windows CI 安装烟测，但四 Provider 的真实账号现场验证、完整 Windows Server 安装回归和全部逐路由代用户验收仍不能仅凭代码测试宣称完成。
 
 ## 1. 总原则
 
@@ -131,12 +131,12 @@ Yunzai 插件使用统一注册入口：`#星芒状态`、账号、课程、任�
 
 ## 4. 实施顺序与检查点
 
-1. 完成本文档所列全仓审计，逐路由/服务/Worker 建立证据表，先修 owner/actor 和 QQ master 信任边界。
+1. 完成本文档所列全仓审计，逐路由/服务/Worker 建立证据表，先修 owner/actor 和 QQ master 信任边界（代码审计与自动化边界已完成，现场仍待验收）。
 2. 收口四 Provider 的只读与扫描状态，再补 Chaoxing 任务执行、题型、验证码、挑战模式和确认/截止语义。
 3. 收口全局题库规范化、混编/挖空/共享材料和缓存信任状态。
 4. 收口调度、并发、重试、通知、计费和管理员代用户流程。
 5. 逐页验证 WebUI 与 Yunzai 命令，更新 `docs/0.0.1/README.md`、`DEPLOYMENT.md` 和运行手册。
-6. 实现 Windows 安装向导，按本节验收矩阵在 Windows 上跑通；每个检查点提交 Conventional Commit，并保留迁移/回滚记录。
+6. 实现 Windows 安装向导，按本节验收矩阵在 Windows 上跑通；当前已加入 Windows Actions 的干净路径/中文空格路径安装烟测；每个检查点提交 Conventional Commit，并保留迁移/回滚记录。
 
 ## 5. 完成定义
 

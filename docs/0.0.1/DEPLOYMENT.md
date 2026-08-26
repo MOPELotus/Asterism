@@ -17,7 +17,10 @@ Yunzai 插件并做健康检查。完整参数和离线/重复安装行为见
 反向代理、TLS 或公网域名；这些仍由部署者配置。
 
 管理员代用户操作时，WebUI 顶栏的目标用户选择器会通过 `X-Asterism-Target-Owner` 传递
-资源归属；操作者仍由当前 Web Session 记录。普通用户不能设置其他用户作为目标。
+资源归属；操作者仍由当前 Web Session 记录。配置好的 Yunzai 网关也可在同一请求头中
+传递显式目标 owner；只有带 `task_command_proxy` 的网关令牌允许这样做，审计 actor 仍是
+Service Token，资源、通知和扣点归目标用户。普通用户和普通 owner-bound Service Token
+不能设置其他用户作为目标。
 
 ## 1. 获取源码和 donor
 

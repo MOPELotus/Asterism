@@ -27,7 +27,6 @@ Copy-Item -Recurse `
 
 ```text
 provider_read
-provider_manage
 task_read
 task_execute
 task_command_proxy
@@ -71,6 +70,12 @@ Web API 使用 `X-Asterism-Target-Owner` 选择资源归属，操作者和资源
 #星芒扫描 <平台或平台:账号序号>
 #星芒执行 <刚才任务列表中的序号或完整任务 ID>
 ```
+
+群主/管理员可以在命令末尾显式指定目标 QQ，例如
+`#星芒任务 chaoxing:1 全部 用户:123456789` 或
+`#星芒执行 3 目标:123456789`。插件只接受数字 QQ，服务端通过
+`X-Asterism-Target-Owner` 绑定资源 owner；执行审计中的 actor 仍是网关 Service Token，
+不会把目标用户的权限提升给普通群成员。非管理员带目标参数会直接拒绝。
 
 普通且不需要人工内容的资源任务直接创建 Job。正式测评、答题补漏、讨论文字、上传和口语输入
 不会在 QQ 中降级成自由文本提交，而会返回对应 WebUI 页面；独立作业和考试仍由用户在 WebUI

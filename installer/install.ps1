@@ -327,7 +327,7 @@ if ($needsGatewayToken) {
     try {
         $gatewayOutput = & $cli --url $apiUrl service-token create `
             --name yunzai-gateway `
-            --scope qq-identity-assert,task-command-proxy,notification-delivery-report `
+            --scope provider-read,task-read,task-execute,qq-identity-assert,task-command-proxy,notification-delivery-report `
             --expires-in-seconds $GatewayTokenTtlSeconds
         if ($LASTEXITCODE -ne 0) { throw "Yunzai 网关 Service Token 创建失败。" }
         $gatewayToken = (($gatewayOutput -join "`n") | ConvertFrom-Json).token

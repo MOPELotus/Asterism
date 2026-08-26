@@ -9900,7 +9900,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, master_cookie)
                     .body(Body::from(
-                        r#"{"name":"yunzai-gateway","scopes":["qq_identity_assert","task_command_proxy"]}"#,
+                        r#"{"name":"yunzai-gateway","scopes":["provider_read","task_read","task_execute","qq_identity_assert","task_command_proxy"]}"#,
                     ))
                     .unwrap(),
             )
@@ -9922,6 +9922,78 @@ mod tests {
         assert_eq!(registered.status(), StatusCode::OK);
         let registered = response_json(registered).await;
         let user_id = registered["user_id"].as_str().unwrap().to_owned();
+        let target_account = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, master_cookie)
+                    .body(Body::from(format!(
+                        r#"{{"provider_id":"provider-alpha","display_name":"qq-target","owner_user_id":"{user_id}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(target_account.status(), StatusCode::CREATED);
+        let delegated_accounts = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/provider-accounts")
+                    .header(header::AUTHORIZATION, format!("Bearer {gateway_token}"))
+                    .header("x-asterism-target-owner", &user_id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delegated_accounts.status(), StatusCode::OK);
+        assert_eq!(response_json(delegated_accounts).await["total"], 1);
+        let delegated_task = TaskId::new();
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        let account_id: String =
+            sqlx::query_scalar("SELECT id FROM provider_accounts WHERE owner_user_id = ? LIMIT 1")
+                .bind(&user_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+              assessment_class, title, remote_state, orchestration_state, discovered_at, \
+              updated_at, capabilities_json) \
+             VALUES (?, ?, 'qq-delegated-task', 'qq-delegated-fingerprint', 'work', \
+                     'routine', 'QQ delegated task', 'pending', 'ready', ?, ?, '[]')",
+        )
+        .bind(delegated_task.to_string())
+        .bind(account_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let delegated_ignore = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{delegated_task}/ignore"))
+                    .header(header::AUTHORIZATION, format!("Bearer {gateway_token}"))
+                    .header("x-asterism-target-owner", &user_id)
+                    .header("idempotency-key", "qq-delegated-ignore")
+                    .header("x-request-id", "qq-delegated-ignore-request")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delegated_ignore.status(), StatusCode::CREATED);
+        let delegated_actor_type: String = sqlx::query_scalar(
+            "SELECT actor_type FROM audit_records WHERE resource_id = ? AND action = 'task_ignore'",
+        )
+        .bind(delegated_task.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(delegated_actor_type, "service_token");
         let roles: String = sqlx::query_scalar("SELECT roles_json FROM users WHERE id = ?")
             .bind(&user_id)
             .fetch_one(database.pool())

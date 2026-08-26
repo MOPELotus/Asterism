@@ -9,7 +9,7 @@
   "notificationGroups": ["123456789"],
   "adminContact": "QQ 123456789",
   "masterUsername": "master",
-  "masterPasswordFile": "C:\\Asterism\\bootstrap-password.txt",
+  "masterPasswordFile": null,
   "gatewayTokenTtlSeconds": 31536000,
   "providers": {
     "chaoxing": true,

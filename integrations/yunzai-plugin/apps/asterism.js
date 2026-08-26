@@ -181,7 +181,15 @@ export class AsterismPlugin extends plugin {
     if (!(await this.authorize(e))) return true
     try {
       const asserted = await this.userClient(e.user_id, Boolean(e.isMaster))
-      await action(asserted.client, asserted.identity)
+      const targetQq = targetQqFromMessage(e.msg)
+      if (targetQq && !e.isMaster) throw new UserFacingError("只有群主/管理员可以指定目标 QQ。")
+      const target = targetQq
+        ? await this.gatewayClient.assertQq(targetQq, false, "/", false)
+        : undefined
+      const client = target
+        ? new AsterismClient({ ...this.config, targetOwnerId: target.user_id })
+        : asserted.client
+      await action(client, target || asserted.identity)
     } catch (error) {
       if (error instanceof UserFacingError) await this.replyAt(e, error.message)
       else if (error instanceof AsterismApiError) await this.replyAt(e, `Asterism 请求失败：${error.code}${error.requestId ? `\n请求 ID：${error.requestId}` : ""}`)
@@ -212,6 +220,11 @@ export class AsterismPlugin extends plugin {
     const at = globalThis.segment?.at ? globalThis.segment.at(e.user_id) : `@${e.user_id}`
     await e.reply([at, `\n${message}`])
   }
+}
+
+function targetQqFromMessage(message) {
+  const match = /(?:目标用户|目标|用户)\s*[:=：]?\s*(\d{5,20})(?:\s|$)/i.exec(String(message || ""))
+  return match?.[1]
 }
 
 class UserFacingError extends Error {}
