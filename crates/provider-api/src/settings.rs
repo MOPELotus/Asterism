@@ -170,6 +170,11 @@ impl ProviderRuntimeSettingsSchema {
     /// Adds the product-owned answer execution combination. It inherits across
     /// Provider/account/Task scopes and is frozen with the existing Job
     /// runtime-settings snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when adding the Core setting makes the
+    /// combined schema invalid or collides with an existing setting.
     pub fn with_core_ai_policy(mut self) -> Result<Self, ProviderSettingsError> {
         self.definitions.push(core_ai_profile_definition());
         self.validate()?;
@@ -624,6 +629,11 @@ impl ProviderRuntimeSettingsSchema {
 
     /// Resolves the selected answer combination from an immutable settings
     /// snapshot. Older frozen snapshots are hydrated with the economy default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when the snapshot contains an invalid
+    /// or unsupported Core answer profile.
     pub fn ai_execution_profile(
         &self,
         resolved: &ResolvedProviderRuntimeSettings,
