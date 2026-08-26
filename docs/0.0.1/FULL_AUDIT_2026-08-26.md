@@ -24,7 +24,7 @@
 - 四个平台真实账号登录、课程/任务只读、Chaoxing 三类验证码、全量静默扫描和真实题型/附件混编。
 - Yunzai 真实 Miao/TRSS 实例中的 `e.isMaster` 事件值、锅巴配置、群 @ 投递和 Service Token scope。
 - 代用户执行的每一个写路由必须在真实 WebUI 操作中确认 owner、actor、通知和扣点；当前已有共享后端边界和基础测试，但仍需逐页现场验收。
-- OpenAPI 自定义 target-owner header 的客户端契约说明和最终部署手册联动检查。
+- 最终部署手册联动检查仍需在 Windows 实机安装后完成；target-owner header 已进入 OpenAPI，并会由 Web 客户端生成类型。
 
 ## 结论
 
