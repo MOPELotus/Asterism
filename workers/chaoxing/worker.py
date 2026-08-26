@@ -2367,10 +2367,9 @@ def run_knowledge_point(bot, module, payload, native, events, redactor):
     fresh = next((row for row in fresh_points if str(row.get("id")) == str(point.get("id"))), None)
     verified = bool(fresh and fresh.get("has_finished"))
     attempts_used = 1
-    # Challenge chains can remain locked when an answer was accepted locally
-    # but the platform has not yet unlocked the next node.  Re-run the same
-    # donor sequence a small, explicit number of times; never spin forever or
-    # retry ordinary knowledge points.  The Core/answer service can inspect the
+    # Challenge chains can remain locked after an answer attempt. Poll fresh
+    # platform state a small, explicit number of times, but never replay the
+    # same immutable answer draft. The Core/answer service can inspect the
     # escalation marker and perform its single Sol xhigh fallback.
     while challenge and not verified and attempts_used < challenge_attempts:
         attempts_used += 1
@@ -2378,35 +2377,11 @@ def run_knowledge_point(bot, module, payload, native, events, redactor):
             f"Chaoxing challenge point not complete; bounded retry "
             f"{attempts_used}/{challenge_attempts}"
         ))
-        for fallback_index, child_value in enumerate(children):
-            child = require_mapping(child_value, "task.native.jobs item")
-            job = dict(require_mapping(child.get("job"), "task.native.jobs item.job"))
-            if job.get("_asterism_is_passed"):
-                continue
-            job_type = str(job.get("type", ""))
-            # Unlock failures are answer-gated. Never replay video, live,
-            # reading or document mutations merely because a challenge point
-            # remains incomplete.
-            if job_type != "workid":
-                continue
-            job_info = dict(require_mapping(child.get("job_info"), "task.native.jobs item.job_info"))
-            if _is_locked_child(job, job_info):
-                continue
-            job_key = knowledge_job_key(job, int(child.get("job_index", fallback_index)))
-            child_answers = [
-                {"remote_id": remote_id[len(job_key) + 1:], "value": value}
-                for remote_id, value in supplied_answers.items()
-                if remote_id.startswith(f"{job_key}:")
-            ]
-            if not child_answers:
-                continue
-            child_payload = dict(payload)
-            child_payload["answers"] = child_answers
-            child_payload["task"] = {
-                "remote_id": require_mapping(payload.get("task"), "payload.task").get("remote_id"),
-                "native": {"course": course, "point": point, "job": job, "job_info": job_info},
-            }
-            run_task(module, child_payload, events, redactor)
+        # Do not replay the same immutable answer draft. A challenge retry
+        # must receive fresh platform feedback and a newly resolved answer;
+        # the Core escalation queue owns that re-resolution. Replaying the
+        # old answer here can consume attempts without learning anything.
+        events.emit("log", level="info", message="Chaoxing challenge retry reserved for fresh answer resolution")
         with capture_output(events, redactor):
             fresh_points = bot.get_course_point(course["courseId"], course["clazzId"], course["cpi"]).get("points", [])
         fresh = next((row for row in fresh_points if str(row.get("id")) == str(point.get("id"))), None)
