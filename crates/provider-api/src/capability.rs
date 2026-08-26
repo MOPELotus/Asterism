@@ -4549,7 +4549,6 @@ fn valid_execution_mutation_operation_type(value: &str) -> bool {
 
 #[cfg(test)]
 mod execution_mutation_tests {
-    use sha2::Digest as _;
 
     use super::*;
 
