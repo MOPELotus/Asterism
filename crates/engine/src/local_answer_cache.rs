@@ -223,8 +223,7 @@ fn answer_matches_question(question: &Question, answer: &NormalizedAnswer) -> bo
         (QuestionKind::MultipleChoice, NormalizedAnswer::Selections(values)) => {
             selections_exist(question, values)
         }
-        (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_))
-        | (QuestionKind::FillBlank | QuestionKind::ShortAnswer, NormalizedAnswer::Texts(_)) => true,
+        (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_)) => true,
         (QuestionKind::Ordering, NormalizedAnswer::Ordering(values)) => {
             values.len() == question.options.len() && selections_exist(question, values)
         }
