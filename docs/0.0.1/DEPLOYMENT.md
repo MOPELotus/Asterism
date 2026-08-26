@@ -4,6 +4,18 @@
 `asterismd`、SQLite、四个 Python Worker 和一个生产 WebUI；Web/QQ 用户不需要安装
 donor 或 Python。
 
+Windows 部署优先使用仓库内的安装向导：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\installer\install.ps1 -YunzaiRoot 'C:\Yunzai' -RegisterTask
+```
+
+向导会检测/安装本机依赖、创建 Worker venv、构建项目、生成本地密钥、迁移数据库、复制
+Yunzai 插件并做健康检查。完整参数和离线/重复安装行为见
+[`installer/README.md`](../../installer/README.md)。本向导明确不处理 Apache/Caddy/Nginx
+反向代理、TLS 或公网域名；这些仍由部署者配置。
+
 ## 1. 获取源码和 donor
 
 ```bash

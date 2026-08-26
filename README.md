@@ -73,6 +73,10 @@ CLI / WebUI / external integrations
 
 ## 环境要求
 
+Windows 部署可以直接运行 [`installer/install.ps1`](installer/install.ps1)，它会处理本机
+依赖、Worker 环境、构建、迁移、密钥、可选 Yunzai 插件和健康检查。反向代理、TLS 和公网
+DNS 仍由部署者自行配置，详见 [`installer/README.md`](installer/README.md)。
+
 - Rust 1.97 或更高版本；
 - Cargo；
 - Git；

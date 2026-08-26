@@ -24,10 +24,15 @@ export class AsterismClient {
     return this.request("/api/v1/auth/session")
   }
 
-  assertQq(qq, createIfMissing = true, returnTo = "/") {
+  assertQq(qq, createIfMissing = true, returnTo = "/", masterAssertion = false) {
     return this.request("/api/v1/integrations/qq/identity/assert", {
       method: "POST",
-      body: { qq: String(qq), create_if_missing: createIfMissing, return_to: returnTo },
+      body: {
+        qq: String(qq),
+        create_if_missing: createIfMissing,
+        return_to: returnTo,
+        master_assertion: Boolean(masterAssertion),
+      },
     })
   }
 

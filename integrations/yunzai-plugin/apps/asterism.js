@@ -126,7 +126,7 @@ export class AsterismPlugin extends plugin {
       const task = await client.task(taskId)
       const reason = executionBlockReason(task)
       if (reason) {
-        const identity = await this.gatewayClient.assertQq(e.user_id, true, `/tasks/${task.id}`)
+        const identity = await this.gatewayClient.assertQq(e.user_id, true, `/tasks/${task.id}`, Boolean(e.isMaster))
         throw new UserFacingError(`${reason}：${this.config.webUrl}${identity.web_login_path}`)
       }
       const capabilities = recommendedExecutionCapabilities(task.capabilities || [])
@@ -180,7 +180,7 @@ export class AsterismPlugin extends plugin {
   async run(e, action) {
     if (!(await this.authorize(e))) return true
     try {
-      const asserted = await this.userClient(e.user_id)
+      const asserted = await this.userClient(e.user_id, Boolean(e.isMaster))
       await action(asserted.client, asserted.identity)
     } catch (error) {
       if (error instanceof UserFacingError) await this.replyAt(e, error.message)
@@ -193,15 +193,16 @@ export class AsterismPlugin extends plugin {
     return true
   }
 
-  async userClient(qq) {
+  async userClient(qq, masterAssertion = false) {
     const key = String(qq)
     const cached = this.userSessions.get(key)
-    if (cached && cached.expiresAt - Date.now() > 60_000) return cached
-    const identity = await this.gatewayClient.assertQq(key)
+    if (cached && cached.expiresAt - Date.now() > 60_000 && (!masterAssertion || cached.masterAsserted)) return cached
+    const identity = await this.gatewayClient.assertQq(key, true, "/", masterAssertion)
     const value = {
       identity,
       client: new AsterismClient({ ...this.config, token: identity.access_token }),
       expiresAt: Date.parse(identity.expires_at),
+      masterAsserted: masterAssertion || cached?.masterAsserted === true,
     }
     this.userSessions.set(key, value)
     return value

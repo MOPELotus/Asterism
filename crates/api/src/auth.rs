@@ -34,6 +34,7 @@ const MAX_PASSWORD_BYTES: usize = 1024;
 #[derive(Clone, Debug)]
 pub(super) struct AuthContext {
     identity: AuthIdentity,
+    target_owner_id: Option<UserId>,
 }
 
 #[derive(Clone, Debug)]
@@ -120,7 +121,7 @@ impl AuthContext {
                 if principal.has(Permission::ManageOwnAccounts)
                     || principal.has(Permission::ManageProviders) =>
             {
-                Ok(principal.user_id)
+                self.resolve_web_target(principal, Permission::ManageProviders)
             }
             AuthIdentity::Service(token)
                 if token.scopes.contains(&ServiceScope::ProviderRead)
@@ -138,7 +139,7 @@ impl AuthContext {
                 if principal.has(Permission::ManageOwnAccounts)
                     || principal.has(Permission::ManageProviders) =>
             {
-                Ok(principal.user_id)
+                self.resolve_web_target(principal, Permission::ManageProviders)
             }
             AuthIdentity::Service(token)
                 if token.scopes.contains(&ServiceScope::ProviderManage) =>
@@ -228,7 +229,7 @@ impl AuthContext {
     pub(super) fn require_task_read(&self) -> Result<UserId, ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. } if principal.has(Permission::ReadOwnTasks) => {
-                Ok(principal.user_id)
+                self.resolve_web_target(principal, Permission::ExecuteAnyTask)
             }
             AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::TaskRead) => {
                 token.owner_user_id.ok_or_else(ApiError::forbidden)
@@ -273,7 +274,10 @@ impl AuthContext {
                 if principal.has(Permission::ExecuteOwnTasks)
                     || principal.has(Permission::ExecuteAnyTask) =>
             {
-                Ok((principal.user_id, RequestSource::WebUi))
+                Ok((
+                    self.resolve_web_target(principal, Permission::ExecuteAnyTask)?,
+                    RequestSource::WebUi,
+                ))
             }
             AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::TaskExecute) => {
                 let owner_id = token.owner_user_id.ok_or_else(ApiError::forbidden)?;
@@ -288,12 +292,34 @@ impl AuthContext {
         }
     }
 
-    pub(super) fn require_qq_identity_assert(&self) -> Result<(), ApiError> {
+    fn resolve_web_target(
+        &self,
+        principal: &Principal,
+        delegation_permission: Permission,
+    ) -> Result<UserId, ApiError> {
+        let Some(target) = self.target_owner_id else {
+            return Ok(principal.user_id);
+        };
+        if target == principal.user_id || principal.has(delegation_permission) {
+            Ok(target)
+        } else {
+            Err(ApiError::forbidden())
+        }
+    }
+
+    pub(super) fn require_qq_identity_assert(
+        &self,
+        master_assertion: bool,
+    ) -> Result<(), ApiError> {
         match &self.identity {
             AuthIdentity::Service(token)
                 if token.scopes.contains(&ServiceScope::QqIdentityAssert) =>
             {
-                Ok(())
+                if master_assertion && !token.scopes.contains(&ServiceScope::TaskCommandProxy) {
+                    Err(ApiError::forbidden())
+                } else {
+                    Ok(())
+                }
             }
             AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }
@@ -410,7 +436,22 @@ pub(super) async fn authenticate(
     } else {
         return Err(ApiError::unauthorized());
     };
-    request.extensions_mut().insert(AuthContext { identity });
+    let target_owner_id = request
+        .headers()
+        .get("x-asterism-target-owner")
+        .map(|value| {
+            let value = value.to_str().map_err(|_| {
+                ApiError::bad_request("invalid_target_owner", "target owner header is invalid")
+            })?;
+            UserId::from_str(value).map_err(|_| {
+                ApiError::bad_request("invalid_target_owner", "target owner ID is invalid")
+            })
+        })
+        .transpose()?;
+    request.extensions_mut().insert(AuthContext {
+        identity,
+        target_owner_id,
+    });
     Ok(next.run(request).await)
 }
 
@@ -1112,6 +1153,7 @@ mod tests {
                     session_id: WebSessionId::new(),
                     principal: Principal::from_roles(owner_id, [role], []),
                 },
+                target_owner_id: None,
             };
             assert!(auth.require_provider_settings_manage().is_err());
         }
@@ -1120,6 +1162,7 @@ mod tests {
                 session_id: WebSessionId::new(),
                 principal: Principal::from_roles(owner_id, [Role::Master], []),
             },
+            target_owner_id: None,
         };
         assert_eq!(
             master.require_provider_settings_manage().unwrap(),
@@ -1141,6 +1184,7 @@ mod tests {
                 revoked_at: None,
                 last_used_at: None,
             }),
+            target_owner_id: None,
         };
         assert!(
             service(BTreeSet::from([ServiceScope::ProviderRead]))
@@ -1166,6 +1210,7 @@ mod tests {
                 session_id: WebSessionId::new(),
                 principal: Principal::from_roles(owner_id, [Role::User], []),
             },
+            target_owner_id: None,
         };
         assert_eq!(
             auth.require_scan_schedule_manage().unwrap(),

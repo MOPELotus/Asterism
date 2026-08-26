@@ -51,7 +51,22 @@ test("QQ assertion uses the gateway token and exact sender identity", async () =
     qq: "123456",
     create_if_missing: true,
     return_to: "/",
+    master_assertion: false,
   })
+})
+
+test("QQ assertion carries only the trusted Yunzai master attestation requested by the plugin", async () => {
+  let body
+  const client = new AsterismClient({
+    apiUrl: "http://asterism.test",
+    token: "ast_st_gateway",
+    fetchImpl: async (_url, options) => {
+      body = JSON.parse(options.body)
+      return new Response('{"user_id":"u1","qq":"123456","access_token":"ast_ws_user"}', { status: 200 })
+    },
+  })
+  await client.assertQq("123456", true, "/", true)
+  assert.equal(body.master_assertion, true)
 })
 
 test("QQ assertion preserves the safe confirmation deep-link without exposing the user bearer", async () => {

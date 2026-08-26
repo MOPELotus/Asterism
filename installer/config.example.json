@@ -1,0 +1,15 @@
+{
+  "installRoot": "C:\\Asterism\\runtime",
+  "sourceRoot": "C:\\Asterism\\Asterism",
+  "yunzaiRoot": "C:\\Yunzai",
+  "bind": "127.0.0.1:8068",
+  "webUrl": "http://127.0.0.1:8068",
+  "providers": {
+    "chaoxing": true,
+    "welearn": true,
+    "uai": true,
+    "cidaren": true
+  },
+  "registerTask": true,
+  "reverseProxy": null
+}

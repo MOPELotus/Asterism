@@ -55,6 +55,11 @@ Yunzai 实例确认其群消息 API 后启用。`ASTERISM_ALLOWED_GROUPS` 留空
 发送者 QQ 交给受信任的 Asterism 网关：已有绑定时使用对应用户；不存在时创建用户名等于 QQ
 号的普通用户。Provider 账号、任务、余额和执行记录因此始终按真实 QQ 用户隔离。
 
+如果 Yunzai 事件的 `e.isMaster` 为真，插件会在 QQ assertion 中携带受信任的 master
+attestation。Asterism 只接受同时拥有 `qq_identity_assert` 和 `task_command_proxy` 的网关令牌，
+并且提权是单向、可审计的；普通用户请求不能通过自行提交字段提升权限。master 代用户操作时，
+Web API 使用 `X-Asterism-Target-Owner` 选择资源归属，操作者和资源 owner 会分别进入权限与审计边界。
+
 ## 命令
 
 ```text

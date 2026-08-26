@@ -7,7 +7,8 @@ use asterism_domain::{
 use asterism_secrets::SecretString;
 use asterism_storage::{
     SessionRepository, SqliteAdminRepository, SqliteSessionRepository, SqliteUserRepository,
-    UserAdminCreate, UserAdminCreateOutcome, UserAdminRepository, UserRepository,
+    UserAdminCreate, UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate,
+    UserAdminUpdateOutcome, UserRepository,
 };
 use axum::{
     Extension, Json,
@@ -29,6 +30,8 @@ pub(super) struct AssertQqIdentityRequest {
     create_if_missing: bool,
     #[serde(default)]
     return_to: Option<String>,
+    #[serde(default)]
+    master_assertion: bool,
 }
 
 const fn default_create_if_missing() -> bool {
@@ -59,18 +62,25 @@ pub(super) async fn assert_qq_identity(
     Extension(auth): Extension<AuthContext>,
     payload: Result<Json<AssertQqIdentityRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    auth.require_qq_identity_assert()?;
     let request = payload.map(|Json(value)| value).map_err(|_| {
         ApiError::bad_request(
             "invalid_qq_identity_assertion",
             "QQ identity assertion body is invalid",
         )
     })?;
+    auth.require_qq_identity_assert(request.master_assertion)?;
     let qq = parse_qq(&request.qq)?;
     let return_to = validate_return_to(request.return_to.as_deref().unwrap_or("/"))?;
     let now = Utc::now();
-    let (user, created) =
-        find_or_create_user(&state, &auth, qq, request.create_if_missing, now).await?;
+    let (user, created) = find_or_create_user(
+        &state,
+        &auth,
+        qq,
+        request.create_if_missing,
+        request.master_assertion,
+        now,
+    )
+    .await?;
     if user.status != UserStatus::Active {
         return Err(ApiError::forbidden());
     }
@@ -590,10 +600,14 @@ async fn find_or_create_user(
     auth: &AuthContext,
     qq: u64,
     create_if_missing: bool,
+    master_assertion: bool,
     now: Timestamp,
 ) -> Result<(User, bool), ApiError> {
     if let Some(user) = find_qq_user(state, qq).await? {
-        return Ok((user, false));
+        return Ok((
+            promote_asserted_master(state, auth, user, master_assertion, now).await?,
+            false,
+        ));
     }
     if !create_if_missing {
         return Err(ApiError::not_found("qq_identity_not_found"));
@@ -621,7 +635,11 @@ async fn find_or_create_user(
             username: username.clone(),
             password_hash,
             status: UserStatus::Active,
-            roles: vec![Role::User],
+            roles: if master_assertion {
+                vec![Role::Master]
+            } else {
+                vec![Role::User]
+            },
             permissions: BTreeSet::from([
                 Permission::ManageOwnAccounts,
                 Permission::ReadOwnTasks,
@@ -683,7 +701,63 @@ async fn find_or_create_user(
             .ok_or_else(|| ApiError::internal("QQ binding conflict could not be resolved"))?;
         return Ok((winner, false));
     }
+    let user = promote_asserted_master(state, auth, user, master_assertion, now).await?;
     Ok((user, true))
+}
+
+async fn promote_asserted_master(
+    state: &ApiState,
+    auth: &AuthContext,
+    user: User,
+    master_assertion: bool,
+    now: Timestamp,
+) -> Result<User, ApiError> {
+    if !master_assertion || user.roles.contains(&Role::Master) {
+        return Ok(user);
+    }
+    let mut roles = user.roles.clone();
+    roles.retain(|role| *role != Role::User);
+    roles.push(Role::Master);
+    roles.sort_unstable();
+    roles.dedup();
+    let outcome = SqliteAdminRepository::new(state.database.clone())
+        .update_user(UserAdminUpdate {
+            user_id: user.id,
+            expected_updated_at: user.updated_at,
+            status: user.status,
+            roles: &roles,
+            permissions: &user.permissions,
+            actor: auth.audit_actor(),
+            correlation_id: "yunzai-master-assertion",
+            updated_at: now,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    match outcome {
+        UserAdminUpdateOutcome::Updated(_) => SqliteUserRepository::new(state.database.clone())
+            .find_user(user.id)
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::internal("promoted QQ user disappeared")),
+        UserAdminUpdateOutcome::RevisionConflict => {
+            let current = SqliteUserRepository::new(state.database.clone())
+                .find_user(user.id)
+                .await
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| ApiError::internal("QQ user disappeared during promotion"))?;
+            if current.roles.contains(&Role::Master) {
+                Ok(current)
+            } else {
+                Err(ApiError::internal("QQ master promotion revision conflict"))
+            }
+        }
+        UserAdminUpdateOutcome::UserNotFound => {
+            Err(ApiError::internal("QQ user disappeared during promotion"))
+        }
+        UserAdminUpdateOutcome::LastActiveMaster => {
+            Err(ApiError::internal("QQ master promotion was rejected"))
+        }
+    }
 }
 
 async fn find_qq_user(state: &ApiState, qq: u64) -> Result<Option<User>, ApiError> {

@@ -774,7 +774,8 @@ pub fn openapi_document() -> Value {
                     "properties": {
                         "qq": {"type": "string", "pattern": "^[0-9]{5,20}$"},
                         "create_if_missing": {"type": "boolean", "default": true},
-                        "return_to": {"type": "string", "description": "Safe relative WebUI path bound to the one-time login ticket"}
+                        "return_to": {"type": "string", "description": "Safe relative WebUI path bound to the one-time login ticket"},
+                        "master_assertion": {"type": "boolean", "default": false, "description": "Trusted Yunzai e.isMaster attestation; requires both qq_identity_assert and task_command_proxy scopes"}
                     }
                 }}}},
                 "responses": {
@@ -794,7 +795,7 @@ pub fn openapi_document() -> Value {
                     }}}},
                     "400": {"description": "Invalid QQ identity"},
                     "401": {"description": "Authentication required"},
-                    "403": {"description": "Service token lacks qq_identity_assert"},
+                    "403": {"description": "Service token lacks qq_identity_assert or the additional task_command_proxy scope required for a master assertion"},
                     "404": {"description": "QQ identity is absent and creation is disabled"}
                 }
             }},
@@ -4301,6 +4302,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(service_health.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn master_target_owner_header_controls_cross_user_account_scope() {
+        let (app, _) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let master_cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created_user = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/users")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &master_cookie)
+                    .body(Body::from(
+                        r#"{"username":"delegated-user","password":"delegated-password","roles":["user"],"permissions":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created_user.status(), StatusCode::CREATED);
+        let user_id = response_json(created_user).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let account = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &master_cookie)
+                    .body(Body::from(format!(
+                        r#"{{"provider_id":"provider-alpha","display_name":"delegated","owner_user_id":"{user_id}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(account.status(), StatusCode::CREATED);
+        let own_list = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/provider-accounts")
+                    .header(header::COOKIE, &master_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response_json(own_list).await["total"], 0);
+        let delegated_list = app
+            .oneshot(
+                Request::get("/api/v1/provider-accounts")
+                    .header(header::COOKIE, &master_cookie)
+                    .header("x-asterism-target-owner", &user_id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let delegated_list = response_json(delegated_list).await;
+        assert_eq!(delegated_list["total"], 1);
     }
 
     #[tokio::test]
@@ -9672,6 +9741,128 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn yunzai_master_assertion_is_scope_bound_monotonic_and_audited() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let master_cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let limited = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-tokens")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, master_cookie)
+                    .body(Body::from(
+                        r#"{"name":"qq-limited","scopes":["qq_identity_assert"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let limited = response_json(limited).await;
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/identity/assert")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", limited["token"].as_str().unwrap()),
+                    )
+                    .body(Body::from(r#"{"qq":"223344556","master_assertion":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let gateway = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-tokens")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, master_cookie)
+                    .body(Body::from(
+                        r#"{"name":"yunzai-gateway","scopes":["qq_identity_assert","task_command_proxy"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let gateway = response_json(gateway).await;
+        let gateway_token = gateway["token"].as_str().unwrap();
+        let registered = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/identity/assert")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {gateway_token}"))
+                    .body(Body::from(r#"{"qq":"223344556","master_assertion":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(registered.status(), StatusCode::OK);
+        let registered = response_json(registered).await;
+        let user_id = registered["user_id"].as_str().unwrap().to_owned();
+        let roles: String = sqlx::query_scalar("SELECT roles_json FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(roles, r#"["user"]"#);
+
+        let asserted = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/identity/assert")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {gateway_token}"))
+                    .body(Body::from(r#"{"qq":"223344556","master_assertion":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(asserted.status(), StatusCode::OK);
+        let roles: String = sqlx::query_scalar("SELECT roles_json FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(roles, r#"["master"]"#);
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? AND actor_type = 'service_token'",
+        )
+        .bind(&user_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(audit_count >= 1);
+
+        let asserted_again = app
+            .oneshot(
+                Request::post("/api/v1/integrations/qq/identity/assert")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {gateway_token}"))
+                    .body(Body::from(r#"{"qq":"223344556","master_assertion":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(asserted_again.status(), StatusCode::OK);
+        let roles: String = sqlx::query_scalar("SELECT roles_json FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(roles, r#"["master"]"#);
     }
 
     #[tokio::test]
