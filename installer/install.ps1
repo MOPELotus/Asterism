@@ -60,9 +60,14 @@ function Set-PrivateFile([string]$Path, [string]$Content) {
     $Content | Set-Content -LiteralPath $Path -Encoding UTF8 -NoNewline
     $acl = Get-Acl -LiteralPath $Path
     $acl.SetAccessRuleProtection($true, $false)
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, "FullControl", "Allow")
-    $acl.SetAccessRule($rule)
+    foreach ($identity in @(
+        [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
+        "NT AUTHORITY\SYSTEM",
+        "BUILTIN\Administrators"
+    )) {
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, "FullControl", "Allow")
+        $acl.SetAccessRule($rule)
+    }
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
