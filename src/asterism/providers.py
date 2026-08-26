@@ -47,6 +47,7 @@ class ProviderRegistry:
             upstream = upstream_root / "welearn" / "welearn_decompiled.py"
         elif provider == "uai":
             upstream = upstream_root / "uai" / "配置我运行我.py"
+            environment["ASTERISM_UAI_BROWSER_UPSTREAM"] = str(upstream_root / "uai-browser")
         else:
             upstream = upstream_root / "cidaren"
         return WorkerSpec(

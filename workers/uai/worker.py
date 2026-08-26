@@ -17,13 +17,14 @@ import json
 import math
 import os
 import pathlib
+import shutil
 import sys
 import time
 import traceback
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any, Iterable, Mapping
-
+from typing import Any
 
 PROTOCOL = "asterism.uai.worker.v1"
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
@@ -49,7 +50,7 @@ class SourceMetadata:
     adapter_protocol: str
 
     @classmethod
-    def load(cls, path: pathlib.Path) -> "SourceMetadata":
+    def load(cls, path: pathlib.Path) -> SourceMetadata:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
             metadata = cls(**value)
@@ -469,7 +470,7 @@ def list_tasks(module: ModuleType, payload: Mapping[str, Any], events: EventWrit
                 },
             }
         )
-    if os.environ.get("ASTERISM_UAI_BROWSER_UPSTREAM") and os.environ.get("ASTERISM_UAI_BROWSER_EXECUTABLE"):
+    if os.environ.get("ASTERISM_UAI_BROWSER_UPSTREAM"):
         tasks.append({
             "remote_id": f"course-duration:{course_native['resource_id']}",
             "title": "课程学习时长（上游页面驻留）",
@@ -697,6 +698,38 @@ def browser_donor_source() -> pathlib.Path:
         raise WorkerFailure("browser_upstream_invalid", str(error)) from error
 
 
+def find_browser(configured: str | None = None) -> pathlib.Path | None:
+    """Find a Chromium-family executable without requiring PATH setup."""
+    values = [configured, os.environ.get("ASTERISM_UAI_BROWSER_EXECUTABLE")]
+    if os.name == "nt":
+        roots = [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
+        ]
+        values.extend(
+            str(pathlib.Path(root) / relative)
+            for root in roots
+            if root
+            for relative in (
+                "Microsoft/Edge/Application/msedge.exe",
+                "Google/Chrome/Application/chrome.exe",
+                "Chromium/Application/chrome.exe",
+            )
+        )
+    for name in ("msedge", "msedge.exe", "chrome", "chrome.exe", "chromium", "chromium.exe"):
+        values.append(shutil.which(name))
+    for value in values:
+        if not value:
+            continue
+        path = pathlib.Path(value).expanduser()
+        if not path.is_absolute():
+            path = pathlib.Path(__file__).resolve().parents[2] / path
+        if path.is_file():
+            return path.resolve()
+    return None
+
+
 def course_duration_total(bot, module, resource_id, events, redactor) -> int:
     url = f"https://{module.UAI_HOST}/api/tla/learningDetail/studyRecord/totalAndUnitSituation"
     with capture_donor_output(events, redactor):
@@ -718,14 +751,13 @@ def run_course_residence(module: ModuleType, payload: Mapping[str, Any], events:
         raise WorkerFailure("request_invalid", "UAI residence must be 60..3600 seconds")
     minutes = math.ceil(seconds / 60)
     source = browser_donor_source()
-    browser_value = os.environ.get("ASTERISM_UAI_BROWSER_EXECUTABLE")
-    if not browser_value:
-        raise WorkerFailure("browser_required", "UAI browser executable is not configured")
-    browser_path = pathlib.Path(browser_value)
-    if not browser_path.is_absolute():
-        browser_path = pathlib.Path(__file__).resolve().parents[2] / browser_path
-    if not browser_path.is_file():
-        raise WorkerFailure("browser_unavailable", "configured UAI browser executable is absent")
+    configured_browser = settings.get("browser_executable")
+    browser_path = find_browser(str(configured_browser) if configured_browser else None)
+    if browser_path is None:
+        raise WorkerFailure(
+            "browser_unavailable",
+            "no Edge, Chrome, Chromium, or configured browser executable was found",
+        )
 
     bot = new_bot(module)
     restore_session(bot, payload.get("session"))

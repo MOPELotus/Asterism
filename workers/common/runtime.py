@@ -15,8 +15,9 @@ import json
 import pathlib
 import sys
 import traceback
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
 
@@ -39,7 +40,7 @@ class SourceMetadata:
     adapter_protocol: str
 
     @classmethod
-    def load(cls, path: pathlib.Path, protocol: str) -> "SourceMetadata":
+    def load(cls, path: pathlib.Path, protocol: str) -> SourceMetadata:
         try:
             result = cls(**json.loads(path.read_text(encoding="utf-8")))
         except (OSError, UnicodeError, json.JSONDecodeError, TypeError) as error:
@@ -87,6 +88,7 @@ class Redactor:
 
 def payload_secrets(payload: Mapping[str, Any]) -> list[str]:
     values: list[str] = []
+
     def collect(value: Any) -> None:
         if isinstance(value, str):
             if value:
@@ -109,8 +111,13 @@ class Events:
         self.protocol, self.request_id, self.operation = protocol, request_id, operation
 
     def emit(self, event_type: str, **payload: Any) -> None:
-        value = {"protocol": self.protocol, "request_id": self.request_id,
-                 "operation": self.operation, "type": event_type, **payload}
+        value = {
+            "protocol": self.protocol,
+            "request_id": self.request_id,
+            "operation": self.operation,
+            "type": event_type,
+            **payload,
+        }
         # JSONL is an ASCII wire format even when a Windows donor changes the
         # console code page. This keeps the Rust subprocess reader UTF-8 safe.
         sys.__stdout__.write(json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n")
@@ -149,10 +156,18 @@ def capture_output(events: Events, redactor: Redactor):
         try:
             yield
         finally:
-            stdout.flush(); stderr.flush()
+            stdout.flush()
+            stderr.flush()
 
 
-def run(protocol: str, dispatch: Callable[[str, Mapping[str, Any], pathlib.Path, SourceMetadata, Events, Redactor], Mapping[str, Any]], argv=None) -> int:
+def run(
+    protocol: str,
+    dispatch: Callable[
+        [str, Mapping[str, Any], pathlib.Path, SourceMetadata, Events, Redactor],
+        Mapping[str, Any],
+    ],
+    argv=None,
+) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upstream", required=True, type=pathlib.Path)
     parser.add_argument("--source-metadata", required=True, type=pathlib.Path)

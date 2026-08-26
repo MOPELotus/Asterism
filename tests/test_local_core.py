@@ -21,6 +21,7 @@ from asterism.providers import ProviderRegistry, WorkerSpec
 from asterism.runner import RunnerError, RunnerManager
 from asterism.scan import ReadOnlyScanCoordinator
 from workers.common.runtime import payload_secrets
+from workers.uai.worker import find_browser
 
 
 class LocalStoreTests(unittest.TestCase):
@@ -59,6 +60,11 @@ class LocalStoreTests(unittest.TestCase):
         )
         self.assertIn("p", values)
         self.assertIn("cookie-value", values)
+
+    def test_uai_browser_detection_accepts_a_configured_executable(self) -> None:
+        executable = self.paths.root / "browser.exe"
+        executable.write_bytes(b"fixture")
+        self.assertEqual(find_browser(str(executable)), executable.resolve())
 
     def test_profile_state_delete_does_not_touch_account_file(self) -> None:
         profiles = ProfileStore(self.paths)
