@@ -4,7 +4,7 @@
 >
 > 目标：在不扩大 Provider 重写范围的前提下，把现有 WebUI、统一题库、调度、Job/日志/状态和四个上游 Worker 收口为可部署产品；首个安装目标为 Windows Server/Windows 10/11，反向代理不由安装向导处理。
 
-实现进度以提交和测试为准；当前已落地 QQ master assertion、Web/Yunzai target-owner 上下文、Windows 安装器及其无人值守密码文件入口、Windows CI 安装烟测，但四 Provider 的真实账号现场验证、完整 Windows Server 安装回归和全部逐路由代用户验收仍不能仅凭代码测试宣称完成。
+实现进度以提交和测试为准；当前已落地 QQ master assertion、Web/Yunzai target-owner 上下文、Windows 安装器及其无人值守密码文件入口。GitHub Actions Windows smoke 已在 `32944360652` 通过（中文/空格路径、venv、daemon、Master bootstrap、Yunzai token、validate）；四 Provider 的真实账号现场验证、用户自有 Windows Server 安装回归和全部逐路由代用户验收仍不能仅凭代码测试宣称完成。
 
 ## 1. 总原则
 

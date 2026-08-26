@@ -10,6 +10,7 @@
 - Yunzai 插件 `npm test`：12 项通过；`npm run check` 的 Node 语法边界保持可执行。
 - Python Worker：Chaoxing 25、WELearn 5、UAI 9、Cidaren 10 项单元测试通过。
 - 新增 API 测试：QQ master assertion 的 scope 约束、单向提权和审计；master 使用 `X-Asterism-Target-Owner` 读取并通过生命周期动作操作其他用户 Provider Account/Task，actor 保持为网关 Service Token。
+- GitHub Actions CI `32944360652`：`rust`、`adapters`、`windows-installer` 三个 job 全部通过；Windows smoke 覆盖中文/空格安装路径、目标二进制、Worker venv、Yunzai 复制、daemon health、Master bootstrap、网关 token 和 `validate.ps1`。
 
 ## 本轮已收口
 
@@ -24,7 +25,7 @@
 - 四个平台真实账号登录、课程/任务只读、Chaoxing 三类验证码、全量静默扫描和真实题型/附件混编。
 - Yunzai 真实 Miao/TRSS 实例中的 `e.isMaster` 事件值、锅巴配置、群 @ 投递和 Service Token scope。
 - 代用户执行的每一个写路由必须在真实 WebUI/Yunzai 操作中确认 owner、actor、通知和扣点；当前共享后端边界、WebUI target-owner 和 Yunzai 网关显式目标参数已有自动化覆盖，但仍需逐页现场验收。
-- 最终部署手册联动检查仍需在 Windows 实机安装后完成；target-owner header 已进入 OpenAPI，并会由 Web 客户端生成类型。
+- Windows Actions 安装 smoke 已通过；仍需在用户自己的 Windows Server/Windows 10/11 环境做一次联动安装（已有依赖、服务重启、系统重启、端口冲突和反代外部配置）。target-owner header 已进入 OpenAPI，并会由 Web 客户端生成类型。
 
 ## 结论
 
