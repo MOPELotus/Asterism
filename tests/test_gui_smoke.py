@@ -31,6 +31,20 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(
                 [page.provider for page in pages], ["chaoxing", "welearn", "uai", "cidaren"]
             )
+            chaoxing_page = pages[0]
+            chaoxing_page._success(
+                "questions",
+                [
+                    {
+                        "kind": "matching",
+                        "prompt": "图文混编题",
+                        "options": [{"text": "A", "image": "https://example.test/a.png"}],
+                        "remote_id": "remote-1",
+                    }
+                ],
+            )
+            self.assertEqual(chaoxing_page.question_table.rowCount(), 1)
+            self.assertEqual(chaoxing_page.question_table.item(0, 0).text(), "matching")
             for mode in ThemeMode:
                 self.assertEqual(apply_theme(self.application, mode), mode)
             self.assertGreater(window.width(), 0)

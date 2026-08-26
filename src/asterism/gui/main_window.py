@@ -101,6 +101,7 @@ class ProviderPage(QWidget):
         self.current_tasks: list[dict[str, Any]] = []
         self.current_routine_tasks: list[dict[str, Any]] = []
         self.current_formal_tasks: list[dict[str, Any]] = []
+        self.current_questions: list[dict[str, Any]] = []
         self.worker_thread: CallThread | None = None
         self.cancel_event: threading.Event | None = None
         root = QVBoxLayout(self)
@@ -180,6 +181,13 @@ class ProviderPage(QWidget):
         configure_table(self.formal_table)
         root.addWidget(BodyLabel("formal work / exam"))
         root.addWidget(self.formal_table)
+        self.question_table = TableWidget()
+        self.question_table.setColumnCount(4)
+        self.question_table.setHorizontalHeaderLabels(["kind", "prompt", "options", "remote_id"])
+        self.question_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        configure_table(self.question_table)
+        root.addWidget(BodyLabel("questions (read-only preview)"))
+        root.addWidget(self.question_table)
         self.log = TextEdit()
         self.log.setReadOnly(True)
         root.addWidget(BodyLabel("events / result"))
@@ -334,6 +342,8 @@ class ProviderPage(QWidget):
                     )
         elif label == "tasks":
             self.current_tasks = result if isinstance(result, list) else []
+            self.current_questions = []
+            self.question_table.setRowCount(0)
             self.current_formal_tasks = [
                 task for task in self.current_tasks if self._is_formal(task)
             ]
@@ -350,6 +360,24 @@ class ProviderPage(QWidget):
                 for column, key in enumerate(("remote_id", "title", "type", "state")):
                     value = task.get(key, task.get("source_type", ""))
                     self.formal_table.setItem(row, column, QTableWidgetItem(str(value)))
+        elif label == "questions":
+            self.current_questions = result if isinstance(result, list) else []
+            self.question_table.setRowCount(len(self.current_questions))
+            for row, question in enumerate(self.current_questions):
+                if not isinstance(question, dict):
+                    continue
+                prompt = question.get("prompt") or question.get("question") or question.get("stem")
+                options = question.get("options") or question.get("choices") or []
+                values = (
+                    question.get("kind") or "provider_native",
+                    self._preview_text(prompt),
+                    self._preview_text(options),
+                    question.get("remote_id") or "",
+                )
+                for column, value in enumerate(values):
+                    self.question_table.setItem(
+                        row, column, QTableWidgetItem(str(value if value is not None else ""))
+                    )
         data = result.data if hasattr(result, "data") else result
         preview = json.dumps(self._safe_preview(data), ensure_ascii=False, default=str)
         self.log.append(f"[{label}] {preview}")
@@ -443,8 +471,19 @@ class ProviderPage(QWidget):
             self.current_tasks = []
             self.current_routine_tasks = []
             self.current_formal_tasks = []
+            self.current_questions = []
             self.task_table.setRowCount(0)
             self.formal_table.setRowCount(0)
+            self.question_table.setRowCount(0)
+
+    @staticmethod
+    def _preview_text(value: Any, *, limit: int = 500) -> str:
+        if isinstance(value, (dict, list, tuple)):
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        else:
+            text = str(value or "")
+        text = " ".join(text.split())
+        return text if len(text) <= limit else text[: limit - 1] + "…"
 
     def _selected_task(self) -> dict[str, Any] | None:
         formal_row = self.formal_table.currentRow()
