@@ -16,7 +16,8 @@ pub(crate) const ANSWER_TIME_MIN_MILLIS_KEY: &str = "answer.reported_time_min_mi
 pub(crate) const ANSWER_TIME_MAX_MILLIS_KEY: &str = "answer.reported_time_max_millis";
 pub(crate) const SKIP_TIME_MILLIS_KEY: &str = "answer.skip_reported_time_millis";
 pub(crate) const ANSWER_INSTANT_TIMEOUT_SECONDS_KEY: &str = "answer.instant_timeout_seconds";
-pub(crate) const ANSWER_INSTANT_FALLBACK_GRACE_SECONDS_KEY: &str = "answer.instant_fallback_grace_seconds";
+pub(crate) const ANSWER_INSTANT_FALLBACK_GRACE_SECONDS_KEY: &str =
+    "answer.instant_fallback_grace_seconds";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CidarenRuntimeSettings {
@@ -270,7 +271,8 @@ fn answer_definitions(
         ProviderSettingDefinition {
             key: ANSWER_INSTANT_TIMEOUT_SECONDS_KEY.to_owned(),
             display_name: "限时题 Instant 超时".to_owned(),
-            description: "Cidaren 限时题首个低延迟模型请求的冻结预算；超时后进入受限兜底判断。".to_owned(),
+            description: "Cidaren 限时题首个低延迟模型请求的冻结预算；超时后进入受限兜底判断。"
+                .to_owned(),
             kind: ProviderSettingKind::DurationSeconds {
                 minimum: 1,
                 maximum: 30,
@@ -283,7 +285,8 @@ fn answer_definitions(
         ProviderSettingDefinition {
             key: ANSWER_INSTANT_FALLBACK_GRACE_SECONDS_KEY.to_owned(),
             display_name: "限时题兜底等待".to_owned(),
-            description: "Instant 请求超时后的额外有限等待；为零表示立即使用已有候选或失败。".to_owned(),
+            description: "Instant 请求超时后的额外有限等待；为零表示立即使用已有候选或失败。"
+                .to_owned(),
             kind: ProviderSettingKind::DurationSeconds {
                 minimum: 0,
                 maximum: 10,

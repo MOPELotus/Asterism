@@ -133,7 +133,9 @@ pub(super) async fn get_recharge_contact(
         .and_then(|value| value.as_str().map(str::to_owned))
         .map(|value| value.chars().take(512).collect::<String>())
         .filter(|value| !value.trim().is_empty());
-    Ok(crate::auth::no_store(Json(RechargeContactResponse { contact }).into_response()))
+    Ok(crate::auth::no_store(
+        Json(RechargeContactResponse { contact }).into_response(),
+    ))
 }
 
 pub(super) async fn list_credit_transactions(
