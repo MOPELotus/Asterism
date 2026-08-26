@@ -299,7 +299,11 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
         $health = Invoke-RestMethod -Uri ("http://" + $Bind + "/api/v1/system/health") -TimeoutSec 2
         if ($health.status -eq "ok") { break }
     } catch { Start-Sleep -Seconds 1 }
-    if ($attempt -eq 29) { throw "asterismd 未能在 30 秒内通过健康检查（PID $($daemonProcess.Id)）。" }
+    if ($attempt -eq 29) {
+        $daemonLog = Join-Path $InstallRoot "logs\asterismd.log"
+        $diagnostic = if (Test-Path $daemonLog) { (Get-Content -LiteralPath $daemonLog -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { "（尚未生成 daemon 日志）" }
+        throw "asterismd 未能在 30 秒内通过健康检查（PID $($daemonProcess.Id)，进程状态 $((Get-Process -Id $daemonProcess.Id -ErrorAction SilentlyContinue).HasExited)）。`n$diagnostic"
+    }
 }
 $env:ASTERISM_CONFIG = $configPath
 $cli = Join-Path $SourceRoot "target\release\asterismctl.exe"
