@@ -101,7 +101,7 @@ config.local.json                    模型、界面默认值和通知配置
 
 Checkpoint：新 `master` 只包含规划文件，不混入凭据、本地数据或旧运营层实现。
 
-### C1：复原代码与本地运行骨架
+### C1：复原代码与本地运行骨架（已完成）
 
 - 从 `0.0.1` 恢复实际需要的 Provider、Worker、题库、AI、任务和草稿模块。
 - 接入本地 Profile、状态、日志、草稿和 SQLite。
@@ -111,6 +111,10 @@ Checkpoint：新 `master` 只包含规划文件，不混入凭据、本地数据
 
 Checkpoint：四个平台现有能力都能从本地入口加载；一个 Runner 的失败不会终止其他
 Profile 或桌面进程；不需要 Asterism 用户、Token 或 Scheduler。
+
+当前证据：四个固定 donor 均通过入口 hash 校验和无账号 `health`；原 Worker 52 项测试与
+本地控制层 9 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
+进程树兜底均已接入，且数据库中不存在用户、权限、计费或调度表。
 
 ### C2：四平台与共享能力接线
 

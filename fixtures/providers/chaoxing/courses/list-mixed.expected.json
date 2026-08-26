@@ -1,0 +1,26 @@
+[
+  {
+    "remote_id": "course:100:200",
+    "title": "课程一",
+    "term": null,
+    "teacher": "教师甲",
+    "remote_status": null,
+    "metadata_sanitized": {
+      "schema": "chaoxing.course.v1",
+      "description": "2026 春",
+      "role_id": "3"
+    }
+  },
+  {
+    "remote_id": "course:100:201",
+    "title": "课程一（另一班级）",
+    "term": null,
+    "teacher": "教师乙",
+    "remote_status": null,
+    "metadata_sanitized": {
+      "schema": "chaoxing.course.v1",
+      "description": null,
+      "role_id": "3"
+    }
+  }
+]

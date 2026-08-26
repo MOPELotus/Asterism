@@ -1,0 +1,9 @@
+[
+  {
+    "name": "yz-brh/WELearnToSleeep",
+    "revision": "bd160e91d0452b8bf483087fbdd3bdd58d855e13",
+    "entrypoint": "welearn_time.py",
+    "entrypoint_sha256": "f47f35fcc4da6ff3ae02b9d3264008f198b16a404d6b4edb4461cee1dc768a3f",
+    "evidence": "read-only getscoinfo_v7 CMI scan"
+  }
+]

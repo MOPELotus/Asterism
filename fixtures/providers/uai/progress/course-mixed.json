@@ -1,0 +1,17 @@
+{
+  "code": 0,
+  "rt": {
+    "units": {
+      "unit-1": {
+        "strategies": {
+          "required": true,
+          "min_score_pct": 60,
+          "start_time": 1785542400,
+          "end_time": 1790812800,
+          "statistic_mode_out": false
+        }
+      }
+    },
+    "publish_version": "123290"
+  }
+}

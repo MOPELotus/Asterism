@@ -1,0 +1,24 @@
+# Runtime subset used by the headless adapter. The donor's own requirements
+# remain authoritative when additional donor features are enabled.
+requests>=2.32.5
+pyaes>=1.6.1
+beautifulsoup4>=4.14.2
+lxml
+loguru>=0.7.3
+fonttools>=4.60.1
+openai>=1.109.1
+tqdm>=4.67.1
+httpx>=0.28.1
+tenacity>=8.2.0
+# CxKitty auxiliary donor (course Exam module). Keep its native runtime
+# dependencies instead of porting its parser/signature flow into Asterism.
+rich>=12.6.0
+pycryptodome>=3.15.0
+pyyaml>=6.0
+jsonpath-python>=1.0.6
+ddddocr>=1.5.6
+numpy>=1.24.3
+opencv-python-headless>=4.7.0.72
+dataclasses-json>=0.5.7
+yarl>=1.9.2
+playwright>=1.55,<2

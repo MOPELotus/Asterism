@@ -1,0 +1,13 @@
+{
+  "code": 1,
+  "msg": "success",
+  "data": {
+    "records": [
+      {"release_id": 2011, "task_id": 9011, "task_name": "Test Eleven", "task_type": 2, "source": 1, "course_id": "course-b", "course_name": "Synthetic Course B", "over_status": 2, "progress": 11},
+      {"release_id": 2012, "task_id": 9012, "task_name": "Learning Twelve", "task_type": 1, "source": 1, "course_id": "course-a", "course_name": "Synthetic Course A", "over_status": 2, "progress": 12}
+    ],
+    "total": 12
+  },
+  "jv": "0",
+  "cv": "0"
+}

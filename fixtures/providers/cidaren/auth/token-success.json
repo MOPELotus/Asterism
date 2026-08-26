@@ -1,0 +1,15 @@
+{
+  "code": 1,
+  "msg": "success",
+  "data": {
+    "user_info": {
+      "student_name": "Synthetic Student",
+      "student_code": "synthetic-code",
+      "school_name": "Synthetic School",
+      "class_name": "Synthetic Class",
+      "course_id": "course-a"
+    }
+  },
+  "jv": "0",
+  "unknown": "must-be-dropped"
+}

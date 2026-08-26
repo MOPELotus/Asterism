@@ -1,0 +1,26 @@
+{
+  "course_id": "course-a",
+  "list_id": "list-a",
+  "word": "alpha",
+  "means": [
+    {
+      "mean": ["noun", "合成释义"],
+      "usages": [
+        {
+          "phrases_infos": [
+            {
+              "sen_content": "a synthetic {alpha} phrase",
+              "sen_mean_cn": "合成短语"
+            }
+          ],
+          "examples": [
+            {
+              "sen_content": "This is an {alpha} example.",
+              "sen_mean_cn": "这是合成例句。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

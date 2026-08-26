@@ -1,0 +1,27 @@
+{
+  "code": 1,
+  "msg": "synthetic success",
+  "data": {
+    "topic_code": "synthetic-topic-code",
+    "topic_mode": 17,
+    "topic_done_num": 1,
+    "topic_total": 127,
+    "stem": {
+      "content": "合成释义",
+      "remark": ""
+    },
+    "options": [
+      {
+        "answer_tag": 0,
+        "content": "synthetic-word-a",
+        "sub_options": []
+      },
+      {
+        "answer_tag": 1,
+        "content": "synthetic-word-b",
+        "sub_options": []
+      }
+    ]
+  },
+  "jv": "0"
+}

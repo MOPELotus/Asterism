@@ -1,0 +1,56 @@
+{
+  "code": 1,
+  "msg": "success",
+  "data": {
+    "course_id": "course-a",
+    "course_name": "Synthetic Course A",
+    "course_img_url": "https://resource.vocabgo.com/Resource/Icon/course-a.png?v=2",
+    "progress": 35,
+    "time_spent": 725000,
+    "free": 1,
+    "course_status": 1,
+    "off_instruction": "Synthetic access observation",
+    "task_list": [
+      {
+        "task_id": -1,
+        "task_type": 3,
+        "course_id": "course-a",
+        "list_id": "course-a_01",
+        "task_name": "Synthetic List 01",
+        "score": 0.0,
+        "progress": 0,
+        "time_spent": 0,
+        "free": 1,
+        "sort_no": 1,
+        "unknown": "must-be-dropped"
+      },
+      {
+        "task_id": 71002,
+        "task_type": 3,
+        "course_id": "course-a",
+        "list_id": "course-a_02",
+        "task_name": "Synthetic List 02",
+        "score": 42.5,
+        "progress": 35,
+        "time_spent": 125000,
+        "free": 1,
+        "sort_no": 2
+      },
+      {
+        "task_id": 71003,
+        "task_type": 3,
+        "course_id": "course-a",
+        "list_id": "course-a_03",
+        "task_name": "Synthetic List 03",
+        "score": 100.0,
+        "progress": 100,
+        "time_spent": 600000,
+        "free": 2,
+        "sort_no": 3
+      }
+    ]
+  },
+  "jv": "0",
+  "cv": "0",
+  "unknown": "must-be-dropped"
+}

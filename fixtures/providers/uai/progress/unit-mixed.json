@@ -1,0 +1,61 @@
+{
+  "code": 0,
+  "msg": "success",
+  "rt": {
+    "duration_time": 26,
+    "leafs": {
+      "group-1": {
+        "duration": 17,
+        "tab_type": "text",
+        "strategies": {
+          "required": true,
+          "min_score_pct": 60,
+          "start_time": 1785542400,
+          "end_time": 1790812800,
+          "statistic_mode_out": false
+        },
+        "state": {
+          "pass": 1,
+          "pass2": 1,
+          "perm": 1
+        }
+      },
+      "group-2": {
+        "duration": 9,
+        "tab_type": "video",
+        "strategies": {
+          "required": false,
+          "min_score_pct": 0,
+          "start_time": 0,
+          "end_time": 32503651200,
+          "statistic_mode_out": true
+        },
+        "state": {
+          "pass": 0,
+          "pass2": 0,
+          "perm": 1
+        }
+      }
+    },
+    "micros": {
+      "section-1/micro-1": {
+        "state": {
+          "pass": 0,
+          "pass2": 1,
+          "perm": 1
+        },
+        "strategies": {
+          "required": true,
+          "min_score_pct": 60,
+          "start_time": 1785542400,
+          "end_time": 1790812800,
+          "statistic_mode_out": false
+        }
+      }
+    },
+    "open_id": "synthetic-open-id",
+    "publish_version": "123290",
+    "tutorialId": "course-v2:synthetic+rw+20260809",
+    "unit_id": "unit-1"
+  }
+}

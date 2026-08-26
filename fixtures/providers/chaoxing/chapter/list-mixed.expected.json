@@ -1,0 +1,23 @@
+[
+  {
+    "remote_id": "chapter:100:200:4001",
+    "title": "1.1 课程导论",
+    "source_type": "chapter",
+    "remote_state": "pending",
+    "job_count": 3
+  },
+  {
+    "remote_id": "chapter:100:200:4002",
+    "title": "1.2 基础知识",
+    "source_type": "chapter",
+    "remote_state": "completed",
+    "job_count": 0
+  },
+  {
+    "remote_id": "chapter:100:200:4003",
+    "title": "2.1 后续内容",
+    "source_type": "chapter",
+    "remote_state": "not_open",
+    "job_count": 1
+  }
+]

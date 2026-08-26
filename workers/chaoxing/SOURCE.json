@@ -1,0 +1,9 @@
+{
+  "name": "Samueli924/chaoxing",
+  "repository": "https://github.com/Samueli924/chaoxing",
+  "revision": "9699e632b492cdc55ea35a1ab05b6dfcbfb7cf70",
+  "entrypoint": "api/base.py",
+  "entrypoint_sha256": "a7395b6f34a4e36355406a3ad71f1c017dc523c0f8162a6d4b026449e586ed38",
+  "license": "GPL-3.0",
+  "adapter_protocol": "asterism.chaoxing.worker.v1"
+}

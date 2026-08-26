@@ -1,0 +1,17 @@
+{
+  "type": "txt",
+  "ext": {
+    "attachment": {
+      "att_chat_course": {
+        "aid": 8001,
+        "atype": 45,
+        "courseInfo": {
+          "classid": 2001,
+          "courseid": "1001",
+          "coursename": "Calculus"
+        },
+        "title": "Notice"
+      }
+    }
+  }
+}

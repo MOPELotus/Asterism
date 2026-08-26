@@ -1,0 +1,29 @@
+{
+  "code": 1,
+  "success": true,
+  "value": {
+    "courseList": [
+      {
+        "id": 1001,
+        "name": "综合英语",
+        "classId": "class-must-drop",
+        "courseResourceList": [
+          {
+            "id": 2001,
+            "name": "教程 A",
+            "instanceId": "instance-must-drop",
+            "finishPointNum": 2,
+            "totalPointNum": 10,
+            "must_be_dropped": "not-runtime-metadata"
+          },
+          {
+            "id": "2002",
+            "name": "综合英语",
+            "finishPointNum": 0,
+            "totalPointNum": 8
+          }
+        ]
+      }
+    ]
+  }
+}

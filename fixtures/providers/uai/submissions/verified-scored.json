@@ -1,0 +1,44 @@
+{
+  "success": true,
+  "code": 0,
+  "data": {
+    "course": "course-v2:synthetic+rw",
+    "module": "group-1-submit-version-42",
+    "state": {
+      "__EXTEND_DATA__": {
+        "__SUBMIT_INFO__": {
+          "course_id": "course-v2:synthetic+rw",
+          "group_id": "group-1",
+          "version": "submit-version-42",
+          "state": {
+            "expired": false,
+            "lastSubmit": 1786752000,
+            "not_start": false,
+            "score_avg": 37.5
+          },
+          "strategy": {
+            "endTime": 1790812800,
+            "record_every_submit": false,
+            "record_max_submit": true,
+            "required": true,
+            "startTime": 1785542400,
+            "task_mini_score_pct": 60
+          },
+          "strategyId": 3001
+        },
+        "__SUMMARY__": {
+          "answerList": {
+            "0": {
+              "questionType": 1
+            },
+            "1": {
+              "questionType": 2
+            }
+          }
+        }
+      },
+      "quesData": "[{\"instanceId\":\"1001\",\"answer\":\"{\\\"value\\\":[],\\\"children\\\":[{\\\"value\\\":[\\\"A\\\",\\\"B\\\"],\\\"isDone\\\":true}],\\\"progress\\\":{},\\\"record\\\":{\\\"url\\\":\\\"\\\"}}\",\"context\":\"{\\\"state\\\":\\\"submitted\\\"}\",\"contextVersion\":0,\"answerVersion\":0}]",
+      "version": "submit-version-42"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "code": 0,
+  "course": "{\"name\":\"Browser order\",\"units\":[{\"id\":\"unit-z\",\"role\":\"unit\",\"name\":\"Unit Z\",\"children\":[{\"id\":\"section-z\",\"role\":\"section\",\"name\":\"Section Z\",\"children\":[{\"id\":\"micro-z\",\"role\":\"node\",\"name\":\"Micro Z\",\"children\":[{\"id\":\"group-z\",\"role\":\"group\",\"name\":\"Task Z\",\"base\":\"rich-text-read\",\"question_num\":1}]},{\"id\":\"micro-a\",\"role\":\"node\",\"name\":\"Micro A\",\"children\":[{\"id\":\"group-b\",\"role\":\"group\",\"name\":\"Task B\",\"base\":\"rich-text-read\",\"question_num\":1},{\"id\":\"group-a\",\"role\":\"group\",\"name\":\"Task A\",\"base\":\"rich-text-read\",\"question_num\":1}]}]}]},{\"id\":\"unit-a\",\"role\":\"unit\",\"name\":\"Unit A\",\"children\":[{\"id\":\"micro-m\",\"role\":\"node\",\"name\":\"Micro M\",\"children\":[{\"id\":\"group-m\",\"role\":\"group\",\"name\":\"Task M\",\"base\":\"rich-text-read\",\"question_num\":1}]}]}]}",
+  "publish_version": 123290
+}

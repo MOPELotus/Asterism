@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "session_nonce": "{{session_nonce}}",
+  "origin": "https://ucontent.unipus.cn",
+  "frame_id": "content-frame",
+  "remote_task_id": "group:2001:unit-1:group-1",
+  "reply_to_sequence": 7,
+  "event": {
+    "kind": "pong"
+  }
+}

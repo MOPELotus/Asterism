@@ -1,0 +1,53 @@
+{
+  "code": 1,
+  "success": true,
+  "value": {
+    "courseUnitStrategyList": [
+      {
+        "id": 4001,
+        "strategyId": 3001,
+        "unitId": "unit-1",
+        "passScore": "60",
+        "scoreType": "0",
+        "requiredTask": ["group-1", "group-2"],
+        "studyStartTime": 1785542400000,
+        "studyEndTime": 1790812800000,
+        "sort": 1,
+        "unitName": "Language in mission",
+        "caption": "Unit 1",
+        "requireNodeType": "task"
+      },
+      {
+        "id": 4002,
+        "strategyId": 3001,
+        "unitId": "unit-2",
+        "passScore": "0",
+        "scoreType": "1",
+        "requiredTask": [],
+        "studyStartTime": 0,
+        "studyEndTime": 0,
+        "sort": 2,
+        "unitName": "Learning together",
+        "caption": "Unit 2",
+        "requireNodeType": "task"
+      }
+    ],
+    "courseInfo": {
+      "courseName": "must-not-be-retained",
+      "classId": "must-not-be-retained"
+    },
+    "courseStudyStrategy": {
+      "id": 3001,
+      "strategyId": 777,
+      "resourceId": "must-not-be-retained",
+      "instanceId": "must-not-be-retained",
+      "unitUnlock": 1,
+      "unitInnerUnlock": 0,
+      "scoringMode": 0,
+      "studyStartTime": 1782864000000,
+      "studyEndTime": 1793491200000,
+      "strategyType": 1,
+      "courseResourceId": 2001
+    }
+  }
+}

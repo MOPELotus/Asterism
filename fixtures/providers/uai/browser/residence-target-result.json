@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "session_nonce": "{{session_nonce}}",
+  "origin": "https://ucontent.unipus.cn",
+  "frame_id": "top-frame",
+  "remote_task_id": "group:2001:unit-1:group-1",
+  "reply_to_sequence": 9,
+  "target_task_handle": "{{target_task_handle}}",
+  "planned_residence_seconds": 1200,
+  "observed_active_seconds": 1200,
+  "processed_micros": 1,
+  "processed_tabs": 4,
+  "processed_tasks": 8,
+  "video_seconds": 0,
+  "cancelled": false,
+  "last_label": "Unit 1 / Section 2 / Micro 3"
+}

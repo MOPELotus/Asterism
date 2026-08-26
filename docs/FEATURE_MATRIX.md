@@ -11,13 +11,13 @@
 
 | 功能 | 必须保留的行为 | 状态 |
 |---|---|---|
-| Profile | 四个平台各自支持多个明文本地 Profile 和独立会话 | `planned` |
-| 登录 | 复用平台原生密码、Cookie、Token、OAuth/微信流程及自动续期 | `planned` |
-| 清单 | 手动刷新课程、平台原生任务层级和独立正式任务 | `planned` |
+| Profile | 四个平台各自支持多个明文本地 Profile 和独立会话 | `desktop-wired + fixture-verified` |
+| 登录 | 复用平台原生密码、Cookie、Token、OAuth/微信流程及自动续期 | `upstream-proven + desktop-wired + fixture-verified` |
+| 清单 | 手动刷新课程、平台原生任务层级和独立正式任务 | `upstream-proven + desktop-wired + fixture-verified` |
 | 执行 | 单项和手动批量执行，账号隔离，进度、日志和取消 | `planned` |
 | 状态 | 长扫描保守游标与重试，一个阻断账号不影响其他账号 | `planned` |
 | 通知 | 可选的成功/失败终态通知，不包含自动巡检 | `planned` |
-| 错误 | 区分凭据、会话、验证码、网络、协议和上游服务错误 | `planned` |
+| 错误 | 区分凭据、会话、验证码、网络、协议和上游服务错误 | `desktop-wired + fixture-verified` |
 
 ## `chaoxing`
 

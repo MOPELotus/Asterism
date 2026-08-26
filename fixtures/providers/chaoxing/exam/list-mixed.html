@@ -1,0 +1,33 @@
+<!-- SYNTHETIC SANITIZED FIXTURE: no real account or task data. -->
+<!doctype html>
+<html lang="zh-CN">
+  <body>
+    <div class="exam-list-item" onclick="goTest('100','exam-1',0,'SAFE_TIME','paper-1',false,'SAFE_ENC')">
+      <span class="exam-name">单元测验一</span>
+      <span class="exam-status">待做</span>
+      <span class="exam-deadline">剩余 2 天</span>
+    </div>
+    <div class="exam-list-item" data-exam-id="exam-2" data="/exam-ans/mooc2/exam/preview?courseId=100&amp;classId=200&amp;examId=exam-2">
+      <span class="exam-name">单元测验二</span>
+      <span class="exam-status">已完成</span>
+      <span class="exam-score">成绩：82.5 分</span>
+      <button type="button" onclick="reTest('exam-2')">重新考试</button>
+    </div>
+    <li data="/exam/task?taskrefId=exam-3">
+      <p>单元测验三</p>
+      <span class="status">已过期</span>
+    </li>
+    <ul class="nav">
+      <li data="/exam-ans/exam/phone/task-exam?taskrefId=exam-4&amp;enc_task=SAFE_ENC">
+        <p>单元测验四</p>
+        <span>未开始</span>
+        <span class="fr">开放时间待验证</span>
+      </li>
+      <li data="/exam-ans/exam/phone/task-exam?taskrefId=exam-5&amp;enc_task=SAFE_ENC">
+        <p>单元测验五</p>
+        <span>状态待验证</span>
+        <span class="exam-deadline">剩余 48 分钟</span>
+      </li>
+    </ul>
+  </body>
+</html>

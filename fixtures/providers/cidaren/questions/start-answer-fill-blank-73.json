@@ -1,0 +1,24 @@
+{
+  "task_id": 92002,
+  "task_type": 2,
+  "topic_mode": 73,
+  "stem": {
+    "content": "Synthetic two-word prompt",
+    "remark": "synthetic",
+    "ph_us_url": null,
+    "ph_en_url": null,
+    "au_addr": null
+  },
+  "options": [],
+  "answer_num": 2,
+  "chance_num": 2,
+  "topic_done_num": 1,
+  "topic_total": 10,
+  "w_lens": [7, 2],
+  "w_len": 0,
+  "w_tip": "",
+  "word_type": 2,
+  "topic_code": "synthetic-mode-73-topic-code",
+  "answer_state": 1,
+  "show_card_type": 1
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Fanyuchang2026/welearn-helper",
+  "repository": "https://github.com/Fanyuchang2026/welearn-helper",
+  "revision": "afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2",
+  "entrypoint": "welearn_decompiled.py",
+  "entrypoint_sha256": "0d36a449ab807713406a1161b5d5a1d557ca902340de94a5cea7ae5aec140e83",
+  "license": "NOASSERTION",
+  "adapter_protocol": "asterism.welearn.worker.v1"
+}

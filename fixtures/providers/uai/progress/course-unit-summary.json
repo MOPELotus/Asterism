@@ -1,0 +1,40 @@
+{
+  "code": 1,
+  "success": true,
+  "value": {
+    "user": {
+      "appUserId": "42",
+      "ssoId": "must-not-be-retained",
+      "stuName": "must-not-be-retained"
+    },
+    "totalDetail": {
+      "finishProgress": 62.5,
+      "duration": 140000,
+      "score": 72.3
+    },
+    "unitList": [
+      {
+        "finishProgress": 100,
+        "duration": 37542,
+        "score": 85.5,
+        "nodeId": "unit-1",
+        "caption": "Unit 1",
+        "name": "Language in mission",
+        "path": "must-not-be-retained",
+        "required": true,
+        "role": "unit"
+      },
+      {
+        "finishProgress": 25.25,
+        "duration": 1024,
+        "score": null,
+        "nodeId": "unit-2",
+        "caption": "Unit 2",
+        "name": "Learning together",
+        "path": "must-not-be-retained",
+        "required": false,
+        "role": "unit"
+      }
+    ]
+  }
+}

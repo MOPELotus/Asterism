@@ -1,0 +1,9 @@
+{
+  "name": "create-try-now/AutoFinish_UxiaoyuanAI",
+  "repository": "https://github.com/create-try-now/AutoFinish_UxiaoyuanAI",
+  "revision": "bef0d29155cef727e05ba6b72336ee212c94fe84",
+  "entrypoint": "配置我运行我.py",
+  "entrypoint_sha256": "c8884fee374ed322d6be2243f94abeadf867dbb571ef30c4b3512b46809661ad",
+  "license": "Apache-2.0",
+  "adapter_protocol": "asterism.uai.worker.v1"
+}

@@ -1,0 +1,22 @@
+{
+  "id": 7001,
+  "courseId": "1001",
+  "clazzId": 2001,
+  "activeType": 2,
+  "type": 2,
+  "otherId": 0,
+  "status": 1,
+  "name": "Morning attendance",
+  "startTime": {
+    "time": 1786800000000,
+    "timezoneOffset": -480
+  },
+  "endTime": {
+    "time": 1786803600000,
+    "timezoneOffset": -480
+  },
+  "ifPhoto": 0,
+  "ifRefreshEwm": 0,
+  "enc": "PRIVATE_DYNAMIC_ENC_NOT_RETAINED",
+  "code": "PRIVATE_DYNAMIC_CODE_NOT_RETAINED"
+}
