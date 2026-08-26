@@ -1972,13 +1972,6 @@ impl UpstreamWorkerProvider {
         assessment_mode: Option<&str>,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
-        let combined_resource_duration = matches!(
-            request.requested_capabilities.as_slice(),
-            [
-                TaskCapability::ResourceExecution,
-                TaskCapability::DurationReport
-            ]
-        ) && self.metadata.id.as_str() == "welearn";
         let capability = match request.requested_capabilities.as_slice() {
             [TaskCapability::ResourceExecution] => TaskCapability::ResourceExecution,
             [TaskCapability::DurationReport] if self.metadata.id.as_str() == "welearn" => {
@@ -2086,7 +2079,7 @@ impl UpstreamWorkerProvider {
                 metadata_sanitized: Some(json!({"worker_backed": true})),
             })
             .await?;
-        let mut observed = self
+        let observed = self
             .invoke_run_observed(
                 self.session(context).await?,
                 &worker_remote_id,
@@ -2095,34 +2088,6 @@ impl UpstreamWorkerProvider {
                 answers,
             )
             .await?;
-        if combined_resource_duration {
-            let duration_observed = self
-                .invoke_observed(
-                    "run",
-                    json!({
-                        "session": self.session(context).await?,
-                        "task": {"remote_id": worker_remote_id, "native": self.task_native(context, &request.remote_task_id).await?},
-                        "settings": {
-                            "action": "duration",
-                            "duration_seconds": request.runtime_settings
-                                .duration_seconds("worker.duration_seconds")
-                                .unwrap_or(60),
-                        },
-                        "answers": [],
-                    }),
-                )
-                .await?;
-            observed.logs.extend(duration_observed.logs);
-            observed.progress.extend(duration_observed.progress);
-            if let (Some(base), Some(duration)) = (
-                observed.data.as_object_mut(),
-                duration_observed.data.as_object(),
-            ) {
-                for (key, value) in duration {
-                    base.entry(key.clone()).or_insert_with(|| value.clone());
-                }
-            }
-        }
         for log in observed.logs {
             let Some(message) = clean_text(&log.message, 8 * 1024) else {
                 continue;

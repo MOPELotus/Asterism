@@ -7,7 +7,7 @@ donor 或 Python。
 ## 1. 获取源码和 donor
 
 ```bash
-git clone --recurse-submodules --branch 0.0.1 https://github.com/MOPELotus/Asterism.git
+git clone --recurse-submodules --branch master https://github.com/MOPELotus/Asterism.git
 cd Asterism
 git submodule update --init --recursive
 ```
@@ -120,6 +120,6 @@ WELearn donor 当前没有声明开源许可证。当前私有授权部署可以
 `task_command_proxy`，然后把 token、Asterism URL 和允许使用的 QQ 号通过环境变量注入
 机器人进程。完整变量和命令见插件自己的 README。
 
-插件默认只接受白名单私聊。普通资源执行要求六位短期确认码；正式测评、答题、讨论、上传
+插件默认只接受配置群内的 @ 命令，不处理私聊。普通资源执行要求六位短期确认码；正式测评、答题、讨论、上传
 与口语任务保持在 WebUI 完成审核或准备输入。部署验收至少执行 `#星芒状态`、`#星芒账号`
 和一个平台的 `#星芒任务`；远端执行应只在确实需要完成的任务上验证。

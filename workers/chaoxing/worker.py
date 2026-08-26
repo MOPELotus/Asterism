@@ -2280,6 +2280,19 @@ def _is_challenge_point(point: Mapping[str, Any]) -> bool:
     return mode in {"challenge", "challenge_mode", "闯关", "挑战"}
 
 
+def _is_locked_child(job: Mapping[str, Any], job_info: Mapping[str, Any]) -> bool:
+    """Treat donor lock markers as unavailable instead of probing closed nodes."""
+    for value in (job, job_info):
+        for key in ("need_unlock", "locked", "notOpen", "not_open", "isLocked"):
+            marker = value.get(key)
+            if marker is True or str(marker).strip().lower() in {"true", "1", "yes", "locked", "notopen", "未开放", "未解锁"}:
+                return True
+        state = str(value.get("state") or value.get("status") or "").strip().lower()
+        if state in {"locked", "not_open", "notopen", "未开放", "未解锁"}:
+            return True
+    return False
+
+
 def run_knowledge_point(bot, module, payload, native, events, redactor):
     """Keep the donor's public unit of work: one knowledge point."""
     course = dict(require_mapping(native.get("course"), "task.native.course"))
@@ -2321,6 +2334,9 @@ def run_knowledge_point(bot, module, payload, native, events, redactor):
         job_info = dict(require_mapping(
             child.get("job_info"), "task.native.jobs item.job_info"
         ))
+        if _is_locked_child(job, job_info):
+            skipped_unsupported_jobs += 1
+            continue
         job_key = knowledge_job_key(job, int(child.get("job_index", fallback_index)))
         child_answers = []
         prefix = f"{job_key}:"
@@ -2374,6 +2390,8 @@ def run_knowledge_point(bot, module, payload, native, events, redactor):
             if job_type != "workid":
                 continue
             job_info = dict(require_mapping(child.get("job_info"), "task.native.jobs item.job_info"))
+            if _is_locked_child(job, job_info):
+                continue
             job_key = knowledge_job_key(job, int(child.get("job_index", fallback_index)))
             child_answers = [
                 {"remote_id": remote_id[len(job_key) + 1:], "value": value}

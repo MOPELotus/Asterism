@@ -1,6 +1,6 @@
 # Asterism 0.0.1 路线章程
 
-状态：生效，适用于 `0.0.1` 分支
+状态：生效，适用于承载 `0.0.1` 的本地/发布主分支 `master`
 
 建立日期：2026-08-22
 
@@ -8,9 +8,9 @@
 
 ## 分支边界
 
-`0.0.1` 是一条独立的产品化路线。创建它时，`0.0.1` 与 `0.1.0`
+`0.0.1` 是一条独立的产品化路线。创建它时，原 `0.0.1` 与 `0.1.0`
 共同指向 `95875bd`；后续 `0.0.1` 工作不得回写、重构或删除
-`0.1.0` 与 `master` 上的既有实现。它们保留此前以 Rust、Thick Core、
+`0.1.0` 与原 `master`（现保留为普通分支 `legacy/master`）上的既有实现。它们保留此前以 Rust、Thick Core、
 统一 Capability 和 clean-room Provider 实现为中心的完整架构路线。
 
 本目录是 `0.0.1` 的分支级实施依据。现有 `docs/architecture/`、
@@ -222,13 +222,16 @@ upstream 当前可用性和许可证条件调整。第二个平台真的重复�
 
 - **D-001：控制面/执行面分离。** Asterism 统一产品体验，upstream 保持平台执行权。
 - **D-002：不做语言迁移。** Worker 采用 donor 原始运行时。
-- **D-003：四平台并行到只读停止线。** 四个 Adapter 均接到账号、课程和任务扫描；
-  题目扫描只用于真实需要逐题处理的 Provider。授权账号证据齐全后才进入 mutation。
+- **D-003：四平台先到只读停止线，再逐步接入执行。** 四个 Adapter 均接到账号、课程和任务扫描；
+  题目扫描只用于真实需要逐题处理的 Provider。只读检查点完成后，按真实链路逐步进入 execution/mutation。
 - **D-004：contract 由链路生长。** 只共享已重复出现的 JSONL 进程约束、来源校验和脱敏，
   不定义终极 SDK。
 - **D-005：旧代码保留但不强制。** 不删除旧架构，也不让它阻塞新的薄执行链。
 
-## 当前 upstream Worker 状态（2026-08-24）
+## 当前 upstream Worker 状态（2026-08-24 历史快照）
+
+本节记录路线中期的能力快照，不作为当前库存或部署状态；当前事实以
+`workers/DEPLOYMENT_ACCEPTANCE_0.0.1.md` 及最新验收命令输出为准。
 
 - 四个 Worker 均固定 donor revision 与入口 SHA-256，并实现
   `health/authenticate/courses/tasks/run`；Chaoxing/Cidaren 另提供题目读取，UAI/WELearn

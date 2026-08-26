@@ -26,7 +26,7 @@ Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。�
 
 ## Provider 路线
 
-当前 `0.0.1` 分支采用 upstream-first 路线：Asterism 保留 WebUI、账号、课程/任务、
+当前 `master` 分支承载 `0.0.1` 的 upstream-first 路线：Asterism 保留 WebUI、账号、课程/任务、
 题库、调度、Job 与日志控制面，四个平台的执行则通过薄 Worker 调用已审计 donor，
 不要求把 donor 的协议和状态机重新移植为 Rust。完整约束见
 [`docs/0.0.1/README.md`](docs/0.0.1/README.md)。
@@ -85,7 +85,7 @@ SQLite 由应用直接管理，无需单独安装数据库服务。
 克隆并构建：
 
 ```bash
-git clone --recurse-submodules --branch 0.0.1 https://github.com/MOPELotus/Asterism.git
+git clone --recurse-submodules --branch master https://github.com/MOPELotus/Asterism.git
 cd Asterism
 cargo build --workspace
 ```
@@ -239,11 +239,11 @@ CLI > 环境变量 > 配置文件 > 默认值
 
 贡献时请遵守以下原则：
 
-1. Provider 业务逻辑使用 Rust 实现，并通过明确的 Capability 暴露；
+1. Provider 业务逻辑优先复用已审计 donor 的原始运行时；Adapter 只负责边界、配置、事件和结果映射，必要时再通过明确的 Capability 暴露；
 2. 保持 Task、Execution、远端状态和本地编排状态相互独立；
 3. 非幂等操作必须有持久化 issue/receipt/recovery 边界，不能依赖进程内重试；
 4. Provider 不直接访问数据库、Scheduler、WebUI 或用户权限状态；
-5. 不复制来源不明或许可证不兼容的第三方实现；协议迁移应采用可审计的 clean-room 方式；
+5. 不复制来源不明或许可证不兼容的第三方实现；直接调用 donor、保留其运行时或做最小补丁时，必须记录来源、revision、许可证和分发边界；
 6. 不提交真实账号数据、Cookie、Token、密码、私有响应或可识别个人身份的 Fixture；
 7. 新功能必须包含与风险相称的测试，并保持错误与日志脱敏。
 

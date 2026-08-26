@@ -5,7 +5,9 @@ from live account evidence and is safe to keep in the repository.
 
 ## Local acceptance
 
-- Branch is `0.0.1`; `master` and `0.1.0` remain unchanged.
+- Local primary branch is `master` and carries the `0.0.1` route; the former
+  architecture branch is preserved locally as `legacy/master`, while `0.1.0`
+  remains unchanged. No remote branch is changed by this local rename.
 - Daemon health: `ok`; database schema: 110; four Providers registered; no
   outbox backlog or dead-letter outbox entries.
 - Full Rust workspace: green, including API 80, Engine 163, Storage 173,

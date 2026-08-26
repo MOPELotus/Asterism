@@ -668,8 +668,10 @@ pub(super) struct ChaoxingVerificationStatusResponse {
 #[derive(Clone, Debug, Serialize)]
 struct ChaoxingVerificationAttemptSummary {
     occurred_at: String,
+    source: String,
     stage: String,
     result: String,
+    next_retry_at: Option<String>,
     message: String,
 }
 
@@ -708,7 +710,7 @@ pub(super) async fn get_chaoxing_verification_status(
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(90);
     let rows = sqlx::query(
-        "SELECT occurred_at, verification_type, state, detail_sanitized \
+        "SELECT occurred_at, source, verification_type, state, next_retry_at, detail_sanitized \
          FROM chaoxing_verification_attempts \
          WHERE provider_account_id = ? ORDER BY occurred_at DESC LIMIT 20",
     )
@@ -720,8 +722,12 @@ pub(super) async fn get_chaoxing_verification_status(
         .into_iter()
         .map(|row| ChaoxingVerificationAttemptSummary {
             occurred_at: row.try_get("occurred_at").unwrap_or_default(),
+            source: row
+                .try_get("source")
+                .unwrap_or_else(|_| "execution".to_owned()),
             stage: row.try_get("verification_type").unwrap_or_default(),
             result: row.try_get("state").unwrap_or_default(),
+            next_retry_at: row.try_get("next_retry_at").ok(),
             message: row.try_get("detail_sanitized").unwrap_or_default(),
         })
         .collect();

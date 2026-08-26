@@ -1462,11 +1462,21 @@ async fn run_course_automation_tick(
                     }
                     continue;
                 }
+                let split_welearn_duration = provider_id == "welearn"
+                    && capabilities.contains(&TaskCapability::ResourceExecution)
+                    && capabilities.contains(&TaskCapability::DurationReport);
+                let execution_capabilities = if split_welearn_duration {
+                    vec![TaskCapability::ResourceExecution]
+                } else {
+                    capabilities.clone()
+                };
+                let duration_idempotency_key = format!("{idempotency_key}:duration");
+                let duration_correlation_id = format!("{correlation_id}:duration");
                 let result = service
                     .execute(ExecuteTaskCommand {
                         owner_id: plan.owner_user_id,
                         task_id: task.id,
-                        requested_capabilities: capabilities,
+                        requested_capabilities: execution_capabilities,
                         submission_draft_id: None,
                         invocation_draft_id: None,
                         strict_completion_retry: None,
@@ -1495,6 +1505,32 @@ async fn run_course_automation_tick(
                     Ok(_) => {}
                     Err(error) => {
                         tracing::warn!(course_id = %course_id, task_id = %task.id, %error, "course patrol skipped unschedulable task")
+                    }
+                }
+                if split_welearn_duration {
+                    let duration_result = service
+                        .execute(ExecuteTaskCommand {
+                            owner_id: plan.owner_user_id,
+                            task_id: task.id,
+                            requested_capabilities: vec![TaskCapability::DurationReport],
+                            submission_draft_id: None,
+                            invocation_draft_id: None,
+                            strict_completion_retry: None,
+                            score_improvement_retake: None,
+                            billing: None,
+                            ai_selection: Some(ExecutionAiSelectionInput {
+                                profile: "economy".to_owned(),
+                                route: "untimed".to_owned(),
+                            }),
+                            request_source: RequestSource::Scheduler,
+                            actor: AuditActor::User(plan.owner_user_id),
+                            idempotency_key: duration_idempotency_key,
+                            correlation_id: duration_correlation_id,
+                            requested_at: now,
+                        })
+                        .await;
+                    if let Err(error) = duration_result {
+                        tracing::warn!(course_id = %course_id, task_id = %task.id, %error, "course patrol skipped separate WELearn duration action");
                     }
                 }
             }

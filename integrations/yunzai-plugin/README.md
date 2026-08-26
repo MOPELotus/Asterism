@@ -26,6 +26,11 @@ Copy-Item -Recurse `
 推荐在锅巴面板中配置。先在 Asterism 创建供机器人网关使用的系统 Service Token，只授予：
 
 ```text
+provider_read
+provider_manage
+task_read
+task_execute
+task_command_proxy
 qq_identity_assert
 notification_delivery_report
 ```

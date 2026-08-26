@@ -2290,7 +2290,7 @@ fn chaoxing_verification_path() -> Value {
                     "provider_id": {"type": "string"},
                     "automatic_attempt_budget": {"type": "integer", "minimum": 0},
                     "automatic_time_budget_seconds": {"type": "integer", "minimum": 0},
-                    "recent_attempts": {"type": "array", "items": {"type": "object", "required": ["occurred_at", "stage", "result", "message"], "properties": {"occurred_at": {"type": "string", "format": "date-time"}, "stage": {"type": "string"}, "result": {"type": "string"}, "message": {"type": "string"}}}}
+                    "recent_attempts": {"type": "array", "items": {"type": "object", "required": ["occurred_at", "source", "stage", "result", "next_retry_at", "message"], "properties": {"occurred_at": {"type": "string", "format": "date-time"}, "source": {"type": "string", "enum": ["execution", "scan", "question_read", "assessment"]}, "stage": {"type": "string"}, "result": {"type": "string"}, "next_retry_at": {"type": ["string", "null"], "format": "date-time"}, "message": {"type": "string"}}}}
                 }
             }}}},
             "403": {"description": "Provider settings permission required"},

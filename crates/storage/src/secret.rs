@@ -1928,7 +1928,12 @@ async fn authenticate_provider_account(
     if result.rows_affected() != 1 {
         return Err(SecretStoreError::VersionConflict);
     }
-    if !previous_was_authenticated {
+    // Only Chaoxing currently advertises the answer-history harvest capability.
+    // Keep unknown/test providers backward-compatible until they register an
+    // explicit capability, but never create an unclaimable harvest for the
+    // three upstream workers that do not expose one.
+    let supports_answer_harvest = !matches!(provider_id.as_str(), "welearn" | "uai" | "cidaren");
+    if !previous_was_authenticated && supports_answer_harvest {
         ensure_initial_answer_bootstrap_harvest(
             transaction,
             owner_user_id,
