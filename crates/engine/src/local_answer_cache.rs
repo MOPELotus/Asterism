@@ -489,8 +489,14 @@ mod tests {
             &NormalizedAnswer::Composite(vec![
                 NormalizedAnswer::Selections(vec!["A".to_owned()]),
                 pairs,
-                NormalizedAnswer::Texts(vec!["human answer".to_owned()]),
+                NormalizedAnswer::Boolean(true),
             ])
+        ));
+        assert!(!answer_matches_question(
+            &composite,
+            &NormalizedAnswer::Composite(vec![NormalizedAnswer::Texts(vec![
+                "prior person's text".to_owned(),
+            ])])
         ));
         assert!(!answer_matches_question(
             &composite,
