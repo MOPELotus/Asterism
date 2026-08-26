@@ -11,6 +11,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\installer\install.ps1 -YunzaiRoot 'C:\Yunzai' -RegisterTask
 ```
 
+安装器默认优先使用与当前 Git HEAD 和 lockfile 完全匹配的 `windows-latest` 预编译包；普通 Windows Server 不需要本机编译 Rust/WebUI。只有预编译包尚未生成、源码存在影响构建的本地修改，或显式传入 `-SourceBuild`/`-ForceBuild` 时才回退到本机工具链。内网环境可提前下载并通过 `-PrebuiltArchive` 指定压缩包。
+
 向导会检测/安装本机依赖、创建 Worker venv、构建项目、生成本地密钥、迁移数据库、复制
 Yunzai 插件并做健康检查。完整参数和离线/重复安装行为见
 [`installer/README.md`](../../installer/README.md)。本向导明确不处理 Apache/Caddy/Nginx

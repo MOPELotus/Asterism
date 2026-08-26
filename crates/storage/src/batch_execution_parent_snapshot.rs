@@ -985,9 +985,10 @@ fn authorize_parent_access(
         SecretActor::ProviderRuntime(provider_id) if provider_id == scoped_provider_id.as_str() => {
             Ok(())
         }
-        SecretActor::User(_) | SecretActor::ServiceToken(_) | SecretActor::ProviderRuntime(_) => {
-            Err(SecretStoreError::Unauthorized)
-        }
+        SecretActor::User(_)
+        | SecretActor::DelegatedUser { .. }
+        | SecretActor::ServiceToken(_)
+        | SecretActor::ProviderRuntime(_) => Err(SecretStoreError::Unauthorized),
     }
 }
 

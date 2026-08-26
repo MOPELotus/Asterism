@@ -1698,7 +1698,9 @@ fn authorize_scoped(
     let actor_matches = match &access.actor {
         SecretActor::ProviderRuntime(provider) => provider == scoped_provider.as_str(),
         SecretActor::CoreService(_) => true,
-        SecretActor::User(_) | SecretActor::ServiceToken(_) => false,
+        SecretActor::User(_) | SecretActor::DelegatedUser { .. } | SecretActor::ServiceToken(_) => {
+            false
+        }
     };
     if actual_provider == scoped_provider && actor_matches {
         Ok(())
@@ -1771,6 +1773,9 @@ fn decode_operation_state(value: &str) -> Result<QuestionSessionOperationState, 
 fn access_actor(actor: &SecretActor) -> (&'static str, Option<String>) {
     match actor {
         SecretActor::User(id) => ("user", Some(id.to_string())),
+        SecretActor::DelegatedUser { actor_user_id, .. } => {
+            ("user", Some(actor_user_id.to_string()))
+        }
         SecretActor::ServiceToken(id) => ("service_token", Some(id.to_string())),
         SecretActor::CoreService(service) => ("core_service", Some((*service).to_owned())),
         SecretActor::ProviderRuntime(provider) => ("provider_runtime", Some(provider.clone())),

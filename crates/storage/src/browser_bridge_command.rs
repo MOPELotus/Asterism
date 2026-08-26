@@ -1519,6 +1519,7 @@ async fn insert_dispatch_audit(
 ) -> Result<(), SecretStoreError> {
     let (actor_type, actor_id) = match &access.actor {
         SecretActor::User(id) => ("user", id.to_string()),
+        SecretActor::DelegatedUser { actor_user_id, .. } => ("user", actor_user_id.to_string()),
         SecretActor::ServiceToken(id) => ("service_token", id.to_string()),
         SecretActor::CoreService(service) => ("core_service", (*service).to_owned()),
         SecretActor::ProviderRuntime(provider_id) => ("provider_runtime", provider_id.clone()),
@@ -1558,6 +1559,7 @@ async fn insert_result_audit(
 ) -> Result<(), SecretStoreError> {
     let (actor_type, actor_id) = match &access.actor {
         SecretActor::User(id) => ("user", id.to_string()),
+        SecretActor::DelegatedUser { actor_user_id, .. } => ("user", actor_user_id.to_string()),
         SecretActor::ServiceToken(id) => ("service_token", id.to_string()),
         SecretActor::CoreService(service) => ("core_service", (*service).to_owned()),
         SecretActor::ProviderRuntime(provider_id) => ("provider_runtime", provider_id.clone()),
@@ -1723,7 +1725,9 @@ fn authorize_scoped(
     let actor_matches = match &access.actor {
         SecretActor::ProviderRuntime(provider) => provider == scoped_provider.as_str(),
         SecretActor::CoreService(_) => true,
-        SecretActor::User(_) | SecretActor::ServiceToken(_) => false,
+        SecretActor::User(_) | SecretActor::DelegatedUser { .. } | SecretActor::ServiceToken(_) => {
+            false
+        }
     };
     if actual_provider == scoped_provider && actor_matches {
         Ok(())

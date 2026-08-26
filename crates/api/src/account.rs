@@ -220,7 +220,7 @@ pub(super) async fn put_provider_credentials(
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::internal("request ID middleware did not provide an ID"))?;
     let access = SecretAccess {
-        actor: auth.secret_actor(),
+        actor: auth.secret_actor_for(owner_id),
         correlation_id: correlation_id.to_owned(),
         reason: "replace Provider account credentials".to_owned(),
     };
@@ -265,7 +265,7 @@ pub(super) async fn put_auth_session_credentials(
         )
     })?;
     let access = SecretAccess {
-        actor: auth.secret_actor(),
+        actor: auth.secret_actor_for(owner_id),
         correlation_id: request_id(&headers)?.to_owned(),
         reason: "complete Provider authentication session".to_owned(),
     };
@@ -362,7 +362,7 @@ pub(super) async fn poll_interactive_auth_session(
         )
     })?;
     let access = SecretAccess {
-        actor: auth.secret_actor(),
+        actor: auth.secret_actor_for(owner_id),
         correlation_id: request_id(&headers)?.to_owned(),
         reason: "poll interactive Provider authentication".to_owned(),
     };
@@ -496,7 +496,7 @@ pub(super) async fn submit_external_oauth_callback(
         )
     })?;
     let access = SecretAccess {
-        actor: auth.secret_actor(),
+        actor: auth.secret_actor_for(owner_id),
         correlation_id: request_id(&headers)?.to_owned(),
         reason: "complete external OAuth authentication session".to_owned(),
     };

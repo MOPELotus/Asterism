@@ -2572,9 +2572,10 @@ fn authorize_planning_input_access(
     match &access.actor {
         SecretActor::CoreService(_) => Ok(()),
         SecretActor::ProviderRuntime(actual) if actual == provider_id.as_str() => Ok(()),
-        SecretActor::User(_) | SecretActor::ServiceToken(_) | SecretActor::ProviderRuntime(_) => {
-            Err(SecretStoreError::Unauthorized)
-        }
+        SecretActor::User(_)
+        | SecretActor::DelegatedUser { .. }
+        | SecretActor::ServiceToken(_)
+        | SecretActor::ProviderRuntime(_) => Err(SecretStoreError::Unauthorized),
     }
 }
 

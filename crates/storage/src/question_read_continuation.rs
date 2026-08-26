@@ -1339,6 +1339,9 @@ async fn insert_audit(
 ) -> Result<(), SecretStoreError> {
     let (actor_type, actor_id) = match &access.actor {
         asterism_secrets::SecretActor::User(id) => ("user", id.to_string()),
+        asterism_secrets::SecretActor::DelegatedUser { actor_user_id, .. } => {
+            ("user", actor_user_id.to_string())
+        }
         asterism_secrets::SecretActor::ServiceToken(id) => ("service_token", id.to_string()),
         asterism_secrets::SecretActor::CoreService(name) => ("core_service", (*name).to_owned()),
         asterism_secrets::SecretActor::ProviderRuntime(id) => ("provider_runtime", id.to_owned()),

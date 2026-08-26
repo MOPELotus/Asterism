@@ -1213,6 +1213,7 @@ fn authorize_claim(
 fn audit_actor(access: &SecretAccess) -> Result<AuditActor, SecretStoreError> {
     match access.actor {
         SecretActor::User(user_id) => Ok(AuditActor::User(user_id)),
+        SecretActor::DelegatedUser { actor_user_id, .. } => Ok(AuditActor::User(actor_user_id)),
         SecretActor::ServiceToken(token_id) => Ok(AuditActor::ServiceToken(token_id)),
         SecretActor::CoreService(_) | SecretActor::ProviderRuntime(_) => {
             Err(SecretStoreError::Unauthorized)

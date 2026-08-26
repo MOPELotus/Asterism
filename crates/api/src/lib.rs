@@ -6137,6 +6137,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn master_can_submit_provider_credentials_for_delegated_owner() {
+        let (app, database) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let master_cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created_user = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/users")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &master_cookie)
+                    .body(Body::from(
+                        r#"{"username":"credential-owner","password":"delegated-password","roles":["user"],"permissions":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created_user.status(), StatusCode::CREATED);
+        let owner_id = response_json(created_user).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let account = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &master_cookie)
+                    .body(Body::from(format!(
+                        r#"{{"provider_id":"provider-alpha","display_name":"delegated-auth","owner_user_id":"{owner_id}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(account.status(), StatusCode::CREATED);
+        let account_id = response_json(account).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let started = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/provider-accounts/{account_id}/auth-sessions"
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &master_cookie)
+                .header("x-asterism-target-owner", &owner_id)
+                .body(Body::from(r#"{"method":"imported_cookie"}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::CREATED);
+        let session_id = response_json(started).await["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let committed = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/credentials"
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &master_cookie)
+                .header("x-asterism-target-owner", &owner_id)
+                .body(Body::from(
+                    r#"{"auth_method":"imported_cookie","acquired_via":"manual_import","session_kind":"cookie","fields":[{"purpose":"provider_cookie","value":"delegated-session-value"}]}"#,
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.status(), StatusCode::OK);
+        assert_eq!(response_json(committed).await["status"]["valid"], true);
+        let stored_owner: String =
+            sqlx::query_scalar("SELECT owner_user_id FROM provider_accounts WHERE id = ?")
+                .bind(&account_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored_owner, owner_id);
+    }
+
+    #[tokio::test]
     async fn interactive_auth_poll_api_commits_without_exposing_continuation() {
         let (app, database) = credential_test_app(true).await;
         let bootstrap = bootstrap(&app).await;

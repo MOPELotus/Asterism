@@ -128,6 +128,18 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn secret_actor_for(&self, owner_user_id: UserId) -> SecretActor {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.user_id != owner_user_id => {
+                SecretActor::DelegatedUser {
+                    actor_user_id: principal.user_id,
+                    owner_user_id,
+                }
+            }
+            _ => self.secret_actor(),
+        }
+    }
+
     pub(super) fn require_account_read(&self) -> Result<UserId, ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. }

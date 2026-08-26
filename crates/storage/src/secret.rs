@@ -2203,7 +2203,9 @@ fn authorize_browser_bridge_secret_access(
     let actor_matches = match &access.actor {
         SecretActor::CoreService(_) => true,
         SecretActor::ProviderRuntime(provider_id) => provider_id == session.provider_id.as_str(),
-        SecretActor::User(_) | SecretActor::ServiceToken(_) => false,
+        SecretActor::User(_) | SecretActor::DelegatedUser { .. } | SecretActor::ServiceToken(_) => {
+            false
+        }
     };
     actor_matches
         .then_some(())
@@ -2401,6 +2403,7 @@ pub(crate) async fn insert_secret_audit(
 fn encode_secret_actor(actor: &SecretActor) -> (&'static str, String) {
     match actor {
         SecretActor::User(id) => ("user", id.to_string()),
+        SecretActor::DelegatedUser { actor_user_id, .. } => ("user", actor_user_id.to_string()),
         SecretActor::ServiceToken(id) => ("service_token", id.to_string()),
         SecretActor::CoreService(service) => ("core_service", (*service).to_owned()),
         SecretActor::ProviderRuntime(provider_id) => ("provider_runtime", provider_id.to_owned()),
@@ -2410,6 +2413,7 @@ fn encode_secret_actor(actor: &SecretActor) -> (&'static str, String) {
 fn secret_audit_actor(actor: &SecretActor) -> Option<AuditActor> {
     match actor {
         SecretActor::User(id) => Some(AuditActor::User(*id)),
+        SecretActor::DelegatedUser { actor_user_id, .. } => Some(AuditActor::User(*actor_user_id)),
         SecretActor::ServiceToken(id) => Some(AuditActor::ServiceToken(*id)),
         SecretActor::CoreService(_) | SecretActor::ProviderRuntime(_) => None,
     }

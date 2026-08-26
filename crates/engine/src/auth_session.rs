@@ -1751,6 +1751,9 @@ async fn finish_oauth_pending<S: AuthSessionRepository>(
 fn audit_actor_from_access(access: &SecretAccess) -> Result<AuditActor, AuthSessionServiceError> {
     match access.actor {
         asterism_secrets::SecretActor::User(user_id) => Ok(AuditActor::User(user_id)),
+        asterism_secrets::SecretActor::DelegatedUser { actor_user_id, .. } => {
+            Ok(AuditActor::User(actor_user_id))
+        }
         asterism_secrets::SecretActor::ServiceToken(token_id) => {
             Ok(AuditActor::ServiceToken(token_id))
         }

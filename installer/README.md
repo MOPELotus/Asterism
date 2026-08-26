@@ -1,8 +1,10 @@
 # Windows 安装向导
 
-`install.ps1` 是 Asterism 0.0.1 的 Windows 优先安装入口。它会检测/安装 Git、Rust、MSVC/Windows SDK、Node.js、npm、Python，创建 Worker 虚拟环境，构建 Rust 与 WebUI，生成本地配置和密钥，运行数据库迁移，复制可选的 Yunzai 插件，并执行本地健康检查。
+`install.ps1` 是 Asterism 0.0.1 的 Windows 优先安装入口。它会检测 Git 和 Python、创建 Worker 虚拟环境、优先安装官方预编译 Rust/WebUI 产物、生成本地配置和密钥、运行数据库迁移、复制可选的 Yunzai 插件并执行本地健康检查。只有回退或显式选择源码构建时才检测/安装 Rust、MSVC/Windows SDK、Node.js 和 npm。
 
-安装器脚本使用 UTF-8 BOM，同时支持 Windows PowerShell 5.1 和 PowerShell 7；CI 会用 Windows PowerShell 5.1 对仓库内全部 `.ps1` 做 parser validation。建议在 Windows Server 上以管理员身份打开新的 PowerShell 窗口运行；安装 Rust release binary 必须有 Visual Studio Build Tools 2022 的 **Desktop development with C++** 工作负载，并勾选 MSVC x64/x86 tools 和 Windows 10/11 SDK。安装器会通过 `vswhere`/Visual Studio 安装目录检查这些组件，不会把普通 PowerShell 中 `where.exe link` 找不到当成唯一判据。
+安装器脚本使用 UTF-8 BOM，同时支持 Windows PowerShell 5.1 和 PowerShell 7；CI 会用 Windows PowerShell 5.1 对仓库内全部 `.ps1` 做 parser validation。默认安装优先下载 CI 已验证并与当前 Git HEAD、`Cargo.lock`、`web/package-lock.json` 完全匹配的官方 Windows 预编译包，因此普通服务器部署不再需要本机编译 Rust/WebUI，也不要求安装 Rust、Node.js 或 Visual Studio Build Tools。Python 仍用于 Provider Worker。
+
+只有指定 `-SourceBuild`/`-ForceBuild`，或当前提交尚无匹配预编译包时，才回退到源码构建。源码构建 Rust release binary 必须有 Visual Studio Build Tools 2022 的 **Desktop development with C++** 工作负载，并勾选 MSVC x64/x86 tools 和 Windows 10/11 SDK。安装器会通过 `vswhere`/Visual Studio 安装目录检查这些组件，不会把普通 PowerShell 中 `where.exe link` 找不到当成唯一判据。
 
 ## 交互安装
 
@@ -21,9 +23,11 @@ Set-ExecutionPolicy -Scope Process Bypass
   -RegisterTask
 ```
 
-可使用 `-NonInteractive` 配合显式参数执行无人值守安装。首次初始化或补建 Yunzai 网关令牌时，还必须通过 `-MasterPasswordFile` 提供只含一行密码的本地文件；安装器刻意不接受命令行明文密码。`-SkipDependencyInstall` 只允许在依赖已经由管理员准备好时使用；`-SkipBuild` 只适用于已有 release 构建产物的升级/重配置，且会在缺少 `asterismd.exe`、`asterismctl.exe` 或 `web/dist/index.html` 时立即失败；`-ForceBuild` 无条件重新构建，不能和 `-SkipBuild` 同时使用。
+可使用 `-NonInteractive` 配合显式参数执行无人值守安装。首次初始化或补建 Yunzai 网关令牌时，还必须通过 `-MasterPasswordFile` 提供只含一行密码的本地文件；安装器刻意不接受命令行明文密码。`-SkipDependencyInstall` 只允许在依赖已经由管理员准备好时使用；`-SkipBuild` 只适用于已有 release 构建产物的升级/重配置，且会在缺少 `asterismd.exe`、`asterismctl.exe` 或 `web/dist/index.html` 时立即失败；`-SourceBuild` 强制使用本机源码工具链，`-ForceBuild` 还会忽略现有构建缓存。二者都不能和 `-SkipBuild` 同时使用。内网环境可用 `-PrebuiltArchive C:\path\asterism-windows-x64.zip` 指定提前下载的包；包内提交与当前源码不一致时会拒绝复用并回退源码构建。
 
 默认运行会检查 `runtime/build-stamp.json`、Git HEAD、`Cargo.lock`、`web/package-lock.json`、影响构建的工作区修改以及 release/WebUI 产物。全部匹配时输出“检测到有效现有构建产物，跳过 Rust/WebUI 构建”；源码、锁文件、相关未提交修改或产物变化时只重建一次并更新 stamp。这样安装中途在初始化阶段失败后重新运行不会再次编译几十分钟。安装器会把 WebUI 的 OpenAPI 预生成也放在 cargo release profile，避免重复生成 debug 依赖。
+
+当本地缓存无效且未强制源码构建时，安装器从 `MOPELotus/Asterism` 的 `windows-latest` Release 下载 `asterism-windows-x64.zip` 与独立 SHA-256 文件，先校验下载内容，再校验包内 Git HEAD 和两个 lockfile 指纹。只有三者完全匹配且工作区没有影响构建的修改时才安装预编译产物；否则清楚说明原因并回退源码构建。
 
 也可以从 JSON 读取路径、Provider、群号和联系方式：
 

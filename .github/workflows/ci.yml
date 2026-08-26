@@ -67,6 +67,8 @@ jobs:
   windows-installer:
     runs-on: windows-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
@@ -161,3 +163,36 @@ jobs:
             Get-Process asterismd -ErrorAction SilentlyContinue | Stop-Process -Force
             Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
           }
+      - name: Package rolling Windows prebuilt bundle
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'asterism-windows-x64'
+          $archive = Join-Path $env:RUNNER_TEMP 'asterism-windows-x64.zip'
+          New-Item -ItemType Directory -Force $bundle | Out-Null
+          Copy-Item target\release\asterismd.exe, target\release\asterismctl.exe -Destination $bundle
+          Copy-Item web\dist (Join-Path $bundle 'web-dist') -Recurse
+          [ordered]@{
+            schema = 1
+            gitHead = '${{ github.sha }}'
+            cargoLock = (Get-FileHash Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+            webLock = (Get-FileHash web\package-lock.json -Algorithm SHA256).Hash.ToLowerInvariant()
+            builtAtUtc = [DateTime]::UtcNow.ToString('o')
+          } | ConvertTo-Json | Set-Content (Join-Path $bundle 'build-info.json') -Encoding UTF8
+          Compress-Archive -Path (Join-Path $bundle '*') -DestinationPath $archive -Force
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  asterism-windows-x64.zip" | Set-Content ($archive + '.sha256') -Encoding ASCII
+      - name: Publish rolling Windows prebuilt bundle
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'asterism-windows-x64.zip'
+          gh release view windows-latest --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create windows-latest --repo $env:GITHUB_REPOSITORY --title 'Windows rolling prebuilt' --notes 'Automatically updated from the latest verified master build.' --prerelease
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to create rolling Windows release.' }
+          }
+          gh release upload windows-latest $archive ($archive + '.sha256') --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to upload rolling Windows bundle.' }

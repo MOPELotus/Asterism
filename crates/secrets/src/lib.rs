@@ -331,6 +331,10 @@ impl SecretAccess {
     pub fn authorizes(&self, owner_user_id: UserId) -> bool {
         let actor_valid = match &self.actor {
             SecretActor::User(user_id) => *user_id == owner_user_id,
+            SecretActor::DelegatedUser {
+                owner_user_id: authorized_owner,
+                ..
+            } => *authorized_owner == owner_user_id,
             SecretActor::ServiceToken(_) => true,
             SecretActor::CoreService(service) => valid_actor_label(service),
             SecretActor::ProviderRuntime(provider_id) => valid_actor_label(provider_id),
@@ -344,6 +348,10 @@ impl SecretAccess {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SecretActor {
     User(UserId),
+    DelegatedUser {
+        actor_user_id: UserId,
+        owner_user_id: UserId,
+    },
     ServiceToken(ServiceTokenId),
     CoreService(&'static str),
     ProviderRuntime(String),
@@ -489,6 +497,30 @@ mod tests {
         assert_eq!(format!("{bytes:?}"), "SecretValue([REDACTED])");
         assert_eq!(format!("{text:?}"), "SecretString([REDACTED])");
         assert_eq!(format!("{key:?}"), "SecretKey([REDACTED])");
+    }
+
+    #[test]
+    fn delegated_user_access_preserves_actor_and_binds_one_owner() {
+        let actor_user_id = UserId::new();
+        let owner_user_id = UserId::new();
+        let access = SecretAccess {
+            actor: SecretActor::DelegatedUser {
+                actor_user_id,
+                owner_user_id,
+            },
+            correlation_id: "delegated-provider-auth".to_owned(),
+            reason: "master authenticates an account for its owner".to_owned(),
+        };
+
+        assert!(access.authorizes(owner_user_id));
+        assert!(!access.authorizes(UserId::new()));
+        assert_eq!(
+            access.actor,
+            SecretActor::DelegatedUser {
+                actor_user_id,
+                owner_user_id,
+            }
+        );
     }
 
     #[test]

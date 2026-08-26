@@ -784,7 +784,9 @@ async fn authorize_account(
     let actor_authorized = match &access.actor {
         SecretActor::CoreService(_) => true,
         SecretActor::ProviderRuntime(runtime) => runtime == provider_id.as_str(),
-        SecretActor::User(_) | SecretActor::ServiceToken(_) => false,
+        SecretActor::User(_) | SecretActor::DelegatedUser { .. } | SecretActor::ServiceToken(_) => {
+            false
+        }
     };
     if !access.authorizes(owner_user_id) || !actor_authorized {
         return Err(SecretStoreError::Unauthorized);

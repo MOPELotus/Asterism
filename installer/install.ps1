@@ -16,6 +16,8 @@ param(
     [switch]$SkipDependencyInstall,
     [switch]$SkipBuild,
     [switch]$ForceBuild,
+    [switch]$SourceBuild,
+    [string]$PrebuiltArchive,
     [switch]$RegisterTask,
     [switch]$NonInteractive
 )
@@ -23,8 +25,8 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-if ($SkipBuild -and $ForceBuild) {
-    throw "-SkipBuild 与 -ForceBuild 不能同时使用。"
+if ($SkipBuild -and ($ForceBuild -or $SourceBuild)) {
+    throw "-SkipBuild 不能与 -ForceBuild/-SourceBuild 同时使用。"
 }
 
 $script:installCommitted = $false
@@ -196,6 +198,64 @@ function Write-BuildStamp([string]$Root, [string]$Path) {
     }
     Set-PrivateFile $Path (($stamp | ConvertTo-Json -Depth 5) + "`n")
 }
+function Install-PrebuiltBundle([string]$Root, [string]$StampPath, [string]$ArchivePath) {
+    $fingerprint = Get-BuildFingerprint $Root
+    if (-not $fingerprint.gitHead -or @($fingerprint.dirty).Count -gt 0) {
+        Write-Host "工作区不是干净的 Git HEAD，不能安全复用预编译包。" -ForegroundColor Yellow
+        return $false
+    }
+    $downloadedArchive = $false
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("asterism-prebuilt-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force $temporaryRoot | Out-Null
+    try {
+        if (-not $ArchivePath) {
+            $ArchivePath = Join-Path $temporaryRoot "asterism-windows-x64.zip"
+            $checksumPath = $ArchivePath + ".sha256"
+            $baseUrl = "https://github.com/MOPELotus/Asterism/releases/download/windows-latest"
+            Write-Host "尝试下载与当前 master 配套的 Windows 预编译包..." -ForegroundColor Cyan
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/asterism-windows-x64.zip" -OutFile $ArchivePath
+                Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/asterism-windows-x64.zip.sha256" -OutFile $checksumPath
+            } catch {
+                Write-Host "预编译包暂不可用，将回退到本机源码构建：$($_.Exception.Message)" -ForegroundColor Yellow
+                return $false
+            }
+            $expectedHash = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+            if ((Get-Sha256 $ArchivePath) -ne $expectedHash) { throw "Windows 预编译包 SHA-256 校验失败。" }
+            $downloadedArchive = $true
+        } else {
+            $ArchivePath = (Resolve-Path $ArchivePath).Path
+        }
+        $expanded = Join-Path $temporaryRoot "expanded"
+        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $expanded -Force
+        $manifestPath = Join-Path $expanded "build-info.json"
+        if (-not (Test-Path -LiteralPath $manifestPath)) { throw "预编译包缺少 build-info.json。" }
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        foreach ($key in @("gitHead", "cargoLock", "webLock")) {
+            if ([string]$manifest.$key -ne [string]$fingerprint[$key]) {
+                Write-Host "预编译包与当前源码不匹配（$key），将回退到本机源码构建。" -ForegroundColor Yellow
+                return $false
+            }
+        }
+        $daemonSource = Join-Path $expanded "asterismd.exe"
+        $cliSource = Join-Path $expanded "asterismctl.exe"
+        $webSource = Join-Path $expanded "web-dist"
+        if (-not (Test-Path $daemonSource) -or -not (Test-Path $cliSource) -or -not (Test-Path (Join-Path $webSource "index.html"))) {
+            throw "预编译包缺少必要的 daemon、CLI 或 WebUI 产物。"
+        }
+        New-Item -ItemType Directory -Force (Join-Path $Root "target\release") | Out-Null
+        New-Item -ItemType Directory -Force (Join-Path $Root "web\dist") | Out-Null
+        Copy-Item -LiteralPath $daemonSource -Destination (Join-Path $Root "target\release\asterismd.exe") -Force
+        Copy-Item -LiteralPath $cliSource -Destination (Join-Path $Root "target\release\asterismctl.exe") -Force
+        Copy-Item -Path (Join-Path $webSource "*") -Destination (Join-Path $Root "web\dist") -Recurse -Force
+        Write-BuildStamp $Root $StampPath
+        Write-Host "已安装匹配当前源码的 Windows 预编译包，跳过 Rust/WebUI 本机编译。" -ForegroundColor Green
+        return $true
+    } finally {
+        if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($downloadedArchive) { $ArchivePath = $null }
+    }
+}
 function Set-PrivateFile([string]$Path, [string]$Content, [switch]$WithBom) {
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Force $parent | Out-Null
@@ -339,6 +399,8 @@ if (-not $AdminContact -and $inputConfig.adminContact) { $AdminContact = [string
 if (-not $PSBoundParameters.ContainsKey("MasterUsername") -and $inputConfig.masterUsername) { $MasterUsername = [string]$inputConfig.masterUsername }
 if (-not $MasterPasswordFile -and $inputConfig.masterPasswordFile) { $MasterPasswordFile = [string]$inputConfig.masterPasswordFile }
 if (-not $PSBoundParameters.ContainsKey("GatewayTokenTtlSeconds") -and $inputConfig.gatewayTokenTtlSeconds) { $GatewayTokenTtlSeconds = [int]$inputConfig.gatewayTokenTtlSeconds }
+if (-not $PrebuiltArchive -and $inputConfig.prebuiltArchive) { $PrebuiltArchive = [string]$inputConfig.prebuiltArchive }
+if (-not $PSBoundParameters.ContainsKey("SourceBuild") -and $inputConfig.sourceBuild) { $SourceBuild = $true }
 if (-not $PSBoundParameters.ContainsKey("RegisterTask") -and $inputConfig.registerTask) { $RegisterTask = $true }
 
 Write-Step "收集安装参数"
@@ -357,12 +419,6 @@ if ($databaseParent) { New-Item -ItemType Directory -Force $databaseParent | Out
 
 Write-Step "检测/安装 Windows 依赖"
 Ensure-Dependency git Git.Git "Git"
-Ensure-Dependency cargo Rustlang.Rustup "Rust/Cargo"
-Ensure-Dependency rustc Rustlang.Rustup "Rust/Cargo"
-Ensure-MinimumVersion "Rust" "rustc" @("--version") ([version]"1.97.0")
-Ensure-Dependency node OpenJS.NodeJS.LTS "Node.js"
-Ensure-Dependency npm OpenJS.NodeJS.LTS "npm"
-Ensure-MinimumVersion "Node.js" "node" @("-p", "process.versions.node") ([version]"22.18.0")
 if (-not (Get-Command py -ErrorAction SilentlyContinue) -and -not (Get-Command python -ErrorAction SilentlyContinue)) {
     Install-WithWinget Python.Python.3.12 "Python"
 }
@@ -372,16 +428,32 @@ Ensure-MinimumVersion "Python" $pythonLauncher (@($pythonLauncherArgs) + @("-c",
 if (-not (Get-Command schtasks -ErrorAction SilentlyContinue)) { Write-Warning "未找到 schtasks；将跳过 Windows 任务注册。"; $RegisterTask = $false }
 $buildStampPath = Join-Path $InstallRoot "build-stamp.json"
 $buildCache = Test-BuildCache $SourceRoot $buildStampPath
+$useSourceBuild = $false
 if ($SkipBuild) {
     $artifactCheck = Test-BuildArtifacts $SourceRoot
     if (-not $artifactCheck.Valid) { throw "已指定 -SkipBuild，但构建产物不完整：$($artifactCheck.Missing -join ', ')" }
     Write-Host "已指定 -SkipBuild，使用现有构建产物（不检查源码匹配）。" -ForegroundColor Yellow
-} elseif (-not $ForceBuild -and $buildCache.Valid) {
-    Write-Host "检测到有效现有构建产物，跳过 Rust/WebUI 构建。" -ForegroundColor Green
 } elseif ($ForceBuild) {
     Write-Host "已指定 -ForceBuild，无条件重新构建。" -ForegroundColor Yellow
+    $useSourceBuild = $true
+} elseif ($SourceBuild) {
+    Write-Host "已指定 -SourceBuild，使用本机 Rust/Node 工具链构建。" -ForegroundColor Yellow
+    $useSourceBuild = $true
+} elseif ($buildCache.Valid) {
+    Write-Host "检测到有效现有构建产物，跳过 Rust/WebUI 构建。" -ForegroundColor Green
 } else {
-    Write-Host "需要重新构建：$($buildCache.Reason)" -ForegroundColor Yellow
+    Write-Host "现有构建不可复用：$($buildCache.Reason)" -ForegroundColor Yellow
+    if (-not (Install-PrebuiltBundle $SourceRoot $buildStampPath $PrebuiltArchive)) {
+        $useSourceBuild = $true
+    }
+}
+if ($useSourceBuild) {
+    Ensure-Dependency cargo Rustlang.Rustup "Rust/Cargo"
+    Ensure-Dependency rustc Rustlang.Rustup "Rust/Cargo"
+    Ensure-MinimumVersion "Rust" "rustc" @("--version") ([version]"1.97.0")
+    Ensure-Dependency node OpenJS.NodeJS.LTS "Node.js"
+    Ensure-Dependency npm OpenJS.NodeJS.LTS "npm"
+    Ensure-MinimumVersion "Node.js" "node" @("-p", "process.versions.node") ([version]"22.18.0")
 }
 
 Write-Step "准备源码和 Python Worker 环境"
@@ -514,7 +586,7 @@ retry_max_delay_seconds = 1800
 if ((Test-Path $configPath) -and ((Get-Content -LiteralPath $configPath -Raw) -ne $config)) { Copy-Item $configPath "$configPath.before-install-$(Get-Date -Format yyyyMMdd-HHmmss-fffffff).bak" }
 Set-PrivateFile $configPath $config
 
-if (-not $SkipBuild -and ($ForceBuild -or -not $buildCache.Valid)) {
+if ($useSourceBuild) {
     Write-Step "构建 Asterism 和 WebUI"
     $msvcToolchain = Ensure-MsvcToolchain
     Import-VsDevEnvironment $msvcToolchain
