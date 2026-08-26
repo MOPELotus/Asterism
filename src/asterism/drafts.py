@@ -124,6 +124,8 @@ class DraftRepository:
             )
 
     def get(self, provider: str, profile_id: str, draft_id: str) -> FormalDraft:
+        if provider not in PROVIDER_IDS:
+            raise ValueError(f"unsupported provider id: {provider}")
         placeholder = FormalDraft(
             id=str(UUID(draft_id)),
             provider=provider,
@@ -132,6 +134,20 @@ class DraftRepository:
             payload={},
         )
         return FormalDraft.from_dict(read_json_object(self.path_for(placeholder)))
+
+    def list(self, provider: str | None = None) -> list[FormalDraft]:
+        providers = (provider,) if provider else PROVIDER_IDS
+        drafts: list[FormalDraft] = []
+        for provider_id in providers:
+            if provider_id not in PROVIDER_IDS:
+                raise ValueError(f"unsupported provider id: {provider_id}")
+            root = self.paths.drafts / provider_id
+            for path in root.glob("*/*.json") if root.exists() else ():
+                try:
+                    drafts.append(FormalDraft.from_dict(read_json_object(path)))
+                except (OSError, TypeError, ValueError, KeyError):
+                    continue
+        return sorted(drafts, key=lambda item: item.updated_at, reverse=True)
 
     def set_status(self, draft: FormalDraft, status: str) -> FormalDraft:
         if status not in {"draft", "submitted", "discarded"}:

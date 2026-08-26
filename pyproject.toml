@@ -13,7 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 desktop = [
     "PyQt6>=6.8,<7",
-    "PyQt-Fluent-Widgets>=1.8,<2",
+    "PyQt6-Fluent-Widgets>=1.8,<2",
 ]
 providers = [
     "beautifulsoup4>=4.14.2",
@@ -51,6 +51,7 @@ dev = [
 
 [project.scripts]
 asterism = "asterism.cli:main"
+asterism-gui = "asterism.gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

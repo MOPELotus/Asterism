@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS answer_candidates (
     answer_hash TEXT NOT NULL,
     answer_json TEXT NOT NULL,
     source_kind TEXT NOT NULL,
-    source_ref TEXT,
+    source_ref TEXT NOT NULL DEFAULT '',
     confidence REAL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE(question_id, answer_hash, source_kind, source_ref)
@@ -135,3 +135,11 @@ class QuestionBank:
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                 )
             }
+
+    def question_id(self, provider: str, identity_hash: str) -> int | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM questions WHERE provider=? AND identity_hash=?",
+                (provider, identity_hash),
+            ).fetchone()
+            return int(row[0]) if row else None

@@ -6,14 +6,18 @@ import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
+from asterism.answers import AnswerRepository, canonical_question, question_identity, rebind_answer
 from asterism.config import LocalConfigStore
 from asterism.database import QuestionBank
 from asterism.drafts import DraftRepository
+from asterism.inventory import InventoryStore
 from asterism.paths import DataPaths
 from asterism.profiles import ProfileStateStore, ProfileStore
 from asterism.providers import ProviderRegistry, WorkerSpec
 from asterism.runner import RunnerError, RunnerManager
+from asterism.scan import ReadOnlyScanCoordinator
 
 
 class LocalStoreTests(unittest.TestCase):
@@ -88,6 +92,60 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(row["status"], "submitted")
         self.assertIn('"q1":"A"', row["payload_json"])
 
+    def test_question_identity_ignores_remote_ids_and_signed_media_query(self) -> None:
+        first = {
+            "remote_id": "q-1",
+            "kind": "single_choice",
+            "prompt": "  Which  option? ",
+            "options": [
+                {"id": "a", "text": "Alpha", "image": "https://img.example/a.png?sign=one"},
+                {"id": "b", "text": "Beta", "image": "https://img.example/b.png?sign=one"},
+            ],
+        }
+        second = {
+            "remote_id": "q-99",
+            "kind": "single_choice",
+            "prompt": "Which option?",
+            "options": [
+                {"id": "remote-b", "text": "Beta", "image": "https://IMG.EXAMPLE/b.png?sign=two"},
+                {"id": "remote-a", "text": "Alpha", "image": "https://img.example/a.png?sign=two"},
+            ],
+        }
+        self.assertEqual(
+            question_identity("chaoxing", first)[0], question_identity("chaoxing", second)[0]
+        )
+        self.assertNotIn("remote_id", canonical_question(first))
+
+    def test_option_answer_rebinds_by_content_after_random_order(self) -> None:
+        original_options = ["Alpha", "Beta", "Gamma"]
+        rotated_options = ["Gamma", "Alpha", "Beta"]
+        identity = question_identity(
+            "chaoxing", {"kind": "single_choice", "prompt": "Pick", "options": original_options}
+        )[0]
+        self.assertTrue(identity)
+        self.assertEqual(rebind_answer({"option": "Alpha"}, rotated_options), "B")
+
+    def test_answer_repository_reuses_only_unconflicted_correct_candidate(self) -> None:
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question = {
+            "kind": "single_choice",
+            "prompt": "Pick",
+            "options": ["A. Alpha", "B. Beta"],
+            "answer_evidence": {
+                "source": "cidaren_answer_lib",
+                "value": "Alpha",
+                "verified": False,
+            },
+        }
+        question_id, identity = repository.ingest_question("cidaren", question)
+        self.assertEqual(repository.resolve_exact("cidaren", identity).status, "unverified")
+        repository.record_candidate(question_id, {"text": "Alpha"}, "ai", "correct")
+        self.assertEqual(repository.resolve_exact("cidaren", identity).status, "exact")
+        repository.record_candidate(question_id, {"text": "Beta"}, "ai", "correct")
+        self.assertEqual(repository.resolve_exact("cidaren", identity).status, "conflict")
+
 
 class RunnerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -136,6 +194,79 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(RunnerError) as raised:
             self.manager.invoke(self.spec, "sleep", timeout=5, cancel=cancelled)
         self.assertEqual(raised.exception.code, "cancelled")
+
+
+class ScanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.paths = DataPaths.resolve(self.temporary.name)
+        self.paths.initialize()
+        self.profiles = ProfileStore(self.paths)
+        self.profile = self.profiles.create("chaoxing", "scan")
+        self.states = ProfileStateStore(self.paths)
+        self.bank = QuestionBank(self.paths.database)
+        self.bank.initialize()
+        self.calls: list[tuple[str, str]] = []
+
+        def result(data):
+            return SimpleNamespace(data=data)
+
+        class FakeService:
+            def courses(inner, profile, *, cancel=None):
+                self.calls.append(("courses", ""))
+                return result({"courses": [{"remote_id": "course-1", "title": "one"}]})
+
+            def tasks(inner, profile, course, *, cancel=None):
+                self.calls.append(("tasks", str(course["remote_id"])))
+                return result(
+                    {
+                        "tasks": [
+                            {"remote_id": "task-1", "title": "one"},
+                            {"remote_id": "task-2", "title": "two"},
+                        ]
+                    }
+                )
+
+            def questions(
+                inner,
+                profile,
+                task,
+                *,
+                allow_read_that_starts_attempt=False,
+                cancel=None,
+            ):
+                self.calls.append(("questions", str(task["remote_id"])))
+                return result(
+                    {
+                        "questions": [
+                            {
+                                "kind": "single_choice",
+                                "prompt": str(task["remote_id"]),
+                                "options": ["A", "B"],
+                            }
+                        ]
+                    }
+                )
+
+        inventory = InventoryStore(self.states)
+        self.coordinator = ReadOnlyScanCoordinator(
+            FakeService(), self.states, inventory, AnswerRepository(self.bank)
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_scan_persists_progress_and_resumes_without_repeating_tasks(self) -> None:
+        first = self.coordinator.scan(self.profile)
+        self.assertEqual(first.state, "completed")
+        self.assertEqual(first.completed_tasks, 2)
+        self.assertEqual(first.question_count, 2)
+        calls_after_first = len(self.calls)
+        second = self.coordinator.scan(self.profile)
+        self.assertEqual(second.state, "completed")
+        self.assertEqual(second.completed_tasks, 2)
+        self.assertEqual(len(self.calls), calls_after_first + 2)  # courses + tasks only
+        self.assertEqual(self.calls[-2:], [("courses", ""), ("tasks", "course-1")])
 
 
 if __name__ == "__main__":
