@@ -1,0 +1,53 @@
+# Local application data and credentials
+/accounts/
+/state/
+/logs/
+/drafts/
+/data/
+/config.local.json
+/config.local.toml
+*.cookies.txt
+*.session.json
+*.token.json
+*.secrets.json
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.bak
+*.log
+
+# Local agent and audit state
+/.agents/
+/.audit_tmp/
+/.codex/
+/.codex-docs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and release outputs
+/build/
+/dist/
+/release/
+/target/
+*.zip
+*.7z
+
+# Front-end remnants or future tooling caches
+node_modules/
+.nuitka-cache/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
