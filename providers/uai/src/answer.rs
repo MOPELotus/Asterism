@@ -1705,7 +1705,7 @@ mod tests {
         let mut bytes = plaintext.as_bytes().to_vec();
         bytes.extend(std::iter::repeat_n(u8::try_from(padding).unwrap(), padding));
         let mut encoded = String::with_capacity(bytes.len() * 2);
-        for chunk in bytes.chunks_exact_mut(16) {
+        for chunk in bytes.as_chunks::<16>().0 {
             let mut block_bytes = [0_u8; 16];
             block_bytes.copy_from_slice(chunk);
             let mut block = Array::from(block_bytes);

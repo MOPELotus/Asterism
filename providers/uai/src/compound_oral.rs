@@ -1955,8 +1955,8 @@ mod tests {
         let mut bytes = serde_json::to_vec(plaintext).unwrap();
         let padding = 16 - (bytes.len() % 16);
         bytes.extend(std::iter::repeat_n(u8::try_from(padding).unwrap(), padding));
-        for chunk in bytes.chunks_exact_mut(16) {
-            let block: &mut [u8; 16] = chunk.try_into().unwrap();
+        for chunk in bytes.as_chunks_mut::<16>().0 {
+            let block: &mut [u8; 16] = chunk;
             cipher.encrypt_block(block.into());
         }
         let mut encoded = String::with_capacity(bytes.len() * 2);
