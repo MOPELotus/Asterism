@@ -127,15 +127,21 @@ Ensure-Dependency npm OpenJS.NodeJS.LTS "npm"
 if (-not (Get-Command py -ErrorAction SilentlyContinue) -and -not (Get-Command python -ErrorAction SilentlyContinue)) {
     Install-WithWinget Python.Python.3.12 "Python"
 }
-$pythonLauncher = if (Get-Command py -ErrorAction SilentlyContinue) { (Get-Command py).Source } else { Require-Command python }
+$pythonLauncher = if (Get-Command python -ErrorAction SilentlyContinue) { (Get-Command python).Source } elseif (Get-Command py -ErrorAction SilentlyContinue) { (Get-Command py).Source } else { throw "未找到 Python 或 py launcher。" }
 $pythonLauncherArgs = if ((Split-Path -Leaf $pythonLauncher) -like "py*") { @("-3") } else { @() }
 if (-not (Get-Command schtasks -ErrorAction SilentlyContinue)) { Write-Warning "未找到 schtasks；将跳过 Windows 任务注册。"; $RegisterTask = $false }
 
 Write-Step "准备源码和 Python Worker 环境"
 if ((Resolve-Path $SourceRoot).Path -ne $SourceRoot) { throw "源码目录解析失败。" }
 $venv = Join-Path $InstallRoot ".venv-workers"
-if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) { & $pythonLauncher @pythonLauncherArgs -m venv $venv }
+if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
+    & $pythonLauncher @pythonLauncherArgs -m venv $venv
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
+        throw "Python venv 创建失败：$venv"
+    }
+}
 $python = Join-Path $venv "Scripts\python.exe"
+if (-not (Test-Path $python)) { throw "未找到 Worker Python：$python" }
 foreach ($requirements in @("workers\chaoxing\requirements.txt", "workers\welearn\requirements.txt", "workers\uai\requirements.txt", "workers\cidaren\requirements.txt")) {
     $file = Join-Path $SourceRoot $requirements
     if (Test-Path $file) { & $python -m pip install -r $file }
