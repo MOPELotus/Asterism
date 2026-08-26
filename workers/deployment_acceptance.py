@@ -21,7 +21,7 @@ def health(url: str) -> dict:
     allowed = {
         "service", "version", "status", "database", "schema_version",
         "registered_providers", "outbox_pending", "outbox_dead_letter",
-        "secret_store_configured",
+        "secret_store_configured", "master_initialized",
     }
     return {key: value[key] for key in allowed if key in value}
 
@@ -89,7 +89,15 @@ def deployment_readiness(database_path: Path) -> dict:
             scopes = set(json.loads(scopes_json))
         except (TypeError, json.JSONDecodeError):
             continue
-        if {"qq_identity_assert", "notification_delivery_report"} <= scopes:
+        if {
+            "provider_read",
+            "provider_manage",
+            "task_read",
+            "task_execute",
+            "qq_identity_assert",
+            "task_command_proxy",
+            "notification_delivery_report",
+        } <= scopes:
             gateway_ready = True
             break
     database.close()
