@@ -331,7 +331,8 @@ if ($needsAdminAuthentication) {
         throw "无人值守安装需要通过 -MasterPasswordFile（或配置文件的 masterPasswordFile）提供 Master 密码；安装器不接受命令行明文密码。"
     }
     $authCommand = if ($health.master_initialized) { @("auth", "login") } else { @("init") }
-    $authArgs = @("--url", $apiUrl) + @($authCommand) + @("--username", $MasterUsername)
+    $bootstrapScopes = "system-read,provider-read,provider-manage,task-read,task-execute,credit-read,credit-manage,audit-read,service-token-manage,qq-identity-assert,task-command-proxy,notification-delivery-report"
+    $authArgs = @("--url", $apiUrl) + @($authCommand) + @("--username", $MasterUsername, "--scope", $bootstrapScopes)
     $createdInitialMaster = -not $health.master_initialized
     if ($MasterPasswordFile) {
         $passwordLine = (Get-Content -LiteralPath $MasterPasswordFile -Raw).TrimEnd("`r", "`n")
