@@ -296,16 +296,16 @@ if (-not (Test-Path (Join-Path $SourceRoot "target\release\asterismctl.exe"))) {
 $bootstrapOut = Join-Path $InstallRoot "logs\bootstrap.stdout.log"
 $bootstrapErr = Join-Path $InstallRoot "logs\bootstrap.stderr.log"
 $daemonProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $SourceRoot -WindowStyle Hidden -RedirectStandardOutput $bootstrapOut -RedirectStandardError $bootstrapErr -PassThru
-for ($attempt = 0; $attempt -lt 30; $attempt++) {
+for ($attempt = 0; $attempt -lt 120; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri ("http://" + $Bind + "/api/v1/system/health") -TimeoutSec 2
         if ($health.status -eq "ok") { break }
     } catch { Start-Sleep -Seconds 1 }
-    if ($attempt -eq 29) {
+    if ($attempt -eq 119) {
         $daemonLog = Join-Path $InstallRoot "logs\asterismd.log"
         $diagnosticFiles = @($daemonLog, $bootstrapOut, $bootstrapErr) | Where-Object { Test-Path $_ }
         $diagnostic = if ($diagnosticFiles) { ($diagnosticFiles | ForEach-Object { "--- $_ ---"; Get-Content -LiteralPath $_ -Tail 40 -ErrorAction SilentlyContinue }) -join "`n" } else { "（尚未生成 daemon/启动日志）" }
-        throw "asterismd 未能在 30 秒内通过健康检查（PID $($daemonProcess.Id)，进程状态 $((Get-Process -Id $daemonProcess.Id -ErrorAction SilentlyContinue).HasExited)）。`n$diagnostic"
+        throw "asterismd 未能在 120 秒内通过健康检查（PID $($daemonProcess.Id)，进程状态 $((Get-Process -Id $daemonProcess.Id -ErrorAction SilentlyContinue).HasExited)）。`n$diagnostic"
     }
 }
 $env:ASTERISM_CONFIG = $configPath
