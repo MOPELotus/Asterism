@@ -1,6 +1,7 @@
 import { useLogin } from "@refinedev/core";
 import { LockKeyhole } from "lucide-react";
 import { type FormEvent, useState } from "react";
+import { useSearchParams } from "react-router";
 
 import { Alert, AlertDescription } from "@/components/ui/alert.tsx";
 import { Button } from "@/components/ui/button.tsx";
@@ -12,6 +13,7 @@ type LoginVariables = { username: string; password: string };
 
 export function LoginPage() {
   const login = useLogin<LoginVariables>();
+  const [searchParams] = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
@@ -34,6 +36,11 @@ export function LoginPage() {
         </CardHeader>
         <CardContent>
           <form className="space-y-4" onSubmit={submit}>
+            {searchParams.get("passwordChanged") === "1" ? (
+              <Alert>
+                <AlertDescription>密码已保存，旧会话已撤销。请使用新密码登录。</AlertDescription>
+              </Alert>
+            ) : null}
             <div className="space-y-2">
               <Label htmlFor="username">用户名</Label>
               <Input

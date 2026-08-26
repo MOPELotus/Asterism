@@ -100,8 +100,13 @@ pub(super) async fn assert_qq_identity(
         )
         .await
         .map_err(ApiError::internal)?;
+    let return_to = if created {
+        "/settings/password".to_owned()
+    } else {
+        return_to.to_owned()
+    };
     let (web_login_path, web_login_expires_at) =
-        create_web_login_ticket(&state, user.id, return_to, now).await?;
+        create_web_login_ticket(&state, user.id, &return_to, now).await?;
     Ok(crate::auth::no_store(
         Json(AssertQqIdentityResponse {
             user_id: user.id,
@@ -596,6 +601,7 @@ async fn find_or_create_user(
 
     let username = qq.to_string();
     let users = SqliteUserRepository::new(state.database.clone());
+    let mut created_user = false;
     let user = if let Some(existing) = users
         .find_user_by_username(&username)
         .await
@@ -637,7 +643,10 @@ async fn find_or_create_user(
             .await
             .map_err(ApiError::internal)?
         {
-            UserAdminCreateOutcome::Created(_) => user,
+            UserAdminCreateOutcome::Created(_) => {
+                created_user = true;
+                user
+            }
             UserAdminCreateOutcome::UsernameConflict => users
                 .find_user_by_username(&username)
                 .await
@@ -645,6 +654,15 @@ async fn find_or_create_user(
                 .ok_or_else(|| ApiError::internal("QQ user conflict could not be resolved"))?,
         }
     };
+
+    if created_user {
+        sqlx::query("UPDATE users SET password_initialized = 0 WHERE id = ? AND username = ?")
+            .bind(user.id.to_string())
+            .bind(&username)
+            .execute(state.database.pool())
+            .await
+            .map_err(ApiError::internal)?;
+    }
 
     let qq_i64 = i64::try_from(qq).map_err(|_| {
         ApiError::bad_request("invalid_qq", "QQ number is outside the supported range")

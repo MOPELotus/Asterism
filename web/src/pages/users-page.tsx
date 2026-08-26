@@ -1,16 +1,17 @@
 import { usePermissions } from "@refinedev/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Coins, Save, UserPlus } from "lucide-react";
+import { Coins, KeyRound, Save, UserPlus } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
   createAdminUser,
   grantUserCredits,
   listAdminUsers,
+  resetAdminUserPassword,
   updateAdminUser,
 } from "@/api/generated/sdk.gen.ts";
 import type { Permission, Role, UserProfile, UserStatus } from "@/api/generated/types.gen.ts";
-import { requireData } from "@/api/result.ts";
+import { ensureSuccess, requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
 import { QueryError, TableSkeleton } from "@/components/query-feedback.tsx";
 import { StateBadge } from "@/components/state-badge.tsx";
@@ -84,11 +85,39 @@ export function UsersPage() {
         </Card>
         <div className="space-y-6">
           {selected ? <EditUserCard user={selected} onUpdated={async () => queryClient.invalidateQueries({ queryKey: ["admin-users"] })} /> : null}
+          {selected ? <ResetPasswordCard user={selected} onReset={async () => queryClient.invalidateQueries({ queryKey: ["admin-users"] })} /> : null}
           {selected && canGrantCredits ? <CreditGrantCard user={selected} /> : null}
         </div>
       </div>
     </PageShell>
   );
+}
+
+function ResetPasswordCard({ user, onReset }: { user: UserProfile; onReset: () => Promise<unknown> }) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const reset = useMutation({
+    mutationFn: async () => ensureSuccess(await resetAdminUserPassword({
+      path: { user_id: user.id },
+      headers: { "x-request-id": crypto.randomUUID() },
+      body: { password, expected_updated_at: user.updated_at },
+    })),
+    onSuccess: async () => {
+      setPassword("");
+      setConfirmation("");
+      await onReset();
+    },
+  });
+  const passwordsMatch = password === confirmation;
+  useEffect(() => { setPassword(""); setConfirmation(""); reset.reset(); }, [user.id]);
+  return <Card><CardHeader><CardTitle>重置密码 · {user.username}</CardTitle></CardHeader><CardContent className="space-y-4">
+    <p className="text-sm text-muted-foreground">管理员设置新密码后，此用户的全部旧 Web 会话会立即失效。</p>
+    {reset.error ? <QueryError error={reset.error} /> : null}
+    {reset.isSuccess ? <Alert><KeyRound className="size-4" /><AlertTitle>密码已重置</AlertTitle><AlertDescription>请将新密码通过安全渠道交给用户。</AlertDescription></Alert> : null}
+    <div className="grid gap-4 sm:grid-cols-2"><Field label="新密码"><Input type="password" maxLength={1024} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></Field><Field label="确认新密码"><Input type="password" maxLength={1024} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></Field></div>
+    {!passwordsMatch && confirmation ? <p className="text-sm text-destructive">两次输入的新密码不一致。</p> : null}
+    <Button disabled={reset.isPending || password.length < 8 || !passwordsMatch} onClick={() => reset.mutate()}><KeyRound className="size-4" />{reset.isPending ? "正在重置" : "重置密码"}</Button>
+  </CardContent></Card>;
 }
 
 function CreateUserCard({ onCreated }: { onCreated: (user: UserProfile) => Promise<void> }) {

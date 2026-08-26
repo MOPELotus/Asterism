@@ -482,6 +482,122 @@ pub(super) async fn login(
     create_session_response(&state, user, Utc::now()).await
 }
 
+pub(super) struct PasswordChangeRequest {
+    current_password: Option<SecretString>,
+    new_password: SecretString,
+}
+
+impl fmt::Debug for PasswordChangeRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PasswordChangeRequest")
+            .field("current_password", &self.current_password)
+            .field("new_password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for PasswordChangeRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            current_password: Option<String>,
+            new_password: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            current_password: wire.current_password.map(SecretString::new),
+            new_password: SecretString::new(wire.new_password),
+        })
+    }
+}
+
+/// Changes an existing password or initializes the password for a QQ-created
+/// user whose authenticated Web session came from a QQ login ticket.
+pub(super) async fn change_or_set_password(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    payload: Result<Json<PasswordChangeRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let AuthIdentity::Web { principal, .. } = &auth.identity else {
+        return Err(ApiError::forbidden());
+    };
+    let request = api_json(payload)?;
+    validate_password(&request.new_password, true)?;
+    let user = SqliteUserRepository::new(state.database.clone())
+        .find_user(principal.user_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(ApiError::unauthorized)?;
+    let password_service = Argon2idPasswordService::default();
+    let initialized: bool =
+        sqlx::query_scalar("SELECT password_initialized = 1 FROM users WHERE id = ?")
+            .bind(user.id.to_string())
+            .fetch_one(state.database.pool())
+            .await
+            .map_err(ApiError::internal)?;
+    if let Some(current) = request.current_password {
+        validate_password(&current, false)?;
+        if !password_service
+            .verify(&current, &user.password_hash)
+            .map_err(ApiError::internal)?
+        {
+            return Err(ApiError::invalid_credentials());
+        }
+    } else if initialized {
+        return Err(ApiError::bad_request(
+            "current_password_required",
+            "current password is required",
+        ));
+    }
+    let password_hash = password_service
+        .hash(&request.new_password)
+        .map_err(ApiError::internal)?;
+    let now = Utc::now();
+    let mut transaction = state
+        .database
+        .pool()
+        .begin()
+        .await
+        .map_err(ApiError::internal)?;
+    sqlx::query(
+        "UPDATE users SET password_hash = ?, password_initialized = 1, updated_at = ? WHERE id = ?",
+    )
+    .bind(password_hash)
+    .bind(now)
+    .bind(user.id.to_string())
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    sqlx::query("UPDATE web_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+        .bind(now)
+        .bind(user.id.to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    sqlx::query(
+        "INSERT INTO audit_records (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, outcome, metadata_sanitized_json) VALUES (?, ?, 'user', ?, 'password_changed', 'user', ?, 'succeeded', '{}')",
+    )
+    .bind(asterism_domain::AuditRecordId::new().to_string())
+    .bind(now)
+    .bind(user.id.to_string())
+    .bind(user.id.to_string())
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    transaction.commit().await.map_err(ApiError::internal)?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        clear_session_cookie(state.secure_cookies),
+    );
+    Ok(no_store(response))
+}
+
 fn master_already_initialized() -> ApiError {
     ApiError::conflict(
         "master_already_initialized",

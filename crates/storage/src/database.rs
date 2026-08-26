@@ -150,14 +150,14 @@ mod tests {
     async fn all_migrations_apply_to_a_fresh_database() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
-        assert_eq!(database.schema_version().await.unwrap(), 110);
+        assert_eq!(database.schema_version().await.unwrap(), 111);
         database.health_check().await.unwrap();
 
         let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 110);
+        assert_eq!(migration_count, 111);
 
         let verification_trigger: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_chaoxing_execution_verification_log'",

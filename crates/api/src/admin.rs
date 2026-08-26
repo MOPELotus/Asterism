@@ -17,7 +17,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
@@ -440,6 +440,95 @@ pub(super) async fn update_user(
             "the final active Master cannot be suspended, disabled, or demoted",
         )),
     }
+}
+
+pub(super) struct ResetUserPasswordRequest {
+    password: SecretString,
+    expected_updated_at: Timestamp,
+}
+
+impl fmt::Debug for ResetUserPasswordRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResetUserPasswordRequest")
+            .field("password", &"[REDACTED]")
+            .field("expected_updated_at", &self.expected_updated_at)
+            .finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for ResetUserPasswordRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            password: String,
+            expected_updated_at: Timestamp,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            password: SecretString::new(wire.password),
+            expected_updated_at: wire.expected_updated_at,
+        })
+    }
+}
+
+pub(super) async fn reset_user_password(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<ResetUserPasswordRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let actor = auth.require_user_manage()?;
+    let user_id = parse_user_id(&user_id)?;
+    let Json(request) = payload.map_err(|_| {
+        ApiError::bad_request("invalid_password_reset", "password reset body is invalid")
+    })?;
+    crate::auth::validate_password(&request.password, true)?;
+    let hash = Argon2idPasswordService::default()
+        .hash(&request.password)
+        .map_err(ApiError::internal)?;
+    let now = Utc::now();
+    let correlation_id = required_request_id(&headers)?;
+    let mut transaction = state
+        .database
+        .pool()
+        .begin()
+        .await
+        .map_err(ApiError::internal)?;
+    let changed = sqlx::query("UPDATE users SET password_hash = ?, password_initialized = 1, updated_at = ? WHERE id = ? AND updated_at = ?")
+        .bind(hash)
+        .bind(now.to_rfc3339_opts(SecondsFormat::Nanos, true))
+        .bind(user_id.to_string())
+        .bind(
+            request
+                .expected_updated_at
+                .to_rfc3339_opts(SecondsFormat::Nanos, true),
+        )
+        .execute(&mut *transaction).await.map_err(ApiError::internal)?;
+    if changed.rows_affected() != 1 {
+        return Err(ApiError::conflict(
+            "user_revision_conflict",
+            "the user changed after expected_updated_at",
+        ));
+    }
+    sqlx::query("UPDATE web_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+        .bind(now)
+        .bind(user_id.to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    sqlx::query("INSERT INTO audit_records (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, correlation_id, outcome, metadata_sanitized_json) VALUES (?, ?, 'user', ?, 'password_reset', 'user', ?, ?, 'succeeded', '{}')")
+        .bind(asterism_domain::AuditRecordId::new().to_string()).bind(now).bind(actor.to_string()).bind(user_id.to_string()).bind(correlation_id)
+        .execute(&mut *transaction).await.map_err(ApiError::internal)?;
+    transaction.commit().await.map_err(ApiError::internal)?;
+    Ok(crate::auth::no_store(
+        StatusCode::NO_CONTENT.into_response(),
+    ))
 }
 
 pub(super) async fn list_audit(

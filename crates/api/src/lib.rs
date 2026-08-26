@@ -54,6 +54,7 @@ use axum::{
     http::{HeaderName, HeaderValue, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
+    routing::put,
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -247,6 +248,7 @@ pub fn build_router(state: ApiState) -> Router {
     let protected = Router::new()
         .route("/api/v1/auth/session", get(auth::current_identity))
         .route("/api/v1/auth/logout", post(auth::logout))
+        .route("/api/v1/auth/password", put(auth::change_or_set_password))
         .route(
             "/api/v1/integrations/qq/identity/assert",
             post(qq::assert_qq_identity),
@@ -399,6 +401,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/api/v1/admin/users/{user_id}",
             get(admin::get_user).put(admin::update_user),
+        )
+        .route(
+            "/api/v1/admin/users/{user_id}/password",
+            put(admin::reset_user_password),
         )
         .route(
             "/api/v1/admin/users/{user_id}/credit-grants",
@@ -722,6 +728,26 @@ pub fn openapi_document() -> Value {
                 "operationId": "login",
                 "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Credentials"}}}},
                 "responses": {"200": {"description": "Session created"}, "401": {"description": "Invalid credentials"}, "429": {"description": "Rate limited"}}
+            }},
+            "/api/v1/auth/password": {"put": {
+                "operationId": "changeOrSetPassword",
+                "description": "Changes an initialized password after verifying the current password, or sets the first password for a QQ-created account. Every existing Web session is revoked on success.",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object",
+                    "required": ["new_password"],
+                    "properties": {
+                        "current_password": {"type": "string", "format": "password", "minLength": 1, "maxLength": 1024, "writeOnly": true},
+                        "new_password": {"type": "string", "format": "password", "minLength": 8, "maxLength": 1024, "writeOnly": true}
+                    },
+                    "additionalProperties": false
+                }}}},
+                "responses": {
+                    "204": {"description": "Password stored and all Web sessions revoked"},
+                    "400": {"description": "Invalid password or current password is required"},
+                    "401": {"description": "Authentication or current password verification failed"},
+                    "403": {"description": "A Web session is required"}
+                }
             }},
             "/api/v1/auth/qq-login/{ticket}": {"get": {
                 "operationId": "consumeQqWebLogin",
@@ -1742,6 +1768,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/admin/users/{user_id}/password".to_owned(),
+            admin_user_password_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/admin/users/{user_id}/credit-grants".to_owned(),
             admin_credit_grant_path(),
         );
@@ -2357,6 +2390,32 @@ fn admin_user_path() -> Value {
             }
         }
     })
+}
+
+fn admin_user_password_path() -> Value {
+    json!({"put": {
+        "operationId": "resetAdminUserPassword",
+        "description": "Replaces a user's password under an optimistic revision guard and revokes every existing Web session for that user.",
+        "security": [{"cookieAuth": []}],
+        "parameters": [{"name": "user_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+            "type": "object",
+            "required": ["password", "expected_updated_at"],
+            "properties": {
+                "password": {"type": "string", "format": "password", "minLength": 8, "maxLength": 1024, "writeOnly": true},
+                "expected_updated_at": {"type": "string", "format": "date-time"}
+            },
+            "additionalProperties": false
+        }}}},
+        "responses": {
+            "204": {"description": "Password reset and all Web sessions revoked"},
+            "400": {"description": "Invalid user ID, password or revision"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "ManageUsers Web permission required"},
+            "404": {"description": "User not found"},
+            "409": {"description": "User revision conflict"}
+        }
+    }})
 }
 
 fn admin_credit_grant_path() -> Value {
@@ -9019,6 +9078,253 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn password_change_revokes_old_sessions_and_replaces_credentials() {
+        let app = test_router().await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let changed = app
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/auth/password")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"current_password":"correct-horse-battery-staple","new_password":"new-correct-horse-battery-staple"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if changed.status() != StatusCode::NO_CONTENT {
+            let status = changed.status();
+            let body = to_bytes(changed.into_body(), 16 * 1024).await.unwrap();
+            panic!(
+                "password change failed: {status} {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        assert!(changed.headers().contains_key(header::SET_COOKIE));
+
+        let revoked = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/auth/session")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            app.clone()
+                .oneshot(login_request("correct-horse-battery-staple"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.oneshot(login_request("new-correct-horse-battery-staple"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn uninitialized_qq_style_user_can_set_first_password_without_current_secret() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let master_cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/users")
+                    .header(header::COOKIE, master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "create-qq-style-user")
+                    .body(Body::from(
+                        r#"{"username":"12345678","password":"unreachable-seed","roles":["user"],"permissions":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let user_id = response_json(created).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        sqlx::query("UPDATE users SET password_initialized = 0 WHERE id = ?")
+            .bind(user_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let login = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 3], 41_003))))
+                    .body(Body::from(
+                        r#"{"username":"12345678","password":"unreachable-seed"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let initialized = app
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/auth/password")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"new_password":"chosen-user-password"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(initialized.status(), StatusCode::NO_CONTENT);
+        let relogin = app
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 4], 41_004))))
+                    .body(Body::from(
+                        r#"{"username":"12345678","password":"chosen-user-password"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(relogin.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn administrator_password_reset_revokes_user_sessions() {
+        let app = test_router().await;
+        let bootstrap = bootstrap(&app).await;
+        let master_cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/users")
+                    .header(header::COOKIE, &master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "create-reset-member")
+                    .body(Body::from(
+                        r#"{"username":"reset-member","password":"original-password","roles":["user"],"permissions":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+        let user_id = created["id"].as_str().unwrap();
+        let expected_updated_at = created["updated_at"].as_str().unwrap();
+        let login = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 5], 41_005))))
+                    .body(Body::from(
+                        r#"{"username":"reset-member","password":"original-password"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let member_cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let reset = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/api/v1/admin/users/{user_id}/password"))
+                    .header(header::COOKIE, master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "reset-member-password")
+                    .body(Body::from(
+                        json!({
+                            "password": "administrator-reset-password",
+                            "expected_updated_at": expected_updated_at
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if reset.status() != StatusCode::NO_CONTENT {
+            let status = reset.status();
+            let body = to_bytes(reset.into_body(), 16 * 1024).await.unwrap();
+            panic!(
+                "password reset failed: {status} {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let revoked = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/auth/session")
+                    .header(header::COOKIE, member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+        let relogin = app
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 6], 41_006))))
+                    .body(Body::from(
+                        r#"{"username":"reset-member","password":"administrator-reset-password"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(relogin.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     #[allow(
         clippy::too_many_lines,
         reason = "the route integrity test keeps the complete versioned API surface together"
@@ -9051,6 +9357,7 @@ mod tests {
         for path in [
             "/api/v1/auth/bootstrap",
             "/api/v1/auth/login",
+            "/api/v1/auth/password",
             "/api/v1/auth/qq-login/{ticket}",
             "/api/v1/auth/session",
             "/api/v1/auth/logout",
@@ -9103,6 +9410,7 @@ mod tests {
             "/api/v1/credits/transactions",
             "/api/v1/credits/reservations",
             "/api/v1/admin/users/{user_id}/credit-grants",
+            "/api/v1/admin/users/{user_id}/password",
             "/api/v1/executions",
             "/api/v1/executions/{execution_id}",
             "/api/v1/executions/{execution_id}/logs",
@@ -9340,10 +9648,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(login.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            login.headers()[header::LOCATION],
-            "/tasks/task-safe?confirm=1"
-        );
+        assert_eq!(login.headers()[header::LOCATION], "/settings/password");
         let qq_cookie = login.headers()[header::SET_COOKIE]
             .to_str()
             .unwrap()

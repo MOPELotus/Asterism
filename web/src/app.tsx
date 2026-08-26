@@ -29,6 +29,7 @@ const AnswerWorkflowPage = lazy(() => import("@/pages/answer-workflow-page.tsx")
 const UsersPage = lazy(() => import("@/pages/users-page.tsx").then((module) => ({ default: module.UsersPage })));
 const AiConfigPage = lazy(() => import("@/pages/ai-config-page.tsx").then((module) => ({ default: module.AiConfigPage })));
 const PricingCatalogPage = lazy(() => import("@/pages/pricing-catalog-page.tsx").then((module) => ({ default: module.PricingCatalogPage })));
+const PasswordPage = lazy(() => import("@/pages/password-page.tsx").then((module) => ({ default: module.PasswordPage })));
 
 export function App() {
   return (
@@ -77,6 +78,7 @@ export function App() {
             <Route path="executions" element={<ExecutionsPage />} />
             <Route path="executions/:executionId" element={<ExecutionDetailPage />} />
             <Route path="credits" element={<CreditsPage />} />
+            <Route path="settings/password" element={<PasswordPage />} />
             <Route path="admin/users" element={<UsersPage />} />
             <Route path="admin/audit" element={<AuditPage />} />
             <Route path="admin/service-tokens" element={<ServiceTokensPage />} />

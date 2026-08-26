@@ -56,6 +56,7 @@ export function AppLayout() {
           {primaryNavigation.map((item) => (
             <NavItem key={item.to} {...item} onNavigate={() => setMobileOpen(false)} />
           ))}
+          <NavItem to="/settings/password" label="登录密码" icon={KeyRound} onNavigate={() => setMobileOpen(false)} />
           {canManageSystem ? (
             <NavItem
               to="/admin/runtime-settings"
