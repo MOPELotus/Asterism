@@ -6,6 +6,12 @@ param(
     [string]$Bind = "127.0.0.1:8068",
     [string]$WebUrl,
     [string]$DatabasePath,
+    [string]$ConfigFile,
+    [string]$AllowedGroups,
+    [string]$NotificationGroups,
+    [string]$AdminContact,
+    [string]$MasterUsername = "master",
+    [int]$GatewayTokenTtlSeconds = 31536000,
     [switch]$SkipDependencyInstall,
     [switch]$SkipBuild,
     [switch]$RegisterTask,
@@ -83,6 +89,20 @@ function Set-PrivateFile([string]$Path, [string]$Content) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+$inputConfig = if ($ConfigFile) {
+    Get-Content -LiteralPath (Resolve-Path $ConfigFile) -Raw | ConvertFrom-Json
+} else { $null }
+if (-not $InstallRoot -and $inputConfig.installRoot) { $InstallRoot = [string]$inputConfig.installRoot }
+if (-not $SourceRoot -and $inputConfig.sourceRoot) { $SourceRoot = [string]$inputConfig.sourceRoot }
+if (-not $YunzaiRoot -and $inputConfig.yunzaiRoot) { $YunzaiRoot = [string]$inputConfig.yunzaiRoot }
+if (-not $PSBoundParameters.ContainsKey("Bind") -and $inputConfig.bind) { $Bind = [string]$inputConfig.bind }
+if (-not $WebUrl -and $inputConfig.webUrl) { $WebUrl = [string]$inputConfig.webUrl }
+if (-not $DatabasePath -and $inputConfig.databasePath) { $DatabasePath = [string]$inputConfig.databasePath }
+if (-not $AllowedGroups -and $inputConfig.allowedGroups) { $AllowedGroups = @($inputConfig.allowedGroups) -join "," }
+if (-not $NotificationGroups -and $inputConfig.notificationGroups) { $NotificationGroups = @($inputConfig.notificationGroups) -join "," }
+if (-not $AdminContact -and $inputConfig.adminContact) { $AdminContact = [string]$inputConfig.adminContact }
+if (-not $PSBoundParameters.ContainsKey("RegisterTask") -and $inputConfig.registerTask) { $RegisterTask = $true }
+
 Write-Step "收集安装参数"
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SourceRoot = if ($SourceRoot) { (Resolve-Path $SourceRoot).Path } else { (Resolve-Path (Join-Path $scriptRoot "..")).Path }
@@ -141,7 +161,10 @@ ASTERISM_SECRET_KEYS=prod-v1=$secret
 "@
 }
 $enabled = @{}
-foreach ($provider in @("chaoxing", "welearn", "uai", "cidaren")) { $enabled[$provider] = Ask-YesNo "启用 $provider" $true }
+foreach ($provider in @("chaoxing", "welearn", "uai", "cidaren")) {
+    $defaultEnabled = if ($inputConfig.providers -and $null -ne $inputConfig.providers.$provider) { [bool]$inputConfig.providers.$provider } else { $true }
+    $enabled[$provider] = Ask-YesNo "启用 $provider" $defaultEnabled
+}
 $config = @"
 [server]
 bind = "$Bind"
@@ -222,13 +245,16 @@ $(if ($browser) { "`$env:ASTERISM_CHAOXING_BROWSER_EXECUTABLE = `"$browser`"`n`$
 "@
 Set-PrivateFile $runScript $runContent
 
+$pluginTarget = $null
 if ($YunzaiRoot -and (Test-Path $YunzaiRoot)) {
     Write-Step "安装 Yunzai 插件"
     $pluginTarget = Join-Path $YunzaiRoot "plugins\asterism-plugin"
     New-Item -ItemType Directory -Force (Split-Path -Parent $pluginTarget) | Out-Null
     if (Test-Path $pluginTarget) { Copy-Item $pluginTarget "$pluginTarget.before-install-$(Get-Date -Format yyyyMMdd-HHmmss)" -Recurse }
     Copy-Item (Join-Path $SourceRoot "integrations\yunzai-plugin\*") $pluginTarget -Recurse -Force
-    Write-Warning "Yunzai 插件已复制，但 Service Token 需在首次 asterismctl init 后写入插件 config/asterism.json。"
+    $AllowedGroups = if ($AllowedGroups) { $AllowedGroups } else { Ask "允许使用 Asterism 的群号（逗号分隔，留空表示全部）" "" }
+    $NotificationGroups = if ($NotificationGroups) { $NotificationGroups } else { Ask "通知群号（逗号分隔，留空表示不投递）" "" }
+    $AdminContact = if ($AdminContact) { $AdminContact } else { Ask "管理员联系方式" "" }
 }
 
 if ($RegisterTask) {
@@ -248,9 +274,62 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
     } catch { Start-Sleep -Seconds 1 }
     if ($attempt -eq 29) { throw "asterismd 未能在 30 秒内通过健康检查（PID $($daemonProcess.Id)）。" }
 }
-Write-Host "请在下一步为首次 Master 输入密码："
 $env:ASTERISM_CONFIG = $configPath
-& (Join-Path $SourceRoot "target\release\asterismctl.exe") init --username master --url ("http://" + $Bind)
+$cli = Join-Path $SourceRoot "target\release\asterismctl.exe"
+$apiUrl = "http://" + $Bind
+$pluginConfigPath = if ($pluginTarget) { Join-Path $pluginTarget "config\asterism.json" } else { $null }
+$needsGatewayToken = $pluginTarget -and -not (Test-Path $pluginConfigPath)
+$needsAdminAuthentication = (-not $health.master_initialized) -or $needsGatewayToken
+$adminToken = $null
+$adminTokenId = $null
+$createdInitialMaster = $false
+if ($needsAdminAuthentication) {
+    $authCommand = if ($health.master_initialized) { @("auth", "login") } else { @("init") }
+    $createdInitialMaster = -not $health.master_initialized
+    Write-Host (if ($createdInitialMaster) { "请为首次 Master 输入并确认密码：" } else { "请为现有 Master 输入密码，以创建缺失的 Yunzai 网关令牌：" })
+    $adminOutput = & $cli --url $apiUrl @authCommand --username $MasterUsername
+    if ($LASTEXITCODE -ne 0) { throw "Master 初始化或认证失败。" }
+    $adminResult = ($adminOutput -join "`n") | ConvertFrom-Json
+    $adminToken = $adminResult.token
+    $adminTokenId = $adminResult.metadata.id
+    if (-not $adminToken) { throw "asterismctl 未返回管理 Service Token。" }
+    if ($createdInitialMaster) {
+        Write-Warning "以下初始管理 Service Token 只显示一次，请保存到密码管理器："
+        $adminOutput | Write-Output
+    }
+}
+
+if ($needsGatewayToken) {
+    Write-Step "创建并写入 Yunzai 网关令牌"
+    $env:ASTERISM_TOKEN = $adminToken
+    try {
+        $gatewayOutput = & $cli --url $apiUrl service-token create `
+            --name yunzai-gateway `
+            --scope qq-identity-assert,task-command-proxy,notification-delivery-report `
+            --expires-in-seconds $GatewayTokenTtlSeconds
+        if ($LASTEXITCODE -ne 0) { throw "Yunzai 网关 Service Token 创建失败。" }
+        $gatewayToken = (($gatewayOutput -join "`n") | ConvertFrom-Json).token
+        if (-not $gatewayToken) { throw "asterismctl 未返回 Yunzai 网关令牌。" }
+        $pluginConfig = [ordered]@{
+            apiUrl = $apiUrl
+            webUrl = $WebUrl
+            token = $gatewayToken
+            allowedGroups = @($AllowedGroups -split '[\s,]+' | Where-Object { $_ })
+            notificationGroups = @($NotificationGroups -split '[\s,]+' | Where-Object { $_ })
+            notificationIntervalMs = 30000
+            adminContact = $AdminContact
+            requestTimeoutMs = 180000
+        } | ConvertTo-Json -Depth 4
+        Set-PrivateFile $pluginConfigPath ($pluginConfig + "`n")
+        if (-not $createdInitialMaster -and $adminTokenId) {
+            & $cli --url $apiUrl service-token revoke $adminTokenId | Out-Null
+        }
+    } finally {
+        Remove-Item Env:ASTERISM_TOKEN -ErrorAction SilentlyContinue
+        $adminToken = $null
+        $gatewayToken = $null
+    }
+}
 
 Write-Host "`n安装完成。" -ForegroundColor Green
 Write-Host "本地 WebUI/API：$WebUrl"

@@ -655,6 +655,12 @@ async fn health(State(state): State<ApiState>) -> Result<Json<HealthResponse>, A
         outbox_pending: outbox.pending,
         outbox_dead_letter: outbox.dead_letter,
         secret_store_configured: state.secret_store.is_some(),
+        master_initialized: sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM system_settings WHERE key = 'master_initialized')",
+        )
+        .fetch_one(state.database.pool())
+        .await
+        .map_err(ApiError::internal)?,
     }))
 }
 
@@ -3283,6 +3289,7 @@ pub struct HealthResponse {
     pub outbox_pending: u64,
     pub outbox_dead_letter: u64,
     pub secret_store_configured: bool,
+    pub master_initialized: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -4188,6 +4195,7 @@ mod tests {
         let health: HealthResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(health.status, "ok");
         assert!(!health.secret_store_configured);
+        assert!(!health.master_initialized);
     }
 
     #[tokio::test]

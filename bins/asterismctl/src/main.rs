@@ -405,6 +405,9 @@ enum CliScope {
     CreditManage,
     AuditRead,
     ServiceTokenManage,
+    QqIdentityAssert,
+    TaskCommandProxy,
+    NotificationDeliveryReport,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
@@ -526,6 +529,9 @@ impl From<CliScope> for ServiceScope {
             CliScope::CreditManage => Self::CreditManage,
             CliScope::AuditRead => Self::AuditRead,
             CliScope::ServiceTokenManage => Self::ServiceTokenManage,
+            CliScope::QqIdentityAssert => Self::QqIdentityAssert,
+            CliScope::TaskCommandProxy => Self::TaskCommandProxy,
+            CliScope::NotificationDeliveryReport => Self::NotificationDeliveryReport,
         }
     }
 }
@@ -1146,6 +1152,29 @@ mod tests {
         }
         .into_request();
         assert_eq!(request.scopes, [ServiceScope::ProviderRead].into());
+    }
+
+    #[test]
+    fn yunzai_gateway_scopes_are_explicitly_available() {
+        let request = TokenOptions {
+            name: "yunzai".to_owned(),
+            scopes: vec![
+                CliScope::QqIdentityAssert,
+                CliScope::TaskCommandProxy,
+                CliScope::NotificationDeliveryReport,
+            ],
+            expires_in_seconds: 60,
+        }
+        .into_request();
+        assert_eq!(
+            request.scopes,
+            [
+                ServiceScope::QqIdentityAssert,
+                ServiceScope::TaskCommandProxy,
+                ServiceScope::NotificationDeliveryReport,
+            ]
+            .into()
+        );
     }
 
     #[test]

@@ -4,6 +4,10 @@
   "yunzaiRoot": "C:\\Yunzai",
   "bind": "127.0.0.1:8068",
   "webUrl": "http://127.0.0.1:8068",
+  "databasePath": "C:\\Asterism\\runtime\\asterism.db",
+  "allowedGroups": ["123456789"],
+  "notificationGroups": ["123456789"],
+  "adminContact": "QQ 123456789",
   "providers": {
     "chaoxing": true,
     "welearn": true,

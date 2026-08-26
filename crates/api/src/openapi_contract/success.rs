@@ -204,6 +204,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "outbox_pending",
                     "outbox_dead_letter",
                     "secret_store_configured",
+                    "master_initialized",
                 ],
                 json!({
                     "service": string(),
@@ -214,7 +215,8 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "registered_providers": unsigned_integer(),
                     "outbox_pending": unsigned_integer(),
                     "outbox_dead_letter": unsigned_integer(),
-                    "secret_store_configured": {"type": "boolean"}
+                    "secret_store_configured": {"type": "boolean"},
+                    "master_initialized": {"type": "boolean"}
                 }),
             ),
         ),
