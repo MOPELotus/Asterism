@@ -71,10 +71,15 @@ class DesktopController:
             notifications=NotificationDispatcher(config_store),
         )
 
-    def health(self, provider: str) -> ProviderOperationResult:
+    def health(
+        self,
+        provider: str,
+        *,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ProviderOperationResult:
         # A health call does not require a Profile or credentials.
         spec = self.service.registry.get(provider)
-        return self.service.runner.invoke(spec, "health", timeout=30)
+        return self.service.runner.invoke(spec, "health", timeout=30, on_event=on_event)
 
     def save_profile(
         self,
@@ -108,9 +113,15 @@ class DesktopController:
         self.profiles.delete(profile.provider, profile.id)
 
     def sync_courses(
-        self, profile: Profile, *, cancel: threading.Event | None = None
+        self,
+        profile: Profile,
+        *,
+        cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
-        return list(self.service.courses(profile, cancel=cancel).data.get("courses", []))
+        return list(
+            self.service.courses(profile, cancel=cancel, on_event=on_event).data.get("courses", [])
+        )
 
     def sync_tasks(
         self,
@@ -118,8 +129,13 @@ class DesktopController:
         course: dict[str, Any],
         *,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
-        return list(self.service.tasks(profile, course, cancel=cancel).data.get("tasks", []))
+        return list(
+            self.service.tasks(profile, course, cancel=cancel, on_event=on_event).data.get(
+                "tasks", []
+            )
+        )
 
     def scan_questions(
         self,
@@ -128,12 +144,14 @@ class DesktopController:
         *,
         allow_read_that_starts_attempt: bool = False,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         result = self.service.questions(
             profile,
             task,
             allow_read_that_starts_attempt=allow_read_that_starts_attempt,
             cancel=cancel,
+            on_event=on_event,
         )
         questions = result.data.get("questions", [])
         if isinstance(questions, list):
@@ -250,8 +268,9 @@ class DesktopController:
         task: dict[str, Any],
         *,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
-        return self.service.read_duration(profile, task, cancel=cancel)
+        return self.service.read_duration(profile, task, cancel=cancel, on_event=on_event)
 
     def inspect_task(
         self,
@@ -259,8 +278,9 @@ class DesktopController:
         task: dict[str, Any],
         *,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
-        return self.service.inspect(profile, task, cancel=cancel)
+        return self.service.inspect(profile, task, cancel=cancel, on_event=on_event)
 
     def scan_all(
         self,

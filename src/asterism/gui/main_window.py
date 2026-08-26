@@ -44,6 +44,7 @@ from .fluent import (
 class CallThread(QThread):
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
+    event = pyqtSignal(object)
 
     def __init__(self, callback):
         super().__init__()
@@ -51,7 +52,7 @@ class CallThread(QThread):
 
     def run(self) -> None:
         try:
-            self.succeeded.emit(self.callback())
+            self.succeeded.emit(self.callback(self.event.emit))
         except Exception as error:  # pragma: no cover - UI error path
             self.failed.emit(str(error))
 
@@ -319,9 +320,37 @@ class ProviderPage(QWidget):
         self.cancel_event = threading.Event()
         self.worker_thread = CallThread(callback)
         self.cancel_button.setEnabled(True)
+        self.worker_thread.event.connect(lambda event: self._event_received(label, event))
         self.worker_thread.succeeded.connect(lambda result: self._success(label, result))
         self.worker_thread.failed.connect(lambda error: self._failure(label, error))
         self.worker_thread.start()
+
+    def _event_received(self, label: str, event: Any) -> None:
+        """Render worker progress without allowing raw credentials into the UI."""
+        if not isinstance(event, dict):
+            return
+        event_type = str(event.get("type") or "event")
+        if event_type == "progress":
+            current = event.get("current", "?")
+            total = event.get("total")
+            suffix = f"/{total}" if total not in (None, "") else ""
+            message = str(event.get("message") or "")
+            self.log.append(f"[{label}] progress {current}{suffix} {message}".rstrip())
+            return
+        if event_type == "log":
+            level = str(event.get("level") or "info").upper()
+            message = self._preview_text(event.get("message"), limit=1000)
+            self.log.append(f"[{label}] {level} {message}".rstrip())
+            return
+        if event_type == "error":
+            code = str(event.get("code") or "worker_error")
+            message = self._preview_text(event.get("message"), limit=1000)
+            self.log.append(f"[{label}] ERROR {code}: {message}".rstrip())
+            return
+        self.log.append(
+            f"[{label}] {event_type} "
+            + json.dumps(self._safe_preview(event), ensure_ascii=False, default=str)
+        )
 
     def _success(self, label: str, result: Any) -> None:
         if label == "courses":
@@ -451,18 +480,26 @@ class ProviderPage(QWidget):
             self.log.append("[cancel] requested")
 
     def health(self) -> None:
-        self._call(lambda: self.controller.health(self.provider), "health")
+        self._call(
+            lambda on_event: self.controller.health(self.provider, on_event=on_event), "health"
+        )
 
     def authenticate(self) -> None:
         profile = self.profile()
         if profile:
-            self._call(lambda: self.controller.service.authenticate(profile), "authenticate")
+            self._call(
+                lambda on_event: self.controller.service.authenticate(profile, on_event=on_event),
+                "authenticate",
+            )
 
     def sync_courses(self) -> None:
         profile = self.profile()
         if profile:
             self._call(
-                lambda: self.controller.sync_courses(profile, cancel=self.cancel_event), "courses"
+                lambda on_event: self.controller.sync_courses(
+                    profile, cancel=self.cancel_event, on_event=on_event
+                ),
+                "courses",
             )
 
     def _course_selected(self) -> None:
@@ -502,7 +539,10 @@ class ProviderPage(QWidget):
             return
         course = self.current_courses[row]
         self._call(
-            lambda: self.controller.sync_tasks(profile, course, cancel=self.cancel_event), "tasks"
+            lambda on_event: self.controller.sync_tasks(
+                profile, course, cancel=self.cancel_event, on_event=on_event
+            ),
+            "tasks",
         )
 
     def scan_questions(self) -> None:
@@ -521,11 +561,12 @@ class ProviderPage(QWidget):
             == QMessageBox.StandardButton.Yes
         )
         self._call(
-            lambda: self.controller.scan_questions(
+            lambda on_event: self.controller.scan_questions(
                 profile,
                 task,
                 allow_read_that_starts_attempt=allow_attempt,
                 cancel=self.cancel_event,
+                on_event=on_event,
             ),
             "questions",
         )
@@ -544,10 +585,18 @@ class ProviderPage(QWidget):
             == QMessageBox.StandardButton.Yes
         )
         self._call(
-            lambda: self.controller.scan_all(
+            lambda on_event: self.controller.scan_all(
                 profile,
                 allow_cidaren_attempt=allow_attempt,
                 cancel=self.cancel_event,
+                on_update=lambda status: on_event(
+                    {
+                        "type": "progress",
+                        "current": status.completed_tasks,
+                        "total": status.task_count or None,
+                        "message": status.last_error or status.phase,
+                    }
+                ),
             ),
             "scan all",
         )
@@ -577,15 +626,22 @@ class ProviderPage(QWidget):
             )
             self.log.append(f"[draft] {draft.id}")
             return
-        self._call(lambda: self._execute_task(profile, task), "run")
+        self._call(lambda on_event: self._execute_task(profile, task, on_event), "run")
 
-    def _execute_task(self, profile: Profile, task: dict[str, Any]) -> Any:
+    def _execute_task(
+        self,
+        profile: Profile,
+        task: dict[str, Any],
+        on_event=None,
+    ) -> Any:
         answers = None
         if self.provider == "chaoxing":
             native = task.get("native") if isinstance(task.get("native"), dict) else {}
             route = "timed" if native.get("route_kind") == "course_exam" else "untimed"
             answers = self.controller.prepare_answers(profile, task, route=route)
-        return self.controller.run_task(profile, task, answers=answers, cancel=self.cancel_event)
+        return self.controller.run_task(
+            profile, task, answers=answers, cancel=self.cancel_event, on_event=on_event
+        )
 
     def run_batch(self) -> None:
         profile = self.profile()
@@ -629,7 +685,7 @@ class ProviderPage(QWidget):
         if not accepted:
             return
         self._call(
-            lambda: self.controller.run_batch(
+            lambda _on_event: self.controller.run_batch(
                 profile,
                 routine,
                 concurrency=concurrency,
@@ -661,7 +717,9 @@ class ProviderPage(QWidget):
             QMessageBox.warning(self, self.provider, "请先同步并选择 task")
             return
         self._call(
-            lambda: self.controller.read_duration(profile, task, cancel=self.cancel_event),
+            lambda on_event: self.controller.read_duration(
+                profile, task, cancel=self.cancel_event, on_event=on_event
+            ),
             "duration",
         )
 
@@ -672,14 +730,19 @@ class ProviderPage(QWidget):
             QMessageBox.warning(self, self.provider, "请先同步并选择 task")
             return
         self._call(
-            lambda: self.controller.inspect_task(profile, task, cancel=self.cancel_event),
+            lambda on_event: self.controller.inspect_task(
+                profile, task, cancel=self.cancel_event, on_event=on_event
+            ),
             "inspect",
         )
 
     def oauth_begin(self) -> None:
         profile = self.profile()
         if profile:
-            self._call(lambda: self.controller.service.oauth_begin(profile), "oauth begin")
+            self._call(
+                lambda on_event: self.controller.service.oauth_begin(profile, on_event=on_event),
+                "oauth begin",
+            )
 
     def oauth_exchange(self) -> None:
         profile = self.profile()
@@ -688,7 +751,9 @@ class ProviderPage(QWidget):
         callback_url, accepted = QInputDialog.getText(self, "cidaren", "粘贴微信确认后的回调链接")
         if accepted and callback_url.strip():
             self._call(
-                lambda: self.controller.service.oauth_exchange(profile, callback_url.strip()),
+                lambda on_event: self.controller.service.oauth_exchange(
+                    profile, callback_url.strip(), on_event=on_event
+                ),
                 "oauth exchange",
             )
 
@@ -796,7 +861,7 @@ class DraftPage(QWidget):
         ):
             return
         self.log.append(f"[draft] submitting {draft.id}")
-        self.worker_thread = CallThread(lambda: self.controller.submit_draft(draft))
+        self.worker_thread = CallThread(lambda _on_event: self.controller.submit_draft(draft))
         self.worker_thread.succeeded.connect(self._submit_succeeded)
         self.worker_thread.failed.connect(lambda error: self.log.append(f"[draft] ERROR {error}"))
         self.worker_thread.start()
@@ -899,7 +964,7 @@ class QuestionBankPage(QWidget):
         route = str(self.route.currentData() or "untimed")
         self.log.append(f"[ai] {provider} {combination}/{route} starting")
         self.worker_thread = CallThread(
-            lambda: self.controller.answer_question(
+            lambda _on_event: self.controller.answer_question(
                 provider, question, combination=combination, route=route
             )
         )

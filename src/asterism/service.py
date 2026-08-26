@@ -93,10 +93,17 @@ class ProviderService:
             on_event=on_event,
         )
 
-    def oauth_begin(self, profile: Profile) -> ProviderOperationResult:
+    def oauth_begin(
+        self,
+        profile: Profile,
+        *,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ProviderOperationResult:
         if profile.provider != "cidaren":
             raise ValueError("oauth_begin is only available for cidaren")
-        result = self._invoke(profile, "oauth_begin", retry_authentication=False)
+        result = self._invoke(
+            profile, "oauth_begin", retry_authentication=False, on_event=on_event
+        )
         binding = {
             key: result.data[key] for key in ("state_digest", "marker_digest") if key in result.data
         }
@@ -105,7 +112,13 @@ class ProviderService:
         self.states.save(profile, "oauth-binding", binding)
         return result
 
-    def oauth_exchange(self, profile: Profile, callback_url: str) -> ProviderOperationResult:
+    def oauth_exchange(
+        self,
+        profile: Profile,
+        callback_url: str,
+        *,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ProviderOperationResult:
         if profile.provider != "cidaren":
             raise ValueError("oauth_exchange is only available for cidaren")
         binding = self.states.load(profile, "oauth-binding")
@@ -116,6 +129,7 @@ class ProviderService:
             "oauth_exchange",
             {"callback_url": callback_url, "binding": binding},
             retry_authentication=False,
+            on_event=on_event,
         )
 
     def courses(
@@ -123,8 +137,9 @@ class ProviderService:
         profile: Profile,
         *,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
-        result = self._invoke(profile, "courses", cancel=cancel)
+        result = self._invoke(profile, "courses", cancel=cancel, on_event=on_event)
         courses = result.data.get("courses")
         if not isinstance(courses, list) or not all(isinstance(item, dict) for item in courses):
             raise RunnerError("protocol_invalid", "courses result must contain an object list")
@@ -137,8 +152,11 @@ class ProviderService:
         course: dict[str, Any],
         *,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
-        result = self._invoke(profile, "tasks", {"course": course}, cancel=cancel)
+        result = self._invoke(
+            profile, "tasks", {"course": course}, cancel=cancel, on_event=on_event
+        )
         tasks = result.data.get("tasks")
         if not isinstance(tasks, list) or not all(isinstance(item, dict) for item in tasks):
             raise RunnerError("protocol_invalid", "tasks result must contain an object list")
@@ -155,11 +173,12 @@ class ProviderService:
         *,
         allow_read_that_starts_attempt: bool = False,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
         payload: dict[str, Any] = {"task": task}
         if allow_read_that_starts_attempt:
             payload["allow_read_that_starts_attempt"] = True
-        return self._invoke(profile, "questions", payload, cancel=cancel)
+        return self._invoke(profile, "questions", payload, cancel=cancel, on_event=on_event)
 
     def inspect(
         self,
@@ -167,10 +186,11 @@ class ProviderService:
         task: dict[str, Any],
         *,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
         if profile.provider != "uai":
             raise ValueError("inspect is currently exposed only for uai")
-        return self._invoke(profile, "inspect", {"task": task}, cancel=cancel)
+        return self._invoke(profile, "inspect", {"task": task}, cancel=cancel, on_event=on_event)
 
     def run_task(
         self,
@@ -195,9 +215,14 @@ class ProviderService:
         task: dict[str, Any],
         *,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
         if profile.provider == "uai":
-            return self._invoke(profile, "duration", {"task": task}, cancel=cancel)
+            return self._invoke(
+                profile, "duration", {"task": task}, cancel=cancel, on_event=on_event
+            )
         if profile.provider == "welearn":
-            return self._invoke(profile, "duration", {"task": task}, cancel=cancel)
+            return self._invoke(
+                profile, "duration", {"task": task}, cancel=cancel, on_event=on_event
+            )
         raise ValueError(f"duration read is not exposed for {profile.provider}")

@@ -14,7 +14,14 @@ class ThemeMode(StrEnum):
     DARK = "dark"
 
 
+_HEADLESS_PLATFORM = os.environ.get("QT_QPA_PLATFORM", "").casefold() in {
+    "offscreen",
+    "minimal",
+}
+
 try:  # qfluentwidgets is optional during headless development and CI.
+    if _HEADLESS_PLATFORM:
+        raise ImportError("use native Qt widgets with a headless platform plugin")
     from qfluentwidgets import BodyLabel, PrimaryPushButton, PushButton, SubtitleLabel
 
     try:

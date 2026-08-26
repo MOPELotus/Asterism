@@ -45,6 +45,10 @@ class GuiSmokeTests(unittest.TestCase):
             )
             self.assertEqual(chaoxing_page.question_table.rowCount(), 1)
             self.assertEqual(chaoxing_page.question_table.item(0, 0).text(), "matching")
+            chaoxing_page._event_received(
+                "run", {"type": "progress", "current": 2, "total": 5, "message": "working"}
+            )
+            self.assertIn("progress 2/5 working", chaoxing_page.log.toPlainText())
             for mode in ThemeMode:
                 self.assertEqual(apply_theme(self.application, mode), mode)
             self.assertGreater(window.width(), 0)
