@@ -204,6 +204,8 @@ class DesktopController:
                 identity, _canonical = question_identity(profile.provider, question)
             except ValueError:
                 continue
+            if self.bank.question_id(profile.provider, identity) is None:
+                repository.ingest_question(profile.provider, question)
             exact = repository.resolve_exact(profile.provider, identity)
             if exact.status == "exact":
                 answer = rebind_answer(exact.answer, question.get("options"))

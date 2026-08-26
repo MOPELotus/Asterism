@@ -19,6 +19,7 @@ from asterism.answers import (
 from asterism.config import LocalConfigStore
 from asterism.database import QuestionBank
 from asterism.drafts import DraftRepository
+from asterism.gui.controller import DesktopController
 from asterism.inventory import InventoryStore
 from asterism.notifications import NotificationDispatcher
 from asterism.paths import DataPaths
@@ -221,6 +222,32 @@ class LocalStoreTests(unittest.TestCase):
             AIAnswerService.parse_response(
                 {"output_text": '{"answer":"A","confidence":2}'}, "responses"
             )
+
+    def test_controller_prepares_rebound_local_answers_for_chaoxing(self) -> None:
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question = {
+            "kind": "single_choice",
+            "prompt": "Prepared",
+            "options": ["Alpha", "Beta"],
+            "answer_evidence": {"source": "provider_native", "value": "A", "verified": True},
+            "remote_id": "q-1",
+        }
+        repository.ingest_question("chaoxing", question)
+
+        class FakeService:
+            def questions(self, profile, task, *, allow_read_that_starts_attempt=False):
+                return SimpleNamespace(
+                    data={"questions": [{**question, "options": ["Beta", "Alpha"]}]}
+                )
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        controller.bank = bank
+        profile = ProfileStore(self.paths).create("chaoxing", "prepared")
+        answers = controller.prepare_answers(profile, {"remote_id": "task-1"})
+        self.assertEqual(answers, [{"remote_id": "q-1", "value": "B"}])
 
     def test_ai_service_prefers_exact_local_candidate_before_remote_request(self) -> None:
         config = LocalConfigStore(self.paths.config)

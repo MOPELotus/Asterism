@@ -139,6 +139,8 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
 - 完成手动批量执行及可选成功/失败通知。
 - 支持跟随系统、浅色、深色主题；启动前配置 Qt 高 DPI 缩放，窗口尺寸和表格布局随显示器调整。
 - 可选终态通知使用本地配置的无 shell 命令，仅传递事件、平台 ID、操作名和脱敏摘要。
+- `chaoxing` 章节任务执行前，桌面控制层会先读取题目并按全局题库优先、AI 其次准备答案；
+  Worker 仍负责最终的题型编码、平台提交和完成状态读取。
 - AI 组合通过 OpenAI-compatible Responses 请求接入：默认 `economy` 使用 `gpt_router`，
   `gpt_only` 使用 `gpt_site`；限时/不限时分别配置模型与 reasoning effort，国内 endpoint
   只作为主请求失败、超时或不可用时的灾备（默认模型名为 `deepseek-chat`，可在本地配置覆盖）。
