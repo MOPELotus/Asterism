@@ -126,7 +126,13 @@ export class AsterismPlugin extends plugin {
       const task = await client.task(taskId)
       const reason = executionBlockReason(task)
       if (reason) {
-        const identity = await this.gatewayClient.assertQq(e.user_id, true, `/tasks/${task.id}`, Boolean(e.isMaster))
+        const targetQq = targetQqFromMessage(e.msg)
+        const identity = await this.gatewayClient.assertQq(
+          targetQq || e.user_id,
+          true,
+          `/tasks/${task.id}`,
+          !targetQq && Boolean(e.isMaster),
+        )
         throw new UserFacingError(`${reason}：${this.config.webUrl}${identity.web_login_path}`)
       }
       const capabilities = recommendedExecutionCapabilities(task.capabilities || [])
