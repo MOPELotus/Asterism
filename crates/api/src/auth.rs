@@ -212,7 +212,10 @@ impl AuthContext {
                 if principal.has(Permission::ManageOwnAccounts)
                     || principal.has(Permission::ManageProviders) =>
             {
-                Ok(ProviderSettingsAuthority::Owner(principal.user_id))
+                Ok(ProviderSettingsAuthority::Owner(self.resolve_web_target(
+                    principal,
+                    Permission::ManageProviders,
+                )?))
             }
             AuthIdentity::Service(token)
                 if token.scopes.contains(&ServiceScope::ProviderManage) =>

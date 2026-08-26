@@ -13,9 +13,14 @@ import {
   Radar,
 } from "lucide-react";
 import { useState } from "react";
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { NavLink, Outlet } from "react-router";
 
 import type { WebIdentity } from "@/auth-provider.ts";
+import { listAdminUsers } from "@/api/generated/sdk.gen.ts";
+import { requireData } from "@/api/result.ts";
+import { getTargetOwnerUserId, setTargetOwnerUserId } from "@/api/client.ts";
 import { Button } from "@/components/ui/button.tsx";
 import { cn } from "@/lib/utils.ts";
 
@@ -34,6 +39,14 @@ export function AppLayout() {
   const canManageSystem = permissions.data?.includes("manage_system") ?? false;
   const canManageUsers = permissions.data?.includes("manage_users") ?? false;
   const canReadAudit = permissions.data?.some((permission) => permission === "view_any_audit" || permission === "view_own_audit") ?? false;
+  const canDelegate = permissions.data?.includes("execute_any_task") || permissions.data?.includes("manage_providers");
+  const [targetOwner, setTargetOwner] = useState(() => getTargetOwnerUserId() || "");
+  const users = useQuery({
+    queryKey: ["target-owner-users"],
+    enabled: Boolean(canDelegate),
+    queryFn: async () => requireData(await listAdminUsers({ query: { limit: 200, offset: 0 } })),
+  });
+  useEffect(() => { setTargetOwnerUserId(targetOwner || null); }, [targetOwner]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -111,6 +124,10 @@ export function AppLayout() {
             <PanelLeft className="size-5" />
           </Button>
           <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+            {canDelegate ? <select aria-label="当前操作目标用户" className="h-8 max-w-56 rounded-md border bg-background px-2 text-xs" value={targetOwner} onChange={(event) => setTargetOwner(event.target.value)}>
+              <option value="">操作我自己的资源</option>
+              {users.data?.items.filter((user) => user.status === "active").map((user) => <option key={user.id} value={user.id}>代操作：{user.username}</option>)}
+            </select> : null}
             <span className="size-2 rounded-full bg-primary" />
             本地服务已连接
           </div>
