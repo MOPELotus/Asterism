@@ -362,13 +362,13 @@ Ensure-Dependency rustc Rustlang.Rustup "Rust/Cargo"
 Ensure-MinimumVersion "Rust" "rustc" @("--version") ([version]"1.97.0")
 Ensure-Dependency node OpenJS.NodeJS.LTS "Node.js"
 Ensure-Dependency npm OpenJS.NodeJS.LTS "npm"
-Ensure-MinimumVersion "Node.js" "node" @("--version") ([version]"22.18.0")
+Ensure-MinimumVersion "Node.js" "node" @("-p", "process.versions.node") ([version]"22.18.0")
 if (-not (Get-Command py -ErrorAction SilentlyContinue) -and -not (Get-Command python -ErrorAction SilentlyContinue)) {
     Install-WithWinget Python.Python.3.12 "Python"
 }
 $pythonLauncher = if (Get-Command python -ErrorAction SilentlyContinue) { (Get-Command python).Source } elseif (Get-Command py -ErrorAction SilentlyContinue) { (Get-Command py).Source } else { throw "未找到 Python 或 py launcher。" }
 $pythonLauncherArgs = if ((Split-Path -Leaf $pythonLauncher) -like "py*") { @("-3") } else { @() }
-Ensure-MinimumVersion "Python" $pythonLauncher (@($pythonLauncherArgs) + @("--version")) ([version]"3.12.0")
+Ensure-MinimumVersion "Python" $pythonLauncher (@($pythonLauncherArgs) + @("-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))")) ([version]"3.12.0")
 if (-not (Get-Command schtasks -ErrorAction SilentlyContinue)) { Write-Warning "未找到 schtasks；将跳过 Windows 任务注册。"; $RegisterTask = $false }
 $buildStampPath = Join-Path $InstallRoot "build-stamp.json"
 $buildCache = Test-BuildCache $SourceRoot $buildStampPath
