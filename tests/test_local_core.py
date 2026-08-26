@@ -4,6 +4,8 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,7 @@ from asterism.answers import (
     rebind_answer,
 )
 from asterism.batch import ManualBatchExecutor
+from asterism.cidaren_bridge import CidarenAnswerBridge
 from asterism.config import LocalConfigStore
 from asterism.database import QuestionBank
 from asterism.drafts import DraftRepository
@@ -73,6 +76,32 @@ class LocalStoreTests(unittest.TestCase):
         executable = self.paths.root / "browser.exe"
         executable.write_bytes(b"fixture")
         self.assertEqual(find_browser(str(executable)), executable.resolve())
+
+    def test_cidaren_answer_bridge_is_loopback_scoped_and_dispatches_observations(self) -> None:
+        resolved: list[dict] = []
+        observed: list[dict] = []
+        bridge = CidarenAnswerBridge(
+            resolve=lambda value: resolved.append(value)
+            or {"answer_available": True, "value": "A"},
+            observe=lambda value: observed.append(value) or {"ok": True},
+        )
+        try:
+            request = urllib.request.Request(
+                bridge.url,
+                data=b'{"kind":"resolve_answer"}',
+                method="POST",
+                headers={"Authorization": f"Bearer {bridge.ticket}"},
+            )
+            with urllib.request.urlopen(request, timeout=2) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b'{"answer_available":true,"value":"A"}')
+            bad = urllib.request.Request(bridge.url, data=b"{}", method="POST")
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(bad, timeout=2)
+            self.assertEqual(raised.exception.code, 401)
+            self.assertEqual(len(resolved), 1)
+        finally:
+            bridge.close()
 
     def test_profile_state_delete_does_not_touch_account_file(self) -> None:
         profiles = ProfileStore(self.paths)

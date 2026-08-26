@@ -141,6 +141,9 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
 - 可选终态通知使用本地配置的无 shell 命令，仅传递事件、平台 ID、操作名和脱敏摘要。
 - `chaoxing` 章节任务执行前，桌面控制层会先读取题目并按全局题库优先、AI 其次准备答案；
   Worker 仍负责最终的题型编码、平台提交和完成状态读取。
+- `cidaren` 任务执行时，桌面层按单次任务启动短生命周期的 loopback answer bridge：新题先走
+  全局题库/AI 策略，Worker 仍保留 donor 的选项映射、提交顺序和限时回退；平台返回的正误
+  观察写回本地证据。bridge 使用随机 bearer ticket、仅绑定 `127.0.0.1`，任务结束即关闭。
 - AI 组合通过 OpenAI-compatible Responses 请求接入：默认 `economy` 使用 `gpt_router`，
   `gpt_only` 使用 `gpt_site`；限时/不限时分别配置模型与 reasoning effort，国内 endpoint
   只作为主请求失败、超时或不可用时的灾备（默认模型名为 `deepseek-chat`，可在本地配置覆盖）。

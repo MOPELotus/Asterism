@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..ai import AIAnswerService
-from ..answers import AnswerRepository, question_identity, rebind_answer
+from ..answers import AnswerRepository, canonical_answer, question_identity, rebind_answer
 from ..batch import ManualBatchExecutor
+from ..cidaren_bridge import CidarenAnswerBridge
 from ..config import LocalConfigStore
 from ..database import QuestionBank
 from ..drafts import DraftRepository, FormalDraft
@@ -186,9 +188,133 @@ class DesktopController:
         cancel: threading.Event | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
-        return self.service.run_task(
-            profile, task, answers=answers, settings=settings, cancel=cancel, on_event=on_event
+        if profile.provider != "cidaren":
+            return self.service.run_task(
+                profile, task, answers=answers, settings=settings, cancel=cancel, on_event=on_event
+            )
+
+        bridge = CidarenAnswerBridge(
+            resolve=lambda document: self._resolve_cidaren_answer(document),
+            observe=lambda document: self._observe_cidaren_answer(document),
         )
+        task_ref = str(task.get("remote_id") or uuid4())
+        execution_id = str(uuid4())
+        merged_settings = dict(profile.settings)
+        if settings is not None:
+            merged_settings.update(settings)
+        merged_settings["answer_bridge"] = bridge.settings(
+            execution_id=execution_id, task_id=task_ref, remote_task_id=task_ref
+        )
+        try:
+            return self.service.run_task(
+                profile,
+                task,
+                answers=answers,
+                settings=merged_settings,
+                cancel=cancel,
+                on_event=on_event,
+            )
+        finally:
+            bridge.close()
+
+    def _resolve_cidaren_answer(self, document: dict[str, Any]) -> dict[str, Any]:
+        question = self._cidaren_question(document)
+        if question is None:
+            return {"answer_available": False}
+        try:
+            response = self.answer_question(
+                "cidaren", question, route=str(document.get("route") or "untimed")
+            )
+            value = response.get("answer", {}).get("answer")
+            if value is None:
+                return {"answer_available": False}
+            return {"answer_available": True, "value": value}
+        except (OSError, RuntimeError, ValueError):
+            return {"answer_available": False}
+
+    def _observe_cidaren_answer(self, document: dict[str, Any]) -> dict[str, Any]:
+        question = self._cidaren_question(document)
+        submitted = document.get("submitted")
+        if question is None or submitted is None:
+            return {"ok": True}
+        try:
+            repository = self.answer_repository()
+            question_id, _identity = repository.ingest_question("cidaren", question)
+            outcome_value = document.get("outcome")
+            correctness = (
+                outcome_value.get("correctness")
+                if isinstance(outcome_value, dict)
+                else None
+            )
+            outcome = (
+                "correct"
+                if correctness == "correct"
+                else "incorrect"
+                if correctness == "wrong"
+                else "unverified"
+            )
+            source = str(document.get("source") or "cidaren_worker")
+            source_kind = "ai" if source == "bridge" else "provider_native"
+            repository.record_candidate(
+                question_id,
+                canonical_answer(submitted, question.get("options")),
+                source_kind,
+                outcome,
+                source_ref=f"cidaren:{source}",
+                task_ref=str(document.get("remote_task_id") or ""),
+                details={"remote_id": str(document.get("remote_id") or "")},
+            )
+        except (OSError, TypeError, ValueError, RuntimeError):
+            # Observation persistence must never turn a successful donor run
+            # into a failed platform operation.
+            return {"ok": False}
+        return {"ok": True}
+
+    @staticmethod
+    def _cidaren_question(document: Mapping[str, Any]) -> dict[str, Any] | None:
+        exam = document.get("exam")
+        if not isinstance(exam, Mapping):
+            return None
+        stem = exam.get("stem")
+        prompt = ""
+        if isinstance(stem, Mapping):
+            prompt = str(stem.get("content") or stem.get("text") or "").strip()
+        elif stem is not None:
+            prompt = str(stem).strip()
+        if not prompt:
+            prompt = str(
+                exam.get("topic_title") or exam.get("question") or exam.get("word") or ""
+            ).strip()
+        if not prompt:
+            return None
+        mode = str(exam.get("topic_mode") or exam.get("topic_type") or exam.get("type") or "")
+        lowered = mode.casefold()
+        kind = {
+            "1": "single_choice",
+            "single": "single_choice",
+            "choice": "single_choice",
+            "2": "multiple_choice",
+            "multiple": "multiple_choice",
+            "3": "true_false",
+            "judge": "true_false",
+        }.get(
+            lowered,
+            "matching"
+            if "match" in lowered
+            else "ordering"
+            if "order" in lowered
+            else "provider_native",
+        )
+        question: dict[str, Any] = {
+            "remote_id": str(document.get("remote_id") or exam.get("topic_code") or ""),
+            "kind": kind,
+            "prompt": prompt,
+            "options": exam.get("options") or exam.get("option") or [],
+            "native": dict(exam),
+        }
+        if isinstance(stem, Mapping) and stem.get("remark"):
+            question["material"] = {"remark": stem.get("remark")}
+        return question
 
     def prepare_answers(
         self,
