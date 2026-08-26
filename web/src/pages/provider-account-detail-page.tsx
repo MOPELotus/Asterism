@@ -193,6 +193,12 @@ export function ProviderAccountDetailPage() {
       void queryClient.invalidateQueries({ queryKey: ["courses"] });
       void queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
+    onSettled: () => {
+      // Course discovery is checkpointed before slower per-course task reads,
+      // so refresh even when a later task inventory fails or times out.
+      void queryClient.invalidateQueries({ queryKey: ["courses"] });
+      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
   });
   const saveSchedule = useMutation({
     mutationFn: async () => requireData(await configureProviderAccountScanSchedule({ path: { account_id: accountId }, body: { enabled: scheduleEnabled, ...(scheduleInterval ? { desired_interval_seconds: Number(scheduleInterval) } : {}) } })),

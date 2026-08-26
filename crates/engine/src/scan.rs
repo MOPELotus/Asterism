@@ -72,8 +72,10 @@ impl<R> ProviderScanService<R>
 where
     R: ProviderScanRepository,
 {
-    /// Reads every available inventory capability before committing one scan
-    /// batch. Provider failures therefore cannot leave a partial observation.
+    /// Checkpoints a verified course inventory before reading the slower
+    /// per-course task inventories. A task failure can therefore leave a
+    /// course-only observation, but never a partial or falsely complete task
+    /// observation.
     ///
     /// # Errors
     ///
@@ -120,6 +122,21 @@ where
             },
             None => Vec::new(),
         };
+        if entry.course_inventory.is_some() {
+            let course_checkpoint = ProviderScanBatch {
+                provider_account_id: account.id,
+                provider_id: account.provider_id.clone(),
+                provider_version: entry.metadata.implementation_version.clone(),
+                observed_at,
+                correlation_id: correlation_id.clone(),
+                initiated_by: initiated_by.clone(),
+                courses: remote_courses.iter().cloned().map(scanned_course).collect(),
+                tasks: Vec::new(),
+            };
+            self.repository
+                .ingest_course_inventory(&course_checkpoint)
+                .await?;
+        }
         let remote_tasks_result = match &entry.task_inventory {
             Some(inventory) if entry.course_inventory.is_some() => {
                 collect_course_tasks(inventory.as_ref(), &context, &remote_courses).await
@@ -353,6 +370,20 @@ mod tests {
 
     #[async_trait]
     impl ProviderScanRepository for RecordingRepository {
+        async fn ingest_course_inventory(
+            &self,
+            batch: &ProviderScanBatch,
+        ) -> Result<ProviderScanReport, StorageError> {
+            self.batches.lock().unwrap().push(batch.clone());
+            Ok(ProviderScanReport {
+                courses_seen: batch.courses.len(),
+                tasks_created: 0,
+                tasks_updated: 0,
+                tasks_unchanged: 0,
+                task_changes: Vec::new(),
+            })
+        }
+
         async fn ingest_scan(
             &self,
             batch: &ProviderScanBatch,
@@ -451,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_collects_capabilities_before_one_repository_write() {
+    async fn scan_checkpoints_courses_before_committing_complete_inventory() {
         let metadata = metadata([
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
@@ -495,14 +526,15 @@ mod tests {
 
         assert_eq!((report.courses_seen, report.tasks_created), (1, 1));
         let batches = repository.batches.lock().unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].provider_version, "0.1.0");
+        assert_eq!(batches.len(), 2);
+        assert!(batches[0].tasks.is_empty());
+        assert_eq!(batches[1].provider_version, "0.1.0");
         assert_eq!(
-            batches[0].tasks[0].course_remote_id.as_deref(),
+            batches[1].tasks[0].course_remote_id.as_deref(),
             Some("course-a")
         );
         assert_eq!(
-            batches[0].tasks[0].assessment_class,
+            batches[1].tasks[0].assessment_class,
             AssessmentClass::Unknown
         );
         let contexts = inventory.contexts.lock().unwrap();
@@ -530,7 +562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_does_not_write_after_provider_failure() {
+    async fn scan_keeps_course_checkpoint_after_task_provider_failure() {
         let metadata = metadata([
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
@@ -574,7 +606,10 @@ mod tests {
                 .await,
             Err(ProviderScanError::Provider(error)) if error.is_retryable()
         ));
-        assert!(repository.batches.lock().unwrap().is_empty());
+        let batches = repository.batches.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].courses.len(), 1);
+        assert!(batches[0].tasks.is_empty());
     }
 
     #[tokio::test]
@@ -655,7 +690,9 @@ mod tests {
             )
         );
         assert_eq!(occurrences, 1);
-        assert!(repository.batches.lock().unwrap().is_empty());
+        let batches = repository.batches.lock().unwrap();
+        assert_eq!(batches.len(), 2);
+        assert!(batches.iter().all(|batch| batch.tasks.is_empty()));
     }
 
     #[tokio::test]
@@ -706,7 +743,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(repository.batches.lock().unwrap().is_empty());
+        let batches = repository.batches.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].courses.len(), 1);
+        assert!(batches[0].tasks.is_empty());
     }
 
     #[tokio::test]

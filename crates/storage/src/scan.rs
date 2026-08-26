@@ -78,6 +78,14 @@ pub struct ProviderScanReport {
 
 #[async_trait]
 pub trait ProviderScanRepository: Send + Sync {
+    /// Persists a successfully read course inventory without changing any
+    /// previously observed tasks. This lets a slow or failed per-course task
+    /// scan expose the already verified course list instead of discarding it.
+    async fn ingest_course_inventory(
+        &self,
+        batch: &ProviderScanBatch,
+    ) -> Result<ProviderScanReport, StorageError>;
+
     async fn ingest_scan(
         &self,
         batch: &ProviderScanBatch,
@@ -97,6 +105,29 @@ impl SqliteProviderScanRepository {
 
 #[async_trait]
 impl ProviderScanRepository for SqliteProviderScanRepository {
+    async fn ingest_course_inventory(
+        &self,
+        batch: &ProviderScanBatch,
+    ) -> Result<ProviderScanReport, StorageError> {
+        validate_batch(batch)?;
+        if !batch.tasks.is_empty() {
+            return Err(StorageError::InvalidData(
+                "course inventory checkpoint must not contain tasks".to_owned(),
+            ));
+        }
+        let mut transaction = self.database.pool().begin().await?;
+        verify_account(&mut transaction, batch).await?;
+        let courses = upsert_courses(&mut transaction, batch).await?;
+        transaction.commit().await?;
+        Ok(ProviderScanReport {
+            courses_seen: courses.len(),
+            tasks_created: 0,
+            tasks_updated: 0,
+            tasks_unchanged: 0,
+            task_changes: Vec::new(),
+        })
+    }
+
     async fn ingest_scan(
         &self,
         batch: &ProviderScanBatch,
@@ -876,6 +907,31 @@ mod tests {
         let unchanged = repository.ingest_scan(&empty).await.unwrap();
         assert_eq!(unchanged.tasks_updated, 0);
         assert!(unchanged.task_changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn course_inventory_checkpoint_never_retires_existing_tasks() {
+        let (database, account_id) = setup().await;
+        let repository = SqliteProviderScanRepository::new(database.clone());
+        let now = Utc::now();
+        repository
+            .ingest_scan(&scan(account_id, now))
+            .await
+            .unwrap();
+        let mut checkpoint = scan(account_id, now + chrono::Duration::minutes(1));
+        checkpoint.tasks.clear();
+
+        let report = repository
+            .ingest_course_inventory(&checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(report.courses_seen, 1);
+        assert_eq!(report.tasks_updated, 0);
+        let state: String = sqlx::query_scalar("SELECT remote_state FROM tasks")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(state, "pending");
     }
 
     #[tokio::test]
