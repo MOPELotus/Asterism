@@ -307,6 +307,19 @@ impl UpstreamWorkerProvider {
             {
                 ProviderErrorKind::UnsupportedTask
             }
+            UaiWorkerClientError::Remote { code, .. }
+                if matches!(
+                    code.as_str(),
+                    "upstream_unavailable"
+                        | "upstream_integrity_mismatch"
+                        | "upstream_load_failed"
+                        | "source_metadata_invalid"
+                        | "auxiliary_upstream_invalid"
+                        | "dependency_missing"
+                ) =>
+            {
+                ProviderErrorKind::Internal
+            }
             UaiWorkerClientError::Timeout(_)
             | UaiWorkerClientError::Spawn(_)
             | UaiWorkerClientError::Write(_)
@@ -3871,6 +3884,28 @@ mod tests {
 
         assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
         assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn missing_worker_runtime_files_are_internal_deployment_errors() {
+        for code in [
+            "upstream_unavailable",
+            "upstream_integrity_mismatch",
+            "upstream_load_failed",
+            "source_metadata_invalid",
+            "auxiliary_upstream_invalid",
+            "dependency_missing",
+        ] {
+            let error = UpstreamWorkerProvider::map_client(
+                "tasks",
+                &UaiWorkerClientError::Remote {
+                    code: code.to_owned(),
+                    message: "local Worker setup is incomplete".to_owned(),
+                },
+            );
+            assert_eq!(error.kind, ProviderErrorKind::Internal, "code={code}");
+            assert!(!error.is_retryable(), "code={code}");
+        }
     }
 
     #[test]

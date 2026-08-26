@@ -28,6 +28,26 @@ Check "Yunzai plugin" (Test-Path (Join-Path $SourceRoot "integrations\yunzai-plu
 Check "installer script" (Test-Path (Join-Path $SourceRoot "installer\install.ps1")) "installer/install.ps1"
 Check "installer README" (Test-Path (Join-Path $SourceRoot "installer\README.md")) "installer/README.md"
 
+$upstreamFiles = @(
+    "upstreams\chaoxing\api\base.py",
+    "upstreams\chaoxing-exam\cxapi\api.py",
+    "upstreams\welearn\welearn_decompiled.py",
+    "upstreams\uai\配置我运行我.py",
+    "upstreams\uai-browser\unipus_ai_auto_player.user.js",
+    "upstreams\cidaren\api\login.py"
+)
+foreach ($relative in $upstreamFiles) {
+    Check "upstream Worker: $relative" (Test-Path -LiteralPath (Join-Path $SourceRoot $relative)) $relative
+}
+$runScriptPath = Join-Path $InstallRoot "run-asterism.ps1"
+if (Test-Path -LiteralPath $runScriptPath) {
+    $runScriptText = Get-Content -LiteralPath $runScriptPath -Raw
+    Check "runtime working directory" ($runScriptText -match [regex]::Escape("Set-Location -LiteralPath `"$SourceRoot`"")) "run script pins SourceRoot"
+    Check "runtime absolute upstream paths" ($runScriptText -match 'ASTERISM_CHAOXING_WORKER_UPSTREAM' -and $runScriptText -match 'ASTERISM_UAI_WORKER_UPSTREAM') "run script pins Worker paths"
+} else {
+    Check "runtime launch script" $false "run-asterism.ps1"
+}
+
 $secretPath = Join-Path $InstallRoot "secrets.env"
 if (Test-Path -LiteralPath $secretPath) {
     $secretText = Get-Content -LiteralPath $secretPath -Raw

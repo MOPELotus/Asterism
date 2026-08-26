@@ -52,6 +52,17 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 四个 Python Worker 会通过同一个安装器创建的 `.venv-workers` 启动；daemon 启动脚本显式传入该 Python 路径，不依赖系统 Python 的当前目录或 PATH。
 
+四个平台 donor 使用 Git submodule。安装器会在创建 Worker 环境前检查所需入口；缺失时自动执行 `git submodule update --init --recursive`，仍不完整则在启动服务前停止并列出缺失文件。不要使用 GitHub 的源码 ZIP 部署，因为 ZIP 不包含 submodule。至少应存在：
+
+- `upstreams\chaoxing-exam\cxapi\api.py`
+- `upstreams\chaoxing\api\base.py`
+- `upstreams\welearn\welearn_decompiled.py`
+- `upstreams\uai\配置我运行我.py`
+- `upstreams\uai-browser\unipus_ai_auto_player.user.js`
+- `upstreams\cidaren\api\login.py`
+
+生成的 `run-asterism.ps1` 会先切换到源码根目录，并把全部 Worker、donor 和元数据路径设为绝对路径。这保证 SYSTEM 启动任务不会因默认工作目录是 `C:\Windows\System32` 而找错文件，也避免中文 UAI 入口经过相对路径或当前代码页时失真。本地 Worker 文件/依赖缺失属于部署错误，不再对用户显示为远端平台不可用。
+
 安装完成后可运行本机验收：
 
 ```powershell

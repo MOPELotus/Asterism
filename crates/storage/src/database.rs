@@ -28,7 +28,11 @@ impl Database {
         let options = SqliteConnectOptions::from_str(database_url)?
             .create_if_missing(true)
             .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5))
+            // Windows Server can briefly retain SQLite write locks while
+            // background recovery, outbox and scan ticks converge after
+            // startup. Keep WAL semantics, but wait through that transient
+            // contention instead of dropping an otherwise recoverable tick.
+            .busy_timeout(Duration::from_secs(30))
             .journal_mode(if in_memory {
                 SqliteJournalMode::Memory
             } else {

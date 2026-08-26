@@ -115,6 +115,27 @@ function Ensure-MinimumVersion([string]$DisplayName, [string]$Command, [string[]
         throw "$DisplayName 版本过低或无法识别（当前：$raw，最低：$Minimum）。请从官方来源升级后重试。"
     }
 }
+function Ensure-UpstreamSubmodules([string]$Root) {
+    $required = @(
+        "upstreams\chaoxing\api\base.py",
+        "upstreams\chaoxing-exam\cxapi\api.py",
+        "upstreams\welearn\welearn_decompiled.py",
+        "upstreams\uai\配置我运行我.py",
+        "upstreams\uai-browser\unipus_ai_auto_player.user.js",
+        "upstreams\cidaren\api\login.py"
+    )
+    $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Root $_)) })
+    if ($missing.Count -eq 0) { return }
+    if (Test-Path -LiteralPath (Join-Path $Root ".gitmodules")) {
+        Write-Host "检测到上游 submodule 尚未完整检出，正在初始化..." -ForegroundColor Yellow
+        Invoke-NativeCommand "初始化上游 submodule" "git" @("-C", $Root, "submodule", "update", "--init", "--recursive")
+    }
+    $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Root $_)) })
+    if ($missing.Count -gt 0) {
+        throw ("上游 Worker 文件不完整：{0}`n请在源码根目录执行 git submodule update --init --recursive，" +
+            "确认这些文件存在后重新运行安装器：{1}") -f (($missing -join ", ")), (($required -join ", "))
+    }
+}
 function New-SecretKey {
     $bytes = [byte[]]::new(32)
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -419,6 +440,7 @@ if ($databaseParent) { New-Item -ItemType Directory -Force $databaseParent | Out
 
 Write-Step "检测/安装 Windows 依赖"
 Ensure-Dependency git Git.Git "Git"
+Ensure-UpstreamSubmodules $SourceRoot
 if (-not (Get-Command py -ErrorAction SilentlyContinue) -and -not (Get-Command python -ErrorAction SilentlyContinue)) {
     Install-WithWinget Python.Python.3.12 "Python"
 }
@@ -610,6 +632,7 @@ $runScript = Join-Path $InstallRoot "run-asterism.ps1"
 $daemon = Join-Path $SourceRoot "target\release\asterismd.exe"
 $runContent = @"
 `$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath "$SourceRoot"
 foreach (`$line in Get-Content -LiteralPath "$secretPath") {
     if (`$line -match '^ASTERISM_[A-Z0-9_]+=') {
         `$parts = `$line -split '=', 2
@@ -617,6 +640,14 @@ foreach (`$line in Get-Content -LiteralPath "$secretPath") {
     }
 }
 `$env:ASTERISM_UAI_WORKER_PYTHON = "$python"
+`$env:ASTERISM_CHAOXING_WORKER_UPSTREAM = "$(Join-Path $SourceRoot 'upstreams\chaoxing')"
+`$env:ASTERISM_CHAOXING_AUXILIARY_UPSTREAM = "$(Join-Path $SourceRoot 'upstreams\chaoxing-exam')"
+`$env:ASTERISM_WELEARN_WORKER_UPSTREAM = "$(Join-Path $SourceRoot 'upstreams\welearn\welearn_decompiled.py')"
+`$env:ASTERISM_CIDAREN_WORKER_UPSTREAM = "$(Join-Path $SourceRoot 'upstreams\cidaren')"
+`$env:ASTERISM_UAI_WORKER_UPSTREAM = "$(Join-Path $SourceRoot 'upstreams\uai\配置我运行我.py')"
+`$env:ASTERISM_UAI_BROWSER_UPSTREAM = "$(Join-Path $SourceRoot 'upstreams\uai-browser')"
+`$env:ASTERISM_UAI_WORKER_ADAPTER = "$(Join-Path $SourceRoot 'workers\uai\worker.py')"
+`$env:ASTERISM_UAI_WORKER_SOURCE_METADATA = "$(Join-Path $SourceRoot 'workers\uai\SOURCE.json')"
 $(if ($browser) { "`$env:ASTERISM_CHAOXING_BROWSER_EXECUTABLE = `"$browser`"`n`$env:ASTERISM_UAI_BROWSER_EXECUTABLE = `"$browser`"" } else { "" })
 & "$daemon" --config "$configPath" --web-dist "$(Join-Path $SourceRoot 'web\dist')" --uai-worker-python "$python" *>> "$(Join-Path $InstallRoot 'logs\asterismd.log')"
 `$exitCode = `$LASTEXITCODE
