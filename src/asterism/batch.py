@@ -33,6 +33,7 @@ class ManualBatchExecutor:
         settings: dict[str, Any] | None = None,
         answer_provider: Callable[[dict[str, Any]], list[dict[str, Any]] | None] | None = None,
         cancel: threading.Event | None = None,
+        run_task: Callable[..., ProviderOperationResult] | None = None,
     ) -> list[BatchItemResult]:
         if concurrency < 1:
             raise ValueError("concurrency must be at least one")
@@ -48,7 +49,8 @@ class ManualBatchExecutor:
                 )
             try:
                 answers = answer_provider(task) if answer_provider else None
-                result = self.service.run_task(
+                execute_task = run_task or self.service.run_task
+                result = execute_task(
                     profile,
                     task,
                     answers=answers,

@@ -534,6 +534,26 @@ class BatchTests(unittest.TestCase):
             ],
         )
 
+    def test_batch_can_use_controller_runner_for_provider_specific_bridges(self) -> None:
+        calls = []
+
+        class FakeService:
+            def run_task(self, profile, task, *, answers=None, settings=None, cancel=None):
+                raise AssertionError("provider runner should be used")
+
+        def run_task(profile, task, *, answers=None, settings=None, cancel=None):
+            calls.append(task["remote_id"])
+            return SimpleNamespace(data={"remote_state": "completed"})
+
+        profile = SimpleNamespace(provider="cidaren")
+        results = ManualBatchExecutor(FakeService()).run(
+            profile,
+            [{"remote_id": "one"}, {"remote_id": "two"}],
+            run_task=run_task,
+        )
+        self.assertEqual([item.error_code for item in results], [None, None])
+        self.assertEqual(calls, ["one", "two"])
+
 
 class ScanTests(unittest.TestCase):
     def setUp(self) -> None:

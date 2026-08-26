@@ -386,6 +386,7 @@ class DesktopController:
             settings=settings,
             answer_provider=answer_provider,
             cancel=cancel,
+            run_task=self.run_task if profile.provider == "cidaren" else None,
         )
 
     def read_duration(
