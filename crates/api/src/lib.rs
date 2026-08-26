@@ -903,6 +903,7 @@ pub fn openapi_document() -> Value {
                 "get": {
                     "operationId": "listProviderAccounts",
                     "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "description": "Lists Provider accounts for the authenticated owner. A master/operator may select a target owner with X-Asterism-Target-Owner; actor and owner remain separate in authorization and audit records.",
                     "responses": {"200": {"description": "Owner-scoped Provider accounts"}, "401": {"description": "Authentication required"}, "403": {"description": "Insufficient permission"}}
                 },
                 "post": {

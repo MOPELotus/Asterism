@@ -15,6 +15,12 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Windows 安装向导需要以管理员身份运行（会修改本地 ACL，并可选注册 SYSTEM 任务）。请右键 PowerShell 选择‘以管理员身份运行’后重试。"
+}
+
 function Write-Step([string]$Message) { Write-Host "`n==> $Message" -ForegroundColor Cyan }
 function Refresh-ProcessPath {
     $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
