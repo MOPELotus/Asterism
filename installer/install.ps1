@@ -464,6 +464,7 @@ if ($SkipBuild) {
     $useSourceBuild = $true
 } elseif ($buildCache.Valid) {
     Write-Host "检测到有效现有构建产物，跳过 Rust/WebUI 构建。" -ForegroundColor Green
+    Write-Output "ASTERISM_BUILD_REUSED=1"
 } else {
     Write-Host "现有构建不可复用：$($buildCache.Reason)" -ForegroundColor Yellow
     if (-not (Install-PrebuiltBundle $SourceRoot $buildStampPath $PrebuiltArchive)) {

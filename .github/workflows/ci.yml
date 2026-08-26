@@ -137,7 +137,7 @@ jobs:
               -SkipDependencyInstall `
               -NonInteractive 2>&1)
             $installOutput | Out-Host
-            if (($installOutput | Out-String) -notmatch '检测到有效现有构建产物') {
+            if (($installOutput | Out-String) -notmatch 'ASTERISM_BUILD_REUSED=1') {
               throw 'Installer did not automatically reuse the matching release build stamp.'
             }
             .\installer\validate.ps1 -InstallRoot $installRoot -SourceRoot $PWD.Path
