@@ -10,12 +10,12 @@ from live account evidence and is safe to keep in the repository.
   remains unchanged. No remote branch is changed by this local rename.
 - Daemon health: `ok`; database schema: 110; four Providers registered; no
   outbox backlog or dead-letter outbox entries.
-- Full Rust workspace: green, including API 80, Engine 163, Storage 173,
-  Chaoxing 204, WELearn 255, UAI 308, Cidaren 214, and all remaining crates.
-- Python Worker fixture smoke: Chaoxing 44/44 and Cidaren 10/10 green with declared
+- Full Rust workspace: green; current test counts are recorded by the CI artifact rather than
+  hard-coded here so this acceptance note does not drift when coverage grows.
+- Python Worker fixture smoke: Chaoxing 25/25, WELearn 5/5, UAI 9/9 and Cidaren 10/10 green with declared
   parser and Answer Bridge coverage
   dependencies installed.
-- Yunzai plugin: `npm test` 10/10 and `npm run check` green.
+- Yunzai plugin: `npm test` 12/12 and `npm run check` green.
 - WebUI production build/typecheck and the major route/mobile/error-state pass
   are complete.
 - `python workers/deployment_acceptance.py` emits only aggregate, credential-free
