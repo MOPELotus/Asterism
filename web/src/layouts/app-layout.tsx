@@ -39,7 +39,7 @@ export function AppLayout() {
   const canManageSystem = permissions.data?.includes("manage_system") ?? false;
   const canManageUsers = permissions.data?.includes("manage_users") ?? false;
   const canReadAudit = permissions.data?.some((permission) => permission === "view_any_audit" || permission === "view_own_audit") ?? false;
-  const canDelegate = permissions.data?.includes("execute_any_task") || permissions.data?.includes("manage_providers");
+  const canDelegate = (permissions.data?.includes("execute_any_task") || permissions.data?.includes("manage_providers")) && canManageUsers;
   const [targetOwner, setTargetOwner] = useState(() => getTargetOwnerUserId() || "");
   const users = useQuery({
     queryKey: ["target-owner-users"],
