@@ -234,7 +234,11 @@ function senderKey(e) {
 }
 
 function argumentAfter(message, prefix) {
-  return String(message || "").replace(/^#?/, "").replace(prefix, "").trim()
+  return String(message || "")
+    .replace(/^#?/, "")
+    .replace(prefix, "")
+    .replace(/(?:目标用户|目标|用户)\s*[:=：]?\s*\d{5,20}(?=\s|$)/ig, "")
+    .trim()
 }
 
 function parseAccountSelector(value, required) {

@@ -38,7 +38,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 密码文件只用于向 `asterismctl --password-stdin` 传递密码，不会复制进安装目录或写入日志。部署后应删除该临时文件，或至少将 ACL 限制为管理员和 SYSTEM。
 
-首次安装会提示设置 Master 密码，并只显示一次初始管理令牌。配置了 Yunzai 目录时，安装器会自动创建含 `provider_read`、`task_read`、`task_execute`、`qq_identity_assert`、`task_command_proxy`、`notification_delivery_report` 的最小网关令牌并写入插件配置；重复安装会保留已存在的网关配置，不会重复创建令牌。`task_command_proxy` 只允许受信任的 Yunzai 网关在显式目标用户边界内执行代操作，普通 Service Token 不能借此跨 owner。
+首次安装会提示设置 Master 密码，并只显示一次初始管理令牌。配置了 Yunzai 目录时，安装器会自动创建含 `provider_read`、`provider_manage`、`task_read`、`task_execute`、`qq_identity_assert`、`task_command_proxy`、`notification_delivery_report` 的最小网关令牌并写入插件配置；重复安装会保留已存在的网关配置，不会重复创建令牌。`task_command_proxy` 只允许受信任的 Yunzai 网关在显式目标用户边界内执行代操作，普通 Service Token 不能借此跨 owner。
 
 安装器不会配置 Apache/Caddy/Nginx、域名、TLS 或任何反向代理。完成后请自行将反代指向输出的本地地址。安装日志位于安装根目录 `logs`，配置和密钥位于安装根目录且使用当前 Windows 用户 ACL 保护。
 

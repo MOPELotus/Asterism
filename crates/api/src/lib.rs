@@ -9900,7 +9900,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, master_cookie)
                     .body(Body::from(
-                        r#"{"name":"yunzai-gateway","scopes":["provider_read","task_read","task_execute","qq_identity_assert","task_command_proxy"]}"#,
+                        r#"{"name":"yunzai-gateway","scopes":["provider_read","provider_manage","task_read","task_execute","qq_identity_assert","task_command_proxy"]}"#,
                     ))
                     .unwrap(),
             )
