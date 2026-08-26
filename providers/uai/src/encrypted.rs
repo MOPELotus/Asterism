@@ -79,7 +79,7 @@ pub(crate) fn decrypt_unipus_payload(
     let cipher = Aes128::new(&Array::from(key));
     key.zeroize();
     let mut decoded = decode_hex(hexadecimal)?;
-    for chunk in decoded.chunks_exact_mut(AES_BLOCK_BYTES) {
+    for chunk in decoded.as_chunks_mut::<AES_BLOCK_BYTES>().0 {
         let mut block_bytes = [0_u8; AES_BLOCK_BYTES];
         block_bytes.copy_from_slice(chunk);
         let mut block = Array::from(block_bytes);
@@ -100,7 +100,7 @@ pub(crate) fn decrypt_unipus_payload(
 
 fn decode_hex(value: &str) -> ProviderResult<Vec<u8>> {
     let mut decoded = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    for pair in value.as_bytes().as_chunks::<2>().0 {
         let high = hex_nibble(pair[0])
             .ok_or_else(|| invalid_response("UAI encrypted payload is not hexadecimal"))?;
         let low = hex_nibble(pair[1])

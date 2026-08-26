@@ -1355,7 +1355,7 @@ fn parse_chapter_result_score(html: &Html) -> ProviderResult<Option<u64>> {
 }
 
 fn parse_chapter_score_milli(value: &str) -> ProviderResult<u32> {
-    let (whole, fraction) = value.split_once('.').map_or((value, ""), |parts| parts);
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
     if whole.is_empty()
         || whole.len() > 3
         || !whole.bytes().all(|byte| byte.is_ascii_digit())

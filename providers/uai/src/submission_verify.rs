@@ -718,7 +718,7 @@ fn policy_milli_percent(value: Option<&Value>) -> ProviderResult<u32> {
 }
 
 fn decimal_milli_points(encoded: &str) -> ProviderResult<u64> {
-    let (whole, fractional) = encoded.split_once('.').map_or((encoded, ""), |parts| parts);
+    let (whole, fractional) = encoded.split_once('.').unwrap_or((encoded, ""));
     if whole.is_empty()
         || !whole.bytes().all(|byte| byte.is_ascii_digit())
         || !fractional.bytes().all(|byte| byte.is_ascii_digit())
