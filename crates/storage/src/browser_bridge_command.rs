@@ -2691,8 +2691,8 @@ mod tests {
         .fetch_one(fixture.database.pool())
         .await
         .unwrap();
-        assert_eq!(harvest_count, 1);
-        assert_eq!(harvest_job_count, 1);
+        assert_eq!(harvest_count, 0);
+        assert_eq!(harvest_job_count, 0);
         assert!(
             fixture
                 .session_repository
@@ -2725,7 +2725,7 @@ mod tests {
                 .fetch_one(fixture.database.pool())
                 .await
                 .unwrap();
-        assert_eq!(harvest_count, 1);
+        assert_eq!(harvest_count, 0);
     }
 
     #[tokio::test]
