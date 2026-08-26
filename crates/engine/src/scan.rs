@@ -129,7 +129,7 @@ where
                 provider_version: entry.metadata.implementation_version.clone(),
                 observed_at,
                 correlation_id: correlation_id.clone(),
-                initiated_by: initiated_by.clone(),
+                initiated_by,
                 courses: remote_courses.iter().cloned().map(scanned_course).collect(),
                 tasks: Vec::new(),
             };
