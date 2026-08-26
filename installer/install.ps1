@@ -331,18 +331,19 @@ if ($needsAdminAuthentication) {
         throw "无人值守安装需要通过 -MasterPasswordFile（或配置文件的 masterPasswordFile）提供 Master 密码；安装器不接受命令行明文密码。"
     }
     $authCommand = if ($health.master_initialized) { @("auth", "login") } else { @("init") }
+    $authArgs = @("--url", $apiUrl) + @($authCommand) + @("--username", $MasterUsername)
     $createdInitialMaster = -not $health.master_initialized
     if ($MasterPasswordFile) {
         $passwordLine = (Get-Content -LiteralPath $MasterPasswordFile -Raw).TrimEnd("`r", "`n")
         if ([string]::IsNullOrWhiteSpace($passwordLine)) { throw "Master 密码文件为空。" }
         try {
-            $adminOutput = $passwordLine | & $cli --url $apiUrl @authCommand --username $MasterUsername --password-stdin
+            $adminOutput = $passwordLine | & $cli @authArgs --password-stdin
         } finally {
             $passwordLine = $null
         }
     } else {
         Write-Host (if ($createdInitialMaster) { "请为首次 Master 输入并确认密码：" } else { "请为现有 Master 输入密码，以创建缺失的 Yunzai 网关令牌：" })
-        $adminOutput = & $cli --url $apiUrl @authCommand --username $MasterUsername
+        $adminOutput = & $cli @authArgs
     }
     if ($LASTEXITCODE -ne 0) { throw "Master 初始化或认证失败。" }
     $adminResult = ($adminOutput -join "`n") | ConvertFrom-Json
