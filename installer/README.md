@@ -79,5 +79,5 @@ Set-ExecutionPolicy -Scope Process Bypass
 - 缺失依赖优先通过 winget 官方包安装；Windows Server/LTSC 没有 winget 时，安装器会给出逐项官方地址（Git、rustup、Node.js、Python、Edge、Visual Studio Build Tools）并停止，不下载未知二进制。
 - Edge/Chrome 是 Chaoxing/UAI 浏览器兜底能力的可选依赖；无人值守服务器未安装浏览器时会明确警告并继续，不会因为没有 winget 阻断其余安装。
 - 安装器会在启动前检查监听端口，并通过 asterismd 可执行路径和 `--config` 命令行确认当前实例归属；端口已有无法确认归属的实例时会明确停止，绝不只凭 health 的 `master_initialized` 创建 Master/token。
-- 安装器只清理由本次启动且明确归属的临时 daemon；失败时清理 wrapper 和子 daemon，成功时按设计保留。已有同一安装配置的 daemon 会复用，不会重复启动或误杀。
+- 安装器只停止能同时核对二进制路径、配置路径和监听端口的当前安装 daemon，并在重跑时安全重启它，使新二进制、Worker 绝对路径和环境变量立即生效；其他 Asterism 或占用端口的进程不会被误杀。安装失败时会清理由本次启动的 wrapper 和子 daemon，成功时保留新实例。
 - 已存在的 `secrets.env`、数据库、Yunzai 网关 token 和插件配置会保留；配置备份、任务注册和 venv 重跑均按幂等路径处理。

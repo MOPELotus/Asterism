@@ -693,16 +693,24 @@ if ($listeningPids.Count -gt 0 -and $ownedListener.Count -eq 0) {
 }
 $daemonProcess = $null
 if ($ownedListener.Count -gt 0) {
-    Write-Host "检测到当前安装配置已经有 asterismd 运行实例，复用该实例，不启动第二个 daemon。" -ForegroundColor Yellow
-} else {
-    $runScriptArgument = '"' + $runScript + '"'
-    $daemonProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScriptArgument) -WorkingDirectory $SourceRoot -WindowStyle Hidden -RedirectStandardOutput $bootstrapOut -RedirectStandardError $bootstrapErr -PassThru
-    $script:installerDaemonProcess = $daemonProcess
-    $script:installerDaemonOwned = $true
-    Start-Sleep -Milliseconds 500
-    $processAfter = @(Get-AsterismProcessInfo)
-    $script:installerDaemonChildPids = @($processAfter | Where-Object { $processBefore.Pid -notcontains $_.Pid -and $_.ExecutablePath -and ((Resolve-Path $_.ExecutablePath -ErrorAction SilentlyContinue).Path -eq (Resolve-Path $daemon).Path) } | Select-Object -ExpandProperty Pid)
+    Write-Host "检测到当前安装配置的 asterismd；将安全重启以应用新二进制、Worker 路径和环境。" -ForegroundColor Yellow
+    foreach ($owned in $ownedListener) {
+        Stop-Process -Id $owned.Pid -Force -ErrorAction Stop
+    }
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        if (@(Get-ListeningProcessIds $port).Count -eq 0) { break }
+        Start-Sleep -Milliseconds 100
+        if ($attempt -eq 49) { throw "当前安装的 asterismd 停止后仍占用端口 $Bind；拒绝以旧运行环境继续安装。" }
+    }
+    $ownedListener = @()
 }
+$runScriptArgument = '"' + $runScript + '"'
+$daemonProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScriptArgument) -WorkingDirectory $SourceRoot -WindowStyle Hidden -RedirectStandardOutput $bootstrapOut -RedirectStandardError $bootstrapErr -PassThru
+$script:installerDaemonProcess = $daemonProcess
+$script:installerDaemonOwned = $true
+Start-Sleep -Milliseconds 500
+$processAfter = @(Get-AsterismProcessInfo)
+$script:installerDaemonChildPids = @($processAfter | Where-Object { $processBefore.Pid -notcontains $_.Pid -and $_.ExecutablePath -and ((Resolve-Path $_.ExecutablePath -ErrorAction SilentlyContinue).Path -eq (Resolve-Path $daemon).Path) } | Select-Object -ExpandProperty Pid)
 for ($attempt = 0; $attempt -lt 120; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri ($apiUrl + "/api/v1/system/health") -TimeoutSec 2
