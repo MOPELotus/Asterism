@@ -266,12 +266,18 @@ def run_task(module, payload, events, redactor):
 
 def dispatch(operation, payload, entry, metadata, events, redactor):
     module = load(entry, events, redactor)
-    if operation == "health": return {"status": "ok", "source": metadata.__dict__, "python": sys.version.split()[0], "operations": ["health", "authenticate", "courses", "tasks", "questions", "run"]}
+    if operation == "health": return {"status": "ok", "source": metadata.__dict__, "python": sys.version.split()[0], "operations": ["health", "authenticate", "courses", "tasks", "questions", "run", "duration"]}
     if operation == "authenticate": return authenticate(module, payload, events, redactor)
     if operation == "courses": return courses(module, payload, events, redactor)
     if operation == "tasks": return tasks(module, payload, events, redactor)
     if operation == "questions": return questions(module, payload, events, redactor)
     if operation == "run": return run_task(module, payload, events, redactor)
+    if operation == "duration":
+        copied = dict(payload)
+        settings = dict(payload.get("settings")) if isinstance(payload.get("settings"), Mapping) else {}
+        settings["action"] = "duration"
+        copied["settings"] = settings
+        return run_task(module, copied, events, redactor)
     raise WorkerFailure("operation_unsupported", operation)
 
 

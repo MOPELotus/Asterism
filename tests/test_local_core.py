@@ -8,11 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from asterism.ai import AIAnswerService
 from asterism.answers import AnswerRepository, canonical_question, question_identity, rebind_answer
 from asterism.config import LocalConfigStore
 from asterism.database import QuestionBank
 from asterism.drafts import DraftRepository
 from asterism.inventory import InventoryStore
+from asterism.notifications import NotificationDispatcher
 from asterism.paths import DataPaths
 from asterism.profiles import ProfileStateStore, ProfileStore
 from asterism.providers import ProviderRegistry, WorkerSpec
@@ -73,6 +75,82 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(value["ui"]["language"], "zh-CN")
         self.assertFalse(value["notifications"]["enabled"])
         self.assertEqual(store.load(), value)
+
+    def test_existing_config_receives_new_model_defaults_without_losing_custom_values(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        config.save(
+            {
+                "version": 1,
+                "ui": {"theme": "dark", "language": "zh-CN"},
+                "notifications": {"enabled": False, "command": ""},
+                "models": {},
+                "providers": {"chaoxing": {"verification_attempt_budget": 5}},
+            }
+        )
+        loaded = config.load()
+        self.assertEqual(loaded["ui"]["theme"], "dark")
+        self.assertEqual(loaded["providers"]["chaoxing"]["verification_attempt_budget"], 5)
+        self.assertEqual(loaded["models"]["default"], "economy")
+        self.assertIn("gpt_router", loaded["models"]["endpoints"])
+
+    def test_ai_default_combinations_build_responses_multimodal_request(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        service = AIAnswerService(config, bank)
+        choice = service.choose("economy", "untimed")
+        self.assertEqual(choice.endpoint.protocol, "responses")
+        self.assertEqual(choice.model, "gpt-5.6-terra")
+        request = service.build_request(
+            {
+                "kind": "single_choice",
+                "prompt": "看图",
+                "options": [{"text": "A", "image": "https://example.test/a.png"}],
+            },
+            choice,
+        )
+        self.assertEqual(request["store"], False)
+        self.assertEqual(request["text"]["format"]["type"], "json_schema")
+        self.assertTrue(
+            any(item["type"] == "input_image" for item in request["input"][0]["content"])
+        )
+
+    def test_ai_cache_round_trip(self) -> None:
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        bank.put_ai_cache("cache-1", "gpt:test", {"answer": "A"}, {"total_tokens": 3})
+        self.assertEqual(
+            bank.get_ai_cache("cache-1"),
+            {
+                "model_profile": "gpt:test",
+                "response": {"answer": "A"},
+                "usage": {"total_tokens": 3},
+            },
+        )
+
+    def test_ai_service_prefers_exact_local_candidate_before_remote_request(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question = {
+            "kind": "single_choice",
+            "prompt": "Cached",
+            "options": ["A", "B"],
+        }
+        question_id, _identity = repository.ingest_question("chaoxing", question)
+        repository.record_candidate(question_id, {"option": "A"}, "provider_native", "correct")
+        service = AIAnswerService(config, bank)
+        result = service.answer("chaoxing", question)
+        self.assertEqual(result["source"], "local_cache")
+        self.assertTrue(result["cached"])
+
+    def test_notifications_are_disabled_by_default(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        result = NotificationDispatcher(config).send(
+            "success", provider="chaoxing", operation="run", summary={"status": "success"}
+        )
+        self.assertFalse(result.sent)
 
     def test_formal_draft_file_and_sqlite_index_stay_in_sync(self) -> None:
         profiles = ProfileStore(self.paths)

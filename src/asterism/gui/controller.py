@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..ai import AIAnswerService
 from ..answers import AnswerRepository
 from ..batch import ManualBatchExecutor
 from ..config import LocalConfigStore
 from ..database import QuestionBank
 from ..drafts import DraftRepository, FormalDraft
 from ..inventory import InventoryStore
+from ..notifications import NotificationDispatcher, NotificationResult
 from ..paths import DataPaths, application_root
 from ..profiles import Profile, ProfileStateStore, ProfileStore
 from ..providers import ProviderRegistry
@@ -32,6 +34,8 @@ class DesktopController:
     service: ProviderService
     batch: ManualBatchExecutor
     scanner: ReadOnlyScanCoordinator
+    ai: AIAnswerService
+    notifications: NotificationDispatcher
 
     @classmethod
     def create(cls, data_root: str | Path | None = None, source_root: str | Path | None = None):
@@ -50,6 +54,8 @@ class DesktopController:
         )
         inventory = InventoryStore(states)
         scanner = ReadOnlyScanCoordinator(service, states, inventory, AnswerRepository(bank))
+        ai = AIAnswerService(LocalConfigStore(paths.config), bank)
+        config_store = LocalConfigStore(paths.config)
         return cls(
             paths=paths,
             profiles=ProfileStore(paths),
@@ -61,6 +67,8 @@ class DesktopController:
             service=service,
             batch=ManualBatchExecutor(service),
             scanner=scanner,
+            ai=ai,
+            notifications=NotificationDispatcher(config_store),
         )
 
     def health(self, provider: str) -> ProviderOperationResult:
@@ -182,6 +190,15 @@ class DesktopController:
     ) -> ProviderOperationResult:
         return self.service.read_duration(profile, task, cancel=cancel)
 
+    def inspect_task(
+        self,
+        profile: Profile,
+        task: dict[str, Any],
+        *,
+        cancel: threading.Event | None = None,
+    ) -> ProviderOperationResult:
+        return self.service.inspect(profile, task, cancel=cancel)
+
     def scan_all(
         self,
         profile: Profile,
@@ -201,6 +218,38 @@ class DesktopController:
 
     def scan_status(self, profile: Profile) -> ScanStatus:
         return self.scanner.status(profile)
+
+    def list_questions(self, provider: str | None = None) -> list[dict[str, Any]]:
+        return self.bank.list_questions(provider)
+
+    def answer_question(
+        self,
+        provider: str,
+        question: dict[str, Any],
+        *,
+        combination: str | None = None,
+        route: str = "untimed",
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        return self.ai.answer(
+            provider,
+            question,
+            combination=combination,
+            route=route,
+            force_refresh=force_refresh,
+        )
+
+    def notify(
+        self,
+        event: str,
+        *,
+        provider: str,
+        operation: str,
+        summary: dict[str, Any],
+    ) -> NotificationResult:
+        return self.notifications.send(
+            event, provider=provider, operation=operation, summary=summary
+        )
 
     def save_draft(self, profile: Profile, task_ref: str, payload: dict[str, Any]):
         return self.drafts.create(profile, task_ref, payload)

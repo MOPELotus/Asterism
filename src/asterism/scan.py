@@ -108,6 +108,10 @@ class ReadOnlyScanCoordinator:
         status.state = "running"
         status.phase = "courses"
         status.last_error = ""
+        status.course_count = 0
+        status.task_count = 0
+        status.question_count = 0
+        status.completed_tasks = 0
         self._save(status, on_update)
         try:
             courses = self._retry(
@@ -148,7 +152,12 @@ class ReadOnlyScanCoordinator:
                     if not isinstance(task, dict):
                         continue
                     task_id = str(task.get("remote_id") or "")
-                    if not task_id or task_id in status.completed_task_refs:
+                    if not task_id:
+                        continue
+                    if task_id in status.completed_task_refs:
+                        status.completed_tasks += 1
+                        status.cursor = task_id
+                        self._save(status, on_update)
                         continue
                     status.phase = f"questions:{task_id}"
                     self._save(status, on_update)

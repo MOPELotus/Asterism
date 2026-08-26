@@ -5,7 +5,6 @@ import pathlib
 import types
 import unittest
 
-
 WORKER_PATH = pathlib.Path(__file__).resolve().parents[1] / "worker.py"
 SPEC = importlib.util.spec_from_file_location("asterism_welearn_worker", WORKER_PATH)
 assert SPEC and SPEC.loader
@@ -66,13 +65,37 @@ def module_fixture():
 def payload(action, **settings):
     return {
         "session": {"cookies": {"sid": "secret"}},
-        "task": {"native": {"uid": "1", "cid": "2", "classid": "3",
-                            "unit_index": 0, "item": {"id": "sco-1"}}},
+        "task": {
+            "native": {
+                "uid": "1",
+                "cid": "2",
+                "classid": "3",
+                "unit_index": 0,
+                "item": {"id": "sco-1"},
+            }
+        },
         "settings": {"action": action, **settings},
     }
 
 
 class RunTaskTests(unittest.TestCase):
+    def test_duration_dispatch_reuses_donor_duration_path(self):
+        module = module_fixture()
+        original_load = WORKER.load
+        WORKER.load = lambda *_args: module
+        try:
+            result = WORKER.dispatch(
+                "duration",
+                payload("complete", duration_seconds=12),
+                pathlib.Path(__file__).resolve(),
+                types.SimpleNamespace(),
+                Events(),
+                WORKER.Redactor(),
+            )
+        finally:
+            WORKER.load = original_load
+        self.assertEqual(result["result"]["action"], "duration")
+
     def test_course_probe_bootstraps_student_session_after_transient_null(self):
         module = module_fixture()
         responses = iter([Response(None), Response({}), Response({"clist": [{"cid": 1}]})])
@@ -103,14 +126,18 @@ class RunTaskTests(unittest.TestCase):
 
     def test_completion_reuses_startstudy(self):
         module = module_fixture()
-        result = WORKER.run_task(module, payload("complete", correctness=97), Events(), WORKER.Redactor())
+        result = WORKER.run_task(
+            module, payload("complete", correctness=97), Events(), WORKER.Redactor()
+        )
 
         self.assertEqual(module.way1Succeed, [(97, "sco-1")])
         self.assertEqual(result["remote_state"], "completed")
 
     def test_duration_reuses_startstudy_time(self):
         module = module_fixture()
-        result = WORKER.run_task(module, payload("duration", duration_seconds=12), Events(), WORKER.Redactor())
+        result = WORKER.run_task(
+            module, payload("duration", duration_seconds=12), Events(), WORKER.Redactor()
+        )
 
         self.assertEqual(result["result"]["action"], "duration")
 
@@ -129,7 +156,12 @@ class RunTaskTests(unittest.TestCase):
 
     def test_invalid_duration_fails_before_upstream(self):
         with self.assertRaises(WORKER.WorkerFailure):
-            WORKER.run_task(module_fixture(), payload("duration", duration_seconds=0), Events(), WORKER.Redactor())
+            WORKER.run_task(
+                module_fixture(),
+                payload("duration", duration_seconds=0),
+                Events(),
+                WORKER.Redactor(),
+            )
 
     def test_zero_progress_course_keeps_upstream_execution_available(self):
         module = module_fixture()

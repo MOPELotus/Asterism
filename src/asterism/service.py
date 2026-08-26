@@ -161,6 +161,17 @@ class ProviderService:
             payload["allow_read_that_starts_attempt"] = True
         return self._invoke(profile, "questions", payload, cancel=cancel)
 
+    def inspect(
+        self,
+        profile: Profile,
+        task: dict[str, Any],
+        *,
+        cancel: threading.Event | None = None,
+    ) -> ProviderOperationResult:
+        if profile.provider != "uai":
+            raise ValueError("inspect is currently exposed only for uai")
+        return self._invoke(profile, "inspect", {"task": task}, cancel=cancel)
+
     def run_task(
         self,
         profile: Profile,
@@ -188,5 +199,5 @@ class ProviderService:
         if profile.provider == "uai":
             return self._invoke(profile, "duration", {"task": task}, cancel=cancel)
         if profile.provider == "welearn":
-            raise ValueError("welearn duration is observed through its task/run result")
+            return self._invoke(profile, "duration", {"task": task}, cancel=cancel)
         raise ValueError(f"duration read is not exposed for {profile.provider}")

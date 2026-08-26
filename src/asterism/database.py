@@ -143,3 +143,79 @@ class QuestionBank:
                 (provider, identity_hash),
             ).fetchone()
             return int(row[0]) if row else None
+
+    def get_ai_cache(self, cache_key: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT model_profile, response_json, usage_json FROM ai_cache WHERE cache_key=?",
+                (cache_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE ai_cache SET last_used_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE cache_key=?",
+                (cache_key,),
+            )
+            return {
+                "model_profile": str(row[0]),
+                "response": json.loads(str(row[1])),
+                "usage": json.loads(str(row[2])),
+            }
+
+    def put_ai_cache(
+        self,
+        cache_key: str,
+        model_profile: str,
+        response: dict[str, Any],
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO ai_cache(cache_key, model_profile, response_json, usage_json)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(cache_key) DO UPDATE SET
+                     model_profile=excluded.model_profile,
+                     response_json=excluded.response_json,
+                     usage_json=excluded.usage_json,
+                     last_used_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')""",
+                (
+                    cache_key,
+                    model_profile,
+                    json.dumps(response, ensure_ascii=False, sort_keys=True),
+                    json.dumps(usage or {}, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+
+    def list_questions(
+        self, provider: str | None = None, *, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 10000:
+            raise ValueError("question list limit must be between 1 and 10000")
+        with self.connect() as connection:
+            if provider:
+                rows = connection.execute(
+                    """SELECT id, provider, identity_hash, native_kind, content_json,
+                              created_at, updated_at
+                       FROM questions WHERE provider=? ORDER BY updated_at DESC LIMIT ?""",
+                    (provider, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """SELECT id, provider, identity_hash, native_kind, content_json,
+                              created_at, updated_at
+                       FROM questions ORDER BY updated_at DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            return [
+                {
+                    "id": int(row[0]),
+                    "provider": str(row[1]),
+                    "identity_hash": str(row[2]),
+                    "native_kind": str(row[3]),
+                    "content": json.loads(str(row[4])),
+                    "created_at": str(row[5]),
+                    "updated_at": str(row[6]),
+                }
+                for row in rows
+            ]

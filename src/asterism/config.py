@@ -11,7 +11,55 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "version": CONFIG_VERSION,
     "ui": {"theme": "system", "language": "zh-CN"},
     "notifications": {"enabled": False, "command": ""},
-    "models": {"combinations": {}, "default": None, "gpt_only": None},
+    "models": {
+        "combinations": {
+            "economy": {
+                "timed": {
+                    "primary": "gpt_router",
+                    "model": "gpt-5.6-luna",
+                    "fallback": "domestic_backup",
+                    "reasoning_effort": "low",
+                },
+                "untimed": {
+                    "primary": "gpt_router",
+                    "model": "gpt-5.6-terra",
+                    "fallback": "domestic_backup",
+                    "reasoning_effort": "medium",
+                },
+            },
+            "gpt_only": {
+                "timed": {
+                    "primary": "gpt_site",
+                    "model": "gpt-5.6-luna",
+                    "reasoning_effort": "low",
+                },
+                "untimed": {
+                    "primary": "gpt_site",
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "xhigh",
+                },
+            },
+        },
+        "endpoints": {
+            "gpt_router": {
+                "base_url": "",
+                "protocol": "responses",
+                "api_key_env": "ASTERISM_GPT_ROUTER_API_KEY",
+            },
+            "gpt_site": {
+                "base_url": "",
+                "protocol": "responses",
+                "api_key_env": "ASTERISM_GPT_SITE_API_KEY",
+            },
+            "domestic_backup": {
+                "base_url": "",
+                "protocol": "responses",
+                "api_key_env": "ASTERISM_DOMESTIC_AI_API_KEY",
+            },
+        },
+        "default": "economy",
+        "gpt_only": "gpt_only",
+    },
     "providers": {},
 }
 
@@ -29,7 +77,18 @@ class LocalConfigStore:
         for key in ("ui", "notifications", "models", "providers"):
             if not isinstance(value.get(key), dict):
                 raise ValueError(f"config.{key} must be an object")
-        return value
+        return self._merge_defaults(value)
+
+    @staticmethod
+    def _merge_defaults(value: dict[str, Any]) -> dict[str, Any]:
+        def merge(default: Any, current: Any) -> Any:
+            if isinstance(default, dict) and isinstance(current, dict):
+                return {key: merge(default.get(key), current[key]) for key in current} | {
+                    key: deepcopy(child) for key, child in default.items() if key not in current
+                }
+            return deepcopy(current)
+
+        return merge(DEFAULT_CONFIG, value)
 
     def ensure(self) -> dict[str, Any]:
         value = self.load()

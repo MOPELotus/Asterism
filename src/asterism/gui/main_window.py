@@ -126,7 +126,7 @@ class ProviderPage(QWidget):
         if provider == "chaoxing":
             action_items.extend([("scan all", self.scan_all), ("scan status", self.scan_status)])
         if provider == "uai":
-            action_items.append(("duration", self.read_duration))
+            action_items.extend([("inspect", self.inspect_task), ("duration", self.read_duration)])
         if provider == "cidaren":
             action_items.extend(
                 [("oauth begin", self.oauth_begin), ("oauth exchange", self.oauth_exchange)]
@@ -277,11 +277,23 @@ class ProviderPage(QWidget):
         data = result.data if hasattr(result, "data") else result
         preview = json.dumps(self._safe_preview(data), ensure_ascii=False, default=str)
         self.log.append(f"[{label}] {preview}")
+        self.controller.notify(
+            "success",
+            provider=self.provider,
+            operation=label,
+            summary={"status": "success"},
+        )
         self.cancel_button.setEnabled(False)
         self.cancel_event = None
 
     def _failure(self, label: str, error: str) -> None:
         self.log.append(f"[{label}] ERROR {error}")
+        self.controller.notify(
+            "failure",
+            provider=self.provider,
+            operation=label,
+            summary={"status": "failure", "error_code": error[:120]},
+        )
         self.cancel_button.setEnabled(False)
         self.cancel_event = None
 
@@ -511,6 +523,17 @@ class ProviderPage(QWidget):
             "duration",
         )
 
+    def inspect_task(self) -> None:
+        profile = self.profile()
+        task = self._selected_task()
+        if not profile or task is None:
+            QMessageBox.warning(self, self.provider, "请先同步并选择 task")
+            return
+        self._call(
+            lambda: self.controller.inspect_task(profile, task, cancel=self.cancel_event),
+            "inspect",
+        )
+
     def oauth_begin(self) -> None:
         profile = self.profile()
         if profile:
@@ -656,17 +679,56 @@ class QuestionBankPage(QWidget):
     def __init__(self, controller: DesktopController):
         super().__init__()
         self.controller = controller
+        self.rows: list[dict[str, Any]] = []
+        self.worker_thread: CallThread | None = None
         root = QVBoxLayout(self)
         root.addWidget(SubtitleLabel("question bank"))
         self.summary = BodyLabel()
         root.addWidget(self.summary)
+        controls = QHBoxLayout()
         refresh = PushButton("刷新")
         refresh.clicked.connect(self.reload)
-        root.addWidget(refresh)
-        root.addStretch(1)
+        controls.addWidget(refresh)
+        controls.addWidget(BodyLabel("组合"))
+        self.combination = ComboBox()
+        self.combination.addItem("economy", "economy")
+        self.combination.addItem("gpt_only", "gpt_only")
+        controls.addWidget(self.combination)
+        controls.addWidget(BodyLabel("route"))
+        self.route = ComboBox()
+        self.route.addItem("untimed", "untimed")
+        self.route.addItem("timed", "timed")
+        controls.addWidget(self.route)
+        answer = PrimaryPushButton("AI 解题并缓存")
+        answer.clicked.connect(self.answer_selected)
+        controls.addWidget(answer)
+        root.addLayout(controls)
+        self.table = TableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["provider", "kind", "prompt", "identity"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        configure_table(self.table)
+        root.addWidget(self.table, 1)
+        self.log = TextEdit()
+        self.log.setReadOnly(True)
+        root.addWidget(self.log)
         self.reload()
 
     def reload(self) -> None:
+        self.rows = self.controller.list_questions()
+        self.table.setRowCount(len(self.rows))
+        for row, value in enumerate(self.rows):
+            content = value.get("content", {})
+            prompt = content.get("prompt", "") if isinstance(content, dict) else ""
+            for column, item in enumerate(
+                (
+                    value.get("provider"),
+                    value.get("native_kind"),
+                    prompt,
+                    value.get("identity_hash"),
+                )
+            ):
+                self.table.setItem(row, column, QTableWidgetItem(str(item or "")))
         with self.controller.bank.connect() as connection:
             questions = connection.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
             candidates = connection.execute("SELECT COUNT(*) FROM answer_candidates").fetchone()[0]
@@ -676,6 +738,36 @@ class QuestionBankPage(QWidget):
         self.summary.setText(
             f"questions: {questions}\ncandidates: {candidates}\nobservations: {observations}"
         )
+
+    def answer_selected(self) -> None:
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self.rows):
+            QMessageBox.warning(self, "question bank", "请先选择题目")
+            return
+        value = self.rows[row]
+        provider = str(value.get("provider") or "")
+        question = value.get("content")
+        if not provider or not isinstance(question, dict):
+            QMessageBox.warning(self, "question bank", "题目内容不完整")
+            return
+        if self.worker_thread is not None and self.worker_thread.isRunning():
+            QMessageBox.information(self, "question bank", "已有 AI 请求正在运行")
+            return
+        combination = str(self.combination.currentData() or "economy")
+        route = str(self.route.currentData() or "untimed")
+        self.log.append(f"[ai] {provider} {combination}/{route} starting")
+        self.worker_thread = CallThread(
+            lambda: self.controller.answer_question(
+                provider, question, combination=combination, route=route
+            )
+        )
+        self.worker_thread.succeeded.connect(
+            lambda result: self.log.append(
+                f"[ai] {json.dumps(ProviderPage._safe_preview(result), ensure_ascii=False)}"
+            )
+        )
+        self.worker_thread.failed.connect(lambda error: self.log.append(f"[ai] ERROR {error}"))
+        self.worker_thread.start()
 
 
 class SettingsPage(QWidget):

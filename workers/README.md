@@ -7,12 +7,12 @@ JSONL 进度、日志和终态事件；本地桌面控制层直接启动这些�
 | Provider ID | donor 入口 | 操作 |
 |---|---|---|
 | `chaoxing` | `upstreams/chaoxing`，并辅助引用 `upstreams/chaoxing-exam` | `health`、`authenticate`、`courses`、`tasks`、`questions`、`run` |
-| `welearn` | `upstreams/welearn/welearn_decompiled.py` | `health`、`authenticate`、`courses`、`tasks`、`questions`、`run` |
+| `welearn` | `upstreams/welearn/welearn_decompiled.py` | `health`、`authenticate`、`courses`、`tasks`、`questions`、`run`、`duration` |
 | `uai` | `upstreams/uai/配置我运行我.py` | `health`、`authenticate`、`courses`、`tasks`、`inspect`、`questions`、`run`、`duration` |
 | `cidaren` | `upstreams/cidaren` | `health`、`oauth_begin`、`oauth_exchange`、`authenticate`、`courses`、`tasks`、`questions`、`run` |
 
-`welearn` 的完成率和时长由 `run.settings.action` 分开选择；`uai` 的完成与时长也使用独立
-操作。`cidaren` 的 `answer_lib` 只能作为低可信历史证据。正式作业/考试答案由桌面草稿和
+`welearn` 的完成率和时长由独立操作（底层仍复用 donor 的 `run.settings.action`）分开选择；
+`uai` 的完成与时长也使用独立操作。`cidaren` 的 `answer_lib` 只能作为低可信历史证据。正式作业/考试答案由桌面草稿和
 确认流程提供，Worker 保留原生编码与提交顺序。
 
 ## 本地环境

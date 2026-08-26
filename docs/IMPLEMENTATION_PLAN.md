@@ -113,7 +113,7 @@ Checkpoint：四个平台现有能力都能从本地入口加载；一个 Runner
 Profile 或桌面进程；不需要 Asterism 用户、Token 或 Scheduler。
 
 当前证据：四个固定 donor 均通过入口 hash 校验和无账号 `health`；原 Worker 52 项测试与
-本地控制层 13 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
+本地控制层与 AI/扫描控制层 19 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
 进程树兜底均已接入，且数据库中不存在用户、权限、计费或调度表。
 
 ### C2：四平台与共享能力接线
@@ -138,13 +138,17 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
 - 完成题库、证据、模型组合、扫描状态、重试和设置页面。
 - 完成手动批量执行及可选成功/失败通知。
 - 支持跟随系统、浅色、深色主题；启动前配置 Qt 高 DPI 缩放，窗口尺寸和表格布局随显示器调整。
+- 可选终态通知使用本地配置的无 shell 命令，仅传递事件、平台 ID、操作名和脱敏摘要。
+- AI 组合通过 OpenAI-compatible Responses 请求接入：默认 `economy` 使用 `gpt_router`，
+  `gpt_only` 使用 `gpt_site`；限时/不限时分别配置模型与 reasoning effort，国内 endpoint
+  只作为主请求失败、超时或不可用时的灾备。响应和用量写入本地 `ai_cache`，不默认保存到云端。
 
 Checkpoint：所有矩阵能力均能从桌面 UI 到达。优先使用组件测试、数据驱动页面检查和
 自动化 UI smoke，不要求机械地逐按钮人工验收。
 
 ### C4：集中真实只读验证
 
-所有接线和 UI 完成后，一次性进行：
+所有接线和 UI 完成后，一次性进行（当前可自动化的全号静默扫描仅覆盖 `chaoxing`）：
 
 - 四个平台登录、会话续期、课程和任务同步。
 - 各平台官方完成状态、时长、必做活动和历史结果读取。
