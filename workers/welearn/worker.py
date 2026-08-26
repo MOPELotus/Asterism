@@ -40,6 +40,45 @@ def retry_read(call):
     raise last
 
 
+def course_rows(module, events, redactor):
+    """Read the donor course endpoint, including its observed transient null.
+
+    WELearn can return JSON ``null`` immediately after the OIDC callback while
+    the student session is still being established. The donor assumes an
+    object and crashes on that response. Keep its endpoint and session flow,
+    but re-enter the student page and retry the read before classifying it.
+    """
+    last_shape = "missing"
+    for attempt in range(3):
+        if attempt:
+            with capture_output(events, redactor):
+                module.session.get(
+                    "https://welearn.sflep.com/student/index.aspx",
+                    headers={"Referer": "https://welearn.sflep.com/"},
+                    timeout=15,
+                )
+        with capture_output(events, redactor):
+            response = module.session.get(
+                "https://welearn.sflep.com/ajax/authCourse.aspx?action=gmc",
+                headers={"Referer": "https://welearn.sflep.com/student/index.aspx"},
+                timeout=15,
+            )
+        try:
+            data = response.json()
+        except (TypeError, ValueError) as error:
+            last_shape = f"non-json http={getattr(response, 'status_code', 'unknown')}"
+            if "prelogin" in str(getattr(response, "text", "")).lower():
+                raise WorkerFailure("authentication_failed", "WELearn session was not established") from error
+            continue
+        if isinstance(data, Mapping) and isinstance(data.get("clist"), list):
+            return data["clist"]
+        last_shape = "json-null" if data is None else type(data).__name__
+    raise WorkerFailure(
+        "course_probe_unavailable",
+        f"WELearn course probe did not return a course list after session bootstrap ({last_shape})",
+    )
+
+
 def restore(module, value):
     value = require_mapping(value, "payload.session")
     jar = value.get("cookies")
@@ -58,20 +97,13 @@ def authenticate(module, payload, events, redactor):
                                       require_text(credential.get("password"), "credentials.password"))
             if not result: raise WorkerFailure("authentication_failed", "upstream SSO login was rejected")
             module.session.cookies.update(result)
-        response = retry_read(lambda: module.session.get(
-            "https://welearn.sflep.com/ajax/authCourse.aspx?action=gmc",
-            headers={"Referer": "https://welearn.sflep.com/student/index.aspx"}))
-        data = response.json()
-    if not isinstance(data.get("clist"), list): raise WorkerFailure("authentication_failed", "course probe was rejected")
-    return {"session": {"cookies": cookie_dict(module)}, "account": {"course_count": len(data["clist"])}}
+    rows = course_rows(module, events, redactor)
+    return {"session": {"cookies": cookie_dict(module)}, "account": {"course_count": len(rows)}}
 
 
 def courses(module, payload, events, redactor):
     restore(module, payload.get("session"))
-    with capture_output(events, redactor):
-        rows = retry_read(lambda: module.session.get(
-            "https://welearn.sflep.com/ajax/authCourse.aspx?action=gmc",
-            headers={"Referer": "https://welearn.sflep.com/student/index.aspx"})).json().get("clist", [])
+    rows = course_rows(module, events, redactor)
     return {"courses": [{"remote_id": str(x["cid"]), "title": str(x.get("name", "")),
                            "remote_status": str(x.get("per", "")),
                            "native": x} for x in rows],

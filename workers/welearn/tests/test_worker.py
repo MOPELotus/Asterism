@@ -32,6 +32,16 @@ class Events:
         self.values.append((event_type, payload))
 
 
+class Response:
+    def __init__(self, value, *, text="", status_code=200):
+        self.value = value
+        self.text = text
+        self.status_code = status_code
+
+    def json(self):
+        return self.value
+
+
 def module_fixture():
     module = types.SimpleNamespace()
     module.session = types.SimpleNamespace(
@@ -63,6 +73,34 @@ def payload(action, **settings):
 
 
 class RunTaskTests(unittest.TestCase):
+    def test_course_probe_bootstraps_student_session_after_transient_null(self):
+        module = module_fixture()
+        responses = iter([Response(None), Response({}), Response({"clist": [{"cid": 1}]})])
+        calls = []
+
+        def get(url, **_kwargs):
+            calls.append(url)
+            if url.endswith("/student/index.aspx"):
+                return Response({})
+            return next(responses)
+
+        module.session.get = get
+        rows = WORKER.course_rows(module, Events(), WORKER.Redactor())
+
+        self.assertEqual(rows, [{"cid": 1}])
+        self.assertEqual(sum(url.endswith("/student/index.aspx") for url in calls), 2)
+
+    def test_course_probe_reports_stable_null_without_worker_internal_crash(self):
+        module = module_fixture()
+        module.session.get = lambda url, **_kwargs: (
+            Response({}) if url.endswith("/student/index.aspx") else Response(None)
+        )
+
+        with self.assertRaises(WORKER.WorkerFailure) as caught:
+            WORKER.course_rows(module, Events(), WORKER.Redactor())
+
+        self.assertEqual(caught.exception.code, "course_probe_unavailable")
+
     def test_completion_reuses_startstudy(self):
         module = module_fixture()
         result = WORKER.run_task(module, payload("complete", correctness=97), Events(), WORKER.Redactor())
