@@ -7,7 +7,7 @@
 - `cargo test --workspace`：全 workspace 通过；API 85、Engine 163、Storage 173，四 Provider 与其余 crate 测试均通过。
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`：通过。
 - Web `npm run typecheck`、`npm run build`：通过。
-- Yunzai 插件 `npm test`：11 项通过；`npm run check` 的 Node 语法边界保持可执行。
+- Yunzai 插件 `npm test`：12 项通过；`npm run check` 的 Node 语法边界保持可执行。
 - Python Worker：Chaoxing 25、WELearn 5、UAI 9、Cidaren 10 项单元测试通过。
 - 新增 API 测试：QQ master assertion 的 scope 约束、单向提权和审计；master 使用 `X-Asterism-Target-Owner` 读取并通过生命周期动作操作其他用户 Provider Account/Task，actor 保持为网关 Service Token。
 
