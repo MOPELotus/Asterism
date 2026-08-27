@@ -86,6 +86,17 @@ class ManualBatchExecutor:
                     error_code="local_error",
                     error_message=str(error),
                 )
+            except Exception as error:
+                # A provider-specific answer adapter must not abort the whole
+                # batch when it raises an unexpected local exception. Keep the
+                # item isolated and avoid echoing arbitrary exception text,
+                # which may contain credentials or remote payloads.
+                return BatchItemResult(
+                    index,
+                    remote_id,
+                    error_code="local_error",
+                    error_message=f"{type(error).__name__}: batch item failed",
+                )
 
         results: list[BatchItemResult] = []
         with ThreadPoolExecutor(

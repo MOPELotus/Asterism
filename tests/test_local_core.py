@@ -1468,6 +1468,25 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(results[0].error_code, "local_error")
         self.assertIsNotNone(results[1].result)
 
+    def test_batch_isolates_unexpected_adapter_failures(self) -> None:
+        class FakeService:
+            def run_task(self, profile, task, **kwargs):
+                return SimpleNamespace(data={"remote_state": "completed"})
+
+        def answer_provider(task):
+            if task["remote_id"] == "broken":
+                raise KeyError("credential-secret")
+            return [{"remote_id": task["remote_id"], "value": "A"}]
+
+        results = ManualBatchExecutor(FakeService()).run(
+            SimpleNamespace(provider="chaoxing"),
+            [{"remote_id": "broken"}, {"remote_id": "healthy"}],
+            answer_provider=answer_provider,
+        )
+        self.assertEqual(results[0].error_code, "local_error")
+        self.assertEqual(results[0].error_message, "KeyError: batch item failed")
+        self.assertIsNotNone(results[1].result)
+
 
 class ScanTests(unittest.TestCase):
     def setUp(self) -> None:
