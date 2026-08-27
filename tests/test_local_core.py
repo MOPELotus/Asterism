@@ -89,6 +89,52 @@ class LocalStoreTests(unittest.TestCase):
         )
         self.assertEqual(spec.command("ignored-python")[0], str(executable))
 
+    def test_controller_wraps_cidaren_run_with_a_short_lived_answer_bridge(self) -> None:
+        calls: list[dict] = []
+
+        class FakeService:
+            def run_task(
+                self,
+                profile,
+                task,
+                *,
+                answers=None,
+                settings=None,
+                cancel=None,
+                on_event=None,
+            ):
+                calls.append(dict(settings or {}))
+                bridge = (settings or {}).get("answer_bridge")
+                assert isinstance(bridge, dict)
+                request = urllib.request.Request(
+                    bridge["url"],
+                    data=b'{"kind":"resolve_answer"}',
+                    method="POST",
+                    headers={"Authorization": f"Bearer {bridge['ticket']}"},
+                )
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    assert response.status == 200
+                return SimpleNamespace(data={"remote_state": "completed"})
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        controller.config = SimpleNamespace(ensure=lambda: {"providers": {}})
+        controller._resolve_cidaren_answer = lambda _document: {"answer_available": False}
+        controller._observe_cidaren_answer = lambda _document: {"ok": True}
+        profile = ProfileStore(self.paths).create("cidaren", "bridge")
+        controller.run_task(profile, {"remote_id": "task-1", "native": {}})
+        self.assertIn("answer_bridge", calls[0])
+        with self.assertRaises((OSError, urllib.error.URLError)):
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    calls[0]["answer_bridge"]["url"],
+                    data=b"{}",
+                    method="POST",
+                    headers={"Authorization": f"Bearer {calls[0]['answer_bridge']['ticket']}"},
+                ),
+                timeout=1,
+            )
+
     def test_cidaren_answer_bridge_is_loopback_scoped_and_dispatches_observations(self) -> None:
         resolved: list[dict] = []
         observed: list[dict] = []
