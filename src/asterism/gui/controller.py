@@ -494,9 +494,18 @@ class DesktopController:
             if self.bank.question_id(profile.provider, identity) is None:
                 repository.ingest_question(profile.provider, question)
             exact = repository.resolve_exact(profile.provider, identity)
+            answer = None
             if exact.status == "exact":
-                answer = rebind_answer(exact.answer, question.get("options"))
-            else:
+                try:
+                    answer = rebind_answer(exact.answer, question.get("options"))
+                except (RuntimeError, ValueError):
+                    # A cached answer is only reusable when its semantic
+                    # option binding is unique for this response. If a
+                    # provider changed or duplicated options, downgrade this
+                    # question to normal resolution instead of aborting the
+                    # whole task.
+                    answer = None
+            if answer is None:
                 try:
                     response = self.answer_question(
                         profile.provider,
