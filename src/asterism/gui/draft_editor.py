@@ -29,6 +29,12 @@ from .fluent import (
 )
 
 
+def make_title(text: str) -> TitleLabel:
+    label = TitleLabel(text)
+    label.setMinimumHeight(34)
+    return label
+
+
 def draft_notice(parent, title: str, message: str, *, error: bool = False) -> None:
     if FLUENT_AVAILABLE:
         MessageBox(title, message, parent).exec()
@@ -57,7 +63,7 @@ class FormalDraftEditor(QDialog):
         intro_layout = QVBoxLayout(intro)
         intro_layout.setContentsMargins(18, 14, 18, 14)
         intro_layout.setSpacing(4)
-        intro_layout.addWidget(TitleLabel("逐题确认与补漏"))
+        intro_layout.addWidget(make_title("逐题确认与补漏"))
         intro_layout.addWidget(
             BodyLabel("选择、连线、排序等结构化答案填写 JSON；主观题填写普通纯文本。")
         )
