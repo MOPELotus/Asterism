@@ -178,6 +178,16 @@ class HomePage(QWidget):
         overview_layout.addWidget(self.refresh, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(overview)
 
+        activity = CardWidget()
+        activity_layout = QVBoxLayout(activity)
+        activity_layout.setContentsMargins(20, 16, 20, 16)
+        activity_layout.setSpacing(5)
+        activity_layout.addWidget(StrongBodyLabel("当前运行状态"))
+        self.activity = BodyLabel("暂无运行中的任务")
+        self.activity.setWordWrap(True)
+        activity_layout.addWidget(self.activity)
+        layout.addWidget(activity)
+
         tips = CardWidget()
         tips_layout = QVBoxLayout(tips)
         tips_layout.setContentsMargins(20, 16, 20, 16)
@@ -207,6 +217,22 @@ class HomePage(QWidget):
             + f"\n数据目录：{self.controller.paths.root}\n"
             "从平台页完成认证后，课程和任务会显示在对应页面。"
         )
+
+    def set_activity(
+        self,
+        text: str,
+        *,
+        current: object | None = None,
+        total: object | None = None,
+        finished: bool = False,
+    ) -> None:
+        if finished:
+            self.activity.setText(f"最近完成：{text}")
+            return
+        progress = ""
+        if current is not None:
+            progress = f" · {current}/{total}" if total not in (None, "") else f" · {current}"
+        self.activity.setText(f"正在执行：{text}{progress}")
 
 
 class ProviderPage(QWidget):
@@ -601,6 +627,7 @@ class ProviderPage(QWidget):
             show_notice(self, self.provider, "已有操作正在运行")
             return
         self.log.append(f"[{label}] starting")
+        self._set_home_activity(self._operation_title(label))
         self.cancel_event = threading.Event()
         self.worker_thread = CallThread(callback)
         self.cancel_button.setEnabled(True)
@@ -620,6 +647,9 @@ class ProviderPage(QWidget):
             suffix = f"/{total}" if total not in (None, "") else ""
             message = str(event.get("message") or "")
             self.log.append(f"[{label}] progress {current}{suffix} {message}".rstrip())
+            self._set_home_activity(
+                self._operation_title(label), current=current, total=total, message=message
+            )
             return
         if event_type == "log":
             level = str(event.get("level") or "info").upper()
@@ -637,6 +667,7 @@ class ProviderPage(QWidget):
         )
 
     def _success(self, label: str, result: Any) -> None:
+        self._set_home_activity(self._operation_title(label), finished=True)
         if label == "courses":
             self.current_courses = result if isinstance(result, list) else []
             self.course_table.setRowCount(len(self.current_courses))
@@ -783,6 +814,7 @@ class ProviderPage(QWidget):
         dialog.show()
 
     def _failure(self, label: str, error: str) -> None:
+        self._set_home_activity(f"{self._operation_title(label)}失败", finished=True)
         self.log.append(f"[{label}] ERROR {error}")
         if label in {"run", "batch run"}:
             self.controller.notify(
@@ -793,6 +825,45 @@ class ProviderPage(QWidget):
             )
         self.cancel_button.setEnabled(False)
         self.cancel_event = None
+
+    @staticmethod
+    def _operation_title(label: str) -> str:
+        return {
+            "health": "连接检查",
+            "authenticate": "认证 / 登录",
+            "courses": "读取课程",
+            "tasks": "读取任务",
+            "questions": "扫描题目",
+            "inspect": "读取任务详情",
+            "run": "执行任务",
+            "batch run": "批量执行",
+            "scan all": "全量扫描",
+            "scan profiles": "批量扫描账号",
+            "scan status": "读取扫描状态",
+            "prepare draft": "准备草稿",
+            "prepare drafts": "准备草稿",
+            "install donor": "准备 Provider 资源",
+            "oauth begin": "开始授权",
+            "oauth exchange": "完成授权",
+        }.get(label, label)
+
+    def _set_home_activity(
+        self,
+        operation: str,
+        *,
+        current: object | None = None,
+        total: object | None = None,
+        message: str = "",
+        finished: bool = False,
+    ) -> None:
+        window = self.window()
+        if not isinstance(window, MainWindow) or not hasattr(window, "home_page"):
+            return
+        profile = self.profile_combo.currentText().strip()
+        text = f"{self.provider} · {profile} · {operation}"
+        if message:
+            text += f"\n{self._preview_text(message, limit=180)}"
+        window.home_page.set_activity(text, current=current, total=total, finished=finished)
 
     @staticmethod
     def _safe_preview(value: Any, *, depth: int = 0) -> Any:
@@ -1843,7 +1914,8 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
             self._init_fluent_shell()
         else:
             self._init_classic_shell()
-        self.add_page("home", HomePage(self.controller))
+        self.home_page = HomePage(self.controller)
+        self.add_page("home", self.home_page)
         for provider in PROVIDER_IDS:
             self.add_page(provider, ProviderPage(self.controller, provider))
         self.add_page("drafts", DraftPage(self.controller))

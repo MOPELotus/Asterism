@@ -77,6 +77,24 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertGreater(window.height(), 0)
             window.close()
 
+    def test_provider_progress_is_visible_on_home_activity_card(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            page = next(
+                page
+                for page in window.pages
+                if isinstance(page, ProviderPage) and page.provider == "chaoxing"
+            )
+            page.profile_combo.setCurrentIndex(0)
+            page._event_received(
+                "run",
+                {"type": "progress", "current": 2, "total": 7, "message": "章节 2"},
+            )
+            self.assertIn("chaoxing", window.home_page.activity.text())
+            self.assertIn("2/7", window.home_page.activity.text())
+            self.assertIn("章节 2", window.home_page.activity.text())
+            window.close()
+
     def test_data_root_allows_only_one_desktop_instance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             first = acquire_instance_lock(temporary)
