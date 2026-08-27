@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -667,6 +668,40 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(result["source"], "local_cache")
         self.assertTrue(result["cached"])
         self.assertEqual(result["answer"]["answer"], "A")
+
+    def test_ai_arbitration_receives_aggregated_candidate_evidence(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        value = config.ensure()
+        value["models"]["endpoints"]["gpt_router"].update(
+            {"base_url": "https://router.test", "api_key": "router-key"}
+        )
+        config.save(value)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question = {"kind": "single_choice", "prompt": "Conflict", "options": ["A", "B"]}
+        question_id, _identity = repository.ingest_question("chaoxing", question)
+        repository.record_candidate(question_id, {"option": "A"}, "native", "correct")
+        repository.record_candidate(
+            question_id,
+            {"option": "B"},
+            "history",
+            "incorrect",
+            task_ref="must-not-be-sent",
+        )
+        service = AIAnswerService(config, bank)
+        captured = {}
+
+        def fake_request(request_question, _choice, _key, _timeout):
+            captured.update(request_question)
+            return {"answer": "A", "confidence": 0.9}, {"total_tokens": 1}
+
+        service._request = fake_request
+        service.answer("chaoxing", question)
+        evidence = captured["answer_evidence_context"]
+        self.assertEqual(len(evidence), 2)
+        self.assertEqual({row["source_kind"] for row in evidence}, {"native", "history"})
+        self.assertNotIn("must-not-be-sent", json.dumps(evidence))
 
     def test_ai_escalation_route_uses_timed_model_configuration(self) -> None:
         config = LocalConfigStore(self.paths.config)

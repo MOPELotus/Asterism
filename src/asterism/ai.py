@@ -169,13 +169,19 @@ class AIAnswerService:
                         "usage": cached["usage"],
                     }
         used_choice = choice
+        request_question = dict(question)
+        question_id = self.bank.question_id(provider, identity_hash)
+        if question_id is not None:
+            evidence = self._evidence_context(question_id)
+            if evidence:
+                request_question["answer_evidence_context"] = evidence
         try:
             if not choice.endpoint.base_url:
                 raise RuntimeError(f"AI endpoint {choice.endpoint.name} has no base_url configured")
             key = choice.endpoint.resolved_key()
             if not key:
                 raise RuntimeError(f"AI endpoint {choice.endpoint.name} has no API key")
-            parsed, usage = self._request(question, choice, key, timeout)
+            parsed, usage = self._request(request_question, choice, key, timeout)
         except (httpx.HTTPError, RuntimeError) as error:
             primary_error = RuntimeError(
                 f"AI endpoint {choice.endpoint.name} request failed or is unavailable"
@@ -189,7 +195,7 @@ class AIAnswerService:
             if not fallback_key:
                 raise primary_error from error
             try:
-                parsed, usage = self._request(question, fallback, fallback_key, timeout)
+                parsed, usage = self._request(request_question, fallback, fallback_key, timeout)
             except (httpx.HTTPError, RuntimeError) as fallback_error:
                 raise RuntimeError(
                     f"AI primary and fallback endpoints failed: {fallback_error}"
@@ -203,7 +209,6 @@ class AIAnswerService:
             normalized,
             usage,
         )
-        question_id = self.bank.question_id(provider, identity_hash)
         if question_id is not None:
             self.answers.record_candidate(
                 question_id,
@@ -222,6 +227,24 @@ class AIAnswerService:
             "cached": False,
             "usage": usage,
         }
+
+    def _evidence_context(self, question_id: int) -> list[dict[str, Any]]:
+        context: list[dict[str, Any]] = []
+        for candidate in self.bank.list_answer_evidence(question_id):
+            observations = candidate.get("observations", [])
+            counts = {
+                outcome: sum(1 for item in observations if item.get("outcome") == outcome)
+                for outcome in ("correct", "incorrect", "unverified")
+            }
+            context.append(
+                {
+                    "answer": candidate.get("answer"),
+                    "source_kind": candidate.get("source_kind"),
+                    "confidence": candidate.get("confidence"),
+                    "outcomes": counts,
+                }
+            )
+        return context
 
     def _request(
         self, question: dict[str, Any], choice: ModelChoice, key: str, timeout: float
