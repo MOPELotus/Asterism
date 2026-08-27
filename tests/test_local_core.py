@@ -521,6 +521,16 @@ class LocalStoreTests(unittest.TestCase):
         self.assertTrue(result["cached"])
         self.assertEqual(result["answer"]["answer"], "A")
 
+    def test_ai_escalation_route_uses_timed_model_configuration(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        service = AIAnswerService(config, bank)
+        self.assertEqual(
+            service.choose("economy", "escalation").model,
+            service.choose("economy", "timed").model,
+        )
+
     def test_ai_cache_rebinds_canonical_option_content_to_current_order(self) -> None:
         config = LocalConfigStore(self.paths.config)
         bank = QuestionBank(self.paths.database)

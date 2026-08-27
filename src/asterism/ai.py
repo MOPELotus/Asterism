@@ -59,6 +59,10 @@ class AIAnswerService:
         self.answers = AnswerRepository(bank)
 
     def choose(self, combination: str | None = None, route: str = "untimed") -> ModelChoice:
+        if route == "escalation":
+            # Cidaren uses this transport marker when its instant request
+            # timed out; model combinations still configure the timed route.
+            route = "timed"
         value = self.config.ensure()
         models = value.get("models", {})
         combination_name = combination or str(models.get("default") or "economy")
@@ -119,6 +123,8 @@ class AIAnswerService:
         force_refresh: bool = False,
         timeout: float = 45,
     ) -> dict[str, Any]:
+        if route == "escalation":
+            route = "timed"
         combination_name = combination or str(
             self.config.ensure().get("models", {}).get("default") or "economy"
         )
