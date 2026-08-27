@@ -139,6 +139,8 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
 - 完成独立作业/考试、待确认草稿、编辑和明确提交。
 - 完成题库、证据、模型组合、扫描状态、重试和设置页面。
 - 完成手动批量执行及可选成功/失败通知。
+- 批量执行的 `chaoxing` 普通任务并发数由本次执行输入，不在桌面层设置任意产品上限；`uai` 与
+  `cidaren` 仍由 Worker 强制单账号串行，`welearn` 遵循 donor 的执行约束。
 - 批量执行按任务标识转发 Worker 的实时进度和日志；每次单项/批量执行可选择 `economy` 或
   `gpt_only` 答案组合，并由本地配置和 Profile 设置继续覆盖 Provider 默认值。
 - `uai` 平台页提供可选的本次讨论/主观纯文本输入；留空时保持 donor 原生行为，填写时通过

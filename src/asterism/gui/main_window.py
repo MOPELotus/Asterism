@@ -663,6 +663,21 @@ class ProviderPage(QWidget):
         self.task_table.clearSelection()
         self.formal_table.clearSelection()
 
+    def _ask_concurrency(self) -> int | None:
+        """Read a positive worker count without imposing a product cap."""
+        value, accepted = QInputDialog.getText(self, self.provider, "并发数", text="1")
+        if not accepted:
+            return None
+        try:
+            concurrency = int(value.strip())
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, self.provider, "并发数必须是正整数")
+            return None
+        if concurrency < 1:
+            QMessageBox.warning(self, self.provider, "并发数必须是正整数")
+            return None
+        return concurrency
+
     @staticmethod
     def _preview_text(value: Any, *, limit: int = 500) -> str:
         if isinstance(value, (dict, list, tuple)):
@@ -898,8 +913,8 @@ class ProviderPage(QWidget):
         execution_settings = self._execution_settings(combination)
         concurrency = 1
         if routine:
-            concurrency, accepted = QInputDialog.getInt(self, self.provider, "并发数", 1, 1, 256)
-            if not accepted:
+            concurrency = self._ask_concurrency()
+            if concurrency is None:
                 return
         if formal:
             def execute_selected(on_event):
