@@ -85,6 +85,12 @@ class GuiSmokeTests(unittest.TestCase):
                 for page in window.pages
                 if isinstance(page, ProviderPage) and page.provider == "chaoxing"
             )
+            page.current_courses = [{"title": "大学英语"}]
+            page.course_table.setRowCount(1)
+            page.course_table.selectRow(0)
+            page.current_routine_tasks = [{"title": "第一章视频", "type": "video"}]
+            page.task_table.setRowCount(1)
+            page.task_table.selectRow(0)
             page.profile_combo.setCurrentIndex(0)
             page._event_received(
                 "run",
@@ -93,6 +99,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("chaoxing", window.home_page.activity.text())
             self.assertIn("2/7", window.home_page.activity.text())
             self.assertIn("章节 2", window.home_page.activity.text())
+            self.assertIn("第一章视频", window.home_page.activity.text())
             window.close()
 
     def test_data_root_allows_only_one_desktop_instance(self) -> None:

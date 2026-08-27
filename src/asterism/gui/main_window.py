@@ -860,10 +860,28 @@ class ProviderPage(QWidget):
         if not isinstance(window, MainWindow) or not hasattr(window, "home_page"):
             return
         profile = self.profile_combo.currentText().strip()
+        context = self._activity_context()
         text = f"{self.provider} · {profile} · {operation}"
+        if context:
+            text += f"\n{context}"
         if message:
             text += f"\n{self._preview_text(message, limit=180)}"
         window.home_page.set_activity(text, current=current, total=total, finished=finished)
+
+    def _activity_context(self) -> str:
+        task = self._selected_task()
+        if isinstance(task, dict):
+            title = str(task.get("title") or task.get("name") or "").strip()
+            if title:
+                return f"任务：{self._preview_text(title, limit=120)}"
+        row = self.course_table.currentRow()
+        if 0 <= row < len(self.current_courses):
+            course = self.current_courses[row]
+            if isinstance(course, dict):
+                title = str(course.get("title") or course.get("name") or "").strip()
+                if title:
+                    return f"课程：{self._preview_text(title, limit=120)}"
+        return ""
 
     @staticmethod
     def _safe_preview(value: Any, *, depth: int = 0) -> Any:
