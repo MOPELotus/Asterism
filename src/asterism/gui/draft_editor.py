@@ -14,7 +14,18 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .fluent import BodyLabel, PrimaryPushButton, PushButton, TableWidget, TextEdit, configure_table
+from .fluent import (
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    PrimaryPushButton,
+    PushButton,
+    StrongBodyLabel,
+    TableWidget,
+    TextEdit,
+    TitleLabel,
+    configure_table,
+)
 
 
 class FormalDraftEditor(QDialog):
@@ -27,20 +38,32 @@ class FormalDraftEditor(QDialog):
             dict(item) for item in payload.get("questions", []) if isinstance(item, dict)
         ]
         self.answers = self._answer_map(payload.get("answers"))
-        self.setWindowTitle("formal draft")
+        self.setWindowTitle("作业 / 考试草稿")
+        self.setMinimumSize(860, 560)
         root = QVBoxLayout(self)
-        root.addWidget(
-            BodyLabel(
-                "逐题确认和补漏。选择、连线、排序等结构化答案填写 JSON；"
-                "主观题可直接填写普通纯文本。"
-            )
+        root.setContentsMargins(24, 20, 24, 22)
+        root.setSpacing(12)
+        intro = CardWidget()
+        intro_layout = QVBoxLayout(intro)
+        intro_layout.setContentsMargins(18, 14, 18, 14)
+        intro_layout.setSpacing(4)
+        intro_layout.addWidget(TitleLabel("逐题确认与补漏"))
+        intro_layout.addWidget(
+            BodyLabel("选择、连线、排序等结构化答案填写 JSON；主观题填写普通纯文本。")
         )
+        intro_layout.addWidget(CaptionLabel("这里只保存本地草稿，不会自动提交到平台。"))
+        root.addWidget(intro)
+        table_card = CardWidget()
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(14, 12, 14, 12)
+        table_layout.addWidget(StrongBodyLabel("题目列表"))
         self.table = TableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["remote_id", "kind", "prompt", "answer", "state"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         configure_table(self.table)
-        root.addWidget(self.table, 1)
+        table_layout.addWidget(self.table, 1)
+        root.addWidget(table_card, 1)
         actions = QHBoxLayout()
         edit = PrimaryPushButton("编辑所选答案")
         edit.clicked.connect(self.edit_selected)
@@ -111,7 +134,7 @@ class FormalDraftEditor(QDialog):
             return
         remote_id = str(question.get("remote_id") or "")
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"answer {remote_id}")
+        dialog.setWindowTitle(f"编辑答案 · {remote_id}")
         layout = QVBoxLayout(dialog)
         editor = TextEdit()
         if remote_id in self.answers:
@@ -152,7 +175,7 @@ class FormalDraftEditor(QDialog):
 
     def edit_advanced(self) -> None:
         dialog = QDialog(self)
-        dialog.setWindowTitle("advanced draft JSON")
+        dialog.setWindowTitle("高级草稿 JSON")
         layout = QVBoxLayout(dialog)
         editor = TextEdit()
         editor.setPlainText(json.dumps(self.current_payload(), ensure_ascii=False, indent=2))
