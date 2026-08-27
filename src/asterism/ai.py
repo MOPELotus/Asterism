@@ -329,9 +329,11 @@ class AIAnswerService:
     @staticmethod
     def _url(endpoint: ModelEndpoint) -> str:
         suffix = "/v1/responses" if endpoint.protocol == "responses" else "/v1/chat/completions"
-        return (
-            endpoint.base_url if endpoint.base_url.endswith(suffix) else endpoint.base_url + suffix
-        )
+        if endpoint.base_url.endswith(suffix):
+            return endpoint.base_url
+        if endpoint.base_url.endswith("/v1"):
+            return endpoint.base_url + suffix[len("/v1") :]
+        return endpoint.base_url + suffix
 
     @classmethod
     def build_request(cls, question: dict[str, Any], choice: ModelChoice) -> dict[str, Any]:

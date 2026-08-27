@@ -641,6 +641,26 @@ class LocalStoreTests(unittest.TestCase):
             )
         )
 
+    def test_ai_endpoint_url_accepts_root_v1_and_full_paths(self) -> None:
+        def endpoint(url, protocol="responses"):
+            return SimpleNamespace(base_url=url, protocol=protocol)
+        self.assertEqual(
+            AIAnswerService._url(endpoint("https://router.test")),
+            "https://router.test/v1/responses",
+        )
+        self.assertEqual(
+            AIAnswerService._url(endpoint("https://router.test/v1")),
+            "https://router.test/v1/responses",
+        )
+        self.assertEqual(
+            AIAnswerService._url(endpoint("https://router.test/v1/responses")),
+            "https://router.test/v1/responses",
+        )
+        self.assertEqual(
+            AIAnswerService._url(endpoint("https://router.test/v1", "chat_completions")),
+            "https://router.test/v1/chat/completions",
+        )
+
     def test_ai_fallback_uses_its_own_model_when_primary_is_unavailable(self) -> None:
         config = LocalConfigStore(self.paths.config)
         value = config.ensure()
