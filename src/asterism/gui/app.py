@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import DataPaths
+from .common import show_notice
 from .fluent import configure_high_dpi
 
 
@@ -21,7 +22,7 @@ def acquire_instance_lock(data_root: str | Path | None = None) -> Any | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from PyQt6.QtWidgets import QApplication, QMessageBox
+    from PyQt6.QtWidgets import QApplication
 
     from .main_window import MainWindow
 
@@ -36,11 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     instance_lock = acquire_instance_lock(args.data_root)
     if instance_lock is None:
         if os.environ.get("ASTERISM_NONINTERACTIVE") != "1":
-            QMessageBox.critical(
-                None,
-                "Asterism",
-                "相同数据目录已有 Asterism 实例正在运行。",
-            )
+            show_notice(None, "Asterism", "相同数据目录已有 Asterism 实例正在运行。", "error")
         return 2
     try:
         window = MainWindow(args.data_root, args.source_root)

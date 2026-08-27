@@ -112,8 +112,14 @@ class LocalStoreTests(unittest.TestCase):
         registry = ProviderRegistry(Path(__file__).resolve().parents[1])
         chaoxing = registry.get("chaoxing")
         uai = registry.get("uai")
-        self.assertTrue(chaoxing.environment["ASTERISM_CHAOXING_AUXILIARY_SOURCES"].endswith("AUXILIARY_SOURCES.json"))
-        self.assertTrue(uai.environment["ASTERISM_UAI_BROWSER_SOURCE_METADATA"].endswith("BROWSER_SOURCE.json"))
+        self.assertTrue(
+            chaoxing.environment["ASTERISM_CHAOXING_AUXILIARY_SOURCES"].endswith(
+                "AUXILIARY_SOURCES.json"
+            )
+        )
+        self.assertTrue(
+            uai.environment["ASTERISM_UAI_BROWSER_SOURCE_METADATA"].endswith("BROWSER_SOURCE.json")
+        )
 
     def test_welearn_upstream_prefers_pinned_bundled_checkout(self) -> None:
         source_root = Path(__file__).resolve().parents[1]
@@ -286,9 +292,7 @@ class LocalStoreTests(unittest.TestCase):
         controller.config = SimpleNamespace(ensure=lambda: {"providers": {}})
         controller.bank = QuestionBank(self.paths.database)
         controller.bank.initialize()
-        controller.answer_question = lambda *args, **kwargs: {
-            "answer": {"answer": "A"}
-        }
+        controller.answer_question = lambda *args, **kwargs: {"answer": {"answer": "A"}}
         profile = ProfileStore(self.paths).create("chaoxing", "challenge")
         task = {"remote_id": "point-1", "native": {"route_kind": "knowledge_point"}}
         controller.run_task(profile, task, answers=[{"remote_id": "q-1", "value": "A"}])
@@ -350,6 +354,73 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertNotIn("_challenge_escalation", calls[-1][1])
 
+    def test_controller_honors_multiple_challenge_escalation_attempts(self) -> None:
+        calls = []
+        log_path = self.paths.root / "run.log"
+
+        class FakeService:
+            def run_task(self, profile, task, **kwargs):
+                calls.append(dict(kwargs.get("settings") or {}))
+                return ProviderOperationResult(
+                    "run",
+                    {"result": {"challenge_escalation_requested": True}},
+                    SimpleNamespace(log_path=log_path),
+                )
+
+            def questions(self, profile, task, **_kwargs):
+                return SimpleNamespace(
+                    data={
+                        "questions": [
+                            {
+                                "remote_id": "q-1",
+                                "kind": "single_choice",
+                                "prompt": "p",
+                                "options": ["A"],
+                            }
+                        ]
+                    }
+                )
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        controller.config = SimpleNamespace(
+            ensure=lambda: {
+                "providers": {},
+                "models": {
+                    "combinations": {
+                        "economy": {
+                            "challenge": {
+                                "primary": "gpt_site",
+                                "model": "gpt-5.6-sol",
+                            }
+                        }
+                    }
+                },
+            }
+        )
+        controller.bank = QuestionBank(self.paths.database)
+        controller.bank.initialize()
+        controller.answer_question = lambda *args, **kwargs: {"answer": {"answer": "A"}}
+        profile = ProfileStore(self.paths).create("chaoxing", "challenge-multiple")
+        task = {"remote_id": "point-1", "native": {"route_kind": "knowledge_point"}}
+
+        controller.run_task(
+            profile,
+            task,
+            answers=[{"remote_id": "q-1", "value": "A"}],
+            settings={
+                "answer_combination": "economy",
+                "challenge_retry_attempts": 0,
+                "challenge_escalation_attempts": 2,
+            },
+        )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(
+            [call.get("_challenge_escalation_attempt") for call in calls[1:]],
+            [1, 2],
+        )
+
     def test_draft_answers_accept_id_to_value_map(self) -> None:
         self.assertEqual(
             DesktopController._normalize_draft_answers({"q-1": "A", "q-2": ["B", "C"]}),
@@ -407,8 +478,12 @@ class LocalStoreTests(unittest.TestCase):
             [{"remote_id": "q-1", "value": "A"}],
             [{"remote_id": "q-1", "value": "A"}, {"remote_id": "other", "value": "B"}],
         ):
-            draft = SimpleNamespace(status="draft", provider="chaoxing", profile_id=profile.id,
-                                    payload={**base, "answers": answers})
+            draft = SimpleNamespace(
+                status="draft",
+                provider="chaoxing",
+                profile_id=profile.id,
+                payload={**base, "answers": answers},
+            )
             with self.assertRaises(ValueError):
                 controller.submit_draft(draft)
 
@@ -438,7 +513,7 @@ class LocalStoreTests(unittest.TestCase):
                     "settings": {},
                 },
             )
-            with self.assertRaisesRegex(ValueError, "non-empty value"):
+            with self.assertRaisesRegex(ValueError, "草稿答案不能为空"):
                 controller.submit_draft(draft)
 
         self.assertEqual(
@@ -453,7 +528,7 @@ class LocalStoreTests(unittest.TestCase):
                 {"remote_id": "q-zero", "value": 0},
             ],
         )
-        with self.assertRaisesRegex(ValueError, "duplicate answer"):
+        with self.assertRaisesRegex(ValueError, "重复题目"):
             DesktopController._normalize_draft_answers(
                 [
                     {"remote_id": "q-1", "value": "A"},
@@ -515,8 +590,9 @@ class LocalStoreTests(unittest.TestCase):
                 "settings": {},
             },
         )
-        with self.assertRaisesRegex(RunnerError, "did not confirm"):
+        with self.assertRaises(RunnerError) as raised:
             controller.submit_draft(draft)
+        self.assertEqual(raised.exception.code, "submission_unconfirmed")
         self.assertEqual(calls, [])
 
     def test_formal_draft_reads_prefills_and_never_submits(self) -> None:
@@ -733,8 +809,9 @@ class LocalStoreTests(unittest.TestCase):
         resolved: list[dict] = []
         observed: list[dict] = []
         bridge = CidarenAnswerBridge(
-            resolve=lambda value: resolved.append(value)
-            or {"answer_available": True, "value": "A"},
+            resolve=lambda value: (
+                resolved.append(value) or {"answer_available": True, "value": "A"}
+            ),
             observe=lambda value: observed.append(value) or {"ok": True},
         )
         try:
@@ -898,6 +975,7 @@ class LocalStoreTests(unittest.TestCase):
     def test_ai_endpoint_url_accepts_root_v1_and_full_paths(self) -> None:
         def endpoint(url, protocol="responses"):
             return SimpleNamespace(base_url=url, protocol=protocol)
+
         self.assertEqual(
             AIAnswerService._url(endpoint("https://router.test")),
             "https://router.test/v1/responses",
@@ -914,6 +992,52 @@ class LocalStoreTests(unittest.TestCase):
             AIAnswerService._url(endpoint("https://router.test/v1", "chat_completions")),
             "https://router.test/v1/chat/completions",
         )
+
+    def test_ai_question_condition_controls_model_timeout_and_retries(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        value = config.ensure()
+        value["models"]["combinations"]["economy"]["untimed"].update(
+            {
+                "timeout_seconds": 20,
+                "retry_attempts": 1,
+                "fallback_reasoning_effort": "high",
+            }
+        )
+        value["models"]["combinations"]["economy"]["conditions"] = [
+            {
+                "kind": "matching,ordering",
+                "primary": "domestic_backup",
+                "model": "deepseek-reasoner",
+                "reasoning_effort": "max",
+                "timeout_seconds": 7.5,
+                "retry_attempts": 2,
+            }
+        ]
+        config.save(value)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        service = AIAnswerService(config, bank)
+
+        choice = service.choose("economy", "untimed", question_kind="matching")
+
+        self.assertEqual(choice.endpoint.name, "domestic_backup")
+        self.assertEqual(choice.model, "deepseek-reasoner")
+        self.assertEqual(choice.reasoning_effort, "max")
+        self.assertEqual(choice.timeout_seconds, 7.5)
+        self.assertEqual(choice.retry_attempts, 2)
+
+        calls = []
+
+        def request(_question, _choice, _key, _timeout):
+            calls.append(True)
+            if len(calls) < 3:
+                raise RuntimeError("temporary failure")
+            return {"answer": "A", "confidence": 0.8}, {}
+
+        service._request = request
+        result, _usage = service._request_with_retries({}, choice, "key", 7.5)
+        self.assertEqual(result["answer"], "A")
+        self.assertEqual(len(calls), 3)
 
     def test_ai_fallback_uses_its_own_model_when_primary_is_unavailable(self) -> None:
         config = LocalConfigStore(self.paths.config)
@@ -989,9 +1113,7 @@ class LocalStoreTests(unittest.TestCase):
         for placeholder in (None, " ", [], {}, ["A", ""], {"left": ""}):
             with self.assertRaisesRegex(RuntimeError, "non-empty"):
                 AIAnswerService._validate_answer(question, placeholder)
-        self.assertFalse(
-            AIAnswerService._validate_answer({"kind": "true_false"}, False)
-        )
+        self.assertFalse(AIAnswerService._validate_answer({"kind": "true_false"}, False))
         self.assertEqual(AIAnswerService._validate_answer({"kind": "fill_blank"}, 0), 0)
 
     def test_ai_cache_revalidates_subjective_answer_before_reuse(self) -> None:
@@ -1238,9 +1360,10 @@ class LocalStoreTests(unittest.TestCase):
             "command": '"C:\\Program Files\\Notify\\notify.exe" --quiet',
         }
         config.save(value)
-        with patch("asterism.notifications.os.name", "nt"), patch(
-            "asterism.notifications.subprocess.run"
-        ) as run:
+        with (
+            patch("asterism.notifications.os.name", "nt"),
+            patch("asterism.notifications.subprocess.run") as run,
+        ):
             run.return_value = SimpleNamespace(returncode=0)
             result = NotificationDispatcher(config).send(
                 "failure",
@@ -1304,21 +1427,15 @@ class LocalStoreTests(unittest.TestCase):
         first = {
             "kind": "single_choice",
             "prompt": "Choose image",
-            "options": [
-                {"text": "A", "image": "https://img.example/render?resource=one&sign=old"}
-            ],
+            "options": [{"text": "A", "image": "https://img.example/render?resource=one&sign=old"}],
         }
         refreshed_signature = {
             **first,
-            "options": [
-                {"text": "A", "image": "https://IMG.EXAMPLE/render?sign=new&resource=one"}
-            ],
+            "options": [{"text": "A", "image": "https://IMG.EXAMPLE/render?sign=new&resource=one"}],
         }
         different_resource = {
             **first,
-            "options": [
-                {"text": "A", "image": "https://img.example/render?resource=two&sign=new"}
-            ],
+            "options": [{"text": "A", "image": "https://img.example/render?resource=two&sign=new"}],
         }
         self.assertEqual(
             question_identity("chaoxing", first)[0],
@@ -1477,7 +1594,11 @@ class LocalStoreTests(unittest.TestCase):
             "chaoxing", {"kind": "single_choice", "prompt": "Review", "options": ["A", "B"]}
         )
         repository.record_candidate(
-            question_id, {"option": "A"}, "manual", "correct", source_ref="local_operator",
+            question_id,
+            {"option": "A"},
+            "manual",
+            "correct",
+            source_ref="local_operator",
             details={"reviewed": True},
         )
         evidence = bank.list_answer_evidence(question_id)

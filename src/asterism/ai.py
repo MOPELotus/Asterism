@@ -14,7 +14,7 @@ from .answers import AnswerRepository, canonical_answer, question_identity, rebi
 from .config import LocalConfigStore
 from .database import QuestionBank
 
-REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,8 @@ class ModelChoice:
     model: str
     reasoning_effort: str = "medium"
     fallback: ModelChoice | None = None
+    timeout_seconds: float | None = None
+    retry_attempts: int = 0
 
 
 class AIAnswerService:
@@ -59,7 +61,13 @@ class AIAnswerService:
         self.bank = bank
         self.answers = AnswerRepository(bank)
 
-    def choose(self, combination: str | None = None, route: str = "untimed") -> ModelChoice:
+    def choose(
+        self,
+        combination: str | None = None,
+        route: str = "untimed",
+        *,
+        question_kind: str | None = None,
+    ) -> ModelChoice:
         if route == "escalation":
             # Cidaren uses this transport marker when its instant request
             # timed out; model combinations still configure the timed route.
@@ -72,6 +80,21 @@ class AIAnswerService:
         if not isinstance(selected, Mapping):
             raise ValueError(f"unknown model combination: {combination_name}")
         route_value = selected.get(route)
+        normalized_kind = str(question_kind or "").strip().casefold()
+        for condition in selected.get("conditions", []):
+            if not isinstance(condition, Mapping):
+                continue
+            kinds = condition.get("kinds", condition.get("kind", ""))
+            if isinstance(kinds, str):
+                kinds = [item.strip().casefold() for item in kinds.split(",")]
+            if normalized_kind and normalized_kind in {
+                str(item).strip().casefold() for item in kinds or []
+            }:
+                route_value = {
+                    **(route_value if isinstance(route_value, Mapping) else {}),
+                    **condition,
+                }
+                break
         if not isinstance(route_value, Mapping):
             raise ValueError(f"model combination {combination_name} has no route {route}")
         endpoints = models.get("endpoints", {})
@@ -87,9 +110,17 @@ class AIAnswerService:
                     fallback_route["model"] = route_value["fallback_model"]
                 else:
                     fallback_route.pop("model", None)
+                fallback_route["reasoning_effort"] = route_value.get(
+                    "fallback_reasoning_effort", route_value.get("reasoning_effort", "medium")
+                )
                 fallback = self._choice_from_route(fallback_route, endpoints, "primary")
                 primary = ModelChoice(
-                    primary.endpoint, primary.model, primary.reasoning_effort, fallback
+                    primary.endpoint,
+                    primary.model,
+                    primary.reasoning_effort,
+                    fallback,
+                    primary.timeout_seconds,
+                    primary.retry_attempts,
                 )
             except ValueError:
                 # A disaster endpoint is optional; an empty/malformed fallback
@@ -112,7 +143,21 @@ class AIAnswerService:
         reasoning_effort = str(route_value.get("reasoning_effort") or "medium").casefold()
         if reasoning_effort not in REASONING_EFFORTS:
             raise ValueError(f"unsupported reasoning effort: {reasoning_effort}")
-        return ModelChoice(endpoint, model, reasoning_effort)
+        try:
+            timeout_value = route_value.get("timeout_seconds")
+            timeout_seconds = (
+                max(0.1, float(timeout_value)) if timeout_value not in (None, "") else None
+            )
+            retry_attempts = max(0, int(route_value.get("retry_attempts") or 0))
+        except (TypeError, ValueError) as error:
+            raise ValueError("model timeout and retry values must be numeric") from error
+        return ModelChoice(
+            endpoint,
+            model,
+            reasoning_effort,
+            timeout_seconds=timeout_seconds,
+            retry_attempts=retry_attempts,
+        )
 
     def answer(
         self,
@@ -129,7 +174,10 @@ class AIAnswerService:
         combination_name = combination or str(
             self.config.ensure().get("models", {}).get("default") or "economy"
         )
-        choice = self.choose(combination_name, route)
+        question_kind = str(
+            question.get("kind") or question.get("native_kind") or question.get("type") or ""
+        )
+        choice = self.choose(combination_name, route, question_kind=question_kind)
         identity_hash, _ = question_identity(provider, question)
         question_id = self.bank.question_id(provider, identity_hash)
         evidence = self._evidence_context(question_id) if question_id is not None else []
@@ -153,8 +201,9 @@ class AIAnswerService:
                         "usage": {},
                     }
         evidence_hash = hashlib.sha256(
-            json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            .encode("utf-8")
+            json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
         ).hexdigest()
         cache_key = self.cache_key(
             provider, identity_hash, combination_name, route, choice, evidence_hash=evidence_hash
@@ -165,9 +214,7 @@ class AIAnswerService:
                 response = dict(cached["response"])
                 if "answer" in response:
                     try:
-                        response["answer"] = self._validate_answer(
-                            question, response["answer"]
-                        )
+                        response["answer"] = self._validate_answer(question, response["answer"])
                         response["answer"] = rebind_answer(
                             response["answer"], question.get("options")
                         )
@@ -196,7 +243,12 @@ class AIAnswerService:
             key = choice.endpoint.resolved_key()
             if not key:
                 raise RuntimeError(f"AI endpoint {choice.endpoint.name} has no API key")
-            parsed, usage = self._request(request_question, choice, key, timeout)
+            parsed, usage = self._request_with_retries(
+                request_question,
+                choice,
+                key,
+                choice.timeout_seconds or timeout,
+            )
         except (httpx.HTTPError, RuntimeError) as error:
             primary_error = RuntimeError(
                 f"AI endpoint {choice.endpoint.name} request failed or is unavailable"
@@ -210,7 +262,12 @@ class AIAnswerService:
             if not fallback_key:
                 raise primary_error from error
             try:
-                parsed, usage = self._request(request_question, fallback, fallback_key, timeout)
+                parsed, usage = self._request_with_retries(
+                    request_question,
+                    fallback,
+                    fallback_key,
+                    fallback.timeout_seconds or timeout,
+                )
             except (httpx.HTTPError, RuntimeError) as fallback_error:
                 raise RuntimeError(
                     f"AI primary and fallback endpoints failed: {fallback_error}"
@@ -247,6 +304,7 @@ class AIAnswerService:
     @staticmethod
     def _validate_answer(question: Mapping[str, Any], answer: Any) -> Any:
         """Reject model output that violates the plain-text subjective boundary."""
+
         def ensure_non_empty(value: Any) -> None:
             if value is None or (isinstance(value, str) and not value.strip()):
                 raise RuntimeError("AI answer must be non-empty")
@@ -312,6 +370,17 @@ class AIAnswerService:
         parsed = self.parse_response(body, choice.endpoint.protocol)
         usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
         return parsed, usage
+
+    def _request_with_retries(
+        self, question: dict[str, Any], choice: ModelChoice, key: str, timeout: float
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        last_error: Exception | None = None
+        for _attempt in range(choice.retry_attempts + 1):
+            try:
+                return self._request(question, choice, key, timeout)
+            except (httpx.HTTPError, RuntimeError) as error:
+                last_error = error
+        raise RuntimeError("AI request exhausted configured retries") from last_error
 
     @staticmethod
     def cache_key(

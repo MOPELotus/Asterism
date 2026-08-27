@@ -23,7 +23,7 @@
 
 | 功能 | 必须保留的行为 | 状态 |
 |---|---|---|
-| 课程界面 | 官方顺序章节/知识点树、全选，作业与考试独立列表 | `upstream-proven + desktop-wired + fixture-verified` |
+| 课程界面 | 官方顺序章节/知识点清单、全选，作业与考试独立列表 | `upstream-proven + desktop-wired + fixture-verified` |
 | 完成状态 | 与官方状态一致，保留已完成历史、模块权重和成绩缺口 | `upstream-proven + desktop-wired + fixture-verified` |
 | 音视频 | 视频和音频回退，可配置倍速/并发，执行后重新读取状态 | `upstream-proven + desktop-wired` |
 | 文档/阅读 | 文档完成、普通阅读和累计阅读时长计分 | `upstream-proven + desktop-wired` |
@@ -82,7 +82,7 @@
 | 排除项 | 题号、远端题目 ID、选项 ID/字母和显示顺序不得定义可复用身份 | `desktop-wired + fixture-verified` |
 | 选项绑定 | 按规范化选项内容和媒体语义保存，唯一时才绑定回本次 Provider ID | `desktop-wired + fixture-verified` |
 | 富媒体 | 保留文本、图片、公式、音视频、文件、共享选项、下划线和编号空格的顺序与归属 | `desktop-wired + fixture-verified` |
-| 复杂题 | 连线、排序、组合、阅读、完形、计算、口语/听力和 Provider-native 题可操作 | `upstream-proven + desktop-wired` |
+| 复杂题 | 连线、排序、组合、阅读、完形、计算、口语/听力和 Provider-native 题可操作；正式草稿中的选择、逐空、配对和排序使用对应编辑器，JSON 仅作高级兜底 | `upstream-proven + desktop-wired + fixture-verified` |
 | 证据 | 保存平台、历史、人工和 AI 候选及每次正确/错误/未验证观察 | `desktop-wired + fixture-verified` |
 | 复用 | 全部观察为正确时可复用；有对有错或多个正解时进入仲裁；纯错误为负证据 | `desktop-wired + fixture-verified` |
 | 省钱组合 | Native、精确缓存、可选便宜验证、Luna 限时、Terra 不限时；Router 失败才使用配置的 DeepSeek 国内灾备 | `desktop-wired + fixture-verified` |

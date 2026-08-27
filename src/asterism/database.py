@@ -144,6 +144,11 @@ class QuestionBank:
             ).fetchone()
             return int(row[0]) if row else None
 
+    def question_count(self) -> int:
+        with self.connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM questions").fetchone()
+            return int(row[0]) if row else 0
+
     def get_ai_cache(self, cache_key: str) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(

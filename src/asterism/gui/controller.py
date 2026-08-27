@@ -56,9 +56,9 @@ class DesktopController:
             RunnerManager(registry, paths.logs, states),
             states,
             InventoryStore(states),
-            settings_provider=lambda provider: config_store.ensure()
-            .get("providers", {})
-            .get(provider, {}),
+            settings_provider=lambda provider: (
+                config_store.ensure().get("providers", {}).get(provider, {})
+            ),
         )
         inventory = InventoryStore(states)
         scanner = ReadOnlyScanCoordinator(service, states, inventory, AnswerRepository(bank))
@@ -91,7 +91,7 @@ class DesktopController:
     def install_external_upstream(self, provider: str) -> dict[str, str]:
         """Install a pinned external donor after explicit UI confirmation."""
         if provider != "welearn":
-            raise ValueError("only welearn supports an external donor in this release")
+            raise ValueError("当前仅 Welearn 支持运行时获取外部组件")
         path = resolve_upstream(
             self.service.registry.source_root,
             self.paths.root,
@@ -222,7 +222,9 @@ class DesktopController:
                 cancel=cancel,
                 on_event=on_event,
             )
-            if self._needs_challenge_escalation(profile, task, result, merged_settings):
+            if not merged_settings.get(
+                "_challenge_escalation"
+            ) and self._needs_challenge_escalation(profile, task, result, merged_settings):
                 # The worker can report that a challenge point is still
                 # incomplete after its local state polling. Re-resolve the
                 # answer and replay the point a bounded number of times before
@@ -230,7 +232,7 @@ class DesktopController:
                 # marker keeps escalation and retry calls from recursing.
                 retry_attempts = merged_settings.get("challenge_retry_attempts", 3)
                 try:
-                    retry_attempts = max(0, min(3, int(retry_attempts)))
+                    retry_attempts = max(0, int(retry_attempts))
                 except (TypeError, ValueError):
                     retry_attempts = 3
                 for attempt in range(1, retry_attempts + 1):
@@ -256,34 +258,62 @@ class DesktopController:
                         cancel=cancel,
                         on_event=on_event,
                     )
+                    if not self._needs_challenge_escalation(profile, task, result, retry_settings):
+                        return result
+                combination_name = str(merged_settings.get("answer_combination") or "economy")
+                configured = (
+                    self.config.ensure()
+                    .get("models", {})
+                    .get("combinations", {})
+                    .get(combination_name, {})
+                )
+                has_challenge_route = isinstance(configured, Mapping) and isinstance(
+                    configured.get("challenge"), Mapping
+                )
+                escalation_combination = combination_name if has_challenge_route else "gpt_only"
+                escalation_route = "challenge" if has_challenge_route else "untimed"
+                escalation_route_label = (
+                    escalation_route
+                    if has_challenge_route
+                    else str(merged_settings.get("challenge_escalation_route") or "sol_xhigh")
+                )
+                try:
+                    escalation_attempts = max(
+                        0, int(merged_settings.get("challenge_escalation_attempts", 1))
+                    )
+                except (TypeError, ValueError):
+                    escalation_attempts = 1
+                for escalation_attempt in range(1, escalation_attempts + 1):
+                    escalation_answers = self.prepare_answers(
+                        profile,
+                        task,
+                        combination=escalation_combination,
+                        route=escalation_route,
+                        force_refresh=True,
+                    )
+                    if not escalation_answers:
+                        # Never replay the answer that just failed the challenge;
+                        # an unavailable escalation model leaves the task safely
+                        # incomplete for explicit user inspection.
+                        return result
+                    escalation_settings = dict(merged_settings)
+                    escalation_settings["_challenge_escalation"] = True
+                    escalation_settings["challenge_retry_attempts"] = 1
+                    escalation_settings["challenge_escalation_route"] = escalation_route_label
+                    escalation_settings["_challenge_escalation_attempt"] = escalation_attempt
+                    result = self.service.run_task(
+                        profile,
+                        task,
+                        answers=escalation_answers,
+                        settings=escalation_settings,
+                        cancel=cancel,
+                        on_event=on_event,
+                    )
                     if not self._needs_challenge_escalation(
-                        profile, task, result, retry_settings
+                        profile, task, result, escalation_settings
                     ):
                         return result
-                escalation_answers = self.prepare_answers(
-                    profile,
-                    task,
-                    combination="gpt_only",
-                    route="untimed",
-                    force_refresh=True,
-                )
-                escalation_settings = dict(merged_settings)
-                escalation_settings["_challenge_escalation"] = True
-                escalation_settings["challenge_retry_attempts"] = 1
-                escalation_settings["challenge_escalation_route"] = "sol_xhigh"
-                if not escalation_answers:
-                    # Never replay the answer that just failed the challenge;
-                    # an unavailable escalation model leaves the task safely
-                    # incomplete for explicit user inspection.
-                    return result
-                return self.service.run_task(
-                    profile,
-                    task,
-                    answers=escalation_answers,
-                    settings=escalation_settings,
-                    cancel=cancel,
-                    on_event=on_event,
-                )
+                return result
             return result
 
         bridge = CidarenAnswerBridge(
@@ -326,7 +356,7 @@ class DesktopController:
         result: ProviderOperationResult,
         settings: Mapping[str, Any],
     ) -> bool:
-        if profile.provider != "chaoxing" or settings.get("_challenge_escalation"):
+        if profile.provider != "chaoxing":
             return False
         native = task.get("native")
         if not isinstance(native, Mapping) or native.get("route_kind") != "knowledge_point":
@@ -334,8 +364,7 @@ class DesktopController:
         data = result.data if isinstance(result, ProviderOperationResult) else {}
         details = data.get("result") if isinstance(data, Mapping) else None
         return (
-            isinstance(details, Mapping)
-            and details.get("challenge_escalation_requested") is True
+            isinstance(details, Mapping) and details.get("challenge_escalation_requested") is True
         )
 
     def provider_settings(
@@ -376,9 +405,7 @@ class DesktopController:
             question_id, _identity = repository.ingest_question("cidaren", question)
             outcome_value = document.get("outcome")
             correctness = (
-                outcome_value.get("correctness")
-                if isinstance(outcome_value, dict)
-                else None
+                outcome_value.get("correctness") if isinstance(outcome_value, dict) else None
             )
             outcome = (
                 "correct"
@@ -559,7 +586,7 @@ class DesktopController:
         separate action on the drafts page.
         """
         if not self._is_formal_task(task):
-            raise ValueError("formal draft preparation requires a formal task")
+            raise ValueError("只有正式作业或考试才能生成待确认草稿")
         questions = self.scan_questions(
             profile,
             task,
@@ -612,7 +639,7 @@ class DesktopController:
         total = len(tasks)
         for index, task in enumerate(tasks, 1):
             if cancel is not None and cancel.is_set():
-                raise RuntimeError("formal draft preparation was cancelled")
+                raise RuntimeError("草稿准备已取消")
             if on_event is not None:
                 on_event(
                     {
@@ -759,7 +786,7 @@ class DesktopController:
         question_id = int(question.get("id") or 0)
         content = question.get("content")
         if question_id < 1 or not isinstance(content, Mapping):
-            raise ValueError("question row is incomplete")
+            raise ValueError("题目记录不完整")
         return self.answer_repository().record_candidate(
             question_id,
             canonical_answer(answer, content.get("options")),
@@ -814,16 +841,16 @@ class DesktopController:
         self, draft: FormalDraft, *, assessment_mode: str
     ) -> tuple[Profile, dict[str, Any], list[dict[str, Any]] | None, dict[str, Any]]:
         if draft.status != "draft":
-            raise ValueError("only a draft can be executed")
+            raise ValueError("只有待确认草稿可以执行")
         if assessment_mode not in {"save", "submit"}:
-            raise ValueError("assessment_mode must be save or submit")
+            raise ValueError("正式任务操作必须明确选择保存或提交")
         profile = self.profiles.get(draft.provider, draft.profile_id)
         task = draft.payload.get("task")
         if not isinstance(task, dict):
-            raise ValueError("draft payload.task must be an object")
+            raise ValueError("草稿中的任务必须是 JSON 对象")
         answers = self._normalize_draft_answers(draft.payload.get("answers"))
         if self._is_formal_task(task) and not answers:
-            raise ValueError("formal draft requires at least one reviewed answer")
+            raise ValueError("正式任务草稿至少需要一条已确认答案")
         questions = draft.payload.get("questions")
         if isinstance(questions, list):
             question_ids = {
@@ -834,24 +861,20 @@ class DesktopController:
             answer_ids = {str(row["remote_id"]) for row in answers or ()}
             unknown = sorted(answer_ids - question_ids)
             if unknown:
-                raise ValueError(
-                    "draft contains answers for unknown questions: " + ", ".join(unknown[:8])
-                )
+                raise ValueError(f"草稿包含 {len(unknown)} 条无法对应题目的答案")
             missing = sorted(question_ids - answer_ids)
             if missing:
-                raise ValueError(
-                    "formal draft still has unanswered questions: " + ", ".join(missing[:8])
-                )
+                raise ValueError(f"草稿仍有 {len(missing)} 道题未补充答案")
         settings = draft.payload.get("settings")
         if settings is not None and not isinstance(settings, dict):
-            raise ValueError("draft payload.settings must be an object")
+            raise ValueError("草稿设置必须是 JSON 对象")
         invocation_settings = dict(settings or {})
         invocation_settings["assessment_mode"] = assessment_mode
         return profile, task, answers, invocation_settings
 
     def save_draft_to_provider(self, draft: FormalDraft) -> ProviderOperationResult:
         if draft.provider != "chaoxing":
-            raise ValueError("provider does not expose a verified save-only formal route")
+            raise ValueError("该平台没有已确认可用的只保存正式任务接口")
         profile, task, answers, settings = self._formal_draft_invocation(
             draft, assessment_mode="save"
         )
@@ -866,7 +889,7 @@ class DesktopController:
         if remote_state not in {"completed", "submitted"}:
             raise RunnerError(
                 "submission_unconfirmed",
-                "provider did not confirm final submission; draft remains editable",
+                "平台未确认最终提交，草稿仍保持可编辑",
             )
         self.drafts.set_status(draft, "submitted")
         return result
@@ -887,37 +910,69 @@ class DesktopController:
             else:
                 rows = [{"remote_id": str(key), "value": answer} for key, answer in value.items()]
         else:
-            raise ValueError("draft payload.answers must be an object or array")
+            raise ValueError("草稿答案必须是 JSON 对象或数组")
         normalized: list[dict[str, Any]] = []
         seen_remote_ids: set[str] = set()
         for row in rows:
             if not isinstance(row, Mapping) or not str(row.get("remote_id") or "").strip():
-                raise ValueError("each draft answer must contain a non-empty remote_id")
+                raise ValueError("每条草稿答案都必须对应一个平台题目")
             remote_id = str(row["remote_id"])
             if remote_id in seen_remote_ids:
-                raise ValueError(f"draft contains duplicate answer for question {remote_id}")
+                raise ValueError("草稿中存在重复题目的答案")
             seen_remote_ids.add(remote_id)
             answer = row.get("value")
             if answer is None or (isinstance(answer, str) and not answer.strip()):
-                raise ValueError(
-                    f"draft answer {row['remote_id']} must contain a non-empty value"
-                )
+                raise ValueError("草稿答案不能为空")
             if isinstance(answer, (list, dict)) and not answer:
-                raise ValueError(
-                    f"draft answer {row['remote_id']} must contain a non-empty value"
-                )
+                raise ValueError("草稿答案不能为空")
             normalized.append({"remote_id": remote_id, "value": answer})
         return normalized
 
     def draft_rows(self) -> list[dict[str, Any]]:
-        return [
-            {
+        rows = []
+        for draft in self.drafts.list():
+            task = draft.payload.get("task")
+            task = task if isinstance(task, Mapping) else {}
+            task_title = str(
+                draft.payload.get("task_title")
+                or draft.payload.get("title")
+                or task.get("title")
+                or task.get("name")
+                or "待确认任务"
+            )
+            rows.append({
                 "id": draft.id,
                 "provider": draft.provider,
                 "profile_id": draft.profile_id,
                 "task_ref": draft.task_ref,
+                "task_title": task_title,
                 "status": draft.status,
                 "updated_at": draft.updated_at,
-            }
-            for draft in self.drafts.list()
-        ]
+            })
+        return rows
+
+    def dashboard_counts(self) -> dict[str, int]:
+        """Count only locally cached data; opening the home page never contacts a provider."""
+        profile_count = course_count = task_count = 0
+        for provider in ("chaoxing", "welearn", "uai", "cidaren"):
+            for profile in self.profiles.list(provider):
+                profile_count += 1
+                try:
+                    courses = self.inventory.load_courses(profile)
+                except (OSError, TypeError, ValueError):
+                    continue
+                course_count += len(courses)
+                for course in courses:
+                    remote_id = str(course.get("remote_id") or "").strip()
+                    if not remote_id:
+                        continue
+                    try:
+                        task_count += len(self.inventory.load_tasks(profile, remote_id))
+                    except (OSError, TypeError, ValueError):
+                        continue
+        return {
+            "profiles": profile_count,
+            "courses": course_count,
+            "tasks": task_count,
+            "bank": self.bank.question_count(),
+        }

@@ -113,10 +113,10 @@ Checkpoint：四个平台现有能力都能从本地入口加载；一个 Runner
 Profile 或桌面进程；不需要 Asterism 用户、Token 或 Scheduler。
 
 当前证据：四个固定 donor 均通过入口 hash 校验和无账号 `health`；原 Worker 53 项测试与
-本地控制层与 GUI/AI/扫描控制层 111 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
+本地控制层、GUI/AI/扫描及打包控制层 145 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
 进程树兜底均已接入，且数据库中不存在用户、权限、计费或调度表。
 
-### C2：四平台与共享能力接线
+### C2：四平台与共享能力接线（代码与 Fixture 已完成）
 
 这不是重新开发阶段。逐项检查 `FEATURE_MATRIX.md`：
 
@@ -130,7 +130,7 @@ Profile 或桌面进程；不需要 Asterism 用户、Token 或 Scheduler。
 Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并全部
 `desktop-wired`；不得存在只能从旧 WebUI 使用的遗留功能。
 
-### C3：桌面 UI 与交互收口
+### C3：桌面 UI 与交互收口（已完成）
 
 - 使用 PyQt-Fluent-Widgets 免费版的 `FluentWindow`/`MSFluentWindow` 作为主窗口，配合
   `NavigationInterface`、`CardWidget`、`InfoBar`、`MessageBox`、`PrimaryPushButton`、
@@ -138,14 +138,16 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
   `SwitchButton`、`CheckBox` 和 `ScrollArea` 等免费组件构建页面；不再以裸 `QMainWindow`、
   裸 Qt 输入控件作为用户可见控件。Pro 专属组件不作为依赖。
 - 主窗口必须是真正的 Fluent 窗口（标题栏、导航、主题切换由库处理），页面按 home、provider、
-  drafts、question bank、settings 等模块拆分，禁止拼成巨型窗口文件。
-- 用户可见文案采用简体中文为默认语言，并提供 English 切换；平台 ID、配置键、Runner 协议和
-  日志字段始终保留英文标识。语言切换只改变 UI 文案，不改变 Profile、数据文件或协议字段。
+  drafts、AI、settings 等模块拆分，禁止拼成巨型窗口文件。
+- 首版用户可见文案统一使用简体中文，不提供未完整覆盖的语言切换；平台 ID、配置键、Runner
+  协议和内部日志字段保持稳定英文标识，但不得把内部字段名、远端 ID 或凭据直接暴露在操作界面。
 - 实现 PyQt6 Fluent 模块化应用壳和首次启动流程。
 - 首次启动显示本地数据目录、凭据边界、只读验证顺序和草稿确认规则；确认状态写入本地配置，
   不创建额外用户或权限实体。
 - 完成四个平台、多 Profile、课程/任务、刷新、执行、取消、进度和日志页面。
 - 完成独立作业/考试、待确认草稿、编辑和明确提交。
+- 正式草稿按题型提供单选、判断、多选、逐空填写、连线配对、排序移动和主观纯文本编辑器；
+  高级 JSON 只作为 Provider-native 或诊断兜底，不作为普通操作入口。
 - 完成题库、证据、模型组合、扫描状态、重试和设置能力；题库作为执行过程中的后台能力，
   不单独占用主导航页面，必要的缓存状态和证据通过任务日志/设置入口查看。
 - 完成手动批量执行及可选成功/失败通知。
@@ -175,6 +177,10 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
 
 Checkpoint：所有矩阵能力均能从桌面 UI 到达。优先使用组件测试、数据驱动页面检查和
 自动化 UI smoke，不要求机械地逐按钮人工验收。
+
+当前证据：主窗口已拆分为独立主页、Provider、草稿、AI 与设置页面；普通提示、确认、输入、
+账号、授权、详情和草稿编辑均使用 Fluent 弹窗。运行时已检查浅色/深色主题、100%、125%、
+150% 和 200% DPI、长文本换行、父窗口居中、空状态、按钮连接、异步互斥及运行中退出保护。
 
 ### C4：集中真实只读验证
 
@@ -241,5 +247,5 @@ Checkpoint：目标机器无需 Python、Node、Rust、管理员权限、服务�
 - `docs/THIRD_PARTY_NOTICES.md`：donor 来源、版本、版权和许可证。
 - `CHANGELOG.md`：用户可见的版本变化。
 
-用户文档以操作结果为中心，不记录迁移争论和内部历史。产品稳定后再增加英文入口，避免
-快速开发期同时维护两套容易失真的文档。
+用户文档以操作结果为中心，不记录迁移争论和内部历史。只有在所有页面、弹窗、状态和错误
+都能完整翻译后才考虑增加其他语言入口，避免出现局部英文和文案长期漂移。
