@@ -480,6 +480,45 @@ class LocalStoreTests(unittest.TestCase):
         service.run_task(profile, {"remote_id": "task-1"})
         self.assertEqual(captured["settings"]["duration_seconds"], 42)
 
+    def test_provider_service_reauthenticates_once_after_session_invalid(self) -> None:
+        calls: list[tuple[str, dict, dict]] = []
+
+        class FakeRegistry:
+            def get(self, provider):
+                return SimpleNamespace(provider=provider)
+
+        class FakeRunner:
+            def invoke(self, _spec, operation, payload, **kwargs):
+                calls.append((operation, dict(payload), dict(kwargs)))
+                course_attempts = sum(item[0] == "courses" for item in calls)
+                if operation == "courses" and course_attempts == 1:
+                    raise RunnerError("session_invalid", "stored session expired")
+                if operation == "courses":
+                    return SimpleNamespace(data={"courses": []})
+                return SimpleNamespace(data={"session": {"refreshed": True}})
+
+        profile = ProfileStore(self.paths).create("chaoxing", "reauth")
+        profile = replace(
+            profile,
+            credentials={"username": "alice", "password": "plain-local"},
+            settings={"speed": 2},
+        )
+        inventory = SimpleNamespace(save_courses=lambda _profile, _courses: None)
+        service = ProviderService(
+            FakeRegistry(),
+            FakeRunner(),
+            ProfileStateStore(self.paths),
+            inventory,
+        )
+
+        result = service.courses(profile)
+
+        self.assertEqual(result.data, {"courses": []})
+        self.assertEqual([item[0] for item in calls], ["courses", "authenticate", "courses"])
+        self.assertEqual(calls[1][1], {"settings": {"speed": 2}})
+        self.assertIs(calls[1][2]["profile"], profile)
+        self.assertIs(calls[2][2]["profile"], profile)
+
     def test_cidaren_answer_bridge_is_loopback_scoped_and_dispatches_observations(self) -> None:
         resolved: list[dict] = []
         observed: list[dict] = []
