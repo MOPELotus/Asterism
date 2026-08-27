@@ -49,3 +49,22 @@ class PortableValidationTests(unittest.TestCase):
             (package / "unexpected.dll").write_bytes(b"unlisted")
             with self.assertRaises(SystemExit):
                 validator.verify_manifest(package, manifest)
+
+    def test_manifest_verification_rejects_symlinks(self) -> None:
+        validator = load_validator()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            payload = package / "Asterism.exe"
+            payload.write_bytes(b"portable")
+            digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            manifest = package / "SHA256SUMS.json"
+            manifest.write_text(
+                json.dumps({"files": {"Asterism.exe": digest}}), encoding="utf-8"
+            )
+            link = package / "unexpected.dll"
+            try:
+                link.symlink_to(payload)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+            with self.assertRaises(SystemExit):
+                validator.verify_manifest(package, manifest)

@@ -17,10 +17,15 @@ def sha256(path: Path) -> str:
 
 
 def verify_manifest(package: Path, manifest_path: Path) -> dict[str, str]:
+    package_root = package.resolve()
+    manifest_resolved = manifest_path.resolve()
+    if manifest_path.is_symlink() or (
+        manifest_resolved != package_root and package_root not in manifest_resolved.parents
+    ):
+        raise SystemExit("portable manifest must be a regular file inside the package")
     value = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or not isinstance(value.get("files"), dict):
         raise SystemExit("portable manifest must contain a files object")
-    package_root = package.resolve()
     verified: dict[str, str] = {}
     for raw_name, expected in value["files"].items():
         name = str(raw_name)
@@ -39,8 +44,17 @@ def verify_manifest(package: Path, manifest_path: Path) -> dict[str, str]:
     actual_files = {
         path.relative_to(package_root).as_posix()
         for path in package_root.rglob("*")
-        if path.is_file() and path.resolve() != manifest_path.resolve()
+        if path.is_file() and not path.is_symlink() and path.resolve() != manifest_resolved
     }
+    symlinks = [
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
+        if path.is_symlink()
+    ]
+    if symlinks:
+        raise SystemExit(
+            "portable package contains unsupported symlinks: " + ", ".join(symlinks[:8])
+        )
     listed_files = set(verified)
     missing = sorted(listed_files - actual_files)
     extra = sorted(actual_files - listed_files)
