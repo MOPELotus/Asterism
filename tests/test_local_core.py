@@ -459,6 +459,29 @@ class LocalStoreTests(unittest.TestCase):
             question_identity("chaoxing", first)[0], question_identity("chaoxing", second)[0]
         )
 
+    def test_question_identity_ignores_cidaren_remote_topic_context(self) -> None:
+        first = {
+            "kind": "single_choice",
+            "prompt": "选择正确答案",
+            "options": [{"answer_tag": 0, "content": "甲"}, {"answer_tag": 1, "content": "乙"}],
+            "native": {
+                "topic_code": "topic-a",
+                "course_id": "course-a",
+                "task_id": "task-a",
+            },
+        }
+        second = {
+            **first,
+            "native": {
+                "topic_code": "topic-b",
+                "course_id": "course-b",
+                "task_id": "task-b",
+            },
+        }
+        self.assertEqual(
+            question_identity("cidaren", first)[0], question_identity("cidaren", second)[0]
+        )
+
     def test_option_answer_rebinds_by_content_after_random_order(self) -> None:
         original_options = ["Alpha", "Beta", "Gamma"]
         rotated_options = ["Gamma", "Alpha", "Beta"]
