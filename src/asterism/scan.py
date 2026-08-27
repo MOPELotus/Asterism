@@ -158,13 +158,17 @@ class ReadOnlyScanCoordinator:
                     # unique. Scope the resume key by course so a task with
                     # the same remote ID in another course is still scanned.
                     task_ref = self._task_ref(course_id, task_id)
-                    if task_ref in status.completed_task_refs or (
+                    legacy_ref = (
                         task_id in status.completed_task_refs
                         and not any(
                             item.endswith(f"::{task_id}")
                             for item in status.completed_task_refs
                         )
-                    ):
+                    )
+                    if task_ref in status.completed_task_refs or legacy_ref:
+                        if legacy_ref:
+                            status.completed_task_refs.remove(task_id)
+                            status.completed_task_refs.append(task_ref)
                         status.completed_tasks += 1
                         status.cursor = task_ref
                         self._save(status, on_update)
