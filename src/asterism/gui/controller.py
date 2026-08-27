@@ -20,7 +20,7 @@ from ..notifications import NotificationDispatcher, NotificationResult
 from ..paths import DataPaths, application_root
 from ..profiles import Profile, ProfileStateStore, ProfileStore
 from ..providers import ProviderRegistry
-from ..runner import RunnerError, RunnerManager
+from ..runner import RunnerManager
 from ..scan import ReadOnlyScanCoordinator, ScanStatus
 from ..service import ProviderOperationResult, ProviderService
 
@@ -495,7 +495,9 @@ class DesktopController:
                         else None
                     ),
                 )
-            except (OSError, ValueError, RunnerError):
+            except Exception:
+                # A malformed donor payload must be isolated to this Profile;
+                # the remaining local accounts still need their own scan.
                 status = self.scanner.status(profile)
             results.append(status)
         return results

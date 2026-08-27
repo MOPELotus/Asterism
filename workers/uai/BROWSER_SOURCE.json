@@ -5,6 +5,5 @@
   "license": "GPL-3.0",
   "entrypoint": "unipus_ai_auto_player.user.js",
   "entrypoint_sha256": "62b8aa849bee99adc6c6204f8300f006443e339fbb1844c908bc8b28bb8c7984",
-  "license": "GPL-3.0",
   "capability": "course_page_residence_and_video"
 }
