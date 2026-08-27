@@ -104,6 +104,7 @@ class AISettingsPage(QWidget):
         super().__init__()
         self.controller = controller
         self._scan_thread = None
+        self._pending_combo: dict[str, Any] | None = None
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         scroll = ScrollArea(); scroll.setWidgetResizable(True); content = QWidget(); scroll.setWidget(content); configure_scroll_area(scroll); outer.addWidget(scroll)
         root = QVBoxLayout(content); root.setContentsMargins(28, 24, 28, 28); root.setSpacing(14)
@@ -197,7 +198,9 @@ class AISettingsPage(QWidget):
     def _refresh_challenge_models(self): self._fill_models(self.challenge_model, str(self.challenge_site.currentData() or ""))
 
     def load_combo(self):
-        name = self.combo_choice.currentData(); combinations = self._models().setdefault("combinations", {}); value = combinations.get(name, {}) if name else {}; self.name.setText(str(name or ""))
+        name = self.combo_choice.currentData(); combinations = self._models().setdefault("combinations", {})
+        value = self._pending_combo if self._pending_combo is not None else combinations.get(name, {}) if name else {}
+        self._pending_combo = None; self.name.setText(str(name or ""))
         for route, fields in self.route_cards.items():
             row = value.get(route, {}) if isinstance(value.get(route), dict) else {}
             for key, field in (("primary", "primary"), ("fallback", "fallback"), ("effort", "reasoning_effort")):
@@ -237,7 +240,11 @@ class AISettingsPage(QWidget):
     def _scan_done(self, name, models): self._endpoints()[name]["models"] = models; self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload(); _notice(self, "扫描模型", f"已读取 {len(models)} 个模型。")
     def new_combo(self): self._open_new_combo({})
     def copy_combo(self): self._open_new_combo(deepcopy(self._models().setdefault("combinations", {}).get(self.combo_choice.currentData(), {})))
-    def _open_new_combo(self, value): self.name.clear(); self.combo_choice.setCurrentIndex(-1); self.load_combo()
+    def _open_new_combo(self, value):
+        self._pending_combo = deepcopy(value)
+        self.name.clear()
+        self.combo_choice.setCurrentIndex(-1)
+        self.load_combo()
     def delete_combo(self):
         name = self.combo_choice.currentData()
         if name: self._models().setdefault("combinations", {}).pop(name, None); self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload()
