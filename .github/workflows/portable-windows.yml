@@ -56,6 +56,24 @@ jobs:
           Invoke-CheckedNative 'local tests' { python -W error::ResourceWarning -m unittest discover -s tests }
           Invoke-CheckedNative 'worker tests' { python workers/run_tests.py }
           Invoke-CheckedNative 'GUI smoke tests' { python -m unittest tests.test_gui_smoke -v }
+      - name: Validate PowerShell scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -Path . -Recurse -Filter *.ps1 |
+            Where-Object { $_.FullName -notmatch '[\\/](\.venv|target|build|release)[\\/]' }
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName, [ref] $tokens, [ref] $errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $messages = ($errors | ForEach-Object { $_.Message }) -join '; '
+              throw "PowerShell parse error in $($file.FullName): $messages"
+            }
+          }
+          Write-Host "PowerShell parser validation passed for $($files.Count) files"
       - name: Build portable ZIP
         shell: pwsh
         run: >-
