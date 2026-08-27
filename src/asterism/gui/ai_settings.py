@@ -6,7 +6,14 @@ from typing import Any
 
 import httpx
 from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtWidgets import QDialog, QFormLayout, QHBoxLayout, QTableWidgetItem, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .fluent import (
     BodyLabel,
