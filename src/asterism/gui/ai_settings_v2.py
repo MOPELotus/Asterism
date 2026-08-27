@@ -218,6 +218,16 @@ class AISettingsPage(QWidget):
 
     def _models(self): return self.controller.config.ensure().setdefault("models", {})
     def _endpoints(self): return self._models().setdefault("endpoints", {})
+    @staticmethod
+    def _selected_value(combo: ComboBox, fallback: list[str] | None = None) -> str | None:
+        value = combo.currentData()
+        if value not in (None, ""):
+            return str(value)
+        index = combo.currentIndex()
+        if fallback is not None and 0 <= index < len(fallback):
+            return str(fallback[index])
+        text = combo.currentText().strip()
+        return text or None
     def reload(self):
         self.endpoint_names = list(self._endpoints())
         self.site_choice.blockSignals(True); self.site_choice.clear()
@@ -320,14 +330,14 @@ class AISettingsPage(QWidget):
 
     def add_site(self): self._edit_site("")
     def edit_site(self):
-        name = self.site_choice.currentData()
+        name = self._selected_value(self.site_choice, self.endpoint_names)
         if name: self._edit_site(name)
     def _edit_site(self, name):
         endpoints = self._endpoints(); dialog = _EndpointDialog(list(endpoints), name, endpoints.get(name), self)
         if dialog.exec() != QDialog.DialogCode.Accepted: return
         new, value = dialog.value(); value["models"] = endpoints.get(name, {}).get("models", []); endpoints.pop(name, None) if name and name != new else None; endpoints[new] = value; self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload(); self.site_choice.setCurrentText(new)
     def delete_site(self):
-        name = self.site_choice.currentData()
+        name = self._selected_value(self.site_choice, self.endpoint_names)
         if not name:
             _notice(self, "删除站点", "当前没有可删除的站点。")
             return
@@ -343,7 +353,7 @@ class AISettingsPage(QWidget):
     def _scan_done(self, name, models): self._endpoints()[name]["models"] = models; self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload(); _notice(self, "扫描模型", f"已读取 {len(models)} 个模型。")
     def new_combo(self): self._open_new_combo({})
     def copy_combo(self):
-        current_id = str(self.combo_choice.currentData() or "")
+        current_id = self._selected_value(self.combo_choice, self.combination_names) or ""
         current = self._models().setdefault("combinations", {}).get(current_id, {})
         current_display = (current or {}).get("display_name") or {"economy": "默认", "gpt_only": "高级"}.get(current_id, current_id)
         self._open_new_combo(deepcopy(current), suggested_id=f"{current_id}_copy" if current_id else "new_combo", suggested_display_name=f"{current_display} 副本")
@@ -366,7 +376,7 @@ class AISettingsPage(QWidget):
         self.combo_choice.blockSignals(False)
         self.load_combo()
     def delete_combo(self):
-        name = self.combo_choice.currentData()
+        name = self._selected_value(self.combo_choice, self.combination_names)
         if not name:
             _notice(self, "删除组合", "当前没有可删除的组合。")
             return
