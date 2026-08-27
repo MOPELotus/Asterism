@@ -12,11 +12,9 @@ from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDialog,
-    QDialogButtonBox,
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -41,6 +39,7 @@ from .fluent import (
     FluentIcon,
     FluentWindow,
     LineEdit,
+    MessageBox,
     NavigationItemPosition,
     PrimaryPushButton,
     PushButton,
@@ -78,6 +77,48 @@ def clear_layout(layout) -> None:
             item.widget().deleteLater()
         if item.layout() is not None:
             clear_layout(item.layout())
+
+
+def show_notice(parent: QWidget, title: str, message: str, level: str = "info") -> None:
+    """Use Fluent dialogs in the desktop build and native dialogs in headless fallback."""
+    if FLUENT_AVAILABLE:
+        MessageBox(title, message, parent).exec()
+        return
+    handler = {
+        "warning": QMessageBox.warning,
+        "error": QMessageBox.critical,
+    }.get(level, QMessageBox.information)
+    handler(parent, title, message)
+
+
+def ask_confirmation(parent: QWidget, title: str, message: str) -> bool:
+    if FLUENT_AVAILABLE:
+        return MessageBox(title, message, parent).exec() == QDialog.DialogCode.Accepted
+    return (
+        QMessageBox.question(parent, title, message)
+        == QMessageBox.StandardButton.Yes
+    )
+
+
+def ask_text(parent: QWidget, title: str, prompt: str, default: str = "") -> tuple[str, bool]:
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(BodyLabel(prompt))
+    editor = LineEdit(default)
+    layout.addWidget(editor)
+    actions = QHBoxLayout()
+    cancel = PushButton("取消")
+    cancel.clicked.connect(dialog.reject)
+    confirm = PrimaryPushButton("确定")
+    confirm.clicked.connect(dialog.accept)
+    actions.addWidget(cancel)
+    actions.addWidget(confirm)
+    actions.addStretch(1)
+    layout.addLayout(actions)
+    dialog.resize(460, 150)
+    accepted = dialog.exec() == QDialog.DialogCode.Accepted
+    return editor.text(), accepted
 
 
 class HomePage(QWidget):
@@ -369,12 +410,12 @@ class ProviderPage(QWidget):
     def profile(self) -> Profile | None:
         profile_id = self.profile_combo.currentData()
         if not profile_id:
-            QMessageBox.warning(self, self.provider, "请先选择 Profile")
+            show_notice(self, self.provider, "请先选择 Profile", "warning")
             return None
         try:
             return self.controller.profiles.get(self.provider, str(profile_id))
         except (OSError, ValueError) as error:
-            QMessageBox.critical(self, self.provider, str(error))
+            show_notice(self, self.provider, str(error), "error")
             return None
 
     def create_profile(self) -> None:
@@ -443,7 +484,7 @@ class ProviderPage(QWidget):
             dialog.close()
             self.reload_profiles()
         except (OSError, ValueError) as error:
-            QMessageBox.critical(self, self.provider, str(error))
+            show_notice(self, self.provider, str(error), "error")
 
     def edit_profile(self) -> None:
         profile = self.profile()
@@ -528,7 +569,7 @@ class ProviderPage(QWidget):
             dialog.close()
             self.reload_profiles()
         except (OSError, ValueError) as error:
-            QMessageBox.critical(self, self.provider, str(error))
+            show_notice(self, self.provider, str(error), "error")
 
     @staticmethod
     def _json_object(text: str, name: str) -> dict[str, Any]:
@@ -544,25 +585,20 @@ class ProviderPage(QWidget):
         profile = self.profile()
         if profile is None:
             return
-        if (
-            QMessageBox.question(
-                self,
-                self.provider,
-                "删除本地 Profile 及其会话状态？日志和草稿会保留。",
-            )
-            != QMessageBox.StandardButton.Yes
+        if not ask_confirmation(
+            self, self.provider, "删除本地 Profile 及其会话状态？日志和草稿会保留。"
         ):
             return
         try:
             self.controller.delete_profile(profile)
             self.reload_profiles()
-            self.log.append(f"[profile] deleted {profile.id}")
+            self.log.append("[profile] 已删除")
         except (OSError, ValueError) as error:
-            QMessageBox.critical(self, self.provider, str(error))
+            show_notice(self, self.provider, str(error), "error")
 
     def _call(self, callback, label: str) -> None:
         if self.worker_thread is not None and self.worker_thread.isRunning():
-            QMessageBox.information(self, self.provider, "已有操作正在运行")
+            show_notice(self, self.provider, "已有操作正在运行")
             return
         self.log.append(f"[{label}] starting")
         self.cancel_event = threading.Event()
@@ -680,8 +716,8 @@ class ProviderPage(QWidget):
                 draft_values = [item for item in result if hasattr(item, "id")]
             elif isinstance(result, dict):
                 draft_values = [item for item in result.get("drafts", []) if hasattr(item, "id")]
-            for draft in draft_values:
-                self.log.append(f"[draft] {draft.id}")
+            for _draft in draft_values:
+                self.log.append("[draft] 已生成待确认草稿")
             if draft_values:
                 window = self.window()
                 if isinstance(window, MainWindow):
@@ -837,13 +873,8 @@ class ProviderPage(QWidget):
     def install_donor(self) -> None:
         if self.provider != "welearn":
             return
-        if (
-            QMessageBox.question(
-                self,
-                "welearn",
-                "将从固定 revision 获取外部 donor。是否允许使用系统 Git或联网下载？",
-            )
-            != QMessageBox.StandardButton.Yes
+        if not ask_confirmation(
+            self, "welearn", "将从固定 revision 获取外部 donor。是否允许使用系统 Git 或联网下载？"
         ):
             return
         self._call(
@@ -890,16 +921,16 @@ class ProviderPage(QWidget):
 
     def _ask_concurrency(self) -> int | None:
         """Read a positive worker count without imposing a product cap."""
-        value, accepted = QInputDialog.getText(self, self.provider, "并发数", text="1")
+        value, accepted = ask_text(self, self.provider, "并发数", "1")
         if not accepted:
             return None
         try:
             concurrency = int(value.strip())
         except (TypeError, ValueError):
-            QMessageBox.warning(self, self.provider, "并发数必须是正整数")
+            show_notice(self, self.provider, "并发数必须是正整数", "warning")
             return None
         if concurrency < 1:
-            QMessageBox.warning(self, self.provider, "并发数必须是正整数")
+            show_notice(self, self.provider, "并发数必须是正整数", "warning")
             return None
         return concurrency
 
@@ -931,7 +962,7 @@ class ProviderPage(QWidget):
         profile = self.profile()
         row = self.course_table.currentRow()
         if not profile or row < 0 or row >= len(self.current_courses):
-            QMessageBox.warning(self, self.provider, "请先同步并选择 course")
+            show_notice(self, self.provider, "请先同步并选择课程", "warning")
             return
         course = self.current_courses[row]
         self._call(
@@ -945,16 +976,11 @@ class ProviderPage(QWidget):
         profile = self.profile()
         task = self._selected_task()
         if not profile or task is None:
-            QMessageBox.warning(self, self.provider, "请先同步并选择 task")
+            show_notice(self, self.provider, "请先同步并选择任务", "warning")
             return
         allow_attempt = (
             self.provider == "cidaren"
-            and QMessageBox.question(
-                self,
-                "cidaren",
-                "该读取路径可能建立远端答题尝试，是否明确授权？",
-            )
-            == QMessageBox.StandardButton.Yes
+            and ask_confirmation(self, "cidaren", "该读取路径可能建立远端答题尝试，是否明确授权？")
         )
         self._call(
             lambda on_event: self.controller.scan_questions(
@@ -970,7 +996,7 @@ class ProviderPage(QWidget):
     def show_task_detail(self) -> None:
         task = self._selected_task()
         if task is None:
-            QMessageBox.warning(self, self.provider, "请先同步并选择 task")
+            show_notice(self, self.provider, "请先同步并选择任务", "warning")
             return
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{self.provider} task detail")
@@ -991,12 +1017,9 @@ class ProviderPage(QWidget):
             return
         allow_attempt = (
             profile.provider == "cidaren"
-            and QMessageBox.question(
-                self,
-                "cidaren",
-                "全量读取 class task 可能建立远端答题尝试，是否明确授权？",
+            and ask_confirmation(
+                self, "cidaren", "全量读取 class task 可能建立远端答题尝试，是否明确授权？"
             )
-            == QMessageBox.StandardButton.Yes
         )
         self._call(
             lambda on_event: self.controller.scan_all(
@@ -1059,13 +1082,8 @@ class ProviderPage(QWidget):
     def scan_profiles(self) -> None:
         if self.provider != "chaoxing":
             return
-        if (
-            QMessageBox.question(
-                self,
-                "chaoxing",
-                "按本地 Profile 逐个执行可恢复的只读全量扫描？失败账号会记录并继续。",
-            )
-            != QMessageBox.StandardButton.Yes
+        if not ask_confirmation(
+            self, "chaoxing", "按本地 Profile 逐个执行可恢复的只读全量扫描？失败账号会记录并继续。"
         ):
             return
         self._call(
@@ -1087,17 +1105,14 @@ class ProviderPage(QWidget):
         profile = self.profile()
         task = self._selected_task()
         if not profile or task is None:
-            QMessageBox.warning(self, self.provider, "请先同步并选择 task")
+            show_notice(self, self.provider, "请先同步并选择任务", "warning")
             return
         if self._is_formal(task):
-            if (
-                QMessageBox.question(
-                    self,
-                    self.provider,
-                    "读取正式任务可能建立答题尝试或启动倒计时。继续后仅生成预填草稿，"
-                    "不会最终提交；提交仍需在 drafts 页面二次确认。是否继续？",
-                )
-                != QMessageBox.StandardButton.Yes
+            if not ask_confirmation(
+                self,
+                self.provider,
+                "读取正式任务可能建立答题尝试或启动倒计时。继续后仅生成预填草稿，"
+                "不会最终提交；提交仍需在草稿页面二次确认。是否继续？",
             ):
                 return
             combination = self._execution_combination()
@@ -1167,7 +1182,7 @@ class ProviderPage(QWidget):
             {index.row() for index in self.formal_table.selectionModel().selectedRows()}
         )
         if not profile or not (routine_rows or formal_rows):
-            QMessageBox.warning(self, self.provider, "请先选择一个或多个 task")
+            show_notice(self, self.provider, "请先选择一个或多个任务", "warning")
             return
         routine = [
             self.current_routine_tasks[row]
@@ -1179,16 +1194,11 @@ class ProviderPage(QWidget):
             for row in formal_rows
             if 0 <= row < len(self.current_formal_tasks)
         ]
-        if (
-            formal
-            and QMessageBox.question(
-                self,
-                self.provider,
-                f"读取选中的 {len(formal)} 个正式任务可能建立答题尝试或启动倒计时。"
-                "继续后仅生成预填草稿，不会最终提交；提交仍需在 drafts 页面二次确认。"
-                "是否继续？",
-            )
-            != QMessageBox.StandardButton.Yes
+        if formal and not ask_confirmation(
+            self,
+            self.provider,
+            f"读取选中的 {len(formal)} 个正式任务可能建立答题尝试或启动倒计时。"
+            "继续后仅生成预填草稿，不会最终提交；提交仍需在草稿页面二次确认。是否继续？",
         ):
             return
         combination = self._execution_combination()
@@ -1282,7 +1292,7 @@ class ProviderPage(QWidget):
         profile = self.profile()
         task = self._selected_task()
         if not profile or task is None:
-            QMessageBox.warning(self, self.provider, "请先同步并选择 task")
+            show_notice(self, self.provider, "请先同步并选择任务", "warning")
             return
         self._call(
             lambda on_event: self.controller.read_duration(
@@ -1295,7 +1305,7 @@ class ProviderPage(QWidget):
         profile = self.profile()
         task = self._selected_task()
         if not profile or task is None:
-            QMessageBox.warning(self, self.provider, "请先同步并选择 task")
+            show_notice(self, self.provider, "请先同步并选择任务", "warning")
             return
         self._call(
             lambda on_event: self.controller.inspect_task(
@@ -1316,7 +1326,7 @@ class ProviderPage(QWidget):
         profile = self.profile()
         if not profile:
             return
-        callback_url, accepted = QInputDialog.getText(self, "cidaren", "粘贴微信确认后的回调链接")
+        callback_url, accepted = ask_text(self, "cidaren", "粘贴微信确认后的回调链接")
         if accepted and callback_url.strip():
             self._call(
                 lambda on_event: self.controller.service.oauth_exchange(
@@ -1408,7 +1418,7 @@ class DraftPage(QWidget):
     def _selected(self):
         row = self.table.currentRow()
         if row < 0 or row >= len(self.current_rows):
-            QMessageBox.warning(self, "drafts", "请先选择草稿")
+            show_notice(self, "草稿", "请先选择草稿", "warning")
             return None
         value = self.current_rows[row]
         try:
@@ -1416,7 +1426,7 @@ class DraftPage(QWidget):
                 str(value["provider"]), str(value["profile_id"]), str(value["id"])
             )
         except (OSError, TypeError, ValueError, KeyError) as error:
-            QMessageBox.critical(self, "drafts", str(error))
+            show_notice(self, "草稿", str(error), "error")
             return None
 
     def _operation_running(self) -> bool:
@@ -1425,7 +1435,7 @@ class DraftPage(QWidget):
     def _refuse_if_busy(self) -> bool:
         if not self._operation_running():
             return False
-        QMessageBox.information(self, "drafts", "已有草稿保存或提交操作正在运行")
+        show_notice(self, "草稿", "已有草稿保存或提交操作正在运行")
         return True
 
     def edit_selected(self) -> None:
@@ -1442,10 +1452,10 @@ class DraftPage(QWidget):
                 if not isinstance(payload, dict):
                     raise ValueError("草稿内容必须是 JSON object")
                 self.controller.update_draft(draft, payload)
-                self.log.append(f"[draft] saved {draft.id}")
+                self.log.append("[draft] 草稿已保存")
                 self.reload()
             except (OSError, TypeError, ValueError) as error:
-                QMessageBox.critical(dialog, "drafts", str(error))
+                show_notice(dialog, "草稿", str(error), "error")
 
         dialog.saved.connect(save_payload)
         dialog.show()
@@ -1457,18 +1467,11 @@ class DraftPage(QWidget):
         if draft is None:
             return
         if draft.status != "draft":
-            QMessageBox.information(self, "drafts", "只有 draft 状态可以提交")
+            show_notice(self, "草稿", "只有草稿状态可以提交")
             return
-        if (
-            QMessageBox.question(
-                self,
-                "drafts",
-                "将使用当前草稿答案调用平台原生提交，确认继续？",
-            )
-            != QMessageBox.StandardButton.Yes
-        ):
+        if not ask_confirmation(self, "草稿", "将使用当前草稿答案调用平台原生提交，确认继续？"):
             return
-        self.log.append(f"[draft] submitting {draft.id}")
+        self.log.append("[draft] 正在提交草稿")
         self.worker_thread = CallThread(lambda _on_event: self.controller.submit_draft(draft))
         self.worker_thread.succeeded.connect(self._submit_succeeded)
         self.worker_thread.failed.connect(lambda error: self.log.append(f"[draft] ERROR {error}"))
@@ -1481,21 +1484,14 @@ class DraftPage(QWidget):
         if draft is None:
             return
         if draft.provider != "chaoxing":
-            QMessageBox.information(self, "drafts", "该 Provider 没有已确认的只保存接口")
+            show_notice(self, "草稿", "该平台没有已确认的只保存接口")
             return
         if draft.status != "draft":
-            QMessageBox.information(self, "drafts", "只有 draft 状态可以保存")
+            show_notice(self, "草稿", "只有草稿状态可以保存")
             return
-        if (
-            QMessageBox.question(
-                self,
-                "drafts",
-                "将当前答案保存到平台，但不执行最终提交。确认继续？",
-            )
-            != QMessageBox.StandardButton.Yes
-        ):
+        if not ask_confirmation(self, "草稿", "将当前答案保存到平台，但不执行最终提交。确认继续？"):
             return
-        self.log.append(f"[draft] saving without final submit {draft.id}")
+        self.log.append("[draft] 正在保存到平台（不提交）")
         self.worker_thread = CallThread(
             lambda _on_event: self.controller.save_draft_to_provider(draft)
         )
@@ -1515,10 +1511,7 @@ class DraftPage(QWidget):
         draft = self._selected()
         if draft is None:
             return
-        if (
-            QMessageBox.question(self, "drafts", "确认丢弃这份草稿？")
-            == QMessageBox.StandardButton.Yes
-        ):
+        if ask_confirmation(self, "草稿", "确认丢弃这份草稿？"):
             self.controller.drafts.set_status(draft, "discarded")
             self.reload()
 
@@ -1631,16 +1624,16 @@ class QuestionBankPage(QWidget):
     def answer_selected(self) -> None:
         row = self.table.currentRow()
         if row < 0 or row >= len(self.rows):
-            QMessageBox.warning(self, "question bank", "请先选择题目")
+            show_notice(self, "题库", "请先选择题目", "warning")
             return
         value = self.rows[row]
         provider = str(value.get("provider") or "")
         question = value.get("content")
         if not provider or not isinstance(question, dict):
-            QMessageBox.warning(self, "question bank", "题目内容不完整")
+            show_notice(self, "题库", "题目内容不完整", "warning")
             return
         if self.worker_thread is not None and self.worker_thread.isRunning():
-            QMessageBox.information(self, "question bank", "已有 AI 请求正在运行")
+            show_notice(self, "题库", "已有 AI 请求正在运行")
             return
         combination = str(self.combination.currentData() or "economy")
         route = str(self.route.currentData() or "untimed")
@@ -1661,7 +1654,7 @@ class QuestionBankPage(QWidget):
     def _selected_question(self) -> dict[str, Any] | None:
         row = self.table.currentRow()
         if row < 0 or row >= len(self.rows):
-            QMessageBox.warning(self, "question bank", "请先选择题目")
+            show_notice(self, "题库", "请先选择题目", "warning")
             return None
         return self.rows[row]
 
@@ -1672,7 +1665,7 @@ class QuestionBankPage(QWidget):
         try:
             value = self.controller.question_evidence(int(question["id"]))
         except (KeyError, OSError, TypeError, ValueError) as error:
-            QMessageBox.critical(self, "question bank", str(error))
+            show_notice(self, "题库", str(error), "error")
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("候选与证据")
@@ -1703,7 +1696,7 @@ class QuestionBankPage(QWidget):
         def persist() -> None:
             text = editor.toPlainText().strip()
             if not text:
-                QMessageBox.warning(dialog, "question bank", "答案不能为空")
+                show_notice(dialog, "题库", "答案不能为空", "warning")
                 return
             try:
                 try:
@@ -1714,7 +1707,7 @@ class QuestionBankPage(QWidget):
                 self.log.append(f"[manual] saved candidate {candidate_id}")
                 dialog.close()
             except (OSError, TypeError, ValueError) as error:
-                QMessageBox.critical(dialog, "question bank", str(error))
+                show_notice(dialog, "题库", str(error), "error")
 
         save.clicked.connect(persist)
         dialog.resize(620, 360)
@@ -1796,7 +1789,7 @@ class SettingsPage(QWidget):
             value = json.loads(self.editor.toPlainText())
             self.controller.config.save(value)
         except (ValueError, OSError, TypeError) as error:
-            QMessageBox.critical(self, "settings", str(error))
+            show_notice(self, "设置", str(error), "error")
 
     def apply_selected_theme(self) -> None:
         try:
@@ -1907,12 +1900,15 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
                 "然后先执行 health、登录和课程只读刷新。正式作业/考试仍需在草稿页人工确认。"
             )
         )
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        buttons = QHBoxLayout()
+        cancel = PushButton("稍后设置")
+        cancel.clicked.connect(dialog.reject)
+        confirm = PrimaryPushButton("开始使用")
+        confirm.clicked.connect(dialog.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(confirm)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
         dialog.resize(620, 300)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             config["onboarding_completed"] = True

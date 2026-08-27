@@ -9,15 +9,16 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QHBoxLayout,
-    QMessageBox,
     QTableWidgetItem,
     QVBoxLayout,
 )
 
 from .fluent import (
+    FLUENT_AVAILABLE,
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    MessageBox,
     PrimaryPushButton,
     PushButton,
     StrongBodyLabel,
@@ -26,6 +27,15 @@ from .fluent import (
     TitleLabel,
     configure_table,
 )
+
+
+def draft_notice(parent, title: str, message: str, *, error: bool = False) -> None:
+    if FLUENT_AVAILABLE:
+        MessageBox(title, message, parent).exec()
+        return
+    from PyQt6.QtWidgets import QMessageBox
+
+    (QMessageBox.critical if error else QMessageBox.warning)(parent, title, message)
 
 
 class FormalDraftEditor(QDialog):
@@ -124,7 +134,7 @@ class FormalDraftEditor(QDialog):
     def _selected_question(self) -> dict[str, Any] | None:
         row = self.table.currentRow()
         if row < 0 or row >= len(self.questions):
-            QMessageBox.warning(self, "formal draft", "请先选择题目")
+            draft_notice(self, "草稿", "请先选择题目")
             return None
         return self.questions[row]
 
@@ -195,7 +205,7 @@ class FormalDraftEditor(QDialog):
                 self.questions = [dict(item) for item in questions if isinstance(item, dict)]
                 self.answers = self._answer_map(value.get("answers"))
             except (TypeError, ValueError, json.JSONDecodeError) as error:
-                QMessageBox.critical(dialog, "formal draft", str(error))
+                draft_notice(dialog, "草稿", str(error), error=True)
                 return
             dialog.accept()
             self.reload()
