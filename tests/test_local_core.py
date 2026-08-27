@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -702,6 +703,25 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(len(evidence), 2)
         self.assertEqual({row["source_kind"] for row in evidence}, {"native", "history"})
         self.assertNotIn("must-not-be-sent", json.dumps(evidence))
+
+    def test_ai_cache_key_changes_when_evidence_changes(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question = {"kind": "single_choice", "prompt": "Cache evidence", "options": ["A", "B"]}
+        question_id, _identity = repository.ingest_question("chaoxing", question)
+        service = AIAnswerService(config, bank)
+        first = service._evidence_context(question_id)
+        first_hash = hashlib.sha256(
+            json.dumps(first, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        repository.record_candidate(question_id, {"option": "A"}, "native", "correct")
+        second = service._evidence_context(question_id)
+        second_hash = hashlib.sha256(
+            json.dumps(second, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        self.assertNotEqual(first_hash, second_hash)
 
     def test_ai_escalation_route_uses_timed_model_configuration(self) -> None:
         config = LocalConfigStore(self.paths.config)

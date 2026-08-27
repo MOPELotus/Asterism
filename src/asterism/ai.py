@@ -130,6 +130,8 @@ class AIAnswerService:
         )
         choice = self.choose(combination_name, route)
         identity_hash, _ = question_identity(provider, question)
+        question_id = self.bank.question_id(provider, identity_hash)
+        evidence = self._evidence_context(question_id) if question_id is not None else []
         if not force_refresh:
             exact = self.answers.resolve_exact(provider, identity_hash)
             if exact.status == "exact":
@@ -146,7 +148,13 @@ class AIAnswerService:
                         "cached": True,
                         "usage": {},
                     }
-        cache_key = self.cache_key(provider, identity_hash, combination_name, route, choice)
+        evidence_hash = hashlib.sha256(
+            json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            .encode("utf-8")
+        ).hexdigest()
+        cache_key = self.cache_key(
+            provider, identity_hash, combination_name, route, choice, evidence_hash=evidence_hash
+        )
         if not force_refresh:
             cached = self.bank.get_ai_cache(cache_key)
             if cached is not None:
@@ -170,7 +178,6 @@ class AIAnswerService:
                     }
         used_choice = choice
         request_question = dict(question)
-        question_id = self.bank.question_id(provider, identity_hash)
         if question_id is not None:
             evidence = self._evidence_context(question_id)
             if evidence:
@@ -266,6 +273,8 @@ class AIAnswerService:
         combination: str,
         route: str,
         choice: ModelChoice,
+        *,
+        evidence_hash: str = "",
     ) -> str:
         raw = "\0".join(
             (
@@ -276,6 +285,7 @@ class AIAnswerService:
                 choice.endpoint.name,
                 choice.model,
                 choice.reasoning_effort,
+                evidence_hash,
             )
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
