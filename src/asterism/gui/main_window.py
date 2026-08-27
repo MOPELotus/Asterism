@@ -89,6 +89,11 @@ def make_title(text: str) -> TitleLabel:
     return label
 
 
+def display_provider(provider: str) -> str:
+    """Human-facing provider label; internal IDs remain lowercase and stable."""
+    return provider[:1].upper() + provider[1:] if provider else provider
+
+
 def show_notice(parent: QWidget, title: str, message: str, level: str = "info") -> None:
     """Use Fluent dialogs in the desktop build and native dialogs in headless fallback."""
     if FLUENT_AVAILABLE:
@@ -223,7 +228,9 @@ class HomePage(QWidget):
         self.metric_labels["profiles"].setText(str(sum(counts.values())))
         self.summary.setText(
             "Profile："
-            + "，".join(f"{provider} {counts[provider]}" for provider in PROVIDER_IDS)
+            + "，".join(
+                f"{display_provider(provider)} {counts[provider]}" for provider in PROVIDER_IDS
+            )
             + f"\n数据目录：{self.controller.paths.root}\n"
             "从平台页完成认证后，课程和任务会显示在对应页面。"
         )
@@ -250,6 +257,7 @@ class ProviderPage(QWidget):
         super().__init__()
         self.controller = controller
         self.provider = provider
+        self.provider_label = display_provider(provider)
         self.current_profile: Profile | None = None
         self.current_courses: list[dict[str, Any]] = []
         self.current_tasks: list[dict[str, Any]] = []
@@ -274,7 +282,7 @@ class ProviderPage(QWidget):
         intro_layout = QVBoxLayout(intro)
         intro_layout.setContentsMargins(20, 16, 20, 16)
         intro_layout.setSpacing(6)
-        intro_layout.addWidget(make_title(f"{provider} 账号"))
+        intro_layout.addWidget(make_title(f"{self.provider_label} 账号"))
         intro_layout.addWidget(
             BodyLabel("先创建或选择一个本地 Profile，再点击认证。认证成功后即可读取课程和任务。")
         )
@@ -476,7 +484,7 @@ class ProviderPage(QWidget):
 
     def create_profile(self) -> None:
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"{self.provider} Profile")
+        dialog.setWindowTitle(f"{self.provider_label} Profile")
         form = QFormLayout(dialog)
         label = LineEdit()
         label.setPlaceholderText("显示名称")
@@ -547,7 +555,7 @@ class ProviderPage(QWidget):
         if profile is None:
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"{self.provider} Profile")
+        dialog.setWindowTitle(f"{self.provider_label} Profile")
         form = QFormLayout(dialog)
         label = LineEdit(profile.label)
         username = LineEdit(str(profile.credentials.get("username") or ""))
@@ -891,7 +899,7 @@ class ProviderPage(QWidget):
             return
         profile = self.profile_combo.currentText().strip()
         context = self._activity_context()
-        text = f"{self.provider} · {profile} · {operation}"
+        text = f"{self.provider_label} · {profile} · {operation}"
         if context:
             text += f"\n{context}"
         if message:
@@ -1118,7 +1126,7 @@ class ProviderPage(QWidget):
             show_notice(self, self.provider, "请先同步并选择任务", "warning")
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"{self.provider} task detail")
+        dialog.setWindowTitle(f"{self.provider_label} task detail")
         layout = QVBoxLayout(dialog)
         viewer = TextEdit()
         viewer.setReadOnly(True)
@@ -1163,7 +1171,7 @@ class ProviderPage(QWidget):
             return
         status = self.controller.scan_status(profile)
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"{self.provider} scan status")
+        dialog.setWindowTitle(f"{self.provider_label} scan status")
         layout = QVBoxLayout(dialog)
         table = TableWidget()
         table.setColumnCount(2)
