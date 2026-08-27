@@ -12,6 +12,8 @@ try:
 
     from asterism.gui.fluent import (
         LineEdit,
+        PushButton,
+        TableWidget,
         TextEdit,
         ThemeMode,
         apply_theme,
@@ -143,5 +145,42 @@ class GuiSmokeTests(unittest.TestCase):
             viewer = dialog.findChildren(TextEdit)[0]
             self.assertTrue(viewer.isReadOnly())
             self.assertNotIn("secret", viewer.toPlainText())
+            dialog.close()
+            window.close()
+
+    def test_scan_status_dialog_exposes_progress_fields_and_retry_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            page = next(
+                page
+                for page in window.pages
+                if isinstance(page, ProviderPage) and page.provider == "chaoxing"
+            )
+            profile = page.controller.profiles.create("chaoxing", "scan-status")
+            page.reload_profiles()
+            page.profile_combo.setCurrentIndex(page.profile_combo.findData(profile.id))
+            page.controller.states.save(
+                profile,
+                "scan",
+                {
+                    "state": "failed",
+                    "phase": "questions:task-1",
+                    "course_count": 2,
+                    "task_count": 4,
+                    "question_count": 7,
+                    "completed_tasks": 3,
+                    "retries": 2,
+                    "cursor": "task-3",
+                    "last_error": "network",
+                },
+            )
+            page.scan_status()
+            dialog = next(
+                child
+                for child in page.findChildren(QWidget)
+                if child.windowTitle() == "chaoxing scan status"
+            )
+            self.assertIn("question_count", dialog.findChildren(TableWidget)[0].item(4, 0).text())
+            self.assertTrue(dialog.findChildren(PushButton))
             dialog.close()
             window.close()

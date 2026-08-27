@@ -863,8 +863,41 @@ class ProviderPage(QWidget):
         if profile is None:
             return
         status = self.controller.scan_status(profile)
-        preview = json.dumps(self._safe_preview(status), ensure_ascii=False)
-        self.log.append(f"[scan status] {preview}")
+        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog.setWindowTitle(f"{self.provider} scan status")
+        layout = QVBoxLayout(dialog)
+        table = TableWidget()
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["field", "value"])
+        values = (
+            ("state", status.state),
+            ("phase", status.phase),
+            ("course_count", status.course_count),
+            ("task_count", status.task_count),
+            ("question_count", status.question_count),
+            ("completed_tasks", status.completed_tasks),
+            ("retries", status.retries),
+            ("cursor", status.cursor),
+            ("last_error", status.last_error),
+            ("updated_at", status.updated_at),
+        )
+        table.setRowCount(len(values))
+        for row, (key, value) in enumerate(values):
+            table.setItem(row, 0, QTableWidgetItem(str(key)))
+            table.setItem(row, 1, QTableWidgetItem(str(value)))
+        configure_table(table)
+        layout.addWidget(table)
+        actions = QHBoxLayout()
+        retry = PushButton("重新扫描当前 Profile")
+        retry.clicked.connect(lambda: (dialog.close(), self.scan_all()))
+        actions.addWidget(retry)
+        close = PushButton("关闭")
+        close.clicked.connect(dialog.close)
+        actions.addWidget(close)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        dialog.resize(720, 520)
+        dialog.show()
 
     def scan_profiles(self) -> None:
         if self.provider != "chaoxing":
