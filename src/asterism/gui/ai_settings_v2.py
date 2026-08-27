@@ -118,8 +118,11 @@ class AISettingsPage(QWidget):
         site_buttons.addStretch(1); sl.addLayout(site_buttons); root.addWidget(site_card)
         combo_card = CardWidget(); cl = QVBoxLayout(combo_card); cl.setContentsMargins(20, 16, 20, 16); cl.addWidget(StrongBodyLabel("答案组合")); self.combo_choice = ComboBox(); cl.addWidget(self.combo_choice)
         combo_buttons = QHBoxLayout()
+        self.delete_combo_button = None
         for text, callback in (("新建组合", self.new_combo), ("复制当前", self.copy_combo), ("删除当前", self.delete_combo)):
             button = PrimaryPushButton(text) if text == "新建组合" else PushButton(text); button.clicked.connect(callback); combo_buttons.addWidget(button)
+            if text == "删除当前":
+                self.delete_combo_button = button
         combo_buttons.addStretch(1); cl.addLayout(combo_buttons); root.addWidget(combo_card)
         self.name = LineEdit(); self.name.setPlaceholderText("组合标识，例如 daily")
         name_card = CardWidget(); nl = QFormLayout(name_card); nl.setContentsMargins(20, 16, 20, 16); nl.addRow("当前组合标识", self.name); root.addWidget(name_card)
@@ -165,7 +168,9 @@ class AISettingsPage(QWidget):
         self.site_choice.blockSignals(False)
         self.combo_choice.blockSignals(True); self.combo_choice.clear(); combinations = self._models().setdefault("combinations", {})
         self.combination_names = list(combinations)
-        for name in self.combination_names: self.combo_choice.addItem(name, name)
+        display_names = {"economy": "默认", "gpt_only": "高级"}
+        for name in self.combination_names:
+            self.combo_choice.addItem(display_names.get(name, name), name)
         self.combo_choice.blockSignals(False); self._refresh_route_endpoints(); self._refresh_condition_endpoints(); self._refresh_challenge_endpoints(); self.load_combo()
 
     def _refresh_route_endpoints(self):
@@ -247,4 +252,9 @@ class AISettingsPage(QWidget):
         self.load_combo()
     def delete_combo(self):
         name = self.combo_choice.currentData()
-        if name: self._models().setdefault("combinations", {}).pop(name, None); self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload()
+        if name:
+            self._models().setdefault("combinations", {}).pop(name, None)
+            if self._models().get("default") == name:
+                self._models()["default"] = next(iter(self._models()["combinations"]), "")
+            self.controller.config.save({**self.controller.config.ensure(), "models": self._models()})
+            self.reload()

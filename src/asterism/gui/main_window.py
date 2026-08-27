@@ -442,9 +442,10 @@ class ProviderPage(QWidget):
         models = self.controller.config.ensure().get("models", {})
         combinations = models.get("combinations", {})
         default = models.get("default", "economy")
+        display_names = {"economy": "默认", "gpt_only": "高级"}
         for name in combinations:
             self.execution_combination.addItem(
-                f"{name}{'（默认）' if name == default else ''}", name
+                f"{display_names.get(name, name)}{'（默认）' if name == default else ''}", name
             )
         if self.execution_combination.count() == 0:
             self.execution_combination.addItem("省钱组合", "economy")
