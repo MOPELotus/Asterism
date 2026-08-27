@@ -20,7 +20,7 @@ from ..notifications import NotificationDispatcher, NotificationResult
 from ..paths import DataPaths, application_root
 from ..profiles import Profile, ProfileStateStore, ProfileStore
 from ..providers import ProviderRegistry
-from ..runner import RunnerManager
+from ..runner import RunnerError, RunnerManager
 from ..scan import ReadOnlyScanCoordinator, ScanStatus
 from ..service import ProviderOperationResult, ProviderService
 
@@ -849,6 +849,12 @@ class DesktopController:
             draft, assessment_mode="submit"
         )
         result = self.run_task(profile, task, answers=answers, settings=settings)
+        remote_state = str(result.data.get("remote_state") or "").casefold()
+        if remote_state not in {"completed", "submitted"}:
+            raise RunnerError(
+                "submission_unconfirmed",
+                "provider did not confirm final submission; draft remains editable",
+            )
         self.drafts.set_status(draft, "submitted")
         return result
 

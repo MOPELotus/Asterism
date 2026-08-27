@@ -447,7 +447,8 @@ class LocalStoreTests(unittest.TestCase):
         profile = controller.profiles.create("chaoxing", "formal-modes")
         controller.drafts = SimpleNamespace(set_status=lambda draft, status: calls.append(status))
         controller.run_task = lambda profile, task, *, answers, settings: (
-            calls.append(settings["assessment_mode"]) or SimpleNamespace(data={})
+            calls.append(settings["assessment_mode"])
+            or SimpleNamespace(data={"remote_state": "submitted"})
         )
         draft = SimpleNamespace(
             status="draft",
@@ -467,6 +468,34 @@ class LocalStoreTests(unittest.TestCase):
         controller.save_draft_to_provider(draft)
         controller.submit_draft(draft)
         self.assertEqual(calls, ["save", "submit", "submitted"])
+
+    def test_formal_draft_stays_draft_when_provider_does_not_confirm_submission(self) -> None:
+        calls: list[str] = []
+        controller = object.__new__(DesktopController)
+        controller.profiles = ProfileStore(self.paths)
+        profile = controller.profiles.create("chaoxing", "unconfirmed-submit")
+        controller.drafts = SimpleNamespace(set_status=lambda _draft, status: calls.append(status))
+        controller.run_task = lambda *_args, **_kwargs: ProviderOperationResult(
+            "run", {"remote_state": "in_progress"}, SimpleNamespace()
+        )
+        draft = SimpleNamespace(
+            status="draft",
+            provider="chaoxing",
+            profile_id=profile.id,
+            payload={
+                "task": {
+                    "remote_id": "work-1",
+                    "assessment_class": "formal",
+                    "native": {"route_kind": "course_homework"},
+                },
+                "questions": [{"remote_id": "q-1"}],
+                "answers": [{"remote_id": "q-1", "value": "A"}],
+                "settings": {},
+            },
+        )
+        with self.assertRaisesRegex(RunnerError, "did not confirm"):
+            controller.submit_draft(draft)
+        self.assertEqual(calls, [])
 
     def test_formal_draft_reads_prefills_and_never_submits(self) -> None:
         log_path = self.paths.logs / "formal-read.jsonl"
