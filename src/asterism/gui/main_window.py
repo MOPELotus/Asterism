@@ -10,7 +10,6 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -35,6 +34,7 @@ from .fluent import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    CheckBox,
     ComboBox,
     FLUENT_AVAILABLE,
     FluentIcon,
@@ -380,7 +380,7 @@ class ProviderPage(QWidget):
         settings_json = TextEdit()
         settings_json.setPlainText("{}")
         settings_json.setPlaceholderText("该 Profile 覆盖的 Provider 设置 JSON")
-        enabled = QCheckBox("参与全 Profile 手动扫描")
+        enabled = CheckBox("参与全 Profile 手动扫描")
         enabled.setChecked(True)
         form.addRow("label", label)
         form.addRow("username", username)
@@ -456,7 +456,7 @@ class ProviderPage(QWidget):
         )
         settings_json = TextEdit()
         settings_json.setPlainText(json.dumps(profile.settings, ensure_ascii=False, indent=2))
-        enabled = QCheckBox("参与全 Profile 手动扫描")
+        enabled = CheckBox("参与全 Profile 手动扫描")
         enabled.setChecked(profile.enabled)
         form.addRow("label", label)
         form.addRow("username", username)

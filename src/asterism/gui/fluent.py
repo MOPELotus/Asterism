@@ -5,7 +5,16 @@ from enum import StrEnum
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton, QTableWidget, QTextEdit, QWidget
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTableWidget,
+    QTextEdit,
+    QWidget,
+)
 
 
 class ThemeMode(StrEnum):
@@ -26,6 +35,7 @@ try:  # qfluentwidgets is optional during headless development and CI.
         BodyLabel,
         CardWidget,
         CaptionLabel,
+        CheckBox,
         FluentIcon,
         FluentWindow,
         MSFluentWindow,
@@ -48,6 +58,7 @@ try:  # qfluentwidgets is optional during headless development and CI.
 except ImportError:  # pragma: no cover - exercised on minimal dev environments
     BodyLabel = QLabel
     CaptionLabel = QLabel
+    CheckBox = QCheckBox
     StrongBodyLabel = QLabel
     TitleLabel = QLabel
     SubtitleLabel = QLabel
