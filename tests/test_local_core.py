@@ -770,6 +770,15 @@ class LocalStoreTests(unittest.TestCase):
         self.assertTrue(
             any(item["type"] == "input_file" for item in file_request["input"][0]["content"])
         )
+        media_question = {
+            "kind": "listening",
+            "prompt": "听音频回答",
+            "media": {"type": "audio", "url": "https://example.test/listen.mp3"},
+        }
+        media_request = service.build_request(media_question, choice)
+        self.assertTrue(
+            any(item["type"] == "input_file" for item in media_request["input"][0]["content"])
+        )
         generic_question = {
             "kind": "single_choice",
             "prompt": "link",

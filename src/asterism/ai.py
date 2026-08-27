@@ -402,7 +402,12 @@ class AIAnswerService:
                 item_type = str(item.get("type") or item.get("mime_type") or "").casefold()
                 if "image" in item_type:
                     local_hint = "image"
-                elif "file" in item_type or "attachment" in item_type:
+                elif (
+                    "file" in item_type
+                    or "attachment" in item_type
+                    or "audio" in item_type
+                    or "video" in item_type
+                ):
                     local_hint = "file"
                 for key, child in item.items():
                     name = str(key).casefold()
@@ -426,7 +431,15 @@ class AIAnswerService:
                             )
                     elif (
                         isinstance(child, str)
-                        and name in {"file", "file_url", "attachment", "attachment_url"}
+                        and name
+                        in {
+                            "file",
+                            "file_url",
+                            "attachment",
+                            "attachment_url",
+                            "audio_url",
+                            "video_url",
+                        }
                         and child.startswith(("http://", "https://"))
                     ):
                         found.append({"type": "input_file", "file_url": child})
