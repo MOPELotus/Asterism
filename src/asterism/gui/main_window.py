@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 
 from ..constants import PROVIDER_IDS
 from ..profiles import Profile
+from .ai_settings import AISettingsPage as ModelAISettingsPage
 from .controller import DesktopController
 from .draft_editor import FormalDraftEditor
 from .fluent import (
@@ -2092,7 +2093,7 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
         for provider in PROVIDER_IDS:
             self.add_page(provider, ProviderPage(self.controller, provider))
         self.add_page("drafts", DraftPage(self.controller))
-        self.add_page("ai", AISettingsPage(self.controller))
+        self.add_page("ai", ModelAISettingsPage(self.controller))
         self.add_page("settings", SettingsPage(self.controller))
         if not FLUENT_AVAILABLE:
             self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex)
