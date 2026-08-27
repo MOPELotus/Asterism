@@ -1447,7 +1447,15 @@ class DraftPage(QWidget):
         self.controller = controller
         self.current_rows: list[dict[str, Any]] = []
         self.worker_thread: CallThread | None = None
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = ScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        root = QVBoxLayout(content)
         root.setContentsMargins(28, 24, 28, 28)
         root.setSpacing(14)
         intro = CardWidget()
@@ -1823,7 +1831,15 @@ class SettingsPage(QWidget):
     def __init__(self, controller: DesktopController):
         super().__init__()
         self.controller = controller
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = ScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        root = QVBoxLayout(content)
         root.setContentsMargins(28, 24, 28, 28)
         root.setSpacing(14)
         intro = CardWidget()
