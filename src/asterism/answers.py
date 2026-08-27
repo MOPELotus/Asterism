@@ -58,6 +58,11 @@ EPHEMERAL_KEYS = {
     "password",
     "cookie",
     "token",
+    "access_token",
+    "authorization",
+    "authorization_url",
+    "callback_url",
+    "api_key",
 }
 OPTION_KEYS = {"options", "choices", "choice", "option_list"}
 SIGNED_URL_KEYS = {

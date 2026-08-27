@@ -1293,6 +1293,21 @@ class LocalStoreTests(unittest.TestCase):
             question_identity("chaoxing", first)[0], question_identity("chaoxing", second)[0]
         )
 
+    def test_question_identity_drops_authentication_artifacts_from_native_payload(self) -> None:
+        question = {
+            "kind": "provider_native",
+            "prompt": "题目",
+            "native": {
+                "authorization_url": "https://login.example/callback?code=secret",
+                "callback_url": "https://127.0.0.1/?token=secret",
+                "access_token": "secret-token",
+                "stable_value": "kept",
+            },
+        }
+        canonical = canonical_question(question)
+        self.assertEqual(canonical["native"], {"stable_value": "kept"})
+        self.assertNotIn("secret", json.dumps(canonical))
+
     def test_question_identity_ignores_cidaren_remote_topic_context(self) -> None:
         first = {
             "kind": "single_choice",
