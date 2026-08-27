@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from asterism.ai import AIAnswerService
 from asterism.answers import (
     AnswerRepository,
+    ResolvedAnswer,
     canonical_answer,
     canonical_question,
     question_identity,
@@ -495,6 +496,20 @@ class LocalStoreTests(unittest.TestCase):
             identity,
             question_identity("chaoxing", {**question, "options": ["Beta", "Alpha"]})[0],
         )
+
+    def test_stale_exact_cache_falls_through_instead_of_returning_wrong_option(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        question = {"kind": "single_choice", "prompt": "Changed", "options": ["Alpha", "Beta"]}
+        service = AIAnswerService(config, bank)
+        service.answers.resolve_exact = lambda _provider, _identity: ResolvedAnswer(
+            "exact", {"option": {"text": "Missing"}}
+        )
+        # A stale cache answer must not be returned or raise during rebinding;
+        # it falls through to the configured AI endpoint instead.
+        with self.assertRaises(RuntimeError):
+            service.answer("chaoxing", question)
 
     def test_notifications_are_disabled_by_default(self) -> None:
         config = LocalConfigStore(self.paths.config)

@@ -127,28 +127,41 @@ class AIAnswerService:
         if not force_refresh:
             exact = self.answers.resolve_exact(provider, identity_hash)
             if exact.status == "exact":
-                return {
-                    "answer": {
-                        "answer": rebind_answer(exact.answer, question.get("options")),
-                        "confidence": 1.0,
-                    },
-                    "source": "local_cache",
-                    "cached": True,
-                    "usage": {},
-                }
+                try:
+                    rebound = rebind_answer(exact.answer, question.get("options"))
+                except ValueError:
+                    # A stale or ambiguous option set must not block a fresh
+                    # AI request; retain the record as evidence only.
+                    rebound = None
+                if rebound is not None:
+                    return {
+                        "answer": {"answer": rebound, "confidence": 1.0},
+                        "source": "local_cache",
+                        "cached": True,
+                        "usage": {},
+                    }
         cache_key = self.cache_key(provider, identity_hash, combination_name, route, choice)
         if not force_refresh:
             cached = self.bank.get_ai_cache(cache_key)
             if cached is not None:
                 response = dict(cached["response"])
                 if "answer" in response:
-                    response["answer"] = rebind_answer(response["answer"], question.get("options"))
-                return {
-                    "answer": response,
-                    "source": "ai_cache",
-                    "cached": True,
-                    "usage": cached["usage"],
-                }
+                    try:
+                        response["answer"] = rebind_answer(
+                            response["answer"], question.get("options")
+                        )
+                    except ValueError:
+                        # The cache key is identity-bound, but a provider may
+                        # still change an option's semantic content. Treat it
+                        # as a miss instead of returning a wrong binding.
+                        response = {}
+                if response:
+                    return {
+                        "answer": response,
+                        "source": "ai_cache",
+                        "cached": True,
+                        "usage": cached["usage"],
+                    }
         used_choice = choice
         try:
             if not choice.endpoint.base_url:
