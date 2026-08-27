@@ -135,6 +135,8 @@ class PortableValidationTests(unittest.TestCase):
             with patch.object(builder, "run", side_effect=fake_run), self.assertRaises(SystemExit):
                 builder.build_executable("python", output, entry, "worker", [], gui=False)
             self.assertIn("--include-module=common.runtime", captured["command"])
+            self.assertIn("--include-package=requests", captured["command"])
+            self.assertIn("--include-package=Cryptodome", captured["command"])
             self.assertTrue(captured["env"]["PYTHONPATH"].startswith(str(builder.ROOT / "workers")))
 
     def test_browser_smoke_requires_marker_and_zero_exit(self) -> None:

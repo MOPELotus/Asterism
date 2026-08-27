@@ -21,6 +21,27 @@ SOURCE_LOCATIONS = (
     (Path("workers/uai/BROWSER_SOURCE.json"), Path("upstreams/uai-browser")),
     (Path("workers/cidaren/SOURCE.json"), Path("upstreams/cidaren")),
 )
+FREEZE_PACKAGES = (
+    # Donor modules are loaded dynamically from resources at runtime, so
+    # Nuitka cannot discover these imports from the worker source alone.
+    "requests",
+    "bs4",
+    "Crypto",
+    "Cryptodome",
+    "cryptography",
+    "jwt",
+    "yarl",
+    "yaml",
+    "rich",
+    "loguru",
+    "tenacity",
+    "tqdm",
+    "brotli",
+    "cv2",
+    "numpy",
+    "qrcode",
+    "spacy",
+)
 
 
 def validate_native_architecture(architecture: str) -> None:
@@ -361,6 +382,7 @@ def build_executable(
         f"--output-filename={name}.exe",
         "--follow-imports",
         "--include-module=common.runtime",
+        *(f"--include-package={package}" for package in FREEZE_PACKAGES),
         *(["--enable-plugin=pyqt6", "--windows-console-mode=disable"] if gui else []),
         *include_data,
         str(entry),
