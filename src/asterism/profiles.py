@@ -115,7 +115,13 @@ class ProfileStore:
             if not directory.exists():
                 continue
             for path in sorted(directory.glob("*.json")):
-                result.append(Profile.from_dict(read_json_object(path)))
+                try:
+                    result.append(Profile.from_dict(read_json_object(path)))
+                except (OSError, TypeError, ValueError, KeyError):
+                    # A hand-edited or interrupted Profile must not prevent
+                    # the remaining local accounts from loading. Keep the
+                    # malformed file untouched so the operator can repair it.
+                    continue
         return sorted(result, key=lambda item: (item.provider, item.label.casefold(), item.id))
 
     def delete(self, provider: str, profile_id: str) -> None:

@@ -574,6 +574,15 @@ class LocalStoreTests(unittest.TestCase):
         )
         self.assertTrue(updated.enabled)
 
+    def test_profile_listing_isolates_malformed_account_files(self) -> None:
+        profiles = ProfileStore(self.paths)
+        valid = profiles.create("chaoxing", "valid")
+        malformed = self.paths.accounts / "chaoxing" / "malformed.json"
+        malformed.write_text('{"enabled":"false"}', encoding="utf-8")
+        listed = profiles.list("chaoxing")
+        self.assertEqual([profile.id for profile in listed], [valid.id])
+        self.assertTrue(malformed.exists())
+
     def test_provider_service_applies_global_defaults_to_run(self) -> None:
         captured = {}
 
