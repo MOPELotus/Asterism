@@ -628,7 +628,7 @@ class ProviderPage(QWidget):
                 "failure",
                 provider=self.provider,
                 operation=label,
-                summary={"status": "failure", "error_code": error[:120]},
+                summary={"status": "failure", "error_code": "operation_failed"},
             )
         self.cancel_button.setEnabled(False)
         self.cancel_event = None

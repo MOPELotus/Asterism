@@ -11,6 +11,7 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from asterism.ai import AIAnswerService
 from asterism.answers import (
@@ -812,6 +813,34 @@ class LocalStoreTests(unittest.TestCase):
             "success", provider="chaoxing", operation="run", summary={"status": "success"}
         )
         self.assertFalse(result.sent)
+
+    def test_notification_command_handles_quoted_windows_path_and_redacts_summary(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        value = config.ensure()
+        value["notifications"] = {
+            "enabled": True,
+            "command": '"C:\\Program Files\\Notify\\notify.exe" --quiet',
+        }
+        config.save(value)
+        with patch("asterism.notifications.os.name", "nt"), patch(
+            "asterism.notifications.subprocess.run"
+        ) as run:
+            run.return_value = SimpleNamespace(returncode=0)
+            result = NotificationDispatcher(config).send(
+                "failure",
+                provider="chaoxing",
+                operation="run",
+                summary={
+                    "status": "failure",
+                    "error_code": "network",
+                    "message": "secret provider response",
+                },
+            )
+        self.assertTrue(result.sent)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:2], [r"C:\Program Files\Notify\notify.exe", "--quiet"])
+        self.assertNotIn("secret provider response", argv[-1])
+        self.assertEqual(json.loads(argv[-1])["summary"]["error_code"], "network")
 
     def test_formal_draft_file_and_sqlite_index_stay_in_sync(self) -> None:
         profiles = ProfileStore(self.paths)
