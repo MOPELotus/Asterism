@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -209,7 +210,8 @@ class AIAnswerService:
                 ) from fallback_error
             used_choice = fallback
         normalized = dict(parsed)
-        normalized["answer"] = canonical_answer(parsed.get("answer"), question.get("options"))
+        normalized["answer"] = self._validate_answer(question, parsed.get("answer"))
+        normalized["answer"] = canonical_answer(normalized["answer"], question.get("options"))
         self.bank.put_ai_cache(
             cache_key,
             used_choice.endpoint.name + ":" + used_choice.model,
@@ -234,6 +236,34 @@ class AIAnswerService:
             "cached": False,
             "usage": usage,
         }
+
+    @staticmethod
+    def _validate_answer(question: Mapping[str, Any], answer: Any) -> Any:
+        """Reject model output that violates the plain-text subjective boundary."""
+        kind = str(question.get("kind") or question.get("type") or "").casefold()
+        if kind not in {"short_answer", "subjective", "discussion", "essay", "long_answer"}:
+            return answer
+
+        def validate_text(value: Any) -> str:
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeError("AI subjective answer must be non-empty plain text")
+            text = value.strip()
+            marker_pattern = (
+                r"(?i)(?:^|[\s\[（(])"
+                r"(?:system|assistant|user|测试文本|自动化测试)"
+                r"(?:$|[\s\]）):：])"
+            )
+            if re.search(marker_pattern, text):
+                raise RuntimeError("AI subjective answer contains system or test text")
+            if "```" in text or re.search(r"(?m)^\s{0,3}#{1,6}\s", text):
+                raise RuntimeError("AI subjective answer contains Markdown formatting")
+            if len(text.encode("utf-8")) > 16 * 1024:
+                raise RuntimeError("AI subjective answer is oversized")
+            return text
+
+        if isinstance(answer, list):
+            return [validate_text(item) for item in answer]
+        return validate_text(answer)
 
     def _evidence_context(self, question_id: int) -> list[dict[str, Any]]:
         context: list[dict[str, Any]] = []

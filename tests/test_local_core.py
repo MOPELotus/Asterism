@@ -694,6 +694,16 @@ class LocalStoreTests(unittest.TestCase):
                 {"output_text": '{"answer":"A","confidence":2}'}, "responses"
             )
 
+    def test_ai_rejects_markdown_or_test_text_for_subjective_answers(self) -> None:
+        question = {"kind": "short_answer", "prompt": "Explain", "options": []}
+        for answer in ("```python\nprint(1)\n```", "测试文本：请提交", "# heading"):
+            with self.assertRaises(RuntimeError):
+                AIAnswerService._validate_answer(question, answer)
+        self.assertEqual(
+            AIAnswerService._validate_answer(question, "A natural plain-text response."),
+            "A natural plain-text response.",
+        )
+
     def test_controller_prepares_rebound_local_answers_for_chaoxing(self) -> None:
         bank = QuestionBank(self.paths.database)
         bank.initialize()
