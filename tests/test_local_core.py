@@ -583,6 +583,15 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual([profile.id for profile in listed], [valid.id])
         self.assertTrue(malformed.exists())
 
+    def test_generated_state_treats_malformed_json_as_missing(self) -> None:
+        profile = ProfileStore(self.paths).create("welearn", "recover-state")
+        states = ProfileStateStore(self.paths)
+        path = self.paths.state / "welearn" / profile.id / "session.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{interrupted", encoding="utf-8")
+        self.assertIsNone(states.load(profile, "session"))
+        self.assertTrue(path.exists())
+
     def test_provider_service_applies_global_defaults_to_run(self) -> None:
         captured = {}
 

@@ -141,7 +141,15 @@ class ProfileStateStore:
 
     def load(self, profile: Profile, name: str) -> dict[str, Any] | None:
         path = self._path(profile, name)
-        return read_json_object(path) if path.exists() else None
+        if not path.exists():
+            return None
+        try:
+            return read_json_object(path)
+        except (OSError, TypeError, ValueError):
+            # State is generated and recoverable. Treat an interrupted or
+            # hand-corrupted session/checkpoint as absent so password/token
+            # authentication can rebuild it from the Profile credentials.
+            return None
 
     def save(self, profile: Profile, name: str, value: dict[str, Any]) -> None:
         atomic_write_json(self._path(profile, name), value)
