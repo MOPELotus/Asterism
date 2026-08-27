@@ -830,6 +830,16 @@ class LocalStoreTests(unittest.TestCase):
             "The user should compare the result with the source.",
         )
 
+    def test_ai_rejects_placeholder_answers_for_all_question_kinds(self) -> None:
+        question = {"kind": "single_choice", "prompt": "Choose", "options": ["A", "B"]}
+        for placeholder in (None, " ", [], {}):
+            with self.assertRaisesRegex(RuntimeError, "non-empty"):
+                AIAnswerService._validate_answer(question, placeholder)
+        self.assertFalse(
+            AIAnswerService._validate_answer({"kind": "true_false"}, False)
+        )
+        self.assertEqual(AIAnswerService._validate_answer({"kind": "fill_blank"}, 0), 0)
+
     def test_ai_cache_revalidates_subjective_answer_before_reuse(self) -> None:
         config = LocalConfigStore(self.paths.config)
         value = config.ensure()
