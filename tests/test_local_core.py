@@ -1663,6 +1663,22 @@ class ScanTests(unittest.TestCase):
         self.assertIsNotNone(persisted)
         self.assertNotIn("password-secret", json.dumps(persisted))
 
+    def test_scan_recovers_from_malformed_persisted_status(self) -> None:
+        self.states.save(
+            self.profile,
+            "scan",
+            {
+                "state": "failed",
+                "course_count": "not-a-number",
+                "completed_tasks": -5,
+                "completed_task_refs": "course::task",
+            },
+        )
+        status = self.coordinator.status(self.profile)
+        self.assertEqual(status.course_count, 0)
+        self.assertEqual(status.completed_tasks, 0)
+        self.assertEqual(status.completed_task_refs, [])
+
 
 if __name__ == "__main__":
     unittest.main()

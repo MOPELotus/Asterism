@@ -35,20 +35,30 @@ class ScanStatus:
 
     @classmethod
     def from_value(cls, value: dict[str, Any], profile: Profile) -> ScanStatus:
+        def nonnegative_int(name: str) -> int:
+            candidate = value.get(name, 0)
+            if isinstance(candidate, bool):
+                return 0
+            try:
+                parsed = int(candidate or 0)
+            except (TypeError, ValueError):
+                return 0
+            return max(0, parsed)
+
+        raw_refs = value.get("completed_task_refs", [])
+        refs = raw_refs if isinstance(raw_refs, list) else []
         return cls(
             provider=profile.provider,
             profile_id=profile.id,
             state=str(value.get("state") or "idle"),
             phase=str(value.get("phase") or ""),
-            course_count=int(value.get("course_count") or 0),
-            task_count=int(value.get("task_count") or 0),
-            question_count=int(value.get("question_count") or 0),
-            completed_tasks=int(value.get("completed_tasks") or 0),
-            retries=int(value.get("retries") or 0),
+            course_count=nonnegative_int("course_count"),
+            task_count=nonnegative_int("task_count"),
+            question_count=nonnegative_int("question_count"),
+            completed_tasks=nonnegative_int("completed_tasks"),
+            retries=nonnegative_int("retries"),
             cursor=str(value.get("cursor") or ""),
-            completed_task_refs=[
-                str(item) for item in value.get("completed_task_refs", []) if str(item)
-            ],
+            completed_task_refs=[str(item) for item in refs if str(item)],
             last_error=str(value.get("last_error") or ""),
             updated_at=str(value.get("updated_at") or _now()),
         )
