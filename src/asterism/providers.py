@@ -80,12 +80,38 @@ class ProviderRegistry:
 
     def validate(self, spec: WorkerSpec) -> list[str]:
         executable = spec.executable if spec.executable is not None else spec.script
-        missing = [
+        required = [
             str(path)
             for path in (executable, spec.upstream, spec.source_metadata)
             if not path.exists()
         ]
-        return missing
+        if spec.provider == "chaoxing":
+            required.extend(
+                str(path)
+                for path in (
+                    Path(value)
+                    for value in (
+                        spec.environment.get("ASTERISM_CHAOXING_AUXILIARY_UPSTREAM"),
+                        spec.environment.get("ASTERISM_CHAOXING_AUXILIARY_SOURCES"),
+                    )
+                    if value
+                )
+                if not path.exists()
+            )
+        elif spec.provider == "uai":
+            required.extend(
+                str(path)
+                for path in (
+                    Path(value)
+                    for value in (
+                        spec.environment.get("ASTERISM_UAI_BROWSER_UPSTREAM"),
+                        spec.environment.get("ASTERISM_UAI_BROWSER_SOURCE_METADATA"),
+                    )
+                    if value
+                )
+                if not path.exists()
+            )
+        return required
 
     def environment_for(self, spec: WorkerSpec) -> dict[str, str]:
         result = os.environ.copy()

@@ -106,6 +106,21 @@ class LocalStoreTests(unittest.TestCase):
         self.assertTrue(chaoxing.environment["ASTERISM_CHAOXING_AUXILIARY_SOURCES"].endswith("AUXILIARY_SOURCES.json"))
         self.assertTrue(uai.environment["ASTERISM_UAI_BROWSER_SOURCE_METADATA"].endswith("BROWSER_SOURCE.json"))
 
+    def test_provider_registry_validates_auxiliary_donors_before_start(self) -> None:
+        registry = ProviderRegistry(Path(__file__).resolve().parents[1])
+        for provider in ("chaoxing", "welearn", "uai", "cidaren"):
+            self.assertEqual(registry.validate(registry.get(provider)), [], provider)
+        root = self.paths.root / "resources"
+        (root / "workers" / "chaoxing").mkdir(parents=True)
+        (root / "upstreams" / "chaoxing").mkdir(parents=True)
+        (root / "workers" / "chaoxing" / "worker.py").write_text("", encoding="utf-8")
+        (root / "workers" / "chaoxing" / "SOURCE.json").write_text("{}", encoding="utf-8")
+        (root / "workers" / "chaoxing" / "AUXILIARY_SOURCES.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        missing = ProviderRegistry(root).validate(ProviderRegistry(root).get("chaoxing"))
+        self.assertTrue(any("chaoxing-exam" in item for item in missing))
+
     def test_controller_wraps_cidaren_run_with_a_short_lived_answer_bridge(self) -> None:
         calls: list[dict] = []
 
