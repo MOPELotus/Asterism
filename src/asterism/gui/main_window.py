@@ -85,15 +85,65 @@ class HomePage(QWidget):
         self.controller = controller
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 28)
-        layout.setSpacing(12)
-        layout.addWidget(TitleLabel("Asterism"))
-        layout.addWidget(BodyLabel("本地桌面控制台"))
-        layout.addWidget(CaptionLabel("选择平台账号，完成认证后读取课程和任务。正式提交始终需要明确确认。"))
+        layout.setSpacing(16)
+
+        hero = CardWidget()
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(24, 20, 24, 20)
+        hero_layout.setSpacing(6)
+        hero_layout.addWidget(TitleLabel("Asterism"))
+        hero_layout.addWidget(BodyLabel("本地桌面控制台"))
+        hero_layout.addWidget(
+            CaptionLabel("选择平台账号，完成认证后读取课程和任务。正式提交始终需要明确确认。")
+        )
+        layout.addWidget(hero)
+
+        metrics = QGridLayout()
+        metrics.setHorizontalSpacing(12)
+        metrics.setVerticalSpacing(12)
+        self.metric_labels: dict[str, Any] = {}
+        for column, (key, title, note) in enumerate(
+            (
+                ("profiles", "本地账号", "四个平台的 Profile 总数"),
+                ("courses", "课程缓存", "当前本地已读取的课程"),
+                ("tasks", "任务缓存", "当前本地已读取的任务"),
+                ("bank", "题库题目", "全局题库中的题目数量"),
+            )
+        ):
+            card = CardWidget()
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 14, 16, 14)
+            card_layout.setSpacing(3)
+            card_layout.addWidget(CaptionLabel(title))
+            value = TitleLabel("0")
+            value.setObjectName(f"metric_{key}")
+            card_layout.addWidget(value)
+            card_layout.addWidget(CaptionLabel(note))
+            metrics.addWidget(card, 0, column)
+            self.metric_labels[key] = value
+        layout.addLayout(metrics)
+
+        overview = CardWidget()
+        overview_layout = QVBoxLayout(overview)
+        overview_layout.setContentsMargins(20, 16, 20, 16)
+        overview_layout.setSpacing(8)
+        overview_layout.addWidget(StrongBodyLabel("运行概况"))
         self.summary = BodyLabel()
-        layout.addWidget(self.summary)
+        self.summary.setWordWrap(True)
+        overview_layout.addWidget(self.summary)
         self.refresh = PrimaryPushButton("刷新本地状态")
         self.refresh.clicked.connect(self.update_summary)
-        layout.addWidget(self.refresh)
+        overview_layout.addWidget(self.refresh, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(overview)
+
+        tips = CardWidget()
+        tips_layout = QVBoxLayout(tips)
+        tips_layout.setContentsMargins(20, 16, 20, 16)
+        tips_layout.setSpacing(5)
+        tips_layout.addWidget(StrongBodyLabel("开始使用"))
+        tips_layout.addWidget(CaptionLabel("1. 打开左侧平台页面；2. 新建账号 Profile；3. 点击认证 / 登录；4. 读取课程。"))
+        tips_layout.addWidget(CaptionLabel("课程、任务和题目读取不会提交平台数据；作业和考试需在草稿页人工确认后才能提交。"))
+        layout.addWidget(tips)
         layout.addStretch(1)
         self.update_summary()
 
@@ -101,10 +151,12 @@ class HomePage(QWidget):
         counts = {
             provider: len(self.controller.profiles.list(provider)) for provider in PROVIDER_IDS
         }
+        self.metric_labels["profiles"].setText(str(sum(counts.values())))
         self.summary.setText(
             "Profile："
             + "，".join(f"{provider} {counts[provider]}" for provider in PROVIDER_IDS)
-            + f"\n数据目录：{self.controller.paths.root}"
+            + f"\n数据目录：{self.controller.paths.root}\n"
+            "从平台页完成认证后，课程和任务会显示在对应页面。"
         )
 
 
@@ -1578,8 +1630,20 @@ class SettingsPage(QWidget):
         super().__init__()
         self.controller = controller
         root = QVBoxLayout(self)
-        root.addWidget(SubtitleLabel("settings"))
-        root.addWidget(BodyLabel("模型组合、通知和 Provider 默认值保存在 config.local.json。"))
+        root.setContentsMargins(28, 24, 28, 28)
+        root.setSpacing(14)
+        intro = CardWidget()
+        intro_layout = QVBoxLayout(intro)
+        intro_layout.setContentsMargins(20, 16, 20, 16)
+        intro_layout.setSpacing(5)
+        intro_layout.addWidget(TitleLabel("设置"))
+        intro_layout.addWidget(BodyLabel("主题、模型组合、通知和 Provider 默认值保存在本机配置。"))
+        intro_layout.addWidget(CaptionLabel("配置内容不会自动上传；凭据和会话状态保存在本地数据目录。"))
+        root.addWidget(intro)
+        appearance = CardWidget()
+        appearance_layout = QHBoxLayout(appearance)
+        appearance_layout.setContentsMargins(20, 14, 20, 14)
+        appearance_layout.addWidget(StrongBodyLabel("外观主题"))
         self.theme = ComboBox()
         self.theme.addItem("跟随系统", ThemeMode.SYSTEM.value)
         self.theme.addItem("浅色", ThemeMode.LIGHT.value)
@@ -1589,15 +1653,24 @@ class SettingsPage(QWidget):
         )
         self.theme.setCurrentIndex(max(0, self.theme.findData(current_theme)))
         self.theme.currentIndexChanged.connect(self.apply_selected_theme)
-        root.addWidget(self.theme)
+        appearance_layout.addWidget(self.theme)
+        appearance_layout.addStretch(1)
+        root.addWidget(appearance)
+        editor_card = CardWidget()
+        editor_layout = QVBoxLayout(editor_card)
+        editor_layout.setContentsMargins(20, 16, 20, 16)
+        editor_layout.setSpacing(8)
+        editor_layout.addWidget(StrongBodyLabel("高级配置"))
+        editor_layout.addWidget(CaptionLabel("需要精细调整模型或 Provider 参数时，可直接编辑 JSON。保存前请确认格式正确。"))
         self.editor = TextEdit()
         self.editor.setPlainText(
             json.dumps(controller.config.ensure(), ensure_ascii=False, indent=2)
         )
-        root.addWidget(self.editor)
+        editor_layout.addWidget(self.editor)
         save = PrimaryPushButton("保存配置")
         save.clicked.connect(self.save)
-        root.addWidget(save)
+        editor_layout.addWidget(save, 0, Qt.AlignmentFlag.AlignLeft)
+        root.addWidget(editor_card, 1)
 
     def save(self) -> None:
         try:
