@@ -73,6 +73,7 @@ try:  # qfluentwidgets is optional during headless development and CI.
         SubtitleLabel,
         TitleLabel,
     )
+    from qfluentwidgets.common.icon import toQIcon
 
     try:
         from qfluentwidgets import ComboBox, LineEdit, ScrollArea, TableWidget, TextEdit
@@ -93,6 +94,7 @@ except ImportError:  # pragma: no cover - exercised on minimal dev environments
     ScrollArea = QScrollArea
     CardWidget = QWidget
     FluentIcon = None
+    toQIcon = None
     FluentWindow = object
     MSFluentWindow = object
     InfoBar = MessageBox = NavigationInterface = NavigationItemPosition = None

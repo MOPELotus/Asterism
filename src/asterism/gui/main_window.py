@@ -53,6 +53,7 @@ from .fluent import (
     apply_theme,
     configure_scroll_area,
     configure_table,
+    toQIcon,
 )
 
 
@@ -2065,6 +2066,11 @@ class MainWindow(MSFluentWindow if FLUENT_AVAILABLE else QMainWindow):
                 "question-bank": FluentIcon.DICTIONARY,
                 "settings": FluentIcon.SETTING,
             }.get(name, FluentIcon.APPLICATION)
+            # Convert enum icons to QIcon at the boundary.  This avoids a
+            # qfluentwidgets 1.8 navigation paint incompatibility where the
+            # selected icon is treated as a raw enum by QIcon().
+            if toQIcon is not None:
+                icon = toQIcon(icon)
             position = (
                 NavigationItemPosition.BOTTOM
                 if name == "settings"
