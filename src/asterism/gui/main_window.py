@@ -794,20 +794,28 @@ class ProviderPage(QWidget):
             return
         if self._is_formal(task):
             if (
-                QMessageBox.question(self, self.provider, "仅保存草稿，不进行最终提交？")
+                QMessageBox.question(
+                    self,
+                    self.provider,
+                    "读取正式任务可能建立答题尝试或启动倒计时。继续后仅生成预填草稿，"
+                    "不会最终提交；提交仍需在 drafts 页面二次确认。是否继续？",
+                )
                 != QMessageBox.StandardButton.Yes
             ):
                 return
-            draft = self.controller.save_draft(
-                profile,
-                str(task.get("remote_id")),
-                {
-                    "task": task,
-                    "answers": {},
-                    "settings": self._execution_settings(),
-                },
+            combination = self._execution_combination()
+            self._call(
+                lambda on_event: self.controller.prepare_formal_draft(
+                    profile,
+                    task,
+                    combination=combination,
+                    settings=self._execution_settings(combination),
+                    allow_read_that_starts_attempt=True,
+                    cancel=self.cancel_event,
+                    on_event=on_event,
+                ),
+                "prepare draft",
             )
-            self.log.append(f"[draft] {draft.id}")
             return
         combination = self._execution_combination()
         execution_settings = self._execution_settings(combination)
@@ -879,28 +887,68 @@ class ProviderPage(QWidget):
             and QMessageBox.question(
                 self,
                 self.provider,
-                f"选中的 {len(formal)} 个正式任务只保存草稿，不进行最终提交？",
+                f"读取选中的 {len(formal)} 个正式任务可能建立答题尝试或启动倒计时。"
+                "继续后仅生成预填草稿，不会最终提交；提交仍需在 drafts 页面二次确认。"
+                "是否继续？",
             )
             != QMessageBox.StandardButton.Yes
         ):
             return
         combination = self._execution_combination()
         execution_settings = self._execution_settings(combination)
-        for task in formal:
-            draft = self.controller.save_draft(
-                profile,
-                str(task.get("remote_id")),
-                {
-                    "task": task,
-                    "answers": {},
-                    "settings": self._execution_settings(combination),
-                },
+        concurrency = 1
+        if routine:
+            concurrency, accepted = QInputDialog.getInt(self, self.provider, "并发数", 1, 1, 256)
+            if not accepted:
+                return
+        if formal:
+            def execute_selected(on_event):
+                drafts = self.controller.prepare_formal_drafts(
+                    profile,
+                    formal,
+                    combination=combination,
+                    settings=execution_settings,
+                    allow_read_that_starts_attempt=True,
+                    cancel=self.cancel_event,
+                    on_event=on_event,
+                )
+                if not routine:
+                    return drafts
+                results = self.controller.run_batch(
+                    profile,
+                    routine,
+                    concurrency=concurrency,
+                    settings=execution_settings,
+                    answer_provider=(
+                        lambda task: (
+                            self.controller.prepare_answers(
+                                profile,
+                                task,
+                                combination=combination,
+                                route=(
+                                    "timed"
+                                    if isinstance(task.get("native"), dict)
+                                    and task["native"].get("route_kind") == "course_exam"
+                                    else "untimed"
+                                ),
+                                cancel=self.cancel_event,
+                                on_event=on_event,
+                            )
+                            if self.provider == "chaoxing"
+                            else None
+                        )
+                    ),
+                    cancel=self.cancel_event,
+                    on_event=on_event,
+                )
+                return {"drafts": drafts, "routine_results": results}
+
+            self._call(
+                execute_selected,
+                "prepare drafts" if not routine else "batch run",
             )
-            self.log.append(f"[draft] {draft.id}")
-        if not routine:
             return
-        concurrency, accepted = QInputDialog.getInt(self, self.provider, "并发数", 1, 1, 256)
-        if not accepted:
+        if not routine:
             return
         self._call(
             lambda on_event: self.controller.run_batch(
@@ -920,6 +968,8 @@ class ProviderPage(QWidget):
                                 and task["native"].get("route_kind") == "course_exam"
                                 else "untimed"
                             ),
+                            cancel=self.cancel_event,
+                            on_event=on_event,
                         )
                         if self.provider == "chaoxing"
                         else None

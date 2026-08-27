@@ -402,6 +402,8 @@ class DesktopController:
         route: str = "untimed",
         allow_read_that_starts_attempt: bool = False,
         force_refresh: bool = False,
+        cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         """Resolve local/AI answers into the Worker wire shape.
 
@@ -414,9 +416,28 @@ class DesktopController:
             profile,
             task,
             allow_read_that_starts_attempt=allow_read_that_starts_attempt,
+            cancel=cancel,
+            on_event=on_event,
         ).data.get("questions", [])
         if not isinstance(questions, list):
             return []
+        return self._resolve_question_answers(
+            profile,
+            questions,
+            combination=combination,
+            route=route,
+            force_refresh=force_refresh,
+        )
+
+    def _resolve_question_answers(
+        self,
+        profile: Profile,
+        questions: list[Any],
+        *,
+        combination: str | None,
+        route: str,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
         resolved: list[dict[str, Any]] = []
         repository = self.answer_repository()
         for question in questions:
@@ -447,6 +468,101 @@ class DesktopController:
             if answer is not None:
                 resolved.append({"remote_id": str(question["remote_id"]), "value": answer})
         return resolved
+
+    def prepare_formal_draft(
+        self,
+        profile: Profile,
+        task: dict[str, Any],
+        *,
+        combination: str = "economy",
+        settings: Mapping[str, Any] | None = None,
+        allow_read_that_starts_attempt: bool = False,
+        cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> FormalDraft:
+        """Read and prefill a formal assessment without submitting it.
+
+        Some Provider read paths may establish an assessment attempt.  The UI
+        must obtain explicit operator confirmation before setting
+        ``allow_read_that_starts_attempt``.  Final submission remains a
+        separate action on the drafts page.
+        """
+        if not self._is_formal_task(task):
+            raise ValueError("formal draft preparation requires a formal task")
+        questions = self.scan_questions(
+            profile,
+            task,
+            allow_read_that_starts_attempt=allow_read_that_starts_attempt,
+            cancel=cancel,
+            on_event=on_event,
+        )
+        native = task.get("native") if isinstance(task.get("native"), Mapping) else {}
+        route = "timed" if native.get("route_kind") == "course_exam" else "untimed"
+        answers = self._resolve_question_answers(
+            profile,
+            list(questions),
+            combination=combination,
+            route=route,
+        )
+        answered = {str(row["remote_id"]) for row in answers}
+        missing = [
+            str(question.get("remote_id"))
+            for question in questions
+            if isinstance(question, Mapping)
+            and question.get("remote_id")
+            and str(question.get("remote_id")) not in answered
+        ]
+        draft_settings = dict(settings or {})
+        draft_settings["answer_combination"] = combination
+        return self.save_draft(
+            profile,
+            str(task.get("remote_id") or ""),
+            {
+                "task": dict(task),
+                "questions": [dict(question) for question in questions],
+                "answers": answers,
+                "unresolved_question_ids": missing,
+                "settings": draft_settings,
+            },
+        )
+
+    def prepare_formal_drafts(
+        self,
+        profile: Profile,
+        tasks: list[dict[str, Any]],
+        *,
+        combination: str = "economy",
+        settings: Mapping[str, Any] | None = None,
+        allow_read_that_starts_attempt: bool = False,
+        cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[FormalDraft]:
+        drafts: list[FormalDraft] = []
+        total = len(tasks)
+        for index, task in enumerate(tasks, 1):
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError("formal draft preparation was cancelled")
+            if on_event is not None:
+                on_event(
+                    {
+                        "type": "progress",
+                        "current": index,
+                        "total": total,
+                        "message": str(task.get("title") or task.get("remote_id") or "formal"),
+                    }
+                )
+            drafts.append(
+                self.prepare_formal_draft(
+                    profile,
+                    task,
+                    combination=combination,
+                    settings=settings,
+                    allow_read_that_starts_attempt=allow_read_that_starts_attempt,
+                    cancel=cancel,
+                    on_event=on_event,
+                )
+            )
+        return drafts
 
     def run_batch(
         self,

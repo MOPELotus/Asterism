@@ -209,7 +209,7 @@ class LocalStoreTests(unittest.TestCase):
                     "run", {"result": details}, SimpleNamespace(log_path=log_path)
                 )
 
-            def questions(self, profile, task, *, allow_read_that_starts_attempt=False):
+            def questions(self, profile, task, *, allow_read_that_starts_attempt=False, **_kwargs):
                 return SimpleNamespace(
                     data={
                         "questions": [
@@ -271,6 +271,71 @@ class LocalStoreTests(unittest.TestCase):
         controller.profiles = ProfileStore(self.paths)
         with self.assertRaises(ValueError):
             controller.submit_draft(draft)
+
+    def test_formal_draft_reads_prefills_and_never_submits(self) -> None:
+        log_path = self.paths.logs / "formal-read.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("", encoding="utf-8")
+        calls = []
+
+        class FakeService:
+            def questions(self, profile, task, **kwargs):
+                calls.append((profile.provider, task["remote_id"], kwargs))
+                return SimpleNamespace(
+                    data={
+                        "questions": [
+                            {
+                                "remote_id": "q-1",
+                                "kind": "single_choice",
+                                "prompt": "one",
+                                "options": ["A", "B"],
+                            },
+                            {
+                                "remote_id": "q-2",
+                                "kind": "short_answer",
+                                "prompt": "two",
+                                "options": [],
+                            },
+                        ]
+                    },
+                    run=SimpleNamespace(log_path=log_path),
+                )
+
+            def run_task(self, *args, **kwargs):
+                raise AssertionError("draft preparation must not submit")
+
+        controller = object.__new__(DesktopController)
+        controller.paths = self.paths
+        controller.profiles = ProfileStore(self.paths)
+        controller.states = ProfileStateStore(self.paths)
+        controller.bank = QuestionBank(self.paths.database)
+        controller.bank.initialize()
+        controller.drafts = DraftRepository(self.paths, controller.bank)
+        controller.service = FakeService()
+        controller.answer_question = lambda _provider, question, **_kwargs: (
+            {"answer": {"answer": "A"}}
+            if question["remote_id"] == "q-1"
+            else (_ for _ in ()).throw(RuntimeError("no configured model"))
+        )
+        profile = controller.profiles.create("chaoxing", "formal-prefill")
+        task = {
+            "remote_id": "exam-1",
+            "assessment_class": "formal",
+            "native": {"route_kind": "course_exam"},
+        }
+
+        draft = controller.prepare_formal_draft(
+            profile,
+            task,
+            combination="gpt_only",
+            allow_read_that_starts_attempt=True,
+        )
+
+        self.assertEqual(draft.payload["answers"], [{"remote_id": "q-1", "value": "A"}])
+        self.assertEqual(draft.payload["unresolved_question_ids"], ["q-2"])
+        self.assertEqual(len(draft.payload["questions"]), 2)
+        self.assertEqual(draft.payload["settings"]["answer_combination"], "gpt_only")
+        self.assertTrue(calls[0][2]["allow_read_that_starts_attempt"])
 
     def test_controller_scan_all_profiles_isolates_profile_failures(self) -> None:
         profiles = [
@@ -516,7 +581,7 @@ class LocalStoreTests(unittest.TestCase):
         repository.ingest_question("chaoxing", question)
 
         class FakeService:
-            def questions(self, profile, task, *, allow_read_that_starts_attempt=False):
+            def questions(self, profile, task, *, allow_read_that_starts_attempt=False, **_kwargs):
                 return SimpleNamespace(
                     data={"questions": [{**question, "options": ["Beta", "Alpha"]}]}
                 )
