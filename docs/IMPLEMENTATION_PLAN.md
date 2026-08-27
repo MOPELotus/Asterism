@@ -113,7 +113,7 @@ Checkpoint：四个平台现有能力都能从本地入口加载；一个 Runner
 Profile 或桌面进程；不需要 Asterism 用户、Token 或 Scheduler。
 
 当前证据：四个固定 donor 均通过入口 hash 校验和无账号 `health`；原 Worker 53 项测试与
-本地控制层与 GUI/AI/扫描控制层 85 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
+本地控制层与 GUI/AI/扫描控制层 87 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
 进程树兜底均已接入，且数据库中不存在用户、权限、计费或调度表。
 
 ### C2：四平台与共享能力接线
