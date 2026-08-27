@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication, QWidget
 
-    from asterism.gui.fluent import ThemeMode, apply_theme, configure_high_dpi
+    from asterism.gui.fluent import LineEdit, ThemeMode, apply_theme, configure_high_dpi
     from asterism.gui.main_window import MainWindow, ProviderPage
 except ImportError:  # pragma: no cover - desktop extra is optional in CI
     QApplication = None
@@ -89,4 +89,24 @@ class GuiSmokeTests(unittest.TestCase):
             text = page.log.toPlainText()
             self.assertIn("[draft] draft-1", text)
             self.assertIn('"failed":1', text)
+            window.close()
+
+    def test_cidaren_oauth_result_exposes_copyable_authorization_dialog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            page = next(
+                page
+                for page in window.pages
+                if isinstance(page, ProviderPage) and page.provider == "cidaren"
+            )
+            page._show_oauth_authorization(
+                "https://open.weixin.qq.com/connect/oauth2/authorize?x=1"
+            )
+            dialog = next(
+                child
+                for child in page.findChildren(QWidget)
+                if child.windowTitle() == "cidaren OAuth"
+            )
+            self.assertTrue(dialog.findChildren(LineEdit))
+            dialog.close()
             window.close()

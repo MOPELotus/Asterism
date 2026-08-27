@@ -523,6 +523,10 @@ class ProviderPage(QWidget):
                         row, column, QTableWidgetItem(str(value if value is not None else ""))
                     )
         data = result.data if hasattr(result, "data") else result
+        if label == "oauth begin" and isinstance(data, dict):
+            authorization_url = str(data.get("authorization_url") or "").strip()
+            if authorization_url:
+                self._show_oauth_authorization(authorization_url)
         preview = json.dumps(self._safe_preview(data), ensure_ascii=False, default=str)
         self.log.append(f"[{label}] {preview}")
         if label in {"prepare draft", "prepare drafts", "batch run"}:
@@ -577,6 +581,27 @@ class ProviderPage(QWidget):
             )
         self.cancel_button.setEnabled(False)
         self.cancel_event = None
+
+    def _show_oauth_authorization(self, authorization_url: str) -> None:
+        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog.setWindowTitle("cidaren OAuth")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(BodyLabel("请复制链接，在微信中打开并完成确认；确认后将回调链接粘贴回本页面。"))
+        editor = LineEdit()
+        editor.setText(authorization_url)
+        editor.setReadOnly(True)
+        layout.addWidget(editor)
+        actions = QHBoxLayout()
+        copy = PushButton("复制链接")
+        copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(authorization_url))
+        actions.addWidget(copy)
+        close = PushButton("关闭")
+        close.clicked.connect(dialog.close)
+        actions.addWidget(close)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        dialog.resize(820, 180)
+        dialog.show()
 
     def _failure(self, label: str, error: str) -> None:
         self.log.append(f"[{label}] ERROR {error}")
