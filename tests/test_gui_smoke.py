@@ -10,6 +10,7 @@ try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtWidgets import QApplication, QWidget
 
+    from asterism.gui.app import acquire_instance_lock
     from asterism.gui.fluent import (
         LineEdit,
         PushButton,
@@ -75,6 +76,17 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertGreater(window.width(), 0)
             self.assertGreater(window.height(), 0)
             window.close()
+
+    def test_data_root_allows_only_one_desktop_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            first = acquire_instance_lock(temporary)
+            self.assertIsNotNone(first)
+            second = acquire_instance_lock(temporary)
+            self.assertIsNone(second)
+            first.unlock()
+            third = acquire_instance_lock(temporary)
+            self.assertIsNotNone(third)
+            third.unlock()
 
     def test_mixed_batch_result_counts_routine_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
