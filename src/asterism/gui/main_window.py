@@ -716,7 +716,7 @@ class ProviderPage(QWidget):
         self.cancel_event = None
 
     def _show_oauth_authorization(self, authorization_url: str) -> None:
-        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog = QDialog(self)
         dialog.setWindowTitle("cidaren OAuth")
         layout = QVBoxLayout(dialog)
         layout.addWidget(BodyLabel("请复制链接，在微信中打开并完成确认；确认后将回调链接粘贴回本页面。"))
@@ -956,7 +956,7 @@ class ProviderPage(QWidget):
         if task is None:
             QMessageBox.warning(self, self.provider, "请先同步并选择 task")
             return
-        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog = QDialog(self)
         dialog.setWindowTitle(f"{self.provider} task detail")
         layout = QVBoxLayout(dialog)
         viewer = TextEdit()
@@ -1004,7 +1004,7 @@ class ProviderPage(QWidget):
         if profile is None:
             return
         status = self.controller.scan_status(profile)
-        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog = QDialog(self)
         dialog.setWindowTitle(f"{self.provider} scan status")
         layout = QVBoxLayout(dialog)
         table = TableWidget()
@@ -1642,7 +1642,7 @@ class QuestionBankPage(QWidget):
         except (KeyError, OSError, TypeError, ValueError) as error:
             QMessageBox.critical(self, "question bank", str(error))
             return
-        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog = QDialog(self)
         dialog.setWindowTitle("候选与证据")
         layout = QVBoxLayout(dialog)
         viewer = TextEdit()
@@ -1656,7 +1656,7 @@ class QuestionBankPage(QWidget):
         question = self._selected_question()
         if question is None:
             return
-        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog = QDialog(self)
         dialog.setWindowTitle("保存人工答案")
         layout = QVBoxLayout(dialog)
         layout.addWidget(
@@ -1720,6 +1720,24 @@ class SettingsPage(QWidget):
         appearance_layout.addWidget(self.theme)
         appearance_layout.addStretch(1)
         root.addWidget(appearance)
+        language = CardWidget()
+        language_layout = QHBoxLayout(language)
+        language_layout.setContentsMargins(20, 14, 20, 14)
+        language_layout.addWidget(StrongBodyLabel("界面语言 / Language"))
+        self.language = ComboBox()
+        self.language.addItem("简体中文", "zh-CN")
+        self.language.addItem("English", "en-US")
+        current_language = str(
+            controller.config.ensure().get("ui", {}).get("language", "zh-CN")
+        )
+        self.language.setCurrentIndex(max(0, self.language.findData(current_language)))
+        self.language.currentIndexChanged.connect(self.apply_selected_language)
+        language_layout.addWidget(self.language)
+        language_layout.addWidget(
+            CaptionLabel("切换后重新打开窗口生效 / Restart the window to apply")
+        )
+        language_layout.addStretch(1)
+        root.addWidget(language)
         editor_card = CardWidget()
         editor_layout = QVBoxLayout(editor_card)
         editor_layout.setContentsMargins(20, 16, 20, 16)
@@ -1758,6 +1776,14 @@ class SettingsPage(QWidget):
                 apply_theme(app, str(self.theme.currentData()))
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             self.log_theme_error(str(error))
+
+    def apply_selected_language(self) -> None:
+        try:
+            value = json.loads(self.editor.toPlainText())
+            value.setdefault("ui", {})["language"] = self.language.currentData()
+            self.editor.setPlainText(json.dumps(value, ensure_ascii=False, indent=2))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            self.language.setToolTip(f"配置暂不可解析：{error}")
 
     def log_theme_error(self, message: str) -> None:
         # Keep theme selection non-destructive if the JSON editor is temporarily invalid.
