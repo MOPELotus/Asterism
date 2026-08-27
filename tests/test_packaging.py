@@ -42,6 +42,7 @@ class PortableValidationTests(unittest.TestCase):
             "fontTools",
             "cv2",
             "qrcode",
+            "playwright",
         }
         builder = load_builder()
         self.assertTrue(required.issubset(set(builder.FREEZE_PACKAGES)))

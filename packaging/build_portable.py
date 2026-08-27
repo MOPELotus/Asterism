@@ -51,6 +51,7 @@ FREEZE_PACKAGES = (
     "numpy",
     "qrcode",
     "spacy",
+    "playwright",
 )
 
 
