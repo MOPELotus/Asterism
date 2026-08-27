@@ -171,6 +171,19 @@ class ProviderPage(QWidget):
         configure_table(self.task_table)
         root.addWidget(BodyLabel("tasks"))
         root.addWidget(self.task_table)
+        task_selection = QHBoxLayout()
+        task_selection.addWidget(BodyLabel("批量选择"))
+        select_routine = PushButton("全选知识点任务")
+        select_routine.clicked.connect(lambda: self._select_all_rows(self.task_table))
+        task_selection.addWidget(select_routine)
+        select_formal = PushButton("全选作业/考试")
+        select_formal.clicked.connect(lambda: self._select_all_rows(self.formal_table))
+        task_selection.addWidget(select_formal)
+        clear_selection = PushButton("清除选择")
+        clear_selection.clicked.connect(self._clear_task_selection)
+        task_selection.addWidget(clear_selection)
+        task_selection.addStretch(1)
+        root.addLayout(task_selection)
         self.formal_table = TableWidget()
         self.formal_table.setColumnCount(4)
         self.formal_table.setHorizontalHeaderLabels(["remote_id", "title", "type", "state"])
@@ -583,6 +596,14 @@ class ProviderPage(QWidget):
             self.task_table.setRowCount(0)
             self.formal_table.setRowCount(0)
             self.question_table.setRowCount(0)
+
+    @staticmethod
+    def _select_all_rows(table: TableWidget) -> None:
+        table.selectAll()
+
+    def _clear_task_selection(self) -> None:
+        self.task_table.clearSelection()
+        self.formal_table.clearSelection()
 
     @staticmethod
     def _preview_text(value: Any, *, limit: int = 500) -> str:
