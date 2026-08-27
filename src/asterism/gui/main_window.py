@@ -1158,6 +1158,9 @@ class DraftPage(QWidget):
         edit = PushButton("编辑草稿")
         edit.clicked.connect(self.edit_selected)
         actions.addWidget(edit)
+        save_remote = PushButton("保存到平台（不提交）")
+        save_remote.clicked.connect(self.save_selected_to_provider)
+        actions.addWidget(save_remote)
         submit = PrimaryPushButton("确认并提交")
         submit.clicked.connect(self.submit_selected)
         actions.addWidget(submit)
@@ -1232,6 +1235,35 @@ class DraftPage(QWidget):
         self.log.append(f"[draft] submitting {draft.id}")
         self.worker_thread = CallThread(lambda _on_event: self.controller.submit_draft(draft))
         self.worker_thread.succeeded.connect(self._submit_succeeded)
+        self.worker_thread.failed.connect(lambda error: self.log.append(f"[draft] ERROR {error}"))
+        self.worker_thread.start()
+
+    def save_selected_to_provider(self) -> None:
+        draft = self._selected()
+        if draft is None:
+            return
+        if draft.provider != "chaoxing":
+            QMessageBox.information(self, "drafts", "该 Provider 没有已确认的只保存接口")
+            return
+        if draft.status != "draft":
+            QMessageBox.information(self, "drafts", "只有 draft 状态可以保存")
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "drafts",
+                "将当前答案保存到平台，但不执行最终提交。确认继续？",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self.log.append(f"[draft] saving without final submit {draft.id}")
+        self.worker_thread = CallThread(
+            lambda _on_event: self.controller.save_draft_to_provider(draft)
+        )
+        self.worker_thread.succeeded.connect(
+            lambda _result: self.log.append("[draft] saved without final submit")
+        )
         self.worker_thread.failed.connect(lambda error: self.log.append(f"[draft] ERROR {error}"))
         self.worker_thread.start()
 

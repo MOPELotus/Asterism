@@ -746,9 +746,13 @@ class DesktopController:
         self.drafts.save(updated)
         return updated
 
-    def submit_draft(self, draft: FormalDraft) -> ProviderOperationResult:
+    def _formal_draft_invocation(
+        self, draft: FormalDraft, *, assessment_mode: str
+    ) -> tuple[Profile, dict[str, Any], list[dict[str, Any]] | None, dict[str, Any]]:
         if draft.status != "draft":
-            raise ValueError("only a draft can be submitted")
+            raise ValueError("only a draft can be executed")
+        if assessment_mode not in {"save", "submit"}:
+            raise ValueError("assessment_mode must be save or submit")
         profile = self.profiles.get(draft.provider, draft.profile_id)
         task = draft.payload.get("task")
         if not isinstance(task, dict):
@@ -777,6 +781,22 @@ class DesktopController:
         settings = draft.payload.get("settings")
         if settings is not None and not isinstance(settings, dict):
             raise ValueError("draft payload.settings must be an object")
+        invocation_settings = dict(settings or {})
+        invocation_settings["assessment_mode"] = assessment_mode
+        return profile, task, answers, invocation_settings
+
+    def save_draft_to_provider(self, draft: FormalDraft) -> ProviderOperationResult:
+        if draft.provider != "chaoxing":
+            raise ValueError("provider does not expose a verified save-only formal route")
+        profile, task, answers, settings = self._formal_draft_invocation(
+            draft, assessment_mode="save"
+        )
+        return self.run_task(profile, task, answers=answers, settings=settings)
+
+    def submit_draft(self, draft: FormalDraft) -> ProviderOperationResult:
+        profile, task, answers, settings = self._formal_draft_invocation(
+            draft, assessment_mode="submit"
+        )
         result = self.run_task(profile, task, answers=answers, settings=settings)
         self.drafts.set_status(draft, "submitted")
         return result

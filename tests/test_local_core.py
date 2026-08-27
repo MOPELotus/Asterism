@@ -321,6 +321,35 @@ class LocalStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 controller.submit_draft(draft)
 
+    def test_formal_draft_save_and_submit_modes_are_explicit(self) -> None:
+        calls = []
+
+        controller = object.__new__(DesktopController)
+        controller.profiles = ProfileStore(self.paths)
+        profile = controller.profiles.create("chaoxing", "formal-modes")
+        controller.drafts = SimpleNamespace(set_status=lambda draft, status: calls.append(status))
+        controller.run_task = lambda profile, task, *, answers, settings: (
+            calls.append(settings["assessment_mode"]) or SimpleNamespace(data={})
+        )
+        draft = SimpleNamespace(
+            status="draft",
+            provider="chaoxing",
+            profile_id=profile.id,
+            payload={
+                "task": {
+                    "remote_id": "exam-1",
+                    "assessment_class": "formal",
+                    "native": {"route_kind": "course_exam"},
+                },
+                "questions": [{"remote_id": "q-1"}],
+                "answers": [{"remote_id": "q-1", "value": "A"}],
+                "settings": {"assessment_mode": "unsafe-caller-value"},
+            },
+        )
+        controller.save_draft_to_provider(draft)
+        controller.submit_draft(draft)
+        self.assertEqual(calls, ["save", "submit", "submitted"])
+
     def test_formal_draft_reads_prefills_and_never_submits(self) -> None:
         log_path = self.paths.logs / "formal-read.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
