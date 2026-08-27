@@ -97,6 +97,52 @@ class _EndpointDialog(QDialog):
         return self.name.text().strip(), {"base_url": self.url.text().strip(), "api_key": self.key.text(), "protocol": self.protocol.currentData()}
 
 
+class _CombinationNameDialog(QDialog):
+    def __init__(self, names: list[str], suggested_id: str = "new_combo", suggested_display_name: str = "新组合", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("新建答案组合")
+        self.names = set(names)
+        form = QFormLayout(self)
+        form.setContentsMargins(24, 20, 24, 20)
+        form.setSpacing(12)
+        self.display_name = LineEdit()
+        self.display_name.setText(suggested_display_name)
+        self.display_name.setPlaceholderText("例如 默认、考试高正确率")
+        self.combo_id = LineEdit()
+        self.combo_id.setText(suggested_id)
+        self.combo_id.setPlaceholderText("小写英文、数字、下划线或连字符")
+        form.addRow("组合名称", self.display_name)
+        form.addRow("组合 ID", self.combo_id)
+        form.addRow(CaptionLabel("名称用于界面显示；ID 只用于配置引用，保存后不建议频繁修改。"))
+        buttons = QHBoxLayout()
+        cancel = PushButton("取消")
+        save = PrimaryPushButton("创建")
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self._accept)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        form.addRow(buttons)
+        self.resize(620, 250)
+
+    def _accept(self) -> None:
+        display_name = self.display_name.text().strip()
+        combo_id = self.combo_id.text().strip()
+        if not display_name:
+            _notice(self, "答案组合", "请填写组合名称。")
+            return
+        if not re.fullmatch(r"[a-z][a-z0-9_-]*", combo_id):
+            _notice(self, "答案组合", "组合 ID 只能使用小写字母、数字、下划线和连字符，且必须以字母开头。")
+            return
+        if combo_id in self.names:
+            _notice(self, "答案组合", "该组合 ID 已经存在，请换一个 ID。")
+            return
+        self.accept()
+
+    def value(self) -> tuple[str, str]:
+        return self.display_name.text().strip(), self.combo_id.text().strip()
+
+
 class AISettingsPage(QWidget):
     EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
@@ -105,6 +151,9 @@ class AISettingsPage(QWidget):
         self.controller = controller
         self._scan_thread = None
         self._pending_combo: dict[str, Any] | None = None
+        self._pending_combo_id: str | None = None
+        self._pending_combo_display_name: str | None = None
+        self._current_combo_id: str | None = None
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         scroll = ScrollArea(); scroll.setWidgetResizable(True); content = QWidget(); scroll.setWidget(content); configure_scroll_area(scroll); outer.addWidget(scroll)
         root = QVBoxLayout(content); root.setContentsMargins(28, 24, 28, 28); root.setSpacing(14)
@@ -123,9 +172,10 @@ class AISettingsPage(QWidget):
             button = PrimaryPushButton(text) if text == "新建组合" else PushButton(text); button.clicked.connect(callback); combo_buttons.addWidget(button)
             if text == "删除当前":
                 self.delete_combo_button = button
-        combo_buttons.addStretch(1); cl.addLayout(combo_buttons); root.addWidget(combo_card)
-        self.name = LineEdit(); self.name.setPlaceholderText("组合标识，例如 daily")
-        name_card = CardWidget(); nl = QFormLayout(name_card); nl.setContentsMargins(20, 16, 20, 16); nl.addRow("当前组合标识", self.name); root.addWidget(name_card)
+        combo_buttons.addStretch(1); cl.addLayout(combo_buttons)
+        self.current_combo_label = CaptionLabel("请选择一个组合，或点击“新建组合”开始配置")
+        cl.addWidget(self.current_combo_label)
+        root.addWidget(combo_card)
         self.route_cards: dict[str, dict[str, QWidget]] = {}
         for route, label in (("timed", "当任务为限时任务时"), ("untimed", "当任务为一般任务时")):
             root.addWidget(self._build_route(route, label))
@@ -170,7 +220,11 @@ class AISettingsPage(QWidget):
         self.combination_names = list(combinations)
         display_names = {"economy": "默认", "gpt_only": "高级"}
         for name in self.combination_names:
-            self.combo_choice.addItem(display_names.get(name, name), name)
+            value = combinations.get(name, {}) if isinstance(combinations.get(name, {}), dict) else {}
+            label = str(value.get("display_name") or display_names.get(name, name))
+            if self._models().get("default") == name:
+                label += "（默认）"
+            self.combo_choice.addItem(label, name)
         self.combo_choice.blockSignals(False); self._refresh_route_endpoints(); self._refresh_condition_endpoints(); self._refresh_challenge_endpoints(); self.load_combo()
 
     def _refresh_route_endpoints(self):
@@ -204,8 +258,21 @@ class AISettingsPage(QWidget):
 
     def load_combo(self):
         name = self.combo_choice.currentData(); combinations = self._models().setdefault("combinations", {})
-        value = self._pending_combo if self._pending_combo is not None else combinations.get(name, {}) if name else {}
-        self._pending_combo = None; self.name.setText(str(name or ""))
+        pending = self._pending_combo is not None
+        if pending and name is not None:
+            self._pending_combo = None
+            self._pending_combo_id = None
+            self._pending_combo_display_name = None
+            pending = False
+        value = self._pending_combo if pending else combinations.get(name, {}) if name else {}
+        if pending:
+            self._current_combo_id = self._pending_combo_id
+            display_name = self._pending_combo_display_name or self._pending_combo_id or "新组合"
+        else:
+            self._current_combo_id = str(name) if name else None
+            display_name = (combinations.get(name, {}) or {}).get("display_name") if name else None
+            display_name = display_name or ({"economy": "默认", "gpt_only": "高级"}.get(str(name), str(name or "新组合")))
+        self.current_combo_label.setText(f"当前组合：{display_name}  ·  ID：{self._current_combo_id or '未创建'}")
         for route, fields in self.route_cards.items():
             row = value.get(route, {}) if isinstance(value.get(route), dict) else {}
             for key, field in (("primary", "primary"), ("fallback", "fallback"), ("effort", "reasoning_effort")):
@@ -215,17 +282,29 @@ class AISettingsPage(QWidget):
         challenge = self._models().get("challenge", {}); self.challenge_attempts.setText(str(challenge.get("retry_attempts", 3))); self.challenge_site.setCurrentIndex(max(0, self.challenge_site.findData(challenge.get("escalation_endpoint", "")))); self._refresh_challenge_models(); self.challenge_model.setCurrentIndex(max(0, self.challenge_model.findData(challenge.get("escalation_model", "")))); self.challenge_effort.setCurrentIndex(max(0, self.challenge_effort.findData(challenge.get("reasoning_effort", "xhigh")))); self.challenge_retries.setText(str(challenge.get("escalation_retries", 1)))
 
     def save_combo(self):
-        name = self.name.text().strip(); models = self._models(); combinations = models.setdefault("combinations", {})
+        models = self._models(); combinations = models.setdefault("combinations", {})
+        name = self._pending_combo_id or self._current_combo_id or str(self.combo_choice.currentData() or "")
+        current_value = combinations.get(name, {}) if name else {}
+        display_name = self._pending_combo_display_name or (current_value.get("display_name") if isinstance(current_value, dict) else None) or {"economy": "默认", "gpt_only": "高级"}.get(name, name)
         if not re.fullmatch(r"[a-z][a-z0-9_-]*", name): _notice(self, "答案组合", "组合标识格式不正确。"); return
-        old = self.combo_choice.currentData(); value: dict[str, Any] = {}
+        old = self.combo_choice.currentData(); value: dict[str, Any] = {"display_name": display_name}
         for route, fields in self.route_cards.items():
             row = {"primary": fields["primary"].currentData(), "model": fields["model"].currentData() or fields["model"].currentText(), "reasoning_effort": fields["effort"].currentData(), "timeout_seconds": int(fields["timeout"].text() or 0), "retry_attempts": int(fields["retries"].text() or 0)}
             if fields["fallback"].currentData(): row.update({"fallback": fields["fallback"].currentData(), "fallback_model": fields["fallback_model"].currentData() or fields["fallback_model"].currentText(), "fallback_reasoning_effort": fields["fallback_effort"].currentData()})
             value[route] = row
         if self.kind.text().strip(): value["conditions"] = [{"kind": self.kind.text().strip(), "primary": self.kind_site.currentData(), "model": self.kind_model.currentData() or self.kind_model.currentText(), "reasoning_effort": self.kind_effort.currentData(), "timeout_seconds": int(self.kind_timeout.text() or 0), "retry_attempts": int(self.kind_retries.text() or 0)}]
-        if old and old != name: combinations.pop(old, None)
+        if old and old != name and self._pending_combo_id is not None:
+            combinations.pop(old, None)
         combinations[name] = value; models["default"] = models.get("default") or name; models["challenge"] = {"retry_attempts": int(self.challenge_attempts.text() or 3), "escalation_endpoint": self.challenge_site.currentData(), "escalation_model": self.challenge_model.currentData() or self.challenge_model.currentText(), "reasoning_effort": self.challenge_effort.currentData(), "escalation_retries": int(self.challenge_retries.text() or 1)}
-        self.controller.config.save({**self.controller.config.ensure(), "models": models}); self.reload(); self.combo_choice.setCurrentText(name); _notice(self, "AI 配置", "答案组合已保存。")
+        self.controller.config.save({**self.controller.config.ensure(), "models": models})
+        self._pending_combo = None
+        self._pending_combo_id = None
+        self._pending_combo_display_name = None
+        self.reload()
+        index = self.combo_choice.findData(name)
+        if index >= 0:
+            self.combo_choice.setCurrentIndex(index)
+        _notice(self, "AI 配置", "答案组合已保存。")
 
     def add_site(self): self._edit_site("")
     def edit_site(self):
@@ -244,11 +323,28 @@ class AISettingsPage(QWidget):
         self._scan_thread = _ScanThread(name, self._endpoints()[name]); self._scan_thread.done.connect(self._scan_done); self._scan_thread.failed.connect(lambda _, msg: _notice(self, "扫描模型失败", msg)); self._scan_thread.start()
     def _scan_done(self, name, models): self._endpoints()[name]["models"] = models; self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload(); _notice(self, "扫描模型", f"已读取 {len(models)} 个模型。")
     def new_combo(self): self._open_new_combo({})
-    def copy_combo(self): self._open_new_combo(deepcopy(self._models().setdefault("combinations", {}).get(self.combo_choice.currentData(), {})))
-    def _open_new_combo(self, value):
+    def copy_combo(self):
+        current_id = str(self.combo_choice.currentData() or "")
+        current = self._models().setdefault("combinations", {}).get(current_id, {})
+        current_display = (current or {}).get("display_name") or {"economy": "默认", "gpt_only": "高级"}.get(current_id, current_id)
+        self._open_new_combo(deepcopy(current), suggested_id=f"{current_id}_copy" if current_id else "new_combo", suggested_display_name=f"{current_display} 副本")
+    def _open_new_combo(self, value, suggested_id: str = "new_combo", suggested_display_name: str = "新组合"):
+        names = list(self._models().setdefault("combinations", {}))
+        suffix = 2
+        base_id = suggested_id
+        while suggested_id in names:
+            suggested_id = f"{base_id}_{suffix}"
+            suffix += 1
+        dialog = _CombinationNameDialog(names, suggested_id, suggested_display_name, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        display_name, combo_id = dialog.value()
         self._pending_combo = deepcopy(value)
-        self.name.clear()
+        self._pending_combo_id = combo_id
+        self._pending_combo_display_name = display_name
+        self.combo_choice.blockSignals(True)
         self.combo_choice.setCurrentIndex(-1)
+        self.combo_choice.blockSignals(False)
         self.load_combo()
     def delete_combo(self):
         name = self.combo_choice.currentData()
