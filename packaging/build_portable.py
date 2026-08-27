@@ -34,6 +34,25 @@ def validate_sources() -> list[dict[str, str]]:
         if license_name not in ALLOWED_LICENSES:
             blocked.append(item)
         notices.append(item)
+    for metadata_path in (
+        ROOT / "workers" / "chaoxing" / "AUXILIARY_SOURCES.json",
+        ROOT / "workers" / "uai" / "BROWSER_SOURCE.json",
+    ):
+        if not metadata_path.exists():
+            continue
+        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+        records = value if isinstance(value, list) else [value]
+        for metadata in records:
+            license_name = str(metadata.get("license") or "NOASSERTION")
+            item = {
+                "name": str(metadata.get("name") or metadata_path.stem),
+                "repository": str(metadata.get("repository") or ""),
+                "revision": str(metadata.get("revision") or ""),
+                "license": license_name,
+            }
+            if license_name not in ALLOWED_LICENSES:
+                blocked.append(item)
+            notices.append(item)
     if blocked:
         names = ", ".join(f"{item['name']} ({item['license']})" for item in blocked)
         raise SystemExit(

@@ -50,6 +50,8 @@ README.txt               首次启动、数据目录和备份说明
 当前 `welearn` donor 的固定 revision 未提供可确认的再分发许可证，`SOURCE.json` 仍为
 `NOASSERTION`。按本计划的发布安全边界，便携构建会在实际编译前明确失败并列出阻断来源；
 在确认授权或替换为许可清晰的 donor 前，不生成一个暗中缺少 `welearn` 的“完整”发布包。
+构建同样会检查 `chaoxing` 的 CxKitty 辅助 donor 和 `uai` 的浏览器脚本 manifest，二者的
+许可证必须显式记录在 metadata 中。
 
 ## 必须显式打包的资源
 

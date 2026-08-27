@@ -3,6 +3,7 @@
     "name": "SocialSisterYi/CxKitty",
     "repository": "https://github.com/SocialSisterYi/CxKitty",
     "revision": "1589eac9c07c4bab71f79d762b45210643dd537d",
+    "license": "GPL-3.0",
     "runtime_compatibility": "workers/chaoxing/worker.py:install_cxkitty_numpy_compatibility",
     "files": {
       "cxapi/api.py": "ad550b2a34f72a614330309c0c8596e7cb98f0bccf31278a3ab972db138f34bb",
