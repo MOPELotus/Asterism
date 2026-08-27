@@ -56,12 +56,15 @@ jobs:
           python packaging/build_portable.py
           --architecture ${{ matrix.architecture }}
           --version ${{ github.ref_name }}
-      - name: Extract portable ZIP
+      - name: Extract portable ZIP into validation paths
         shell: pwsh
         run: |
           $archive = Get-ChildItem release\asterism-windows-${{ matrix.architecture }}-*.zip | Select-Object -First 1
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath 'portable-ascii-path'
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath 'portable 中文 path'
-      - name: Smoke portable package
+      - name: Smoke portable package in ASCII path
+        run: python packaging/validate_portable.py --require-browser "portable-ascii-path"
+      - name: Smoke portable package in Chinese path
         run: python packaging/validate_portable.py --require-browser "portable 中文 path"
       - uses: actions/upload-artifact@v4
         with:
