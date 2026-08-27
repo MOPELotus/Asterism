@@ -31,6 +31,21 @@ def load_builder():
 
 
 class PortableValidationTests(unittest.TestCase):
+    def test_builder_freezes_dynamic_chaoxing_dependencies(self) -> None:
+        required = {
+            "pyaes",
+            "httpx",
+            "openai",
+            "dataclasses_json",
+            "jsonpath",
+            "ddddocr",
+            "fontTools",
+            "cv2",
+            "qrcode",
+        }
+        builder = load_builder()
+        self.assertTrue(required.issubset(set(builder.FREEZE_PACKAGES)))
+
     def test_builder_verifies_pinned_donor_file_hashes(self) -> None:
         builder = load_builder()
         with tempfile.TemporaryDirectory() as temporary:

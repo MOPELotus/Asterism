@@ -26,6 +26,16 @@ FREEZE_PACKAGES = (
     # Nuitka cannot discover these imports from the worker source alone.
     "requests",
     "bs4",
+    # chaoxing donor modules are imported dynamically from the staged tree;
+    # keep their direct protocol/answer dependencies explicit so Nuitka does
+    # not omit paths that only run after login or during exam resolution.
+    "pyaes",
+    "httpx",
+    "openai",
+    "dataclasses_json",
+    "jsonpath",
+    "fontTools",
+    "ddddocr",
     "Crypto",
     "Cryptodome",
     "cryptography",
