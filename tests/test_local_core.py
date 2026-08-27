@@ -833,6 +833,16 @@ class LocalStoreTests(unittest.TestCase):
             "deepseek-chat",
         )
 
+    def test_deleted_model_entries_are_not_reintroduced_by_default_merge(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        value = config.ensure()
+        value["models"]["combinations"].pop("economy")
+        value["models"]["endpoints"].pop("gpt_router")
+        config.save(value)
+        loaded = config.load()
+        self.assertNotIn("economy", loaded["models"]["combinations"])
+        self.assertNotIn("gpt_router", loaded["models"]["endpoints"])
+
     def test_ai_default_combinations_build_responses_multimodal_request(self) -> None:
         config = LocalConfigStore(self.paths.config)
         bank = QuestionBank(self.paths.database)
