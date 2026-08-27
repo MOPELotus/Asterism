@@ -34,3 +34,18 @@ class PortableValidationTests(unittest.TestCase):
             payload.write_bytes(b"tampered")
             with self.assertRaises(SystemExit):
                 validator.verify_manifest(package, manifest)
+
+    def test_manifest_verification_rejects_unlisted_files(self) -> None:
+        validator = load_validator()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            payload = package / "Asterism.exe"
+            payload.write_bytes(b"portable")
+            digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            manifest = package / "SHA256SUMS.json"
+            manifest.write_text(
+                json.dumps({"files": {"Asterism.exe": digest}}), encoding="utf-8"
+            )
+            (package / "unexpected.dll").write_bytes(b"unlisted")
+            with self.assertRaises(SystemExit):
+                validator.verify_manifest(package, manifest)

@@ -36,6 +36,18 @@ def verify_manifest(package: Path, manifest_path: Path) -> dict[str, str]:
         if str(expected).casefold() != actual:
             raise SystemExit(f"portable manifest hash mismatch: {name}")
         verified[name] = actual
+    actual_files = {
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
+        if path.is_file() and path.resolve() != manifest_path.resolve()
+    }
+    listed_files = set(verified)
+    missing = sorted(listed_files - actual_files)
+    extra = sorted(actual_files - listed_files)
+    if missing:
+        raise SystemExit("portable manifest files are missing: " + ", ".join(missing[:8]))
+    if extra:
+        raise SystemExit("portable package contains unlisted files: " + ", ".join(extra[:8]))
     return verified
 
 
