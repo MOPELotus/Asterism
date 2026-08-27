@@ -1590,6 +1590,7 @@ class ScanTests(unittest.TestCase):
         second = self.coordinator.scan(self.profile)
         self.assertEqual(second.state, "completed")
         self.assertEqual(second.completed_tasks, 2)
+        self.assertEqual(second.question_count, 2)
         self.assertEqual(len(self.calls), calls_after_first + 2)  # courses + tasks only
         self.assertEqual(self.calls[-2:], [("courses", ""), ("tasks", "course-1")])
 

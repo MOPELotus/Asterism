@@ -120,7 +120,9 @@ class ReadOnlyScanCoordinator:
         status.last_error = ""
         status.course_count = 0
         status.task_count = 0
-        status.question_count = 0
+        # question_count is cumulative for the resumable checkpoint. Completed
+        # tasks are intentionally skipped below, so resetting it here would
+        # make a healthy second run misleadingly report zero scanned questions.
         status.completed_tasks = 0
         self._save(status, on_update)
         try:
