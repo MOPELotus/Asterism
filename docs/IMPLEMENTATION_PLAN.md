@@ -113,7 +113,7 @@ Checkpoint：四个平台现有能力都能从本地入口加载；一个 Runner
 Profile 或桌面进程；不需要 Asterism 用户、Token 或 Scheduler。
 
 当前证据：四个固定 donor 均通过入口 hash 校验和无账号 `health`；原 Worker 53 项测试与
-本地控制层与 AI/扫描控制层 43 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
+本地控制层与 AI/扫描控制层 44 项测试通过。Profile、会话、配置、草稿、题库、日志、超时、取消和 Windows
 进程树兜底均已接入，且数据库中不存在用户、权限、计费或调度表。
 
 ### C2：四平台与共享能力接线
@@ -146,6 +146,8 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
   课程刷新、题目扫描和设置保存不会触发通知。
 - `chaoxing` 章节任务执行前，桌面控制层会先读取题目并按全局题库优先、AI 其次准备答案；
   Worker 仍负责最终的题型编码、平台提交和完成状态读取。
+- 挑战知识点若完成状态仍未达标，Worker 先执行其有界重试并返回升级标记；控制层消费该标记，
+  仅再用 `gpt_only` 的 Sol xhigh 答案执行一次升级尝试，并通过内部标记防止无限重试。
 - `cidaren` 任务执行时，桌面层按单次任务启动短生命周期的 loopback answer bridge：新题先走
   全局题库/AI 策略，Worker 仍保留 donor 的选项映射、提交顺序和限时回退；平台返回的正误
   观察写回本地证据。正式作业/考试只使用草稿中经人工确认的答案，不自动启动答题 bridge；

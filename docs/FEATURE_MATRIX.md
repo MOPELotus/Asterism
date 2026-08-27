@@ -33,7 +33,7 @@
 | 考试 | 限时/次数任务进入前确认，草稿，二次确认，原生提交 | `upstream-proven + desktop-wired + fixture-verified` |
 | 讨论/签到 | 保留有证据且影响完成度的操作；生成文本须相关且自然 | `upstream-proven + desktop-wired` |
 | 成绩构成 | 展示模块权重、当前成绩、完成条件和剩余缺口 | `upstream-proven + desktop-wired + fixture-verified` |
-| 挑战模式 | 只执行已开放节点；三次重试、一次 Sol xhigh、然后明确失败 | `ported-unverified + desktop-wired + fixture-verified` |
+| 挑战模式 | 只执行已开放节点；三次有界重试、一次 Sol xhigh 升级、然后明确失败 | `ported-unverified + desktop-wired + fixture-verified` |
 | 验证码 | 复用进度验证、Exam 滑块、活体/人脸路径，自动退避且不全局阻塞 | `upstream-proven + desktop-wired + fixture-verified` |
 | 历史扫描 | 所有可登录账号的可恢复后台扫描，显示覆盖、游标和重试 | `ported-unverified + desktop-wired + fixture-verified` |
 

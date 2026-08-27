@@ -194,7 +194,7 @@ class DesktopController:
     ) -> ProviderOperationResult:
         merged_settings = self.provider_settings(profile, settings)
         if profile.provider != "cidaren" or self._is_formal_task(task):
-            return self.service.run_task(
+            result = self.service.run_task(
                 profile,
                 task,
                 answers=answers,
@@ -202,6 +202,27 @@ class DesktopController:
                 cancel=cancel,
                 on_event=on_event,
             )
+            if self._needs_challenge_escalation(profile, task, result, merged_settings):
+                escalation_answers = self.prepare_answers(
+                    profile,
+                    task,
+                    combination="gpt_only",
+                    route="untimed",
+                    force_refresh=True,
+                )
+                escalation_settings = dict(merged_settings)
+                escalation_settings["_challenge_escalation"] = True
+                escalation_settings["challenge_retry_attempts"] = 1
+                escalation_settings["challenge_escalation_route"] = "sol_xhigh"
+                return self.service.run_task(
+                    profile,
+                    task,
+                    answers=escalation_answers or answers,
+                    settings=escalation_settings,
+                    cancel=cancel,
+                    on_event=on_event,
+                )
+            return result
 
         bridge = CidarenAnswerBridge(
             resolve=lambda document: self._resolve_cidaren_answer(document),
@@ -235,6 +256,25 @@ class DesktopController:
             "course_exam",
             "course_homework",
         }
+
+    @staticmethod
+    def _needs_challenge_escalation(
+        profile: Profile,
+        task: Mapping[str, Any],
+        result: ProviderOperationResult,
+        settings: Mapping[str, Any],
+    ) -> bool:
+        if profile.provider != "chaoxing" or settings.get("_challenge_escalation"):
+            return False
+        native = task.get("native")
+        if not isinstance(native, Mapping) or native.get("route_kind") != "knowledge_point":
+            return False
+        data = result.data if isinstance(result, ProviderOperationResult) else {}
+        details = data.get("result") if isinstance(data, Mapping) else None
+        return (
+            isinstance(details, Mapping)
+            and details.get("challenge_escalation_requested") is True
+        )
 
     def provider_settings(
         self, profile: Profile, overrides: dict[str, Any] | None = None
@@ -356,6 +396,7 @@ class DesktopController:
         combination: str | None = None,
         route: str = "untimed",
         allow_read_that_starts_attempt: bool = False,
+        force_refresh: bool = False,
     ) -> list[dict[str, Any]]:
         """Resolve local/AI answers into the Worker wire shape.
 
@@ -392,6 +433,7 @@ class DesktopController:
                         question,
                         combination=combination,
                         route=route,
+                        force_refresh=force_refresh,
                     )
                 except (OSError, RuntimeError, ValueError):
                     continue

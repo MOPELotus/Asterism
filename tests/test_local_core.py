@@ -32,7 +32,7 @@ from asterism.profiles import ProfileStateStore, ProfileStore
 from asterism.providers import ProviderRegistry, WorkerSpec
 from asterism.runner import RunnerError, RunnerManager
 from asterism.scan import ReadOnlyScanCoordinator
-from asterism.service import ProviderService
+from asterism.service import ProviderOperationResult, ProviderService
 from workers.common.runtime import payload_secrets
 from workers.uai.worker import find_browser
 
@@ -183,6 +183,60 @@ class LocalStoreTests(unittest.TestCase):
             answers=[{"remote_id": "q-1", "value": "A"}],
         )
         self.assertNotIn("answer_bridge", calls[0])
+
+    def test_controller_consumes_chaoxing_challenge_escalation_once(self) -> None:
+        calls = []
+        log_path = self.paths.root / "run.log"
+
+        class FakeService:
+            def run_task(
+                self,
+                profile,
+                task,
+                *,
+                answers=None,
+                settings=None,
+                cancel=None,
+                on_event=None,
+            ):
+                calls.append((answers, dict(settings or {})))
+                details = (
+                    {"challenge_escalation_requested": len(calls) == 1}
+                    if len(calls) == 1
+                    else {"challenge_escalation_requested": False}
+                )
+                return ProviderOperationResult(
+                    "run", {"result": details}, SimpleNamespace(log_path=log_path)
+                )
+
+            def questions(self, profile, task, *, allow_read_that_starts_attempt=False):
+                return SimpleNamespace(
+                    data={
+                        "questions": [
+                            {
+                                "remote_id": "q-1",
+                                "kind": "single_choice",
+                                "prompt": "p",
+                                "options": ["A"],
+                            }
+                        ]
+                    }
+                )
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        controller.config = SimpleNamespace(ensure=lambda: {"providers": {}})
+        controller.bank = QuestionBank(self.paths.database)
+        controller.bank.initialize()
+        controller.answer_question = lambda *args, **kwargs: {
+            "answer": {"answer": "A"}
+        }
+        profile = ProfileStore(self.paths).create("chaoxing", "challenge")
+        task = {"remote_id": "point-1", "native": {"route_kind": "knowledge_point"}}
+        controller.run_task(profile, task, answers=[{"remote_id": "q-1", "value": "A"}])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][1]["_challenge_escalation"], True)
+        self.assertEqual(calls[1][1]["challenge_escalation_route"], "sol_xhigh")
 
     def test_draft_answers_accept_id_to_value_map(self) -> None:
         self.assertEqual(
