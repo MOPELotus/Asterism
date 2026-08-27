@@ -211,11 +211,11 @@ class ReadOnlyScanCoordinator:
             status.phase = "done"
         except RunnerError as error:
             status.state = "cancelled" if error.code == "cancelled" else "failed"
-            status.last_error = f"{error.code}: {error}"
+            status.last_error = f"{error.code}: scan operation failed"
             raise
         except Exception as error:
             status.state = "failed"
-            status.last_error = str(error)
+            status.last_error = f"{type(error).__name__}: scan operation failed"
             raise
         finally:
             status.updated_at = _now()
@@ -241,15 +241,17 @@ class ReadOnlyScanCoordinator:
                     raise
                 if attempt >= max_retries:
                     raise
-                status.last_error = f"{error.code}: {error}"
+                status.last_error = f"{error.code}: scan operation failed"
                 status.retries += 1
                 self._save(status, on_update)
                 cancel.wait(min(2**attempt, 30))
-            except (OSError, ValueError) as error:
-                last_error = RunnerError("retryable_error", str(error))
+            except (OSError, RuntimeError, ValueError) as error:
+                last_error = RunnerError(
+                    "retryable_error", f"{type(error).__name__}: scan operation failed"
+                )
                 if attempt >= max_retries:
                     raise last_error from error
-                status.last_error = str(error)
+                status.last_error = str(last_error)
                 status.retries += 1
                 self._save(status, on_update)
                 cancel.wait(min(2**attempt, 30))

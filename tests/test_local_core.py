@@ -1639,6 +1639,30 @@ class ScanTests(unittest.TestCase):
         )
         self.assertEqual(calls.count(("questions", "shared-task")), 1)
 
+    def test_scan_retries_runtime_failures_without_persisting_exception_text(self) -> None:
+        attempts = 0
+
+        def result(data):
+            return SimpleNamespace(data=data)
+
+        class Service:
+            def courses(self, _profile, *, cancel=None):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("password-secret")
+                return result({"courses": []})
+
+        coordinator = ReadOnlyScanCoordinator(
+            Service(), self.states, InventoryStore(self.states), AnswerRepository(self.bank)
+        )
+        status = coordinator.scan(self.profile, max_retries=1)
+        self.assertEqual(status.state, "completed")
+        self.assertEqual(status.retries, 1)
+        persisted = self.states.load(self.profile, "scan")
+        self.assertIsNotNone(persisted)
+        self.assertNotIn("password-secret", json.dumps(persisted))
+
 
 if __name__ == "__main__":
     unittest.main()
