@@ -89,7 +89,7 @@
 | GPT-only | Native 标答直接使用；精确缓存作为证据；限时 Luna，不限时 Sol xhigh，无国内灾备 | `desktop-wired + fixture-verified` |
 | 模型输入 | 包含全部文本、材料、媒体归属、附件、原生题型、空格/下划线和已有证据 | `desktop-wired + fixture-verified` |
 | 主观文本 | 相关、自然的纯文本；无 Markdown/系统/测试痕迹；差异化并检测重复 | `ported-unverified + desktop-wired` |
-| 正式草稿 | 本地/远端只保存草稿，可编辑答案和来源，明确提交并回收结果 | `ported-unverified + desktop-wired + fixture-verified` |
+| 正式草稿 | 先读取题目并按全局题库/AI 预填，保存题目、答案来源和未解析项；可编辑、补漏，答案覆盖完整后明确提交并回收结果 | `ported-unverified + desktop-wired + fixture-verified` |
 
 ## Checkpoint 规则
 
