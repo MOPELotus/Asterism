@@ -38,9 +38,11 @@ def validate_native_architecture(architecture: str) -> None:
         )
 
 
-def run(command: list[str], *, cwd: Path = ROOT) -> None:
+def run(
+    command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None
+) -> None:
     print("+", " ".join(command), flush=True)
-    completed = subprocess.run(command, cwd=cwd, check=False)
+    completed = subprocess.run(command, cwd=cwd, check=False, env=env)
     if completed.returncode != 0:
         raise SystemExit(completed.returncode)
 
@@ -297,11 +299,20 @@ def build_executable(
         f"--output-dir={output}",
         f"--output-filename={name}.exe",
         "--follow-imports",
+        "--include-module=common.runtime",
         *(["--enable-plugin=pyqt6", "--windows-console-mode=disable"] if gui else []),
         *include_data,
         str(entry),
     ]
-    run(command)
+    environment = os.environ.copy()
+    workers_path = str(ROOT / "workers")
+    existing_python_path = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        workers_path
+        if not existing_python_path
+        else workers_path + os.pathsep + existing_python_path
+    )
+    run(command, env=environment)
     result = output / f"{entry.stem}.dist" / f"{name}.exe"
     if not result.exists():
         matches = list(output.rglob(f"{name}.exe"))

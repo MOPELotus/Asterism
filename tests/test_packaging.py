@@ -83,6 +83,23 @@ class PortableValidationTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 builder.validate_native_architecture("arm64")
 
+    def test_builder_exposes_workers_common_to_nuitka(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "worker.py"
+            entry.write_text("print('ok')\n", encoding="utf-8")
+            output = Path(temporary) / "out"
+            captured = {}
+
+            def fake_run(command, *, cwd=builder.ROOT, env=None):
+                captured["command"] = command
+                captured["env"] = env
+
+            with patch.object(builder, "run", side_effect=fake_run), self.assertRaises(SystemExit):
+                builder.build_executable("python", output, entry, "worker", [], gui=False)
+            self.assertIn("--include-module=common.runtime", captured["command"])
+            self.assertTrue(captured["env"]["PYTHONPATH"].startswith(str(builder.ROOT / "workers")))
+
     def test_browser_smoke_requires_marker_and_zero_exit(self) -> None:
         validator = load_validator()
         executable = Path("chrome.exe")
