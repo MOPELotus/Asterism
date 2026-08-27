@@ -45,6 +45,7 @@ class DesktopController:
         paths.initialize()
         resources = Path(source_root).resolve() if source_root else application_root()
         registry = ProviderRegistry(resources)
+        config_store = LocalConfigStore(paths.config)
         bank = QuestionBank(paths.database)
         bank.initialize()
         states = ProfileStateStore(paths)
@@ -53,11 +54,13 @@ class DesktopController:
             RunnerManager(registry, paths.logs, states),
             states,
             InventoryStore(states),
+            settings_provider=lambda provider: config_store.ensure()
+            .get("providers", {})
+            .get(provider, {}),
         )
         inventory = InventoryStore(states)
         scanner = ReadOnlyScanCoordinator(service, states, inventory, AnswerRepository(bank))
         ai = AIAnswerService(LocalConfigStore(paths.config), bank)
-        config_store = LocalConfigStore(paths.config)
         return cls(
             paths=paths,
             profiles=ProfileStore(paths),
