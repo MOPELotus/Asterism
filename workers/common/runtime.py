@@ -103,6 +103,23 @@ def payload_secrets(payload: Mapping[str, Any]) -> list[str]:
     collect(payload.get("callback_url"))
     for container_name in ("credentials", "session"):
         collect(payload.get(container_name))
+
+    def collect_sensitive(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                lowered = str(key).casefold()
+                if any(
+                    marker in lowered
+                    for marker in ("password", "token", "cookie", "secret", "ticket", "api_key")
+                ):
+                    collect(child)
+                else:
+                    collect_sensitive(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_sensitive(child)
+
+    collect_sensitive(payload.get("settings"))
     return values
 
 

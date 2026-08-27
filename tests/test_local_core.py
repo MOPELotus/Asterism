@@ -71,6 +71,14 @@ class LocalStoreTests(unittest.TestCase):
         )
         self.assertIn("p", values)
         self.assertIn("cookie-value", values)
+        self.assertIn(
+            "bridge-ticket",
+            payload_secrets({"settings": {"answer_bridge": {"ticket": "bridge-ticket"}}}),
+        )
+        self.assertNotIn(
+            "ordinary-setting",
+            payload_secrets({"settings": {"label": "ordinary-setting"}}),
+        )
 
     def test_uai_browser_detection_accepts_a_configured_executable(self) -> None:
         executable = self.paths.root / "browser.exe"
