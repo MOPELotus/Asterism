@@ -43,6 +43,7 @@ from .fluent import (
     NavigationItemPosition,
     PrimaryPushButton,
     PushButton,
+    ScrollArea,
     StrongBodyLabel,
     SubtitleLabel,
     TableWidget,
@@ -255,7 +256,15 @@ class ProviderPage(QWidget):
         self.current_questions: list[dict[str, Any]] = []
         self.worker_thread: CallThread | None = None
         self.cancel_event: threading.Event | None = None
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = ScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        root = QVBoxLayout(content)
         root.setContentsMargins(28, 24, 28, 28)
         root.setSpacing(14)
         intro = CardWidget()

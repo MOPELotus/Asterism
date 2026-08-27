@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTextEdit,
     QWidget,
@@ -51,9 +52,10 @@ try:  # qfluentwidgets is optional during headless development and CI.
     )
 
     try:
-        from qfluentwidgets import ComboBox, LineEdit, TableWidget, TextEdit
+        from qfluentwidgets import ComboBox, LineEdit, ScrollArea, TableWidget, TextEdit
     except ImportError:  # pragma: no cover - old qfluentwidgets releases
         ComboBox, LineEdit, TableWidget, TextEdit = QComboBox, QLineEdit, QTableWidget, QTextEdit
+        ScrollArea = QScrollArea
     FLUENT_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised on minimal dev environments
     BodyLabel = QLabel
@@ -65,6 +67,7 @@ except ImportError:  # pragma: no cover - exercised on minimal dev environments
     PrimaryPushButton = QPushButton
     PushButton = QPushButton
     ComboBox, LineEdit, TableWidget, TextEdit = QComboBox, QLineEdit, QTableWidget, QTextEdit
+    ScrollArea = QScrollArea
     CardWidget = QWidget
     FluentIcon = None
     FluentWindow = object
