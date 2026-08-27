@@ -88,6 +88,20 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIsNotNone(third)
             third.unlock()
 
+    def test_noninteractive_first_run_skips_modal_wizard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            old = os.environ.get("ASTERISM_NONINTERACTIVE")
+            os.environ["ASTERISM_NONINTERACTIVE"] = "1"
+            try:
+                window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+                self.assertFalse(window.controller.config.ensure().get("onboarding_completed"))
+                window.close()
+            finally:
+                if old is None:
+                    os.environ.pop("ASTERISM_NONINTERACTIVE", None)
+                else:
+                    os.environ["ASTERISM_NONINTERACTIVE"] = old
+
     def test_mixed_batch_result_counts_routine_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])

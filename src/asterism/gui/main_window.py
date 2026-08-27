@@ -1576,7 +1576,10 @@ class MainWindow(QMainWindow):
 
     def _show_first_run_wizard(self) -> None:
         """Give a local operator a safe first-run orientation without credentials."""
-        if os.environ.get("QT_QPA_PLATFORM", "").casefold() in {"offscreen", "minimal"}:
+        if (
+            os.environ.get("ASTERISM_NONINTERACTIVE") == "1"
+            or os.environ.get("QT_QPA_PLATFORM", "").casefold() in {"offscreen", "minimal"}
+        ):
             return
         config = self.controller.config.ensure()
         if config.get("onboarding_completed") is True:
