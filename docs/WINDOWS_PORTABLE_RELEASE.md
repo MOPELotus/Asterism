@@ -44,7 +44,7 @@ SHA256SUMS.json          包内文件校验清单
 
 实现入口为 `packaging/build_portable.py`，构建后使用
 `packaging/validate_portable.py` 会先校验 SHA-256 manifest，再在含空格和中文的解压目录启动验证；
-manifest 路径穿越、文件缺失或哈希不匹配会在启动前失败。Workflow 仅在手动触发
+manifest 路径穿越、文件缺失、哈希不匹配或包内出现未列出的文件会在启动前失败。Workflow 仅在手动触发
 或版本 tag 时运行，避免日常代码提交反复执行昂贵的双架构 Nuitka 构建。
 
 当前 `welearn` donor 的固定 revision 未提供可确认的再分发许可证，`SOURCE.json` 仍为
