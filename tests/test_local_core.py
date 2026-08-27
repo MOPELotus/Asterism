@@ -662,6 +662,30 @@ class LocalStoreTests(unittest.TestCase):
         finally:
             bridge.close()
 
+    def test_cidaren_answer_bridge_returns_sanitized_error_on_resolver_failure(self) -> None:
+        bridge = CidarenAnswerBridge(
+            lambda _document: (_ for _ in ()).throw(RuntimeError("credential-secret")),
+            lambda _document: {"ok": True},
+        )
+        try:
+            request = urllib.request.Request(
+                bridge.url,
+                data=json.dumps({"kind": "resolve_answer"}).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {bridge.ticket}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=2)
+            self.assertEqual(raised.exception.code, 500)
+            body = raised.exception.read().decode("utf-8")
+            self.assertIn("answer_bridge_failed", body)
+            self.assertNotIn("credential-secret", body)
+        finally:
+            bridge.close()
+
     def test_profile_state_delete_does_not_touch_account_file(self) -> None:
         profiles = ProfileStore(self.paths)
         states = ProfileStateStore(self.paths)

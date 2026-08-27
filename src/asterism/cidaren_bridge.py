@@ -63,6 +63,11 @@ class CidarenAnswerBridge:
                     json.JSONDecodeError,
                 ) as error:
                     self._send(400, {"error": str(error)})
+                except Exception:
+                    # Resolver/donor failures must still produce a terminal
+                    # response. Do not expose exception text (it may contain
+                    # credentials or remote payloads) to the donor or stderr.
+                    self._send(500, {"error": "answer_bridge_failed"})
 
             def _send(self, status: int, value: Mapping[str, Any]) -> None:
                 body = json.dumps(dict(value), ensure_ascii=False, separators=(",", ":")).encode(
