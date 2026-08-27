@@ -832,7 +832,7 @@ class LocalStoreTests(unittest.TestCase):
 
     def test_ai_rejects_placeholder_answers_for_all_question_kinds(self) -> None:
         question = {"kind": "single_choice", "prompt": "Choose", "options": ["A", "B"]}
-        for placeholder in (None, " ", [], {}):
+        for placeholder in (None, " ", [], {}, ["A", ""], {"left": ""}):
             with self.assertRaisesRegex(RuntimeError, "non-empty"):
                 AIAnswerService._validate_answer(question, placeholder)
         self.assertFalse(

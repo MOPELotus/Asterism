@@ -247,10 +247,17 @@ class AIAnswerService:
     @staticmethod
     def _validate_answer(question: Mapping[str, Any], answer: Any) -> Any:
         """Reject model output that violates the plain-text subjective boundary."""
-        if answer is None or (isinstance(answer, str) and not answer.strip()):
-            raise RuntimeError("AI answer must be non-empty")
-        if isinstance(answer, (list, dict)) and not answer:
-            raise RuntimeError("AI answer must be non-empty")
+        def ensure_non_empty(value: Any) -> None:
+            if value is None or (isinstance(value, str) and not value.strip()):
+                raise RuntimeError("AI answer must be non-empty")
+            if isinstance(value, (list, dict)):
+                if not value:
+                    raise RuntimeError("AI answer must be non-empty")
+                values = value if isinstance(value, list) else value.values()
+                for child in values:
+                    ensure_non_empty(child)
+
+        ensure_non_empty(answer)
         kind = str(question.get("kind") or question.get("type") or "").casefold()
         if kind not in {"short_answer", "subjective", "discussion", "essay", "long_answer"}:
             return answer
