@@ -31,7 +31,10 @@ def auxiliary_root() -> pathlib.Path | None:
     if not root.is_absolute():
         root = pathlib.Path(__file__).resolve().parents[2] / root
     root = root.resolve()
-    manifest_path = pathlib.Path(__file__).with_name("AUXILIARY_SOURCES.json")
+    manifest_path = pathlib.Path(
+        os.environ.get("ASTERISM_CHAOXING_AUXILIARY_SOURCES")
+        or pathlib.Path(__file__).with_name("AUXILIARY_SOURCES.json")
+    )
     try:
         source = json.loads(manifest_path.read_text(encoding="utf-8"))[0]
         for relative, expected in source["files"].items():

@@ -684,7 +684,10 @@ def browser_donor_source() -> pathlib.Path:
     root = pathlib.Path(root_value)
     if not root.is_absolute():
         root = pathlib.Path(__file__).resolve().parents[2] / root
-    manifest_path = pathlib.Path(__file__).with_name("BROWSER_SOURCE.json")
+    manifest_path = pathlib.Path(
+        os.environ.get("ASTERISM_UAI_BROWSER_SOURCE_METADATA")
+        or pathlib.Path(__file__).with_name("BROWSER_SOURCE.json")
+    )
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         source = root.resolve() / manifest["entrypoint"]

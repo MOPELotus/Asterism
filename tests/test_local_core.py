@@ -89,6 +89,13 @@ class LocalStoreTests(unittest.TestCase):
         )
         self.assertEqual(spec.command("ignored-python")[0], str(executable))
 
+    def test_provider_registry_exports_frozen_auxiliary_metadata_paths(self) -> None:
+        registry = ProviderRegistry(Path(__file__).resolve().parents[1])
+        chaoxing = registry.get("chaoxing")
+        uai = registry.get("uai")
+        self.assertTrue(chaoxing.environment["ASTERISM_CHAOXING_AUXILIARY_SOURCES"].endswith("AUXILIARY_SOURCES.json"))
+        self.assertTrue(uai.environment["ASTERISM_UAI_BROWSER_SOURCE_METADATA"].endswith("BROWSER_SOURCE.json"))
+
     def test_controller_wraps_cidaren_run_with_a_short_lived_answer_bridge(self) -> None:
         calls: list[dict] = []
 

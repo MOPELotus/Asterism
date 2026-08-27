@@ -52,11 +52,17 @@ class ProviderRegistry:
             environment["ASTERISM_CHAOXING_AUXILIARY_UPSTREAM"] = str(
                 upstream_root / "chaoxing-exam"
             )
+            environment["ASTERISM_CHAOXING_AUXILIARY_SOURCES"] = str(
+                worker / "AUXILIARY_SOURCES.json"
+            )
         elif provider == "welearn":
             upstream = upstream_root / "welearn" / "welearn_decompiled.py"
         elif provider == "uai":
             upstream = upstream_root / "uai" / "配置我运行我.py"
             environment["ASTERISM_UAI_BROWSER_UPSTREAM"] = str(upstream_root / "uai-browser")
+            environment["ASTERISM_UAI_BROWSER_SOURCE_METADATA"] = str(
+                worker / "BROWSER_SOURCE.json"
+            )
         else:
             upstream = upstream_root / "cidaren"
         executable = worker / "worker.exe"
