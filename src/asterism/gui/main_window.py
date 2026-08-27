@@ -1238,7 +1238,18 @@ class DraftPage(QWidget):
             QMessageBox.critical(self, "drafts", str(error))
             return None
 
+    def _operation_running(self) -> bool:
+        return self.worker_thread is not None and self.worker_thread.isRunning()
+
+    def _refuse_if_busy(self) -> bool:
+        if not self._operation_running():
+            return False
+        QMessageBox.information(self, "drafts", "已有草稿保存或提交操作正在运行")
+        return True
+
     def edit_selected(self) -> None:
+        if self._refuse_if_busy():
+            return
         draft = self._selected()
         if draft is None:
             return
@@ -1259,6 +1270,8 @@ class DraftPage(QWidget):
         dialog.show()
 
     def submit_selected(self) -> None:
+        if self._refuse_if_busy():
+            return
         draft = self._selected()
         if draft is None:
             return
@@ -1281,6 +1294,8 @@ class DraftPage(QWidget):
         self.worker_thread.start()
 
     def save_selected_to_provider(self) -> None:
+        if self._refuse_if_busy():
+            return
         draft = self._selected()
         if draft is None:
             return
@@ -1314,6 +1329,8 @@ class DraftPage(QWidget):
         self.reload()
 
     def discard_selected(self) -> None:
+        if self._refuse_if_busy():
+            return
         draft = self._selected()
         if draft is None:
             return

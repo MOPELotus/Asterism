@@ -413,6 +413,13 @@ class LocalStoreTests(unittest.TestCase):
                 {"remote_id": "q-zero", "value": 0},
             ],
         )
+        with self.assertRaisesRegex(ValueError, "duplicate answer"):
+            DesktopController._normalize_draft_answers(
+                [
+                    {"remote_id": "q-1", "value": "A"},
+                    {"remote_id": "q-1", "value": "B"},
+                ]
+            )
 
     def test_formal_draft_save_and_submit_modes_are_explicit(self) -> None:
         calls = []

@@ -20,7 +20,7 @@ try:
         apply_theme,
         configure_high_dpi,
     )
-    from asterism.gui.main_window import MainWindow, ProviderPage
+    from asterism.gui.main_window import DraftPage, MainWindow, ProviderPage
 except ImportError:  # pragma: no cover - desktop extra is optional in CI
     QApplication = None
 
@@ -101,6 +101,16 @@ class GuiSmokeTests(unittest.TestCase):
                     os.environ.pop("ASTERISM_NONINTERACTIVE", None)
                 else:
                     os.environ["ASTERISM_NONINTERACTIVE"] = old
+
+    def test_draft_page_reports_busy_while_submit_thread_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            page = next(page for page in window.pages if isinstance(page, DraftPage))
+            page.worker_thread = SimpleNamespace(isRunning=lambda: True)
+            self.assertTrue(page._operation_running())
+            page.worker_thread = SimpleNamespace(isRunning=lambda: False)
+            self.assertFalse(page._operation_running())
+            window.close()
 
     def test_mixed_batch_result_counts_routine_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

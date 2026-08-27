@@ -856,9 +856,14 @@ class DesktopController:
         else:
             raise ValueError("draft payload.answers must be an object or array")
         normalized: list[dict[str, Any]] = []
+        seen_remote_ids: set[str] = set()
         for row in rows:
             if not isinstance(row, Mapping) or not str(row.get("remote_id") or "").strip():
                 raise ValueError("each draft answer must contain a non-empty remote_id")
+            remote_id = str(row["remote_id"])
+            if remote_id in seen_remote_ids:
+                raise ValueError(f"draft contains duplicate answer for question {remote_id}")
+            seen_remote_ids.add(remote_id)
             answer = row.get("value")
             if answer is None or (isinstance(answer, str) and not answer.strip()):
                 raise ValueError(
@@ -868,7 +873,7 @@ class DesktopController:
                 raise ValueError(
                     f"draft answer {row['remote_id']} must contain a non-empty value"
                 )
-            normalized.append({"remote_id": str(row["remote_id"]), "value": answer})
+            normalized.append({"remote_id": remote_id, "value": answer})
         return normalized
 
     def draft_rows(self) -> list[dict[str, Any]]:
