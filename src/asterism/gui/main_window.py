@@ -525,6 +525,23 @@ class ProviderPage(QWidget):
         data = result.data if hasattr(result, "data") else result
         preview = json.dumps(self._safe_preview(data), ensure_ascii=False, default=str)
         self.log.append(f"[{label}] {preview}")
+        if label in {"prepare draft", "prepare drafts", "batch run"}:
+            draft_values = []
+            if hasattr(result, "id") and hasattr(result, "payload"):
+                draft_values = [result]
+            elif isinstance(result, list):
+                draft_values = [item for item in result if hasattr(item, "id")]
+            elif isinstance(result, dict):
+                draft_values = [item for item in result.get("drafts", []) if hasattr(item, "id")]
+            for draft in draft_values:
+                self.log.append(f"[draft] {draft.id}")
+            if draft_values:
+                window = self.window()
+                if isinstance(window, MainWindow):
+                    for page in window.pages:
+                        if isinstance(page, DraftPage):
+                            page.reload()
+                            break
         event = "success"
         summary: dict[str, Any] = {"status": "success"}
         batch_results = result
