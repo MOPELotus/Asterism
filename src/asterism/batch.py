@@ -79,7 +79,7 @@ class ManualBatchExecutor:
                 return BatchItemResult(
                     index, remote_id, error_code=error.code, error_message=str(error)
                 )
-            except (OSError, ValueError) as error:
+            except (OSError, RuntimeError, ValueError) as error:
                 return BatchItemResult(
                     index,
                     remote_id,

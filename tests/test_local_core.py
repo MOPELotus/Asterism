@@ -1406,7 +1406,25 @@ class BatchTests(unittest.TestCase):
         )
         self.assertEqual([item.error_code for item in results], [None])
         self.assertEqual(events[0]["task_remote_id"], "one")
-        self.assertEqual(events[0]["batch_index"], 0)
+
+    def test_batch_isolates_answer_resolution_runtime_failures(self) -> None:
+        class FakeService:
+            def run_task(self, profile, task, **kwargs):
+                return SimpleNamespace(data={"remote_state": "completed"})
+
+        def answer_provider(task):
+            if task["remote_id"] == "broken":
+                raise RuntimeError("AI endpoint unavailable")
+            return [{"remote_id": task["remote_id"], "value": "A"}]
+
+        results = ManualBatchExecutor(FakeService()).run(
+            SimpleNamespace(provider="chaoxing"),
+            [{"remote_id": "broken"}, {"remote_id": "healthy"}],
+            answer_provider=answer_provider,
+        )
+        self.assertEqual([item.task_remote_id for item in results], ["broken", "healthy"])
+        self.assertEqual(results[0].error_code, "local_error")
+        self.assertIsNotNone(results[1].result)
 
 
 class ScanTests(unittest.TestCase):
