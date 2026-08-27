@@ -720,6 +720,24 @@ class DesktopController:
         answers = self._normalize_draft_answers(draft.payload.get("answers"))
         if self._is_formal_task(task) and not answers:
             raise ValueError("formal draft requires at least one reviewed answer")
+        questions = draft.payload.get("questions")
+        if isinstance(questions, list):
+            question_ids = {
+                str(question.get("remote_id"))
+                for question in questions
+                if isinstance(question, Mapping) and str(question.get("remote_id") or "").strip()
+            }
+            answer_ids = {str(row["remote_id"]) for row in answers or ()}
+            unknown = sorted(answer_ids - question_ids)
+            if unknown:
+                raise ValueError(
+                    "draft contains answers for unknown questions: " + ", ".join(unknown[:8])
+                )
+            missing = sorted(question_ids - answer_ids)
+            if missing:
+                raise ValueError(
+                    "formal draft still has unanswered questions: " + ", ".join(missing[:8])
+                )
         settings = draft.payload.get("settings")
         if settings is not None and not isinstance(settings, dict):
             raise ValueError("draft payload.settings must be an object")

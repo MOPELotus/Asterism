@@ -272,6 +272,34 @@ class LocalStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             controller.submit_draft(draft)
 
+    def test_formal_draft_rejects_unknown_or_missing_question_answers(self) -> None:
+        class FakeService:
+            def run_task(self, *args, **kwargs):
+                raise AssertionError("provider should not receive invalid draft answers")
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        profile = ProfileStore(self.paths).create("chaoxing", "formal-shape")
+        controller.profiles = ProfileStore(self.paths)
+        task = {
+            "remote_id": "exam-1",
+            "assessment_class": "formal",
+            "native": {"route_kind": "course_exam"},
+        }
+        base = {
+            "task": task,
+            "questions": [{"remote_id": "q-1"}, {"remote_id": "q-2"}],
+            "settings": {},
+        }
+        for answers in (
+            [{"remote_id": "q-1", "value": "A"}],
+            [{"remote_id": "q-1", "value": "A"}, {"remote_id": "other", "value": "B"}],
+        ):
+            draft = SimpleNamespace(status="draft", provider="chaoxing", profile_id=profile.id,
+                                    payload={**base, "answers": answers})
+            with self.assertRaises(ValueError):
+                controller.submit_draft(draft)
+
     def test_formal_draft_reads_prefills_and_never_submits(self) -> None:
         log_path = self.paths.logs / "formal-read.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
