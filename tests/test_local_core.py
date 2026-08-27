@@ -1017,6 +1017,26 @@ class LocalStoreTests(unittest.TestCase):
         answers = controller.prepare_answers(profile, {"remote_id": "task-1"})
         self.assertEqual(answers, [{"remote_id": "q-1", "value": "B"}])
 
+    def test_controller_skips_malformed_question_and_prepares_remaining_answers(self) -> None:
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        good = {"remote_id": "good", "kind": "single_choice", "prompt": "Good", "options": ["A"]}
+        bad = {"remote_id": "bad", "kind": "single_choice", "prompt": "", "options": ["A"]}
+
+        class FakeService:
+            def questions(self, profile, task, **kwargs):
+                return SimpleNamespace(data={"questions": [bad, good]})
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        controller.bank = bank
+        controller.answer_question = lambda _provider, question, **_kwargs: {
+            "answer": {"answer": "A"}
+        }
+        profile = ProfileStore(self.paths).create("chaoxing", "malformed-question")
+        answers = controller.prepare_answers(profile, {"remote_id": "task-1"})
+        self.assertEqual(answers, [{"remote_id": "good", "value": "A"}])
+
     def test_ai_service_prefers_exact_local_candidate_before_remote_request(self) -> None:
         config = LocalConfigStore(self.paths.config)
         bank = QuestionBank(self.paths.database)

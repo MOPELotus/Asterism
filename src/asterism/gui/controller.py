@@ -492,7 +492,12 @@ class DesktopController:
             except ValueError:
                 continue
             if self.bank.question_id(profile.provider, identity) is None:
-                repository.ingest_question(profile.provider, question)
+                try:
+                    repository.ingest_question(profile.provider, question)
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    # A malformed evidence/options payload belongs to this
+                    # question only; keep preparing the remaining answers.
+                    continue
             exact = repository.resolve_exact(profile.provider, identity)
             answer = None
             if exact.status == "exact":
