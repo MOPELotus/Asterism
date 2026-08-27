@@ -94,6 +94,7 @@ class DesktopController:
         credentials: dict[str, Any],
         settings: dict[str, Any] | None = None,
         profile_id: str | None = None,
+        enabled: bool | None = None,
     ) -> Profile:
         if profile_id:
             profile = self.profiles.get(provider, profile_id)
@@ -104,13 +105,19 @@ class DesktopController:
                 label=label.strip(),
                 credentials=dict(credentials),
                 settings=dict(settings or profile.settings),
+                enabled=profile.enabled if enabled is None else enabled,
             )
             self.profiles.save(profile)
             return profile
         profile = self.profiles.create(provider, label)
         from dataclasses import replace
 
-        profile = replace(profile, credentials=dict(credentials), settings=dict(settings or {}))
+        profile = replace(
+            profile,
+            credentials=dict(credentials),
+            settings=dict(settings or {}),
+            enabled=True if enabled is None else enabled,
+        )
         self.profiles.save(profile)
         return profile
 

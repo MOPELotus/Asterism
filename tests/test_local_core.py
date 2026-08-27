@@ -415,6 +415,16 @@ class LocalStoreTests(unittest.TestCase):
         result = controller.scan_all_profiles()
         self.assertEqual([status.profile_id for status in result], ["one", "two"])
 
+    def test_controller_profile_enabled_state_is_editable(self) -> None:
+        controller = object.__new__(DesktopController)
+        controller.profiles = ProfileStore(self.paths)
+        profile = controller.save_profile("chaoxing", "toggle", {}, enabled=False)
+        self.assertFalse(controller.profiles.get("chaoxing", profile.id).enabled)
+        updated = controller.save_profile(
+            "chaoxing", "toggle", {}, profile_id=profile.id, enabled=True
+        )
+        self.assertTrue(updated.enabled)
+
     def test_provider_service_applies_global_defaults_to_run(self) -> None:
         captured = {}
 

@@ -10,6 +10,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -244,7 +245,10 @@ class ProviderPage(QWidget):
         self.profile_combo.clear()
         self.profile_combo.addItem("选择 Profile", None)
         for profile in self.controller.profiles.list(self.provider):
-            self.profile_combo.addItem(f"{profile.label} [{profile.id[:8]}]", profile.id)
+            state = "" if profile.enabled else " · disabled"
+            self.profile_combo.addItem(
+                f"{profile.label} [{profile.id[:8]}]{state}", profile.id
+            )
 
     def profile(self) -> Profile | None:
         profile_id = self.profile_combo.currentData()
@@ -272,11 +276,14 @@ class ProviderPage(QWidget):
         settings_json = TextEdit()
         settings_json.setPlainText("{}")
         settings_json.setPlaceholderText("该 Profile 覆盖的 Provider 设置 JSON")
+        enabled = QCheckBox("参与全 Profile 手动扫描")
+        enabled.setChecked(True)
         form.addRow("label", label)
         form.addRow("username", username)
         form.addRow("password", password)
         form.addRow("credentials", credentials_json)
         form.addRow("settings", settings_json)
+        form.addRow("enabled", enabled)
         save = PrimaryPushButton("保存")
         form.addRow(save)
         save.clicked.connect(
@@ -287,6 +294,7 @@ class ProviderPage(QWidget):
                 password.text(),
                 credentials_json.toPlainText(),
                 settings_json.toPlainText(),
+                enabled.isChecked(),
             )
         )
         dialog.resize(640, 560)
@@ -300,6 +308,7 @@ class ProviderPage(QWidget):
         password: str,
         credentials_text: str,
         settings_text: str,
+        enabled: bool,
     ) -> None:
         try:
             credentials = self._json_object(credentials_text, "credentials")
@@ -313,6 +322,7 @@ class ProviderPage(QWidget):
                 label,
                 credentials,
                 settings=settings,
+                enabled=enabled,
             )
             dialog.close()
             self.reload_profiles()
@@ -342,11 +352,14 @@ class ProviderPage(QWidget):
         )
         settings_json = TextEdit()
         settings_json.setPlainText(json.dumps(profile.settings, ensure_ascii=False, indent=2))
+        enabled = QCheckBox("参与全 Profile 手动扫描")
+        enabled.setChecked(profile.enabled)
         form.addRow("label", label)
         form.addRow("username", username)
         form.addRow("password", password)
         form.addRow("credentials", credentials_json)
         form.addRow("settings", settings_json)
+        form.addRow("enabled", enabled)
         save = PrimaryPushButton("保存")
         form.addRow(save)
         save.clicked.connect(
@@ -358,6 +371,7 @@ class ProviderPage(QWidget):
                 password.text(),
                 credentials_json.toPlainText(),
                 settings_json.toPlainText(),
+                enabled.isChecked(),
             )
         )
         dialog.resize(640, 560)
@@ -372,6 +386,7 @@ class ProviderPage(QWidget):
         password: str,
         credentials_text: str,
         settings_text: str,
+        enabled: bool,
     ) -> None:
         try:
             if not label.strip():
@@ -392,6 +407,7 @@ class ProviderPage(QWidget):
                 credentials,
                 settings=settings,
                 profile_id=profile.id,
+                enabled=enabled,
             )
             dialog.close()
             self.reload_profiles()
