@@ -7,7 +7,7 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .database import QuestionBank
 
@@ -80,7 +80,35 @@ def stable_url(value: str) -> str:
     parsed = urlsplit(value.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return normalize_text(value)
-    return urlunsplit(("https", parsed.netloc.casefold(), parsed.path, "", ""))
+    stable_query = []
+    for key, child in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized_key = key.casefold().replace("-", "_")
+        if (
+            normalized_key in SIGNED_URL_KEYS
+            or any(
+                marker in normalized_key
+                for marker in (
+                    "signature",
+                    "security_token",
+                    "credential",
+                    "accesskey",
+                    "auth_token",
+                )
+            )
+            or normalized_key.startswith(("x_amz_", "x_oss_"))
+        ):
+            continue
+        stable_query.append((key, child))
+    stable_query.sort(key=lambda item: (item[0].casefold(), item[1]))
+    return urlunsplit(
+        (
+            "https",
+            parsed.netloc.casefold(),
+            parsed.path,
+            urlencode(stable_query, doseq=True),
+            "",
+        )
+    )
 
 
 def _semantic_value(value: Any, *, option: bool = False) -> Any:

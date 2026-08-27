@@ -990,6 +990,35 @@ class LocalStoreTests(unittest.TestCase):
         )
         self.assertNotIn("remote_id", canonical_question(first))
 
+    def test_question_identity_preserves_stable_media_resource_query(self) -> None:
+        first = {
+            "kind": "single_choice",
+            "prompt": "Choose image",
+            "options": [
+                {"text": "A", "image": "https://img.example/render?resource=one&sign=old"}
+            ],
+        }
+        refreshed_signature = {
+            **first,
+            "options": [
+                {"text": "A", "image": "https://IMG.EXAMPLE/render?sign=new&resource=one"}
+            ],
+        }
+        different_resource = {
+            **first,
+            "options": [
+                {"text": "A", "image": "https://img.example/render?resource=two&sign=new"}
+            ],
+        }
+        self.assertEqual(
+            question_identity("chaoxing", first)[0],
+            question_identity("chaoxing", refreshed_signature)[0],
+        )
+        self.assertNotEqual(
+            question_identity("chaoxing", first)[0],
+            question_identity("chaoxing", different_resource)[0],
+        )
+
     def test_question_identity_keeps_mixed_native_content_but_ignores_answer_state(self) -> None:
         first = {
             "kind": "provider_native",
