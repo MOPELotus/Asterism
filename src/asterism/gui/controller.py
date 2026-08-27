@@ -214,10 +214,15 @@ class DesktopController:
                 escalation_settings["_challenge_escalation"] = True
                 escalation_settings["challenge_retry_attempts"] = 1
                 escalation_settings["challenge_escalation_route"] = "sol_xhigh"
+                if not escalation_answers:
+                    # Never replay the answer that just failed the challenge;
+                    # an unavailable escalation model leaves the task safely
+                    # incomplete for explicit user inspection.
+                    return result
                 return self.service.run_task(
                     profile,
                     task,
-                    answers=escalation_answers or answers,
+                    answers=escalation_answers,
                     settings=escalation_settings,
                     cancel=cancel,
                     on_event=on_event,
