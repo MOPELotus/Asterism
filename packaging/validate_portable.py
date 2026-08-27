@@ -196,6 +196,23 @@ def smoke_worker_health(package: Path, provider: str) -> dict[str, object]:
     return result
 
 
+def stop_owned_process(process: subprocess.Popen[object], *, timeout: float = 5) -> None:
+    """Best-effort cleanup for a process created by this validator only."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=timeout)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
@@ -240,8 +257,7 @@ def main() -> int:
         try:
             second_code = second.wait(timeout=10)
         except subprocess.TimeoutExpired as error:
-            second.kill()
-            second.wait(timeout=5)
+            stop_owned_process(second)
             raise SystemExit(
                 "second Asterism.exe instance did not reject the occupied data directory"
             ) from error
@@ -250,11 +266,7 @@ def main() -> int:
                 f"second Asterism.exe instance returned unexpected code {second_code}"
             )
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        stop_owned_process(process)
     print(json.dumps({"status": "ok", "package": str(package)}, ensure_ascii=False))
     return 0
 

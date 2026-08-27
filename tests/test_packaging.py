@@ -244,6 +244,48 @@ class PortableValidationTests(unittest.TestCase):
             ), self.assertRaises(SystemExit):
                 validator.smoke_worker_health(package, "chaoxing")
 
+    def test_validator_process_cleanup_does_not_touch_exited_process(self) -> None:
+        validator = load_validator()
+
+        class ExitedProcess:
+            def poll(self):
+                return 1
+
+            def terminate(self):
+                self.fail("terminate must not be called")
+
+        validator.stop_owned_process(ExitedProcess())
+
+    def test_validator_process_cleanup_kills_after_terminate_timeout(self) -> None:
+        validator = load_validator()
+
+        class StubbornProcess:
+            def __init__(self):
+                self.terminated = False
+                self.killed = False
+                self.waits = 0
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout):
+                self.waits += 1
+                if self.waits == 1:
+                    raise validator.subprocess.TimeoutExpired("Asterism.exe", timeout)
+                return 0
+
+        process = StubbornProcess()
+        validator.stop_owned_process(process, timeout=0.01)
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertEqual(process.waits, 2)
+
     def test_validator_allows_system_browser_fallback(self) -> None:
         validator = load_validator()
         with tempfile.TemporaryDirectory() as temporary:
