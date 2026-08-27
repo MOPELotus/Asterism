@@ -1941,6 +1941,120 @@ class SettingsPage(QWidget):
         self.theme.setToolTip(f"配置暂不可解析：{message}")
 
 
+class AISettingsPage(QWidget):
+    """Dedicated Fluent editor for model endpoints and answer combinations."""
+
+    def __init__(self, controller: DesktopController):
+        super().__init__()
+        self.controller = controller
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = ScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        configure_scroll_area(scroll)
+        outer.addWidget(scroll)
+        root = QVBoxLayout(content)
+        root.setContentsMargins(28, 24, 28, 28)
+        root.setSpacing(14)
+        intro = CardWidget()
+        il = QVBoxLayout(intro)
+        il.setContentsMargins(20, 16, 20, 16)
+        il.addWidget(make_title("AI 配置"))
+        il.addWidget(BodyLabel("配置 API 端点、模型和思考等级；API Key 只保存在本机。"))
+        il.addWidget(
+            CaptionLabel(
+                "默认组合优先使用 GPT Router；失败时才使用国内灾备。"
+                "GPT-only 组合仅在需要最高可靠性时选择。"
+            )
+        )
+        root.addWidget(intro)
+        config = controller.config.ensure()
+        models = config.setdefault("models", {})
+        endpoints = models.setdefault("endpoints", {})
+        self.endpoint_fields = {}
+        for name, label in (
+            ("gpt_router", "GPT Router"),
+            ("gpt_site", "GPT 专用站点"),
+            ("domestic_backup", "国内灾备"),
+        ):
+            card = CardWidget()
+            form = QFormLayout(card)
+            form.setContentsMargins(20, 16, 20, 16)
+            form.setSpacing(10)
+            form.addRow(StrongBodyLabel(label), CaptionLabel(name))
+            value = endpoints.get(name, {}) if isinstance(endpoints.get(name), dict) else {}
+            base = LineEdit(str(value.get("base_url") or ""))
+            base.setPlaceholderText("https://…/v1")
+            key = LineEdit(str(value.get("api_key") or ""))
+            key.setEchoMode(LineEdit.EchoMode.Password)
+            key.setPlaceholderText("API Key（本机保存）")
+            model = LineEdit(str(value.get("model") or ""))
+            model.setPlaceholderText("模型名，例如 gpt-5.6-sol")
+            protocol = ComboBox()
+            protocol.addItem("Responses", "responses")
+            protocol.addItem("Chat Completions", "chat_completions")
+            protocol.setCurrentIndex(max(0, protocol.findData(value.get("protocol", "responses"))))
+            form.addRow("地址", base)
+            form.addRow("API Key", key)
+            form.addRow("默认模型", model)
+            form.addRow("协议", protocol)
+            root.addWidget(card)
+            self.endpoint_fields[name] = (base, key, protocol, model)
+        combos = CardWidget()
+        cl = QFormLayout(combos)
+        cl.setContentsMargins(20, 16, 20, 16)
+        cl.setSpacing(10)
+        self.default_combo = ComboBox()
+        self.default_combo.addItem("省钱组合", "economy")
+        self.default_combo.addItem("GPT-only 组合", "gpt_only")
+        self.default_combo.setCurrentIndex(
+            max(0, self.default_combo.findData(models.get("default", "economy")))
+        )
+        self.timed_combo = ComboBox()
+        self.timed_combo.addItem("Luna（限时）", "gpt-5.6-luna")
+        self.timed_combo.addItem("Sol（高质量）", "gpt-5.6-sol")
+        self.untimed_combo = ComboBox()
+        self.untimed_combo.addItem("Terra（不限时）", "gpt-5.6-terra")
+        self.untimed_combo.addItem("Sol（高质量）", "gpt-5.6-sol")
+        cl.addRow(StrongBodyLabel("默认答案组合"), self.default_combo)
+        cl.addRow("限时任务模型", self.timed_combo)
+        cl.addRow("不限时任务模型", self.untimed_combo)
+        root.addWidget(combos)
+        save = PrimaryPushButton("保存 AI 配置")
+        save.clicked.connect(self.save)
+        root.addWidget(save, 0, Qt.AlignmentFlag.AlignLeft)
+        root.addStretch(1)
+
+    def save(self) -> None:
+        config = self.controller.config.ensure()
+        models = config.setdefault("models", {})
+        endpoints = models.setdefault("endpoints", {})
+        for name, (base, key, protocol, model) in self.endpoint_fields.items():
+            value = endpoints.setdefault(name, {})
+            value.update(
+                {
+                    "base_url": base.text().strip(),
+                    "api_key": key.text(),
+                    "protocol": protocol.currentData(),
+                }
+            )
+            if model.text().strip():
+                value["model"] = model.text().strip()
+        models["default"] = self.default_combo.currentData()
+        combinations = models.setdefault("combinations", {})
+        combinations.setdefault("economy", {}).setdefault("timed", {})[
+            "model"
+        ] = self.timed_combo.currentData()
+        combinations.setdefault("economy", {}).setdefault("untimed", {})[
+            "model"
+        ] = self.untimed_combo.currentData()
+        self.controller.config.save(config)
+        show_notice(self, "AI 配置", "配置已保存到本机。")
+
+
 class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
     def __init__(self, data_root: Path | None = None, source_root: Path | None = None):
         super().__init__()
@@ -1975,6 +2089,7 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
         for provider in PROVIDER_IDS:
             self.add_page(provider, ProviderPage(self.controller, provider))
         self.add_page("drafts", DraftPage(self.controller))
+        self.add_page("ai", AISettingsPage(self.controller))
         self.add_page("settings", SettingsPage(self.controller))
         if not FLUENT_AVAILABLE:
             self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex)
@@ -2041,12 +2156,14 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
         labels = {
             "home": "主页",
             "drafts": "草稿",
+            "ai": "AI 配置",
             "question-bank": "题库",
             "settings": "设置",
         }
         english_labels = {
             "home": "Home",
             "drafts": "Drafts",
+            "ai": "AI",
             "question-bank": "Question bank",
             "settings": "Settings",
         }
@@ -2060,6 +2177,7 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
                 "uai": FluentIcon.LANGUAGE,
                 "cidaren": FluentIcon.CHAT,
                 "drafts": FluentIcon.EDIT,
+                "ai": FluentIcon.ROBOT,
                 "question-bank": FluentIcon.DICTIONARY,
                 "settings": FluentIcon.SETTING,
             }.get(name, FluentIcon.APPLICATION)
