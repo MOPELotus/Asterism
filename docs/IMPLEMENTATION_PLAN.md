@@ -139,6 +139,8 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
   裸 Qt 输入控件作为用户可见控件。Pro 专属组件不作为依赖。
 - 主窗口必须是真正的 Fluent 窗口（标题栏、导航、主题切换由库处理），页面按 home、provider、
   drafts、question bank、settings 等模块拆分，禁止拼成巨型窗口文件。
+- 用户可见文案采用简体中文为默认语言，并提供 English 切换；平台 ID、配置键、Runner 协议和
+  日志字段始终保留英文标识。语言切换只改变 UI 文案，不改变 Profile、数据文件或协议字段。
 - 实现 PyQt6 Fluent 模块化应用壳和首次启动流程。
 - 首次启动显示本地数据目录、凭据边界、只读验证顺序和草稿确认规则；确认状态写入本地配置，
   不创建额外用户或权限实体。
