@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -86,6 +87,18 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertGreater(page.combo_choice.count(), 0)
             self.assertIn("economy", page.combination_names)
             self.assertIn("gpt_only", page.combination_names)
+            window.close()
+
+    def test_ai_delete_actions_persist_after_config_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            page = next(item for item in window.pages if isinstance(item, AISettingsPage))
+            with patch("asterism.gui.ai_settings_v2._confirm", return_value=True):
+                page.delete_combo()
+                page.delete_site()
+            loaded = window.controller.config.load()
+            self.assertNotIn("economy", loaded["models"]["combinations"])
+            self.assertNotIn("domestic_backup", loaded["models"]["endpoints"])
             window.close()
 
     def test_provider_progress_is_visible_on_home_activity_card(self) -> None:

@@ -218,6 +218,10 @@ class AISettingsPage(QWidget):
 
     def _models(self): return self.controller.config.ensure().setdefault("models", {})
     def _endpoints(self): return self._models().setdefault("endpoints", {})
+    def _save_models(self, models: dict[str, Any]) -> None:
+        config = self.controller.config.ensure()
+        config["models"] = models
+        self.controller.config.save(config)
     @staticmethod
     def _selected_value(combo: ComboBox, fallback: list[str] | None = None) -> str | None:
         value = combo.currentData()
@@ -333,9 +337,9 @@ class AISettingsPage(QWidget):
         name = self._selected_value(self.site_choice, self.endpoint_names)
         if name: self._edit_site(name)
     def _edit_site(self, name):
-        endpoints = self._endpoints(); dialog = _EndpointDialog(list(endpoints), name, endpoints.get(name), self)
+        models = self._models(); endpoints = models.setdefault("endpoints", {}); dialog = _EndpointDialog(list(endpoints), name, endpoints.get(name), self)
         if dialog.exec() != QDialog.DialogCode.Accepted: return
-        new, value = dialog.value(); value["models"] = endpoints.get(name, {}).get("models", []); endpoints.pop(name, None) if name and name != new else None; endpoints[new] = value; self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload(); self.site_choice.setCurrentText(new)
+        new, value = dialog.value(); value["models"] = endpoints.get(name, {}).get("models", []); endpoints.pop(name, None) if name and name != new else None; endpoints[new] = value; self._save_models(models); self.reload(); self.site_choice.setCurrentText(new)
     def delete_site(self):
         name = self._selected_value(self.site_choice, self.endpoint_names)
         if not name:
@@ -343,14 +347,20 @@ class AISettingsPage(QWidget):
             return
         if not _confirm(self, "删除站点", f"确定删除站点“{name}”吗？组合中的引用不会自动改写。"):
             return
-        self._endpoints().pop(name, None)
-        self.controller.config.save({**self.controller.config.ensure(), "models": self._models()})
+        models = self._models()
+        models.setdefault("endpoints", {}).pop(name, None)
+        self._save_models(models)
         self.reload()
     def scan_site(self):
         name = self.site_choice.currentData()
         if not name: _notice(self, "扫描模型", "请先选择站点。"); return
         self._scan_thread = _ScanThread(name, self._endpoints()[name]); self._scan_thread.done.connect(self._scan_done); self._scan_thread.failed.connect(lambda _, msg: _notice(self, "扫描模型失败", msg)); self._scan_thread.start()
-    def _scan_done(self, name, models): self._endpoints()[name]["models"] = models; self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload(); _notice(self, "扫描模型", f"已读取 {len(models)} 个模型。")
+    def _scan_done(self, name, models):
+        config_models = self._models()
+        config_models.setdefault("endpoints", {}).setdefault(name, {})["models"] = models
+        self._save_models(config_models)
+        self.reload()
+        _notice(self, "扫描模型", f"已读取 {len(models)} 个模型。")
     def new_combo(self): self._open_new_combo({})
     def copy_combo(self):
         current_id = self._selected_value(self.combo_choice, self.combination_names) or ""
@@ -384,8 +394,10 @@ class AISettingsPage(QWidget):
         display_name = (combinations.get(name) or {}).get("display_name") or {"economy": "默认", "gpt_only": "高级"}.get(str(name), str(name))
         if not _confirm(self, "删除组合", f"确定删除答案组合“{display_name}”吗？此操作不可撤销。"):
             return
+        models = self._models()
+        combinations = models.setdefault("combinations", {})
         combinations.pop(name, None)
-        if self._models().get("default") == name:
-            self._models()["default"] = next(iter(combinations), "")
-        self.controller.config.save({**self.controller.config.ensure(), "models": self._models()})
+        if models.get("default") == name:
+            models["default"] = next(iter(combinations), "")
+        self._save_models(models)
         self.reload()

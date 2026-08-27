@@ -102,6 +102,16 @@ class LocalConfigStore:
 
     @staticmethod
     def _merge_defaults(value: dict[str, Any]) -> dict[str, Any]:
+        # These two collections are user-managed.  Once a config file contains
+        # them, its contents are authoritative so deleting a built-in endpoint
+        # or combination is not undone by the default merge on the next load.
+        defaults = deepcopy(DEFAULT_CONFIG)
+        models = value.get("models")
+        if isinstance(models, dict):
+            for collection in ("combinations", "endpoints"):
+                if isinstance(models.get(collection), dict):
+                    defaults["models"][collection] = {}
+
         def merge(default: Any, current: Any) -> Any:
             if isinstance(default, dict) and isinstance(current, dict):
                 return {key: merge(default.get(key), current[key]) for key in current} | {
@@ -109,7 +119,7 @@ class LocalConfigStore:
                 }
             return deepcopy(current)
 
-        return merge(DEFAULT_CONFIG, value)
+        return merge(defaults, value)
 
     def ensure(self) -> dict[str, Any]:
         value = self.load()
