@@ -1311,6 +1311,15 @@ class LocalStoreTests(unittest.TestCase):
             {"option": "Alpha"},
         )
 
+    def test_multi_choice_answer_rebinds_separator_delimited_provider_keys(self) -> None:
+        original = ["Alpha", "Beta", "Gamma"]
+        canonical = canonical_answer("A、C", original)
+        self.assertEqual(canonical, {"options": ["Alpha", "Gamma"]})
+        self.assertEqual(
+            rebind_answer(canonical, ["Gamma", "Alpha", "Beta"]),
+            ["B", "A"],
+        )
+
     def test_numeric_native_answer_canonicalizes_cidaren_answer_tag(self) -> None:
         options = [
             {"answer_tag": 0, "content": "Alpha"},

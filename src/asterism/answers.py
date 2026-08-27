@@ -237,6 +237,18 @@ def canonical_answer(answer: Any, options: Any) -> Any:
             direct = by_key.get(text.casefold())
             if direct is not None:
                 return {"option": direct}
+            separated_keys = [
+                part
+                for part in re.split(r"[\s、,，;；#|/]+", text)
+                if part
+            ]
+            if (
+                len(separated_keys) > 1
+                and all(part.casefold() in by_key for part in separated_keys)
+            ):
+                return {
+                    "options": [by_key[part.casefold()] for part in separated_keys]
+                }
             semantic = semantic_by_encoded.get(
                 json.dumps(text, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             )
