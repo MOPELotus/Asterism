@@ -28,7 +28,9 @@ SHA256SUMS.json          包内文件校验清单
 ```
 
 首次启动时在程序目录旁创建可写的 `accounts/`、`state/`、`drafts/`、`logs/`、`data/`
-和本地配置。构建时必须使用资源 allowlist，禁止递归打包仓库、开发缓存或本地数据。
+和本地配置。构建时必须使用资源 allowlist，禁止递归打包仓库、开发缓存或本地数据。固定
+donor 只复制对应 revision 的 Git tracked 文件；ignored/untracked 的 Cookie、会话、日志和
+本地配置不得进入 staging，tracked donor 文件被本地修改时构建直接失败。
 
 浏览器选择顺序为随包 Chromium、系统 Microsoft Edge。无法启动浏览器时，仅相关操作显示
 明确错误，其他桌面功能仍可使用；但 CI 未在对应架构启动至少一种浏览器时不得发布。

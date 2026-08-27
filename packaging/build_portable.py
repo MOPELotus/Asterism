@@ -126,6 +126,19 @@ def validate_source_integrity(metadata_path: Path, donor_root: Path) -> None:
                 f"pinned donor revision mismatch for {donor_root.name}: "
                 f"expected {expected}, found {actual_revision or 'unknown'}"
             )
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=donor_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if status.returncode != 0:
+            raise SystemExit(f"unable to inspect donor worktree: {donor_root}")
+        if status.stdout.strip():
+            raise SystemExit(
+                f"pinned donor has modified tracked files: {donor_root.name}"
+            )
 
 
 def validate_sources() -> list[dict[str, str]]:
@@ -196,10 +209,53 @@ def copy_tree(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, ignore=ignored)
 
 
+def copy_git_tracked_tree(source: Path, destination: Path) -> None:
+    """Copy only files belonging to the pinned donor revision.
+
+    Ignored and untracked files commonly contain sessions or account state.
+    They must never enter a portable archive merely because a donor was run
+    locally before packaging.
+    """
+    completed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=source,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(f"unable to list pinned donor files: {source}")
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    root = source.resolve()
+    for raw_name in completed.stdout.split(b"\0"):
+        if not raw_name:
+            continue
+        try:
+            relative = Path(raw_name.decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise SystemExit(f"donor contains a non-UTF-8 path: {source}") from error
+        path = _safe_source_file(root, relative.as_posix())
+        if path.is_symlink():
+            raise SystemExit(f"donor contains an unsupported symlink: {relative}")
+        # Gitlinks are directories and are handled as separately pinned donor
+        # roots; ordinary tracked files are copied verbatim.
+        if not path.is_file():
+            continue
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
 def stage_resources(stage: Path, notices: list[dict[str, str]]) -> Path:
     resources = stage / "resources"
     resources.mkdir(parents=True, exist_ok=True)
-    copy_tree(ROOT / "upstreams", resources / "upstreams")
+    copied_donors: set[Path] = set()
+    for _metadata_name, donor_name in SOURCE_LOCATIONS:
+        if donor_name in copied_donors:
+            continue
+        copied_donors.add(donor_name)
+        copy_git_tracked_tree(ROOT / donor_name, resources / donor_name)
     stage_browser_resources(resources)
     worker_resources = resources / "workers"
     for provider in ("chaoxing", "welearn", "uai", "cidaren"):

@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, run
 from unittest.mock import patch
 
 
@@ -91,6 +91,27 @@ class PortableValidationTests(unittest.TestCase):
                 self.assertTrue(builder.stage_browser_resources(resources))
             staged = resources / "browsers" / "chromium" / "chrome-win" / "chrome.exe"
             self.assertEqual(staged.read_bytes(), b"arm-compatible-browser")
+
+    def test_builder_copies_only_git_tracked_donor_files(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            donor = root / "donor"
+            destination = root / "staged"
+            donor.mkdir()
+            run(["git", "init", "-q"], cwd=donor, check=True)
+            (donor / ".gitignore").write_text("state/\n", encoding="utf-8")
+            (donor / "entry.py").write_text("tracked\n", encoding="utf-8")
+            run(["git", "add", ".gitignore", "entry.py"], cwd=donor, check=True)
+            ignored = donor / "state" / "session.json"
+            ignored.parent.mkdir()
+            ignored.write_text('{"token":"must-not-ship"}', encoding="utf-8")
+
+            builder.copy_git_tracked_tree(donor, destination)
+
+            self.assertTrue((destination / "entry.py").is_file())
+            self.assertTrue((destination / ".gitignore").is_file())
+            self.assertFalse((destination / "state").exists())
 
     def test_builder_rejects_cross_architecture_label(self) -> None:
         builder = load_builder()
