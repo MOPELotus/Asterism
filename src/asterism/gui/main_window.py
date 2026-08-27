@@ -657,7 +657,10 @@ class ProviderPage(QWidget):
                 name = str(key)
                 lowered = name.casefold()
                 if lowered == "authorization_url":
-                    result[name] = str(child)
+                    # The full OAuth URL contains a short-lived state/marker;
+                    # it is shown only in the explicit copy dialog and must
+                    # never be echoed into the persistent UI log.
+                    result[name] = "<redacted authorization url>"
                 elif any(
                     marker in lowered
                     for marker in (

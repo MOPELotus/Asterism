@@ -136,6 +136,12 @@ class GuiSmokeTests(unittest.TestCase):
             dialog.close()
             window.close()
 
+    def test_oauth_authorization_url_is_redacted_from_log_preview(self) -> None:
+        url = "https://example.test/oauth?state=temporary-secret"
+        safe = ProviderPage._safe_preview({"authorization_url": url})
+        self.assertNotIn("temporary-secret", str(safe))
+        self.assertEqual(safe["authorization_url"], "<redacted authorization url>")
+
     def test_provider_task_detail_dialog_is_read_only_and_sanitized(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
