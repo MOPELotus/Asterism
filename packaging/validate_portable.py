@@ -110,6 +110,70 @@ def smoke_browser(executable: Path) -> None:
         )
 
 
+def smoke_worker_health(package: Path, provider: str) -> dict[str, object]:
+    """Start one packaged Worker and verify its side-effect-free health path.
+
+    This catches missing frozen imports and resource path mistakes that a mere
+    file-existence check cannot see, while deliberately sending no credentials.
+    """
+    worker_root = package / "resources" / "workers" / provider
+    worker = worker_root / "worker.exe"
+    upstream_root = package / "resources" / "upstreams"
+    upstream = (
+        upstream_root / "chaoxing"
+        if provider == "chaoxing"
+        else upstream_root / "welearn" / "welearn_decompiled.py"
+        if provider == "welearn"
+        else upstream_root / "uai" / "配置我运行我.py"
+        if provider == "uai"
+        else upstream_root / "cidaren"
+    )
+    metadata = worker_root / "SOURCE.json"
+    request = {
+        "request_id": f"portable-health-{provider}",
+        "operation": "health",
+        "payload": {},
+    }
+    try:
+        completed = subprocess.run(
+            [
+                str(worker),
+                "--upstream",
+                str(upstream),
+                "--source-metadata",
+                str(metadata),
+            ],
+            input=json.dumps(request, ensure_ascii=True) + "\n",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SystemExit(f"{provider} packaged Worker health smoke failed: {error}") from error
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"{provider} packaged Worker health smoke failed with exit code "
+            f"{completed.returncode}"
+        )
+    result: dict[str, object] | None = None
+    for line in completed.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            data = event.get("data")
+            if isinstance(data, dict):
+                result = data
+                break
+    if not result or result.get("status") != "ok":
+        raise SystemExit(f"{provider} packaged Worker returned no healthy result")
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
@@ -136,6 +200,7 @@ def main() -> int:
         source = package / "resources" / "workers" / provider / "SOURCE.json"
         if not worker.exists() or not source.exists():
             raise SystemExit(f"portable package is missing {provider} worker resources")
+        smoke_worker_health(package, provider)
     environment = os.environ.copy()
     environment["ASTERISM_NONINTERACTIVE"] = "1"
     process = subprocess.Popen([str(executable)], cwd=package, env=environment)

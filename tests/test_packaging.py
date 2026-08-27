@@ -171,6 +171,33 @@ class PortableValidationTests(unittest.TestCase):
         ), self.assertRaises(SystemExit):
             validator.smoke_browser(executable)
 
+    def test_worker_health_smoke_uses_credential_free_jsonl_request(self) -> None:
+        validator = load_validator()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            worker = package / "resources" / "workers" / "chaoxing" / "worker.exe"
+            worker.parent.mkdir(parents=True)
+            worker.write_bytes(b"worker")
+            metadata = worker.parent / "SOURCE.json"
+            metadata.write_text("{}", encoding="utf-8")
+            (package / "resources" / "upstreams" / "chaoxing").mkdir(parents=True)
+            captured = {}
+
+            def fake_run(command, **kwargs):
+                captured["command"] = command
+                captured["input"] = kwargs["input"]
+                return CompletedProcess(
+                    command,
+                    0,
+                    '{"type":"result","data":{"status":"ok"}}\n',
+                    "",
+                )
+
+            with patch.object(validator.subprocess, "run", side_effect=fake_run):
+                result = validator.smoke_worker_health(package, "chaoxing")
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(captured["command"][0], str(worker))
+            self.assertNotIn("credentials", captured["input"])
     def test_validator_allows_system_browser_fallback(self) -> None:
         validator = load_validator()
         with tempfile.TemporaryDirectory() as temporary:
