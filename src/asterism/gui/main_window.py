@@ -518,6 +518,11 @@ class ProviderPage(QWidget):
             completed = len(result) - failed
             event = "failure" if failed else "success"
             summary = {"status": event, "completed": completed, "failed": failed}
+        elif label == "scan profiles" and isinstance(result, list):
+            failed = sum(1 for item in result if getattr(item, "state", "") != "completed")
+            completed = len(result) - failed
+            event = "failure" if failed else "success"
+            summary = {"status": event, "completed": completed, "failed": failed}
         self.controller.notify(
             event,
             provider=self.provider,
