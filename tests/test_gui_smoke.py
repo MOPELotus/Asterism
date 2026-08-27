@@ -10,7 +10,7 @@ try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtWidgets import QApplication, QWidget
 
-    from asterism.gui.ai_settings import AISettingsPage
+    from asterism.gui.ai_settings_v2 import AISettingsPage
     from asterism.gui.app import acquire_instance_lock
     from asterism.gui.fluent import (
         LineEdit,
@@ -82,8 +82,8 @@ class GuiSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
             page = next(item for item in window.pages if isinstance(item, AISettingsPage))
-            self.assertGreaterEqual(page.endpoint_table.columnCount(), 4)
-            self.assertGreaterEqual(page.combo_table.columnCount(), 3)
+            self.assertGreater(page.site_choice.count(), 0)
+            self.assertGreater(page.combo_choice.count(), 0)
             self.assertIn("economy", page.combination_names)
             self.assertIn("gpt_only", page.combination_names)
             window.close()

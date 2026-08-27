@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 
 from ..constants import PROVIDER_IDS
 from ..profiles import Profile
-from .ai_settings import AISettingsPage as ModelAISettingsPage
+from .ai_settings_v2 import AISettingsPage as ModelAISettingsPage
 from .controller import DesktopController
 from .draft_editor import FormalDraftEditor
 from .fluent import (
