@@ -1240,6 +1240,43 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(len(self.calls), calls_after_first + 2)  # courses + tasks only
         self.assertEqual(self.calls[-2:], [("courses", ""), ("tasks", "course-1")])
 
+    def test_scan_scopes_resume_keys_by_course(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def result(data):
+            return SimpleNamespace(data=data)
+
+        class Service:
+            def courses(self, _profile, *, cancel=None):
+                return result({"courses": [{"remote_id": "course-a"}, {"remote_id": "course-b"}]})
+
+            def tasks(self, _profile, course, *, cancel=None):
+                calls.append(("tasks", str(course["remote_id"])))
+                return result({"tasks": [{"remote_id": "shared-task"}]})
+
+            def questions(self, _profile, task, **_kwargs):
+                calls.append(("questions", str(task["remote_id"])))
+                return result({"questions": []})
+
+        coordinator = ReadOnlyScanCoordinator(
+            Service(), self.states, InventoryStore(self.states), AnswerRepository(self.bank)
+        )
+        status = coordinator.scan(self.profile)
+        self.assertEqual(status.completed_tasks, 2)
+        self.assertEqual(
+            status.completed_task_refs,
+            ["course-a::shared-task", "course-b::shared-task"],
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("tasks", "course-a"),
+                ("questions", "shared-task"),
+                ("tasks", "course-b"),
+                ("questions", "shared-task"),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

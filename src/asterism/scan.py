@@ -154,12 +154,22 @@ class ReadOnlyScanCoordinator:
                     task_id = str(task.get("remote_id") or "")
                     if not task_id:
                         continue
-                    if task_id in status.completed_task_refs:
+                    # Provider task IDs are not guaranteed to be globally
+                    # unique. Scope the resume key by course so a task with
+                    # the same remote ID in another course is still scanned.
+                    task_ref = self._task_ref(course_id, task_id)
+                    if task_ref in status.completed_task_refs or (
+                        task_id in status.completed_task_refs
+                        and not any(
+                            item.endswith(f"::{task_id}")
+                            for item in status.completed_task_refs
+                        )
+                    ):
                         status.completed_tasks += 1
-                        status.cursor = task_id
+                        status.cursor = task_ref
                         self._save(status, on_update)
                         continue
-                    status.phase = f"questions:{task_id}"
+                    status.phase = f"questions:{task_ref}"
                     self._save(status, on_update)
                     try:
                         result = self._retry(
@@ -176,8 +186,8 @@ class ReadOnlyScanCoordinator:
                         )
                     except RunnerError as error:
                         if error.code == "explicit_read_authorization_required":
-                            status.last_error = f"{task_id}: read authorization required"
-                            status.cursor = task_id
+                            status.last_error = f"{task_ref}: read authorization required"
+                            status.cursor = task_ref
                             self._save(status, on_update)
                             continue
                         raise
@@ -188,9 +198,9 @@ class ReadOnlyScanCoordinator:
                                 self.answers.ingest_question(profile.provider, question)
                         status.question_count += len(questions)
                     status.completed_tasks += 1
-                    status.cursor = task_id
-                    if task_id not in status.completed_task_refs:
-                        status.completed_task_refs.append(task_id)
+                    status.cursor = task_ref
+                    if task_ref not in status.completed_task_refs:
+                        status.completed_task_refs.append(task_ref)
                     status.last_error = ""
                     self._save(status, on_update)
             status.state = "completed"
@@ -240,6 +250,10 @@ class ReadOnlyScanCoordinator:
                 self._save(status, on_update)
                 cancel.wait(min(2**attempt, 30))
         raise last_error or AssertionError("unreachable")
+
+    @staticmethod
+    def _task_ref(course_id: str, task_id: str) -> str:
+        return f"{course_id}::{task_id}"
 
     @staticmethod
     def _check_cancel(cancel: threading.Event) -> None:
