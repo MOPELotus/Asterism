@@ -54,7 +54,7 @@
 | 登录/清单 | API 与必要浏览器流程，课程、必做章节和原生活动类型 | `upstream-proven + desktop-wired + fixture-verified` |
 | 完成 | 单账号串行执行所有影响完成度的必做活动 | `upstream-proven + desktop-wired + fixture-verified` |
 | 时长 | 时长/驻留单独执行并重新读取 | `upstream-proven + desktop-wired + fixture-verified` |
-| 讨论 | 获取新鲜题目/上下文，预览相关纯文本草稿并原生发布 | `upstream-proven + desktop-wired` |
+| 讨论 | 获取新鲜题目/上下文，在平台页提供本次纯文本草稿输入并原生发布 | `upstream-proven + desktop-wired` |
 | 特殊活动 | Talk、口语、上传仅在确定不影响完成度时忽略，否则走现有路径 | `upstream-proven + desktop-wired` |
 | AI 边界 | donor 通用 AI 默认关闭；确需答案时使用共享本地策略 | `desktop-wired + fixture-verified` |
 

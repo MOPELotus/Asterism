@@ -168,6 +168,17 @@ class ProviderPage(QWidget):
         )
         execution_options.addStretch(1)
         root.addLayout(execution_options)
+        self.generated_text = None
+        if provider == "uai":
+            text_options = QVBoxLayout()
+            text_options.addWidget(BodyLabel("本次讨论/主观文本（可选，发送前请自行确认）"))
+            self.generated_text = TextEdit()
+            self.generated_text.setPlaceholderText(
+                "留空则沿用 Provider 原生行为；填写后仅作为本次执行的纯文本内容。"
+            )
+            self.generated_text.setFixedHeight(88)
+            text_options.addWidget(self.generated_text)
+            root.addLayout(text_options)
 
         self.course_table = TableWidget()
         self.course_table.setColumnCount(4)
@@ -790,18 +801,30 @@ class ProviderPage(QWidget):
                 {
                     "task": task,
                     "answers": {},
-                    "settings": {"answer_combination": self._execution_combination()},
+                    "settings": self._execution_settings(),
                 },
             )
             self.log.append(f"[draft] {draft.id}")
             return
         combination = self._execution_combination()
+        execution_settings = self._execution_settings(combination)
         self._call(
-            lambda on_event: self._execute_task(profile, task, on_event, combination), "run"
+            lambda on_event: self._execute_task(
+                profile, task, on_event, combination, execution_settings
+            ),
+            "run",
         )
 
     def _execution_combination(self) -> str:
         return str(self.execution_combination.currentData() or "economy")
+
+    def _execution_settings(self, combination: str | None = None) -> dict[str, Any]:
+        settings = {"answer_combination": combination or self._execution_combination()}
+        if self.provider == "uai" and self.generated_text is not None:
+            text = self.generated_text.toPlainText().strip()
+            if text:
+                settings["generated_text"] = text
+        return settings
 
     def _execute_task(
         self,
@@ -809,6 +832,7 @@ class ProviderPage(QWidget):
         task: dict[str, Any],
         on_event=None,
         combination: str = "economy",
+        execution_settings: dict[str, Any] | None = None,
     ) -> Any:
         answers = None
         if self.provider == "chaoxing":
@@ -821,7 +845,7 @@ class ProviderPage(QWidget):
             profile,
             task,
             answers=answers,
-            settings={"answer_combination": combination},
+            settings=dict(execution_settings or self._execution_settings(combination)),
             cancel=self.cancel_event,
             on_event=on_event,
         )
@@ -858,6 +882,7 @@ class ProviderPage(QWidget):
         ):
             return
         combination = self._execution_combination()
+        execution_settings = self._execution_settings(combination)
         for task in formal:
             draft = self.controller.save_draft(
                 profile,
@@ -865,7 +890,7 @@ class ProviderPage(QWidget):
                 {
                     "task": task,
                     "answers": {},
-                    "settings": {"answer_combination": combination},
+                    "settings": self._execution_settings(combination),
                 },
             )
             self.log.append(f"[draft] {draft.id}")
@@ -879,7 +904,7 @@ class ProviderPage(QWidget):
                 profile,
                 routine,
                 concurrency=concurrency,
-                settings={"answer_combination": combination},
+                settings=execution_settings,
                 answer_provider=(
                     lambda task: (
                         self.controller.prepare_answers(
