@@ -58,8 +58,8 @@ donor 只复制对应 revision 的 Git tracked 文件；ignored/untracked 的 Co
 
 实现入口为 `packaging/build_portable.py`，构建后使用
 `packaging/validate_portable.py` 会先校验 SHA-256 manifest，再在含空格和中文的解压目录启动验证；
-manifest 路径穿越、文件缺失、哈希不匹配或包内出现未列出的文件会在启动前失败。Workflow 仅在手动触发
-或版本 tag 时运行，避免日常代码提交反复执行昂贵的双架构 Nuitka 构建。
+manifest 路径穿越、文件缺失、哈希不匹配或包内出现未列出的文件会在启动前失败。Workflow 支持
+`master` 的 push、手动触发和版本 tag；普通开发分支不会触发昂贵的双架构 Nuitka 构建。
 验证器允许首次启动后产生的固定可变数据区（`accounts/`、`state/`、`drafts/`、`logs/`、`data/`
 和 `config.local.json`）不进入发布 manifest，因此可安全重复运行；除此之外的额外文件、任意符号链接和
 被修改的发布文件仍会失败。
