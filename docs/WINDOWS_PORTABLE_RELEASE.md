@@ -19,12 +19,11 @@ donor、浏览器自动化和 native/OCR 资源；固定的解压路径和可诊
 
 ```text
 Asterism.exe
-runtime/                 Python、Qt 和 native 依赖
-providers/               现有 Runner、固定 donor 和运行资源
-browser/                 许可允许时携带对应架构 Chromium
-licenses/                Asterism 与第三方许可证/声明
-accounts.example/        不含真实凭据的 Profile 示例
+resources/upstreams/     固定 donor（去除 .git 和开发缓存）
+resources/workers/       四个平台 Runner 与元数据
+resources/licenses/      第三方许可证副本与 SOURCES.json
 README.txt               首次启动、数据目录和备份说明
+SHA256SUMS.json          包内文件校验清单
 ```
 
 首次启动时在程序目录旁创建可写的 `accounts/`、`state/`、`drafts/`、`logs/`、`data/`

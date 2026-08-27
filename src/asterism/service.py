@@ -234,7 +234,7 @@ class ProviderService:
         profile: Profile,
         task: dict[str, Any],
         *,
-        answers: dict[str, Any] | None = None,
+        answers: Any | None = None,
         settings: dict[str, Any] | None = None,
         cancel: threading.Event | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,

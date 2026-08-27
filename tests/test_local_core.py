@@ -150,6 +150,47 @@ class LocalStoreTests(unittest.TestCase):
                 timeout=1,
             )
 
+    def test_controller_does_not_auto_answer_formal_cidaren_tasks(self) -> None:
+        calls: list[dict] = []
+
+        class FakeService:
+            def run_task(
+                self,
+                profile,
+                task,
+                *,
+                answers=None,
+                settings=None,
+                cancel=None,
+                on_event=None,
+            ):
+                calls.append(dict(settings or {}))
+                return SimpleNamespace(data={"remote_state": "completed"})
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        controller.config = SimpleNamespace(ensure=lambda: {"providers": {}})
+        profile = ProfileStore(self.paths).create("cidaren", "formal")
+        controller.run_task(
+            profile,
+            {
+                "remote_id": "exam-1",
+                "assessment_class": "formal",
+                "native": {"route_kind": "course_exam"},
+            },
+            answers=[{"remote_id": "q-1", "value": "A"}],
+        )
+        self.assertNotIn("answer_bridge", calls[0])
+
+    def test_draft_answers_accept_id_to_value_map(self) -> None:
+        self.assertEqual(
+            DesktopController._normalize_draft_answers({"q-1": "A", "q-2": ["B", "C"]}),
+            [
+                {"remote_id": "q-1", "value": "A"},
+                {"remote_id": "q-2", "value": ["B", "C"]},
+            ],
+        )
+
     def test_cidaren_answer_bridge_is_loopback_scoped_and_dispatches_observations(self) -> None:
         resolved: list[dict] = []
         observed: list[dict] = []
@@ -649,6 +690,34 @@ class BatchTests(unittest.TestCase):
         )
         self.assertEqual([item.error_code for item in results], [None, None])
         self.assertEqual(calls, ["one", "two"])
+
+    def test_batch_forwards_events_with_task_identity(self) -> None:
+        events = []
+
+        class FakeService:
+            def run_task(
+                self,
+                profile,
+                task,
+                *,
+                answers=None,
+                settings=None,
+                cancel=None,
+                on_event=None,
+            ):
+                if on_event is not None:
+                    on_event({"type": "progress", "current": 1, "total": 1})
+                return SimpleNamespace(data={"remote_state": "completed"})
+
+        profile = SimpleNamespace(provider="chaoxing")
+        results = ManualBatchExecutor(FakeService()).run(
+            profile,
+            [{"remote_id": "one"}],
+            on_event=events.append,
+        )
+        self.assertEqual([item.error_code for item in results], [None])
+        self.assertEqual(events[0]["task_remote_id"], "one")
+        self.assertEqual(events[0]["batch_index"], 0)
 
 
 class ScanTests(unittest.TestCase):

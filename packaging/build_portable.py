@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -100,10 +101,41 @@ def stage_resources(stage: Path, notices: list[dict[str, str]]) -> Path:
                 shutil.copy2(path, destination / name)
     licenses = resources / "licenses"
     licenses.mkdir(parents=True, exist_ok=True)
+    _stage_license_files(licenses)
     (licenses / "SOURCES.json").write_text(
         json.dumps(notices, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return resources
+
+
+def _stage_license_files(destination: Path) -> None:
+    """Copy donor notices into an explicit package location.
+
+    The complete donor trees remain under ``resources/upstreams`` for runtime
+    compatibility.  Keeping a second, predictable license directory makes the
+    ZIP self-auditing without copying any repository metadata or local paths.
+    """
+    donor_dirs = {
+        "chaoxing": ROOT / "upstreams" / "chaoxing",
+        "chaoxing-exam": ROOT / "upstreams" / "chaoxing-exam",
+        "welearn": ROOT / "upstreams" / "welearn",
+        "uai": ROOT / "upstreams" / "uai",
+        "uai-browser": ROOT / "upstreams" / "uai-browser",
+        "cidaren": ROOT / "upstreams" / "cidaren",
+    }
+    for donor, source in donor_dirs.items():
+        if not source.exists():
+            continue
+        candidates = [
+            path
+            for path in source.iterdir()
+            if path.is_file()
+            and re.fullmatch(r"(?i)(license|copying|notice)(?:[._-].*)?", path.name)
+        ]
+        for index, path in enumerate(sorted(candidates)):
+            suffix = path.suffix or ".txt"
+            name = f"{donor}-{index}{suffix}"
+            shutil.copy2(path, destination / name)
 
 
 def build_executable(

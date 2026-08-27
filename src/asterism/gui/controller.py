@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -186,13 +187,13 @@ class DesktopController:
         profile: Profile,
         task: dict[str, Any],
         *,
-        answers: dict[str, Any] | None = None,
+        answers: Any | None = None,
         settings: dict[str, Any] | None = None,
         cancel: threading.Event | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
         merged_settings = self.provider_settings(profile, settings)
-        if profile.provider != "cidaren":
+        if profile.provider != "cidaren" or self._is_formal_task(task):
             return self.service.run_task(
                 profile,
                 task,
@@ -225,6 +226,15 @@ class DesktopController:
             )
         finally:
             bridge.close()
+
+    @staticmethod
+    def _is_formal_task(task: Mapping[str, Any]) -> bool:
+        native = task.get("native")
+        route = native.get("route_kind") if isinstance(native, Mapping) else None
+        return task.get("assessment_class") == "formal" or route in {
+            "course_exam",
+            "course_homework",
+        }
 
     def provider_settings(
         self, profile: Profile, overrides: dict[str, Any] | None = None
@@ -400,6 +410,7 @@ class DesktopController:
         settings: dict[str, Any] | None = None,
         answer_provider: Callable[[dict[str, Any]], list[dict[str, Any]] | None] | None = None,
         cancel: threading.Event | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ):
         return self.batch.run(
             profile,
@@ -409,6 +420,7 @@ class DesktopController:
             answer_provider=answer_provider,
             cancel=cancel,
             run_task=self.run_task,
+            on_event=on_event,
         )
 
     def read_duration(
@@ -492,7 +504,7 @@ class DesktopController:
     def update_draft(self, draft: FormalDraft, payload: dict[str, Any]) -> FormalDraft:
         from dataclasses import replace
 
-        updated = replace(draft, payload=dict(payload))
+        updated = replace(draft, payload=dict(payload), updated_at=datetime.now(UTC).isoformat())
         self.drafts.save(updated)
         return updated
 
@@ -503,15 +515,37 @@ class DesktopController:
         task = draft.payload.get("task")
         if not isinstance(task, dict):
             raise ValueError("draft payload.task must be an object")
-        answers = draft.payload.get("answers")
-        if answers is not None and not isinstance(answers, dict):
-            raise ValueError("draft payload.answers must be an object")
+        answers = self._normalize_draft_answers(draft.payload.get("answers"))
         settings = draft.payload.get("settings")
         if settings is not None and not isinstance(settings, dict):
             raise ValueError("draft payload.settings must be an object")
-        result = self.service.run_task(profile, task, answers=answers, settings=settings)
+        result = self.run_task(profile, task, answers=answers, settings=settings)
         self.drafts.set_status(draft, "submitted")
         return result
+
+    @staticmethod
+    def _normalize_draft_answers(value: Any) -> list[dict[str, Any]] | None:
+        """Accept the editor's convenient map form and emit Worker answer rows."""
+        if value is None:
+            return None
+        if isinstance(value, list):
+            rows = value
+        elif isinstance(value, Mapping):
+            nested = value.get("rows", value.get("items", value.get("answers")))
+            if isinstance(nested, list):
+                rows = nested
+            elif "remote_id" in value and "value" in value:
+                rows = [value]
+            else:
+                rows = [{"remote_id": str(key), "value": answer} for key, answer in value.items()]
+        else:
+            raise ValueError("draft payload.answers must be an object or array")
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, Mapping) or not str(row.get("remote_id") or "").strip():
+                raise ValueError("each draft answer must contain a non-empty remote_id")
+            normalized.append({"remote_id": str(row["remote_id"]), "value": row.get("value")})
+        return normalized
 
     def draft_rows(self) -> list[dict[str, Any]]:
         return [

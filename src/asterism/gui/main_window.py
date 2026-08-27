@@ -151,6 +151,17 @@ class ProviderPage(QWidget):
         cancel_index = len(action_items)
         actions.addWidget(self.cancel_button, cancel_index // 5, cancel_index % 5)
         root.addLayout(actions)
+        execution_options = QHBoxLayout()
+        execution_options.addWidget(BodyLabel("本次答案组合"))
+        self.execution_combination = ComboBox()
+        self.execution_combination.addItem("economy", "economy")
+        self.execution_combination.addItem("gpt_only", "gpt_only")
+        execution_options.addWidget(self.execution_combination)
+        execution_options.addWidget(
+            BodyLabel("仅影响需要答案的执行；不需要答题的平台会沿用其原生路径。")
+        )
+        execution_options.addStretch(1)
+        root.addLayout(execution_options)
 
         self.course_table = TableWidget()
         self.course_table.setColumnCount(4)
@@ -173,7 +184,7 @@ class ProviderPage(QWidget):
         root.addWidget(self.task_table)
         task_selection = QHBoxLayout()
         task_selection.addWidget(BodyLabel("批量选择"))
-        select_routine = PushButton("全选知识点任务")
+        select_routine = PushButton("全选普通任务")
         select_routine.clicked.connect(lambda: self._select_all_rows(self.task_table))
         task_selection.addWidget(select_routine)
         select_formal = PushButton("全选作业/考试")
@@ -714,25 +725,45 @@ class ProviderPage(QWidget):
             ):
                 return
             draft = self.controller.save_draft(
-                profile, str(task.get("remote_id")), {"task": task, "answers": {}}
+                profile,
+                str(task.get("remote_id")),
+                {
+                    "task": task,
+                    "answers": {},
+                    "settings": {"answer_combination": self._execution_combination()},
+                },
             )
             self.log.append(f"[draft] {draft.id}")
             return
-        self._call(lambda on_event: self._execute_task(profile, task, on_event), "run")
+        combination = self._execution_combination()
+        self._call(
+            lambda on_event: self._execute_task(profile, task, on_event, combination), "run"
+        )
+
+    def _execution_combination(self) -> str:
+        return str(self.execution_combination.currentData() or "economy")
 
     def _execute_task(
         self,
         profile: Profile,
         task: dict[str, Any],
         on_event=None,
+        combination: str = "economy",
     ) -> Any:
         answers = None
         if self.provider == "chaoxing":
             native = task.get("native") if isinstance(task.get("native"), dict) else {}
             route = "timed" if native.get("route_kind") == "course_exam" else "untimed"
-            answers = self.controller.prepare_answers(profile, task, route=route)
+            answers = self.controller.prepare_answers(
+                profile, task, combination=combination, route=route
+            )
         return self.controller.run_task(
-            profile, task, answers=answers, cancel=self.cancel_event, on_event=on_event
+            profile,
+            task,
+            answers=answers,
+            settings={"answer_combination": combination},
+            cancel=self.cancel_event,
+            on_event=on_event,
         )
 
     def run_batch(self) -> None:
@@ -766,9 +797,16 @@ class ProviderPage(QWidget):
             != QMessageBox.StandardButton.Yes
         ):
             return
+        combination = self._execution_combination()
         for task in formal:
             draft = self.controller.save_draft(
-                profile, str(task.get("remote_id")), {"task": task, "answers": {}}
+                profile,
+                str(task.get("remote_id")),
+                {
+                    "task": task,
+                    "answers": {},
+                    "settings": {"answer_combination": combination},
+                },
             )
             self.log.append(f"[draft] {draft.id}")
         if not routine:
@@ -777,7 +815,7 @@ class ProviderPage(QWidget):
         if not accepted:
             return
         self._call(
-            lambda _on_event: self.controller.run_batch(
+            lambda on_event: self.controller.run_batch(
                 profile,
                 routine,
                 concurrency=concurrency,
@@ -786,6 +824,7 @@ class ProviderPage(QWidget):
                         self.controller.prepare_answers(
                             profile,
                             task,
+                            combination=combination,
                             route=(
                                 "timed"
                                 if isinstance(task.get("native"), dict)
@@ -798,6 +837,7 @@ class ProviderPage(QWidget):
                     )
                 ),
                 cancel=self.cancel_event,
+                on_event=on_event,
             ),
             "batch run",
         )

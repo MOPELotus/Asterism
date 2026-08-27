@@ -34,6 +34,7 @@ class ManualBatchExecutor:
         answer_provider: Callable[[dict[str, Any]], list[dict[str, Any]] | None] | None = None,
         cancel: threading.Event | None = None,
         run_task: Callable[..., ProviderOperationResult] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[BatchItemResult]:
         if concurrency < 1:
             raise ValueError("concurrency must be at least one")
@@ -50,13 +51,29 @@ class ManualBatchExecutor:
             try:
                 answers = answer_provider(task) if answer_provider else None
                 execute_task = run_task or self.service.run_task
-                result = execute_task(
-                    profile,
-                    task,
-                    answers=answers,
-                    settings=settings,
-                    cancel=cancellation,
-                )
+                if on_event is None:
+                    result = execute_task(
+                        profile,
+                        task,
+                        answers=answers,
+                        settings=settings,
+                        cancel=cancellation,
+                    )
+                else:
+                    def forward(event: dict[str, Any]) -> None:
+                        enriched = dict(event)
+                        enriched.setdefault("batch_index", index)
+                        enriched.setdefault("task_remote_id", remote_id)
+                        on_event(enriched)
+
+                    result = execute_task(
+                        profile,
+                        task,
+                        answers=answers,
+                        settings=settings,
+                        cancel=cancellation,
+                        on_event=forward,
+                    )
                 return BatchItemResult(index, remote_id, result=result)
             except RunnerError as error:
                 return BatchItemResult(
