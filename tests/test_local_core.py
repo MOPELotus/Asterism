@@ -31,6 +31,7 @@ from asterism.profiles import ProfileStateStore, ProfileStore
 from asterism.providers import ProviderRegistry, WorkerSpec
 from asterism.runner import RunnerError, RunnerManager
 from asterism.scan import ReadOnlyScanCoordinator
+from asterism.service import ProviderService
 from workers.common.runtime import payload_secrets
 from workers.uai.worker import find_browser
 
@@ -221,6 +222,29 @@ class LocalStoreTests(unittest.TestCase):
         controller.scanner = FakeScanner()
         result = controller.scan_all_profiles()
         self.assertEqual([status.profile_id for status in result], ["one", "two"])
+
+    def test_provider_service_applies_global_defaults_to_run(self) -> None:
+        captured = {}
+
+        class FakeRegistry:
+            def get(self, provider):
+                return SimpleNamespace(provider=provider)
+
+        class FakeRunner:
+            def invoke(self, spec, operation, payload, **_kwargs):
+                captured.update(payload)
+                return SimpleNamespace(data={})
+
+        profile = ProfileStore(self.paths).create("welearn", "defaults")
+        service = ProviderService(
+            FakeRegistry(),
+            FakeRunner(),
+            ProfileStateStore(self.paths),
+            SimpleNamespace(),
+            settings_provider=lambda _provider: {"duration_seconds": 42},
+        )
+        service.run_task(profile, {"remote_id": "task-1"})
+        self.assertEqual(captured["settings"]["duration_seconds"], 42)
 
     def test_cidaren_answer_bridge_is_loopback_scoped_and_dispatches_observations(self) -> None:
         resolved: list[dict] = []

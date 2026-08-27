@@ -239,11 +239,9 @@ class ProviderService:
         cancel: threading.Event | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
-        payload: dict[str, Any] = {"task": task}
+        payload: dict[str, Any] = {"task": task, "settings": self._settings(profile, settings)}
         if answers is not None:
             payload["answers"] = answers
-        if settings is not None:
-            payload["settings"] = settings
         return self._invoke(profile, "run", payload, cancel=cancel, on_event=on_event, timeout=3600)
 
     def read_duration(
