@@ -10,7 +10,13 @@ try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtWidgets import QApplication, QWidget
 
-    from asterism.gui.fluent import LineEdit, ThemeMode, apply_theme, configure_high_dpi
+    from asterism.gui.fluent import (
+        LineEdit,
+        TextEdit,
+        ThemeMode,
+        apply_theme,
+        configure_high_dpi,
+    )
     from asterism.gui.main_window import MainWindow, ProviderPage
 except ImportError:  # pragma: no cover - desktop extra is optional in CI
     QApplication = None
@@ -108,5 +114,34 @@ class GuiSmokeTests(unittest.TestCase):
                 if child.windowTitle() == "cidaren OAuth"
             )
             self.assertTrue(dialog.findChildren(LineEdit))
+            dialog.close()
+            window.close()
+
+    def test_provider_task_detail_dialog_is_read_only_and_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            page = next(
+                page
+                for page in window.pages
+                if isinstance(page, ProviderPage) and page.provider == "chaoxing"
+            )
+            page.current_routine_tasks = [
+                {
+                    "remote_id": "task-1",
+                    "title": "detail",
+                    "native": {"route_kind": "knowledge_point", "token": "secret"},
+                }
+            ]
+            page.task_table.setRowCount(1)
+            page.task_table.selectRow(0)
+            page.show_task_detail()
+            dialog = next(
+                child
+                for child in page.findChildren(QWidget)
+                if child.windowTitle() == "chaoxing task detail"
+            )
+            viewer = dialog.findChildren(TextEdit)[0]
+            self.assertTrue(viewer.isReadOnly())
+            self.assertNotIn("secret", viewer.toPlainText())
             dialog.close()
             window.close()

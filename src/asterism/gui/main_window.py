@@ -131,6 +131,7 @@ class ProviderPage(QWidget):
             ("courses", self.sync_courses),
             ("tasks", self.sync_tasks),
             ("questions", self.scan_questions),
+            ("task detail", self.show_task_detail),
             ("run", self.run_selected),
             ("batch run", self.run_batch),
         ]
@@ -791,6 +792,24 @@ class ProviderPage(QWidget):
             ),
             "questions",
         )
+
+    def show_task_detail(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            QMessageBox.warning(self, self.provider, "请先同步并选择 task")
+            return
+        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog.setWindowTitle(f"{self.provider} task detail")
+        layout = QVBoxLayout(dialog)
+        viewer = TextEdit()
+        viewer.setReadOnly(True)
+        viewer.setPlainText(json.dumps(self._safe_preview(task), ensure_ascii=False, indent=2))
+        layout.addWidget(viewer)
+        close = PushButton("关闭")
+        close.clicked.connect(dialog.close)
+        layout.addWidget(close)
+        dialog.resize(900, 640)
+        dialog.show()
 
     def scan_all(self) -> None:
         profile = self.profile()
