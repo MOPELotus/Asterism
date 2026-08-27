@@ -704,6 +704,38 @@ class LocalStoreTests(unittest.TestCase):
             "A natural plain-text response.",
         )
 
+    def test_ai_cache_revalidates_subjective_answer_before_reuse(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        value = config.ensure()
+        value["models"]["endpoints"]["gpt_router"].update(
+            {"base_url": "https://router.test", "api_key": "router-key"}
+        )
+        config.save(value)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        service = AIAnswerService(config, bank)
+        question = {"kind": "short_answer", "prompt": "Explain", "options": []}
+        choice = service.choose("economy", "untimed")
+        identity_hash, _ = question_identity("chaoxing", question)
+        cache_key = service.cache_key("chaoxing", identity_hash, "economy", "untimed", choice)
+        bank.put_ai_cache(
+            cache_key,
+            "gpt_router:gpt-5.6-terra",
+            {"answer": "# unsafe", "confidence": 0.9},
+            {},
+        )
+        calls = []
+
+        def fresh_request(_question, _choice, _key, _timeout):
+            calls.append(True)
+            return {"answer": "A natural answer.", "confidence": 0.8}, {}
+
+        service._request = fresh_request
+        result = service.answer("chaoxing", question)
+        self.assertFalse(result["cached"])
+        self.assertEqual(result["answer"]["answer"], "A natural answer.")
+        self.assertEqual(calls, [True])
+
     def test_controller_prepares_rebound_local_answers_for_chaoxing(self) -> None:
         bank = QuestionBank(self.paths.database)
         bank.initialize()

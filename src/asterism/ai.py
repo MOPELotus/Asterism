@@ -162,13 +162,17 @@ class AIAnswerService:
                 response = dict(cached["response"])
                 if "answer" in response:
                     try:
+                        response["answer"] = self._validate_answer(
+                            question, response["answer"]
+                        )
                         response["answer"] = rebind_answer(
                             response["answer"], question.get("options")
                         )
-                    except ValueError:
+                    except (RuntimeError, ValueError):
                         # The cache key is identity-bound, but a provider may
-                        # still change an option's semantic content. Treat it
-                        # as a miss instead of returning a wrong binding.
+                        # still change an option's semantic content, or an old
+                        # cache may violate the current subjective safety
+                        # policy. Treat either case as a miss.
                         response = {}
                 if response:
                     return {
