@@ -2057,7 +2057,7 @@ class MainWindow(MSFluentWindow if FLUENT_AVAILABLE else QMainWindow):
             page.setObjectName(name.replace("-", "_"))
             icon = {
                 "home": FluentIcon.HOME,
-                "chaoxing": FluentIcon.BOOK_SHELF,
+                "chaoxing": FluentIcon.LIBRARY,
                 "welearn": FluentIcon.EDUCATION,
                 "uai": FluentIcon.LANGUAGE,
                 "cidaren": FluentIcon.CHAT,
