@@ -247,6 +247,31 @@ class LocalStoreTests(unittest.TestCase):
             ],
         )
 
+    def test_formal_draft_rejects_empty_answers_before_provider_submission(self) -> None:
+        class FakeService:
+            def run_task(self, *args, **kwargs):
+                raise AssertionError("provider should not receive an empty formal draft")
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        profile = ProfileStore(self.paths).create("cidaren", "formal-empty")
+        draft = SimpleNamespace(
+            status="draft",
+            provider="cidaren",
+            profile_id=profile.id,
+            payload={
+                "task": {
+                    "remote_id": "exam-1",
+                    "assessment_class": "formal",
+                    "native": {"route_kind": "course_exam"},
+                },
+                "answers": {},
+            },
+        )
+        controller.profiles = ProfileStore(self.paths)
+        with self.assertRaises(ValueError):
+            controller.submit_draft(draft)
+
     def test_controller_scan_all_profiles_isolates_profile_failures(self) -> None:
         profiles = [
             SimpleNamespace(provider="chaoxing", id="one", enabled=True),

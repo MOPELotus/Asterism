@@ -602,6 +602,8 @@ class DesktopController:
         if not isinstance(task, dict):
             raise ValueError("draft payload.task must be an object")
         answers = self._normalize_draft_answers(draft.payload.get("answers"))
+        if self._is_formal_task(task) and not answers:
+            raise ValueError("formal draft requires at least one reviewed answer")
         settings = draft.payload.get("settings")
         if settings is not None and not isinstance(settings, dict):
             raise ValueError("draft payload.settings must be an object")
