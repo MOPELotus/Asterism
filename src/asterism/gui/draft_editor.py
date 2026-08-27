@@ -59,7 +59,7 @@ class FormalDraftEditor(QDialog):
         table_layout.addWidget(StrongBodyLabel("题目列表"))
         self.table = TableWidget()
         self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["remote_id", "kind", "prompt", "answer", "state"])
+        self.table.setHorizontalHeaderLabels(["序号", "题型", "题干", "答案", "状态"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         configure_table(self.table)
         table_layout.addWidget(self.table, 1)
@@ -112,7 +112,7 @@ class FormalDraftEditor(QDialog):
             prompt = question.get("prompt") or question.get("question") or question.get("stem")
             answer_present = remote_id in self.answers and self.answers[remote_id] is not None
             values = (
-                remote_id,
+                str(row + 1),
                 str(question.get("kind") or "provider_native"),
                 self._preview(prompt),
                 self._preview(self.answers[remote_id]) if answer_present else "",
@@ -134,7 +134,7 @@ class FormalDraftEditor(QDialog):
             return
         remote_id = str(question.get("remote_id") or "")
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"编辑答案 · {remote_id}")
+        dialog.setWindowTitle("编辑答案")
         layout = QVBoxLayout(dialog)
         editor = TextEdit()
         if remote_id in self.answers:

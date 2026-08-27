@@ -290,7 +290,7 @@ class ProviderPage(QWidget):
 
         self.course_table = TableWidget()
         self.course_table.setColumnCount(4)
-        self.course_table.setHorizontalHeaderLabels(["remote_id", "title", "state", "grade"])
+        self.course_table.setHorizontalHeaderLabels(["序号", "课程", "状态", "成绩"])
         self.course_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         configure_table(self.course_table)
         self.course_table.itemSelectionChanged.connect(self._course_selected)
@@ -298,7 +298,7 @@ class ProviderPage(QWidget):
         root.addWidget(self.course_table)
         self.task_table = TableWidget()
         self.task_table.setColumnCount(4)
-        self.task_table.setHorizontalHeaderLabels(["remote_id", "title", "type", "state"])
+        self.task_table.setHorizontalHeaderLabels(["序号", "任务", "类型", "状态"])
         self.task_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.task_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.task_table.itemSelectionChanged.connect(
@@ -322,7 +322,7 @@ class ProviderPage(QWidget):
         root.addLayout(task_selection)
         self.formal_table = TableWidget()
         self.formal_table.setColumnCount(4)
-        self.formal_table.setHorizontalHeaderLabels(["remote_id", "title", "type", "state"])
+        self.formal_table.setHorizontalHeaderLabels(["序号", "作业 / 考试", "类型", "状态"])
         self.formal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.formal_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.formal_table.itemSelectionChanged.connect(
@@ -333,7 +333,7 @@ class ProviderPage(QWidget):
         root.addWidget(self.formal_table)
         self.question_table = TableWidget()
         self.question_table.setColumnCount(4)
-        self.question_table.setHorizontalHeaderLabels(["kind", "prompt", "options", "remote_id"])
+        self.question_table.setHorizontalHeaderLabels(["序号", "题型", "题干", "选项"])
         self.question_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         configure_table(self.question_table)
         root.addWidget(StrongBodyLabel("题目预览（只读）"))
@@ -350,7 +350,7 @@ class ProviderPage(QWidget):
         for profile in self.controller.profiles.list(self.provider):
             state = "" if profile.enabled else " · disabled"
             self.profile_combo.addItem(
-                f"{profile.label} [{profile.id[:8]}]{state}", profile.id
+                f"{profile.label}{state}", profile.id
             )
         self._profile_changed(self.profile_combo.currentIndex())
 
@@ -608,7 +608,7 @@ class ProviderPage(QWidget):
                 grade = course.get("provider_summary", {}).get("grade", {})
                 grade_text = grade.get("overall_score", "") if isinstance(grade, dict) else ""
                 values = (
-                    course.get("remote_id", ""),
+                    str(row + 1),
                     course.get("title", ""),
                     course.get("state", ""),
                     grade_text,
@@ -629,13 +629,23 @@ class ProviderPage(QWidget):
             ]
             self.task_table.setRowCount(len(self.current_routine_tasks))
             for row, task in enumerate(self.current_routine_tasks):
-                for column, key in enumerate(("remote_id", "title", "type", "state")):
-                    value = task.get(key, task.get("task_type", task.get("source_type", "")))
+                values = (
+                    row + 1,
+                    task.get("title", ""),
+                    task.get("type", task.get("task_type", task.get("source_type", ""))),
+                    task.get("state", ""),
+                )
+                for column, value in enumerate(values):
                     self.task_table.setItem(row, column, QTableWidgetItem(str(value)))
             self.formal_table.setRowCount(len(self.current_formal_tasks))
             for row, task in enumerate(self.current_formal_tasks):
-                for column, key in enumerate(("remote_id", "title", "type", "state")):
-                    value = task.get(key, task.get("source_type", ""))
+                values = (
+                    row + 1,
+                    task.get("title", ""),
+                    task.get("type", task.get("source_type", "")),
+                    task.get("state", ""),
+                )
+                for column, value in enumerate(values):
                     self.formal_table.setItem(row, column, QTableWidgetItem(str(value)))
         elif label == "questions":
             self.current_questions = result if isinstance(result, list) else []
@@ -646,10 +656,10 @@ class ProviderPage(QWidget):
                 prompt = question.get("prompt") or question.get("question") or question.get("stem")
                 options = question.get("options") or question.get("choices") or []
                 values = (
+                    str(row + 1),
                     question.get("kind") or "provider_native",
                     self._preview_text(prompt),
                     self._preview_text(options),
-                    question.get("remote_id") or "",
                 )
                 for column, value in enumerate(values):
                     self.question_table.setItem(
@@ -755,7 +765,7 @@ class ProviderPage(QWidget):
             return "<truncated>"
         if hasattr(value, "task_remote_id") and hasattr(value, "error_code"):
             return {
-                "task_remote_id": str(getattr(value, "task_remote_id", "")),
+                "task_remote_id": "<internal>",
                 "error_code": getattr(value, "error_code", None),
                 "error_message": ProviderPage._preview_text(
                     getattr(value, "error_message", ""), limit=300
@@ -776,6 +786,12 @@ class ProviderPage(QWidget):
                     # it is shown only in the explicit copy dialog and must
                     # never be echoed into the persistent UI log.
                     result[name] = "<redacted authorization url>"
+                elif (
+                    lowered in {"id", "remote_id", "task_remote_id", "profile_id", "task_ref"}
+                    or lowered.endswith("_id")
+                    or lowered.endswith("_ref")
+                ):
+                    result[name] = "<internal>"
                 elif any(
                     marker in lowered
                     for marker in (
@@ -1009,18 +1025,18 @@ class ProviderPage(QWidget):
         layout = QVBoxLayout(dialog)
         table = TableWidget()
         table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["field", "value"])
+        table.setHorizontalHeaderLabels(["项目", "内容"])
         values = (
-            ("state", status.state),
-            ("phase", status.phase),
-            ("course_count", status.course_count),
-            ("task_count", status.task_count),
-            ("question_count", status.question_count),
-            ("completed_tasks", status.completed_tasks),
-            ("retries", status.retries),
-            ("cursor", status.cursor),
-            ("last_error", status.last_error),
-            ("updated_at", status.updated_at),
+            ("状态", status.state),
+            ("阶段", status.phase),
+            ("课程数", status.course_count),
+            ("任务数", status.task_count),
+            ("题目数", status.question_count),
+            ("已完成任务", status.completed_tasks),
+            ("重试次数", status.retries),
+            ("扫描位置", status.cursor),
+            ("最近错误", status.last_error),
+            ("更新时间", status.updated_at),
         )
         table.setRowCount(len(values))
         for row, (key, value) in enumerate(values):
@@ -1334,7 +1350,7 @@ class DraftPage(QWidget):
         self.table = TableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(
-            ["provider", "profile_id", "task_ref", "status", "updated_at"]
+            ["平台", "账号", "任务", "状态", "更新时间"]
         )
         configure_table(self.table)
         table_layout.addWidget(self.table)
@@ -1370,10 +1386,24 @@ class DraftPage(QWidget):
         self.current_rows = self.controller.draft_rows()
         self.table.setRowCount(len(self.current_rows))
         for row, value in enumerate(self.current_rows):
-            for column, key in enumerate(
-                ("provider", "profile_id", "task_ref", "status", "updated_at")
-            ):
-                self.table.setItem(row, column, QTableWidgetItem(str(value.get(key) or "")))
+            provider = str(value.get("provider") or "")
+            profile_label = "本地账号"
+            try:
+                profile = self.controller.profiles.get(provider, str(value.get("profile_id") or ""))
+                profile_label = profile.label
+            except (OSError, ValueError):
+                pass
+            payload = value.get("payload") if isinstance(value.get("payload"), dict) else {}
+            task_title = str(payload.get("title") or payload.get("task_title") or "待确认任务")
+            visible = (
+                provider,
+                profile_label,
+                task_title,
+                value.get("status"),
+                value.get("updated_at"),
+            )
+            for column, item in enumerate(visible):
+                self.table.setItem(row, column, QTableWidgetItem(str(item or "")))
 
     def _selected(self):
         row = self.table.currentRow()
@@ -1405,7 +1435,7 @@ class DraftPage(QWidget):
         if draft is None:
             return
         dialog = FormalDraftEditor(draft.payload, self)
-        dialog.setWindowTitle(f"draft {draft.id[:8]}")
+        dialog.setWindowTitle("编辑草稿")
 
         def save_payload(payload: object) -> None:
             try:
@@ -1556,7 +1586,7 @@ class QuestionBankPage(QWidget):
         table_layout.addWidget(StrongBodyLabel("题目"))
         self.table = TableWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["provider", "kind", "prompt", "identity"])
+        self.table.setHorizontalHeaderLabels(["平台", "题型", "题干", "选项"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         configure_table(self.table)
         table_layout.addWidget(self.table, 1)
@@ -1582,7 +1612,9 @@ class QuestionBankPage(QWidget):
                     value.get("provider"),
                     value.get("native_kind"),
                     prompt,
-                    value.get("identity_hash"),
+                    self._preview_text(
+                        content.get("options") if isinstance(content, dict) else ""
+                    ),
                 )
             ):
                 self.table.setItem(row, column, QTableWidgetItem(str(item or "")))

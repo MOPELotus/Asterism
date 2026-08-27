@@ -54,7 +54,7 @@ class GuiSmokeTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(chaoxing_page.question_table.rowCount(), 1)
-            self.assertEqual(chaoxing_page.question_table.item(0, 0).text(), "matching")
+            self.assertEqual(chaoxing_page.question_table.item(0, 1).text(), "matching")
             chaoxing_page._event_received(
                 "run", {"type": "progress", "current": 2, "total": 5, "message": "working"}
             )
@@ -259,7 +259,7 @@ class GuiSmokeTests(unittest.TestCase):
                 for child in page.findChildren(QWidget)
                 if child.windowTitle() == "chaoxing scan status"
             )
-            self.assertIn("question_count", dialog.findChildren(TableWidget)[0].item(4, 0).text())
+            self.assertIn("题目数", dialog.findChildren(TableWidget)[0].item(4, 0).text())
             self.assertTrue(dialog.findChildren(PushButton))
             dialog.close()
             window.close()
