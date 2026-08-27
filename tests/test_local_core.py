@@ -1320,6 +1320,17 @@ class LocalStoreTests(unittest.TestCase):
             ["B", "A"],
         )
 
+    def test_numeric_decimal_option_is_not_treated_as_a_display_prefix(self) -> None:
+        self.assertEqual(canonical_answer("1.5", ["1.5", "2.5"]), {"option": "1.5"})
+        self.assertNotEqual(
+            question_identity(
+                "chaoxing", {"kind": "single_choice", "prompt": "value", "options": ["1.5"]}
+            )[0],
+            question_identity(
+                "chaoxing", {"kind": "single_choice", "prompt": "value", "options": ["5"]}
+            )[0],
+        )
+
     def test_numeric_native_answer_canonicalizes_cidaren_answer_tag(self) -> None:
         options = [
             {"answer_tag": 0, "content": "Alpha"},

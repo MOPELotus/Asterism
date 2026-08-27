@@ -69,7 +69,9 @@ SIGNED_URL_KEYS = {
     "timestamp",
     "ts",
 }
-OPTION_PREFIX = re.compile(r"^\s*(?:[A-Za-z]|\d+)\s*[.、:：)）]\s*")
+OPTION_PREFIX = re.compile(
+    r"^\s*(?:[A-Za-z]\s*[.、:：)）]|\d+\s*(?:[、:：)）]|\.(?!\d)))\s*"
+)
 
 
 def normalize_text(value: str) -> str:
