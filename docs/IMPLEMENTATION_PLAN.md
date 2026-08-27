@@ -132,6 +132,13 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
 
 ### C3：桌面 UI 与交互收口
 
+- 使用 PyQt-Fluent-Widgets 免费版的 `FluentWindow`/`MSFluentWindow` 作为主窗口，配合
+  `NavigationInterface`、`CardWidget`、`InfoBar`、`MessageBox`、`PrimaryPushButton`、
+  `PushButton`、`ComboBox`、`LineEdit`、`TextEdit`、`TableWidget`、`ProgressBar`、
+  `SwitchButton`、`CheckBox` 和 `ScrollArea` 等免费组件构建页面；不再以裸 `QMainWindow`、
+  裸 Qt 输入控件作为用户可见控件。Pro 专属组件不作为依赖。
+- 主窗口必须是真正的 Fluent 窗口（标题栏、导航、主题切换由库处理），页面按 home、provider、
+  drafts、question bank、settings 等模块拆分，禁止拼成巨型窗口文件。
 - 实现 PyQt6 Fluent 模块化应用壳和首次启动流程。
 - 首次启动显示本地数据目录、凭据边界、只读验证顺序和草稿确认规则；确认状态写入本地配置，
   不创建额外用户或权限实体。
@@ -146,6 +153,8 @@ Checkpoint：矩阵全部达到 `upstream-proven` 或 `ported-unverified`，并�
 - `uai` 平台页提供可选的本次讨论/主观纯文本输入；留空时保持 donor 原生行为，填写时通过
   `generated_text` 设置传入 Worker，仅作用于本次执行，不自动写入 Profile。
 - 支持跟随系统、浅色、深色主题；启动前配置 Qt 高 DPI 缩放，窗口尺寸和表格布局随显示器调整。
+  所有页面控件使用 Fluent 主题 token，禁止硬编码颜色/字体锁死主题；在 100%、125%、150% 和
+  200% 缩放下保持导航、表格、对话框和长文本可用。
 - 可选终态通知仅用于单项/批量执行，使用本地配置的无 shell 命令，仅传递事件、平台 ID、操作名和脱敏摘要；
   课程刷新、题目扫描和设置保存不会触发通知。
 - `chaoxing` 章节任务执行前，桌面控制层会先读取题目并按全局题库优先、AI 其次准备答案；

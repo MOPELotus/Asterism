@@ -18,6 +18,8 @@ Windows 便携构建骨架已经接入，但固定的 `welearn` donor 尚无可�
 - 单一可信本地操作者，无 Asterism 登录、角色或权限系统。
 - 四个平台均可配置任意多个本地账号 Profile。
 - 使用 PyQt6 与 PyQt6-Fluent-Widgets 构建模块化 Fluent 桌面界面。
+- 主窗口采用免费版 `FluentWindow`/`MSFluentWindow` 与 `NavigationInterface`；页面控件统一使用
+  免费 Fluent 组件，Pro 组件不作为依赖。
 - 支持跟随系统、浅色、深色主题和 Windows 高 DPI 显示缩放。
 - 原样复用现有 Provider、Worker、题型解析、答案策略和平台私有执行顺序。
 - 题库按题干、材料、选项内容和媒体语义匹配，忽略随机选项顺序及远端 ID；答案和 AI 响应只写入本机缓存。
