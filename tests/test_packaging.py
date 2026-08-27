@@ -76,6 +76,22 @@ class PortableValidationTests(unittest.TestCase):
             staged = resources / "browsers" / "chromium" / "chrome-win64" / "chrome.exe"
             self.assertEqual(staged.read_bytes(), b"browser")
 
+    def test_builder_stages_non_win64_playwright_directory_layout(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "playwright" / "chromium-1" / "chrome-win" / "chrome.exe"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"arm-compatible-browser")
+            resources = root / "resources"
+            resources.mkdir()
+            with patch.dict(
+                "os.environ", {"PLAYWRIGHT_BROWSERS_PATH": str(root / "playwright")}, clear=False
+            ):
+                self.assertTrue(builder.stage_browser_resources(resources))
+            staged = resources / "browsers" / "chromium" / "chrome-win" / "chrome.exe"
+            self.assertEqual(staged.read_bytes(), b"arm-compatible-browser")
+
     def test_builder_rejects_cross_architecture_label(self) -> None:
         builder = load_builder()
         with patch.object(builder.platform, "machine", return_value="AMD64"):

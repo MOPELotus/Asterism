@@ -238,7 +238,12 @@ def stage_browser_resources(resources: Path) -> bool:
     for root in candidates:
         if not root.exists():
             continue
-        for executable in sorted(root.glob("chromium-*/chrome-*/chrome.exe")):
+        # Playwright uses different browser directory names across Windows
+        # architectures/releases (for example chrome-win64 vs chrome-win).
+        # Select only Chromium bundles and never an unrelated executable.
+        for executable in sorted(root.glob("chromium-*/**/chrome.exe")):
+            if not any(part.casefold().startswith("chrome-") for part in executable.parts):
+                continue
             browser_root = executable.parent.parent
             destination = resources / "browsers" / "chromium"
             destination.parent.mkdir(parents=True, exist_ok=True)
