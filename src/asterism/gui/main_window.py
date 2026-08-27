@@ -1833,6 +1833,12 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
             self.controller.config.save(config)
 
     def add_page(self, name: str, page: QWidget) -> None:
+        label = {
+            "home": "主页",
+            "drafts": "草稿",
+            "question-bank": "题库",
+            "settings": "设置",
+        }.get(name, name)
         if FLUENT_AVAILABLE:
             page.setObjectName(name.replace("-", "_"))
             icon = {
@@ -1845,8 +1851,13 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
                 "question-bank": FluentIcon.DICTIONARY,
                 "settings": FluentIcon.SETTING,
             }.get(name, FluentIcon.APPLICATION)
-            self.addSubInterface(page, icon, name, NavigationItemPosition.TOP)
+            position = (
+                NavigationItemPosition.BOTTOM
+                if name == "settings"
+                else NavigationItemPosition.TOP
+            )
+            self.addSubInterface(page, icon, label, position)
         else:
-            self.navigation.addItem(QListWidgetItem(name))
+            self.navigation.addItem(QListWidgetItem(label))
             self.stack.addWidget(page)
         self.pages.append(page)
