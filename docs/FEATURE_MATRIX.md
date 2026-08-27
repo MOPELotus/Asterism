@@ -64,7 +64,7 @@
 |---|---|---|
 | 登录 | 维护版微信链接/二维码回调，不要求 MITM 或抓包 | `upstream-proven + desktop-wired + fixture-verified` |
 | 清单 | 单元自学、班级学习和测试任务，保留原生结构 | `upstream-proven + desktop-wired + fixture-verified` |
-| 执行 | 单账号严格串行，保持 topic code 等前后依赖 | `upstream-proven + desktop-wired + fixture-verified` |
+| 执行 | 单账号严格串行，保持 topic code 等前后依赖；桌面通过短生命周期 loopback bridge 接入全局题库/AI | `upstream-proven + desktop-wired + fixture-verified` |
 | 历史答案 | 将 `answer_lib` 延迟绑定到完整新题，仅作为低可信证据 | `upstream-proven + desktop-wired + fixture-verified` |
 | 限时答题 | Instant 模型优先；65% 后准备回退，85% 采用最佳结果，末 15% 提交/重试 | `upstream-proven + desktop-wired + fixture-verified` |
 | 不限时答题 | 使用一个配置模型和可选自然延时，不做无意义多模型并发 | `upstream-proven + desktop-wired + fixture-verified` |

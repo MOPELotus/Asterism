@@ -49,6 +49,7 @@ def _answer_bridge_settings(settings):
     execution_id = str(nested.get("execution_id") or settings.get("execution_id") or settings.get("answer_bridge_execution_id") or "").strip()
     task_id = str(nested.get("task_id") or settings.get("task_id") or settings.get("answer_bridge_task_id") or "").strip()
     remote_task_id = str(nested.get("remote_task_id") or settings.get("remote_task_id") or "").strip()
+    combination = str(nested.get("combination") or settings.get("answer_combination") or "").strip()
     expires_at = nested.get("expires_at") or settings.get("answer_bridge_expires_at")
     if not url:
         return None
@@ -65,8 +66,15 @@ def _answer_bridge_settings(settings):
                 raise WorkerFailure("request_invalid", "Cidaren answer bridge ticket has expired")
         except (TypeError, ValueError) as error:
             raise WorkerFailure("request_invalid", "Cidaren answer_bridge_expires_at must be Unix seconds") from error
-    return {"url": url, "ticket": ticket, "execution_id": execution_id, "task_id": task_id,
-            "remote_task_id": remote_task_id, "expires_at": expires_at}
+    return {
+        "url": url,
+        "ticket": ticket,
+        "execution_id": execution_id,
+        "task_id": task_id,
+        "remote_task_id": remote_task_id,
+        "combination": combination,
+        "expires_at": expires_at,
+    }
 
 
 def _bridge_post(bridge, document, timeout):
@@ -434,6 +442,7 @@ def execute_task(modules, payload, entry, events, redactor):
                 "task_id": bridge["task_id"],
                 "remote_task_id": bridge["remote_task_id"],
                 "route": answer_route,
+                "combination": bridge["combination"],
                 "timeout_seconds": bridge_timeout,
                 "remote_id": topic_code,
                 "mode": _mode,

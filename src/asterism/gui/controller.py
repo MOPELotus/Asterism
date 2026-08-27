@@ -206,7 +206,10 @@ class DesktopController:
         task_ref = str(task.get("remote_id") or uuid4())
         execution_id = str(uuid4())
         merged_settings["answer_bridge"] = bridge.settings(
-            execution_id=execution_id, task_id=task_ref, remote_task_id=task_ref
+            execution_id=execution_id,
+            task_id=task_ref,
+            remote_task_id=task_ref,
+            combination=str(merged_settings.get("answer_combination") or ""),
         )
         try:
             return self.service.run_task(
@@ -236,7 +239,10 @@ class DesktopController:
             return {"answer_available": False}
         try:
             response = self.answer_question(
-                "cidaren", question, route=str(document.get("route") or "untimed")
+                "cidaren",
+                question,
+                combination=str(document.get("combination") or "") or None,
+                route=str(document.get("route") or "untimed"),
             )
             value = response.get("answer", {}).get("answer")
             if value is None:

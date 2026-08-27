@@ -86,13 +86,21 @@ class CidarenAnswerBridge:
     def url(self) -> str:
         return f"http://127.0.0.1:{self._server.server_port}/answer"
 
-    def settings(self, *, execution_id: str, task_id: str, remote_task_id: str) -> dict[str, Any]:
+    def settings(
+        self,
+        *,
+        execution_id: str,
+        task_id: str,
+        remote_task_id: str,
+        combination: str = "",
+    ) -> dict[str, Any]:
         return {
             "url": self.url,
             "ticket": self.ticket,
             "execution_id": execution_id,
             "task_id": task_id,
             "remote_task_id": remote_task_id,
+            "combination": combination,
         }
 
     def close(self) -> None:
