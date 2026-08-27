@@ -138,9 +138,12 @@ class AIAnswerService:
             if exact.status == "exact":
                 try:
                     rebound = rebind_answer(exact.answer, question.get("options"))
-                except ValueError:
+                    rebound = self._validate_answer(question, rebound)
+                except (RuntimeError, ValueError):
                     # A stale or ambiguous option set must not block a fresh
-                    # AI request; retain the record as evidence only.
+                    # AI request. Likewise, retain an old subjective answer
+                    # that violates the current safety policy as evidence
+                    # rather than auto-submitting it.
                     rebound = None
                 if rebound is not None:
                     return {

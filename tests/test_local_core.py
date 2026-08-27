@@ -736,6 +736,32 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(result["answer"]["answer"], "A natural answer.")
         self.assertEqual(calls, [True])
 
+    def test_exact_cache_revalidates_subjective_answer_before_reuse(self) -> None:
+        config = LocalConfigStore(self.paths.config)
+        value = config.ensure()
+        value["models"]["endpoints"]["gpt_router"].update(
+            {"base_url": "https://router.test", "api_key": "router-key"}
+        )
+        config.save(value)
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question = {"kind": "short_answer", "prompt": "Explain", "options": []}
+        question_id, _ = repository.ingest_question("chaoxing", question)
+        repository.record_candidate(question_id, "# unsafe", "history", "correct")
+        service = AIAnswerService(config, bank)
+        calls = []
+
+        def fresh_request(_question, _choice, _key, _timeout):
+            calls.append(True)
+            return {"answer": "A safe replacement.", "confidence": 0.8}, {}
+
+        service._request = fresh_request
+        result = service.answer("chaoxing", question)
+        self.assertFalse(result["cached"])
+        self.assertEqual(result["answer"]["answer"], "A safe replacement.")
+        self.assertEqual(calls, [True])
+
     def test_controller_prepares_rebound_local_answers_for_chaoxing(self) -> None:
         bank = QuestionBank(self.paths.database)
         bank.initialize()
