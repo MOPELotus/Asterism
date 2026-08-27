@@ -79,6 +79,13 @@ def clear_layout(layout) -> None:
             clear_layout(item.layout())
 
 
+def make_title(text: str) -> TitleLabel:
+    label = TitleLabel(text)
+    label.setMinimumHeight(34)
+    label.setSizePolicy(label.sizePolicy().horizontalPolicy(), label.sizePolicy().verticalPolicy())
+    return label
+
+
 def show_notice(parent: QWidget, title: str, message: str, level: str = "info") -> None:
     """Use Fluent dialogs in the desktop build and native dialogs in headless fallback."""
     if FLUENT_AVAILABLE:
@@ -133,7 +140,7 @@ class HomePage(QWidget):
         hero_layout = QVBoxLayout(hero)
         hero_layout.setContentsMargins(24, 20, 24, 20)
         hero_layout.setSpacing(6)
-        hero_layout.addWidget(TitleLabel("Asterism"))
+        hero_layout.addWidget(make_title("Asterism"))
         hero_layout.addWidget(BodyLabel("本地桌面控制台"))
         hero_layout.addWidget(
             CaptionLabel("选择平台账号，完成认证后读取课程和任务。正式提交始终需要明确确认。")
@@ -157,7 +164,7 @@ class HomePage(QWidget):
             card_layout.setContentsMargins(16, 14, 16, 14)
             card_layout.setSpacing(3)
             card_layout.addWidget(CaptionLabel(title))
-            value = TitleLabel("0")
+            value = make_title("0")
             value.setObjectName(f"metric_{key}")
             card_layout.addWidget(value)
             card_layout.addWidget(CaptionLabel(note))
@@ -255,7 +262,7 @@ class ProviderPage(QWidget):
         intro_layout = QVBoxLayout(intro)
         intro_layout.setContentsMargins(20, 16, 20, 16)
         intro_layout.setSpacing(6)
-        intro_layout.addWidget(TitleLabel(f"{provider} 账号"))
+        intro_layout.addWidget(make_title(f"{provider} 账号"))
         intro_layout.addWidget(
             BodyLabel("先创建或选择一个本地 Profile，再点击认证。认证成功后即可读取课程和任务。")
         )
@@ -1438,7 +1445,7 @@ class DraftPage(QWidget):
         intro_layout = QVBoxLayout(intro)
         intro_layout.setContentsMargins(20, 16, 20, 16)
         intro_layout.setSpacing(5)
-        intro_layout.addWidget(TitleLabel("作业与考试草稿"))
+        intro_layout.addWidget(make_title("作业与考试草稿"))
         intro_layout.addWidget(BodyLabel("这里集中显示需要人工确认的正式作业和考试。"))
         intro_layout.addWidget(CaptionLabel("编辑和保存不会自动提交；只有点击“确认并提交”并再次确认后才会调用平台提交。"))
         root.addWidget(intro)
@@ -1618,7 +1625,7 @@ class QuestionBankPage(QWidget):
         intro_layout = QVBoxLayout(intro)
         intro_layout.setContentsMargins(20, 16, 20, 16)
         intro_layout.setSpacing(5)
-        intro_layout.addWidget(TitleLabel("全局题库"))
+        intro_layout.addWidget(make_title("全局题库"))
         intro_layout.addWidget(
             BodyLabel(
                 "题目按题干、材料、选项内容和媒体语义匹配，平台题号和选项 ID 不作为唯一依据。"
@@ -1814,7 +1821,7 @@ class SettingsPage(QWidget):
         intro_layout = QVBoxLayout(intro)
         intro_layout.setContentsMargins(20, 16, 20, 16)
         intro_layout.setSpacing(5)
-        intro_layout.addWidget(TitleLabel("设置"))
+        intro_layout.addWidget(make_title("设置"))
         intro_layout.addWidget(BodyLabel("主题、模型组合、通知和 Provider 默认值保存在本机配置。"))
         intro_layout.addWidget(CaptionLabel("配置内容不会自动上传；凭据和会话状态保存在本地数据目录。"))
         root.addWidget(intro)
@@ -1937,7 +1944,6 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
         for provider in PROVIDER_IDS:
             self.add_page(provider, ProviderPage(self.controller, provider))
         self.add_page("drafts", DraftPage(self.controller))
-        self.add_page("question-bank", QuestionBankPage(self.controller))
         self.add_page("settings", SettingsPage(self.controller))
         if not FLUENT_AVAILABLE:
             self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex)
