@@ -114,8 +114,13 @@ def apply_theme(app, mode: str | ThemeMode) -> ThemeMode:
             )
         except (ImportError, AttributeError):
             pass
-    app.setPalette(_dark_palette() if effective_dark else app.style().standardPalette())
+    # qfluentwidgets owns the palette when it is available.  Overwriting it
+    # with Qt's platform palette makes the Fluent shell inherit accent colours
+    # (notably the pale yellow Windows palette) and causes the navigation/page
+    # surfaces to look like native Qt widgets.  Only provide a palette for the
+    # headless/native fallback.
     if not FLUENT_AVAILABLE:
+        app.setPalette(_dark_palette() if effective_dark else app.style().standardPalette())
         app.setStyleSheet(
             """
             QTableWidget { gridline-color: #555; }
