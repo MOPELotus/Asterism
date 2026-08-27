@@ -191,6 +191,37 @@ class LocalStoreTests(unittest.TestCase):
             ],
         )
 
+    def test_controller_scan_all_profiles_isolates_profile_failures(self) -> None:
+        profiles = [
+            SimpleNamespace(provider="chaoxing", id="one", enabled=True),
+            SimpleNamespace(provider="chaoxing", id="two", enabled=True),
+            SimpleNamespace(provider="chaoxing", id="disabled", enabled=False),
+        ]
+        statuses = {
+            "one": SimpleNamespace(profile_id="one", state="completed"),
+            "two": SimpleNamespace(profile_id="two", state="failed"),
+        }
+
+        class FakeProfiles:
+            def list(self, provider):
+                self.provider = provider
+                return profiles
+
+        class FakeScanner:
+            def scan(self, profile, **_kwargs):
+                if profile.id == "two":
+                    raise RunnerError("network", "temporarily unavailable")
+                return statuses[profile.id]
+
+            def status(self, profile):
+                return statuses[profile.id]
+
+        controller = object.__new__(DesktopController)
+        controller.profiles = FakeProfiles()
+        controller.scanner = FakeScanner()
+        result = controller.scan_all_profiles()
+        self.assertEqual([status.profile_id for status in result], ["one", "two"])
+
     def test_cidaren_answer_bridge_is_loopback_scoped_and_dispatches_observations(self) -> None:
         resolved: list[dict] = []
         observed: list[dict] = []

@@ -132,7 +132,13 @@ class ProviderPage(QWidget):
             ("batch run", self.run_batch),
         ]
         if provider == "chaoxing":
-            action_items.extend([("scan all", self.scan_all), ("scan status", self.scan_status)])
+            action_items.extend(
+                [
+                    ("scan all", self.scan_all),
+                    ("scan profiles", self.scan_profiles),
+                    ("scan status", self.scan_status),
+                ]
+            )
         if provider == "uai":
             action_items.extend([("inspect", self.inspect_task), ("duration", self.read_duration)])
         elif provider == "welearn":
@@ -711,6 +717,33 @@ class ProviderPage(QWidget):
         status = self.controller.scan_status(profile)
         preview = json.dumps(self._safe_preview(status), ensure_ascii=False)
         self.log.append(f"[scan status] {preview}")
+
+    def scan_profiles(self) -> None:
+        if self.provider != "chaoxing":
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "chaoxing",
+                "按本地 Profile 逐个执行可恢复的只读全量扫描？失败账号会记录并继续。",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self._call(
+            lambda on_event: self.controller.scan_all_profiles(
+                cancel=self.cancel_event,
+                on_update=lambda profile, status: on_event(
+                    {
+                        "type": "progress",
+                        "current": status.completed_tasks,
+                        "total": status.task_count or None,
+                        "message": f"{profile.label}: {status.last_error or status.phase}",
+                    }
+                ),
+            ),
+            "scan profiles",
+        )
 
     def run_selected(self) -> None:
         profile = self.profile()

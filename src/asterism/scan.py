@@ -216,17 +216,30 @@ class ReadOnlyScanCoordinator:
         cancel: threading.Event,
         on_update: Callable[[ScanStatus], None] | None,
     ) -> Any:
+        last_error: RunnerError | None = None
         for attempt in range(max_retries + 1):
             self._check_cancel(cancel)
             try:
                 return operation()
-            except RunnerError:
+            except RunnerError as error:
+                last_error = error
+                if error.code == "cancelled":
+                    raise
                 if attempt >= max_retries:
                     raise
+                status.last_error = f"{error.code}: {error}"
                 status.retries += 1
                 self._save(status, on_update)
                 cancel.wait(min(2**attempt, 30))
-        raise AssertionError("unreachable")
+            except (OSError, ValueError) as error:
+                last_error = RunnerError("retryable_error", str(error))
+                if attempt >= max_retries:
+                    raise last_error from error
+                status.last_error = str(error)
+                status.retries += 1
+                self._save(status, on_update)
+                cancel.wait(min(2**attempt, 30))
+        raise last_error or AssertionError("unreachable")
 
     @staticmethod
     def _check_cancel(cancel: threading.Event) -> None:

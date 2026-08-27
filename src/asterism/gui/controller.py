@@ -20,7 +20,7 @@ from ..notifications import NotificationDispatcher, NotificationResult
 from ..paths import DataPaths, application_root
 from ..profiles import Profile, ProfileStateStore, ProfileStore
 from ..providers import ProviderRegistry
-from ..runner import RunnerManager
+from ..runner import RunnerError, RunnerManager
 from ..scan import ReadOnlyScanCoordinator, ScanStatus
 from ..service import ProviderOperationResult, ProviderService
 
@@ -462,6 +462,43 @@ class DesktopController:
 
     def scan_status(self, profile: Profile) -> ScanStatus:
         return self.scanner.status(profile)
+
+    def scan_all_profiles(
+        self,
+        *,
+        allow_cidaren_attempt: bool = False,
+        max_retries: int = 3,
+        cancel: threading.Event | None = None,
+        on_update: Callable[[Profile, ScanStatus], None] | None = None,
+    ) -> list[ScanStatus]:
+        """Run the manual Chaoxing inventory scan across enabled local profiles.
+
+        Each profile owns its cursor and failures are isolated so one blocked
+        account cannot prevent the remaining accounts from being scanned.
+        This is deliberately a manual action, not a scheduler.
+        """
+        results: list[ScanStatus] = []
+        for profile in self.profiles.list("chaoxing"):
+            if not profile.enabled:
+                continue
+            if cancel is not None and cancel.is_set():
+                break
+            try:
+                status = self.scanner.scan(
+                    profile,
+                    allow_cidaren_attempt=allow_cidaren_attempt,
+                    max_retries=max_retries,
+                    cancel=cancel,
+                    on_update=(
+                        (lambda value, profile=profile: on_update(profile, value))
+                        if on_update is not None
+                        else None
+                    ),
+                )
+            except (OSError, ValueError, RunnerError):
+                status = self.scanner.status(profile)
+            results.append(status)
+        return results
 
     def list_questions(self, provider: str | None = None) -> list[dict[str, Any]]:
         return self.bank.list_questions(provider)
