@@ -523,23 +523,25 @@ class ProviderPage(QWidget):
             completed = len(result) - failed
             event = "failure" if failed else "success"
             summary = {"status": event, "completed": completed, "failed": failed}
-        self.controller.notify(
-            event,
-            provider=self.provider,
-            operation=label,
-            summary=summary,
-        )
+        if label in {"run", "batch run"}:
+            self.controller.notify(
+                event,
+                provider=self.provider,
+                operation=label,
+                summary=summary,
+            )
         self.cancel_button.setEnabled(False)
         self.cancel_event = None
 
     def _failure(self, label: str, error: str) -> None:
         self.log.append(f"[{label}] ERROR {error}")
-        self.controller.notify(
-            "failure",
-            provider=self.provider,
-            operation=label,
-            summary={"status": "failure", "error_code": error[:120]},
-        )
+        if label in {"run", "batch run"}:
+            self.controller.notify(
+                "failure",
+                provider=self.provider,
+                operation=label,
+                summary={"status": "failure", "error_code": error[:120]},
+            )
         self.cancel_button.setEnabled(False)
         self.cancel_event = None
 
