@@ -69,10 +69,19 @@ def copy_tree(source: Path, destination: Path) -> None:
         ".git",
         ".gitmodules",
         "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
         "*.pyc",
         "*.pyo",
         "*.db",
         "*.sqlite*",
+        "*.bak",
+        "*.log",
+        "*.env",
+        "*.secrets",
+        "*.token",
+        "*.cookies",
+        "*.session",
     )
     if destination.exists():
         shutil.rmtree(destination)
