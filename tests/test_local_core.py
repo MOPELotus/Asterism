@@ -372,6 +372,48 @@ class LocalStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 controller.submit_draft(draft)
 
+    def test_formal_draft_rejects_placeholder_answer_values(self) -> None:
+        class FakeService:
+            def run_task(self, *args, **kwargs):
+                raise AssertionError("provider should not receive placeholder answers")
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        controller.profiles = ProfileStore(self.paths)
+        profile = controller.profiles.create("chaoxing", "formal-placeholder")
+        task = {
+            "remote_id": "exam-1",
+            "assessment_class": "formal",
+            "native": {"route_kind": "course_exam"},
+        }
+        for placeholder in (None, " ", [], {}):
+            draft = SimpleNamespace(
+                status="draft",
+                provider="chaoxing",
+                profile_id=profile.id,
+                payload={
+                    "task": task,
+                    "questions": [{"remote_id": "q-1"}],
+                    "answers": [{"remote_id": "q-1", "value": placeholder}],
+                    "settings": {},
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "non-empty value"):
+                controller.submit_draft(draft)
+
+        self.assertEqual(
+            DesktopController._normalize_draft_answers(
+                [
+                    {"remote_id": "q-false", "value": False},
+                    {"remote_id": "q-zero", "value": 0},
+                ]
+            ),
+            [
+                {"remote_id": "q-false", "value": False},
+                {"remote_id": "q-zero", "value": 0},
+            ],
+        )
+
     def test_formal_draft_save_and_submit_modes_are_explicit(self) -> None:
         calls = []
 
