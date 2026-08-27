@@ -39,7 +39,7 @@ from .fluent import (
     FluentIcon,
     LineEdit,
     MessageBox,
-    MSFluentWindow,
+    FluentWindow,
     NavigationItemPosition,
     PrimaryPushButton,
     PushButton,
@@ -53,7 +53,6 @@ from .fluent import (
     apply_theme,
     configure_scroll_area,
     configure_table,
-    toQIcon,
 )
 
 
@@ -1942,7 +1941,7 @@ class SettingsPage(QWidget):
         self.theme.setToolTip(f"配置暂不可解析：{message}")
 
 
-class MainWindow(MSFluentWindow if FLUENT_AVAILABLE else QMainWindow):
+class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
     def __init__(self, data_root: Path | None = None, source_root: Path | None = None):
         super().__init__()
         self.controller = DesktopController.create(data_root, source_root)
@@ -1992,8 +1991,6 @@ class MainWindow(MSFluentWindow if FLUENT_AVAILABLE else QMainWindow):
         layout.addWidget(self.stack, 1)
 
     def _init_fluent_shell(self) -> None:
-        # MSFluentWindow follows the same effect lifecycle as the reference
-        # desktop implementation; do not reconfigure Mica after construction.
         self.navigation = None
         self.stack = None
         self.setMinimumSize(960, 640)
@@ -2066,11 +2063,6 @@ class MainWindow(MSFluentWindow if FLUENT_AVAILABLE else QMainWindow):
                 "question-bank": FluentIcon.DICTIONARY,
                 "settings": FluentIcon.SETTING,
             }.get(name, FluentIcon.APPLICATION)
-            # Convert enum icons to QIcon at the boundary.  This avoids a
-            # qfluentwidgets 1.8 navigation paint incompatibility where the
-            # selected icon is treated as a raw enum by QIcon().
-            if toQIcon is not None:
-                icon = toQIcon(icon)
             position = (
                 NavigationItemPosition.BOTTOM
                 if name == "settings"
