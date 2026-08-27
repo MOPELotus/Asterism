@@ -192,7 +192,7 @@ def course_title(document, course_id):
                     return found
         return None
 
-    return visit(document) or f"词达人课程 {course_id}"
+    return visit(document) or f"cidaren course {course_id}"
 
 
 def class_task_capabilities(progress, is_complete):
