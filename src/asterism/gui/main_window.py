@@ -872,6 +872,7 @@ class ProviderPage(QWidget):
                 profile,
                 routine,
                 concurrency=concurrency,
+                settings={"answer_combination": combination},
                 answer_provider=(
                     lambda task: (
                         self.controller.prepare_answers(
