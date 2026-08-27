@@ -117,6 +117,11 @@ class ProviderRegistry:
         return required
 
     def environment_for(self, spec: WorkerSpec) -> dict[str, str]:
-        result = os.environ.copy()
+        secret_markers = ("password", "token", "cookie", "secret", "api_key", "apikey")
+        result = {
+            key: value
+            for key, value in os.environ.items()
+            if not any(marker in key.casefold() for marker in secret_markers)
+        }
         result.update(spec.environment)
         return result

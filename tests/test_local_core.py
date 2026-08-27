@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -127,6 +128,23 @@ class LocalStoreTests(unittest.TestCase):
         )
         missing = ProviderRegistry(root).validate(ProviderRegistry(root).get("chaoxing"))
         self.assertTrue(any("chaoxing-exam" in item for item in missing))
+
+    def test_worker_environment_filters_parent_credentials(self) -> None:
+        registry = ProviderRegistry(Path(__file__).resolve().parents[1])
+        spec = registry.get("chaoxing")
+        with patch.dict(
+            os.environ,
+            {
+                "ASTERISM_TEST_API_KEY": "must-not-reach-donor",
+                "ASTERISM_TEST_TOKEN": "must-not-reach-donor",
+                "ASTERISM_TEST_PATH": "kept",
+            },
+            clear=False,
+        ):
+            environment = registry.environment_for(spec)
+        self.assertNotIn("ASTERISM_TEST_API_KEY", environment)
+        self.assertNotIn("ASTERISM_TEST_TOKEN", environment)
+        self.assertEqual(environment["ASTERISM_TEST_PATH"], "kept")
 
     def test_controller_wraps_cidaren_run_with_a_short_lived_answer_bridge(self) -> None:
         calls: list[dict] = []
