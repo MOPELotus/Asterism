@@ -63,6 +63,12 @@ class PortableValidationTests(unittest.TestCase):
         ), self.assertRaises(SystemExit):
             validator.smoke_browser(executable)
 
+    def test_validator_allows_system_browser_fallback(self) -> None:
+        validator = load_validator()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            self.assertIsNone(validator.packaged_browser(package))
+
     def test_manifest_verification_rejects_tampering(self) -> None:
         validator = load_validator()
         with tempfile.TemporaryDirectory() as temporary:

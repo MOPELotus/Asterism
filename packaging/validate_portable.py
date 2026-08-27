@@ -112,6 +112,11 @@ def smoke_browser(executable: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
+    parser.add_argument(
+        "--require-browser",
+        action="store_true",
+        help="require and smoke-test the bundled Chromium executable",
+    )
     args = parser.parse_args()
     package = args.package.resolve()
     executable = package / "Asterism.exe"
@@ -121,8 +126,10 @@ def main() -> int:
     verify_manifest(package, manifest)
     browser = packaged_browser(package)
     if browser is None:
-        raise SystemExit("portable package is missing its bundled Chromium executable")
-    smoke_browser(browser)
+        if args.require_browser:
+            raise SystemExit("portable package is missing its bundled Chromium executable")
+    else:
+        smoke_browser(browser)
     for provider in ("chaoxing", "welearn", "uai", "cidaren"):
         worker = package / "resources" / "workers" / provider / "worker.exe"
         source = package / "resources" / "workers" / provider / "SOURCE.json"

@@ -59,7 +59,7 @@ jobs:
           $archive = Get-ChildItem release\asterism-windows-${{ matrix.architecture }}-*.zip | Select-Object -First 1
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath 'portable 中文 path'
       - name: Smoke portable package
-        run: python packaging/validate_portable.py "portable 中文 path"
+        run: python packaging/validate_portable.py --require-browser "portable 中文 path"
       - uses: actions/upload-artifact@v4
         with:
           name: asterism-windows-${{ matrix.architecture }}-${{ github.ref_name }}
