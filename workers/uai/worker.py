@@ -703,7 +703,11 @@ def browser_donor_source() -> pathlib.Path:
 
 def find_browser(configured: str | None = None) -> pathlib.Path | None:
     """Find a Chromium-family executable without requiring PATH setup."""
-    values = [configured, os.environ.get("ASTERISM_UAI_BROWSER_EXECUTABLE")]
+    values = [
+        configured,
+        os.environ.get("ASTERISM_UAI_BROWSER_EXECUTABLE"),
+        os.environ.get("ASTERISM_UAI_PACKAGED_BROWSER"),
+    ]
     if os.name == "nt":
         roots = [
             os.environ.get("PROGRAMFILES"),
@@ -730,6 +734,14 @@ def find_browser(configured: str | None = None) -> pathlib.Path | None:
             path = pathlib.Path(__file__).resolve().parents[2] / path
         if path.is_file():
             return path.resolve()
+        if path.is_dir():
+            matches = sorted(
+                candidate
+                for candidate in path.rglob("*.exe")
+                if candidate.name.casefold() in {"chrome.exe", "msedge.exe", "chromium.exe"}
+            )
+            if matches:
+                return matches[0].resolve()
     return None
 
 

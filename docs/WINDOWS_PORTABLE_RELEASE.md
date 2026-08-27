@@ -21,6 +21,7 @@ donor、浏览器自动化和 native/OCR 资源；固定的解压路径和可诊
 Asterism.exe
 resources/upstreams/     固定 donor（去除 .git 和开发缓存）
 resources/workers/       四个平台 Runner 与元数据
+resources/browsers/      CI 固定并随包携带的 Chromium
 resources/licenses/      第三方许可证副本与 SOURCES.json
 README.txt               首次启动、数据目录和备份说明
 SHA256SUMS.json          包内文件校验清单
@@ -37,6 +38,9 @@ SHA256SUMS.json          包内文件校验清单
 - x64 在 `windows-2022` 使用 x64 Python 与 native MSVC 构建。
 - ARM64 在 `windows-11-arm` 使用 ARM64 Python 与 native ARM64 MSVC 构建。
 - 固定 Python、Nuitka 和运行依赖版本与 hash，禁止向 ARM64 包混入 x64 wheel。
+- 构建前执行 `python -m playwright install chromium`，并将对应架构的 Chromium 复制到
+  `resources/browsers/chromium`；如果本地构建环境没有 Chromium，包仍可生成但运行时回退系统 Edge，
+  CI 发布验收必须确认随包浏览器存在并能启动。
 - 按架构和锁文件 hash 缓存下载与 Nuitka 编译结果。
 - 测试后构建 standalone 目录，生成 SHA-256 manifest，再制作 ZIP。
 - Release Candidate 的两个架构及产物审计全部通过后才发布 GitHub Release。

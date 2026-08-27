@@ -86,6 +86,10 @@ class LocalStoreTests(unittest.TestCase):
         executable = self.paths.root / "browser.exe"
         executable.write_bytes(b"fixture")
         self.assertEqual(find_browser(str(executable)), executable.resolve())
+        packaged = self.paths.root / "browsers" / "chromium" / "chrome-win64" / "chrome.exe"
+        packaged.parent.mkdir(parents=True)
+        packaged.write_bytes(b"fixture")
+        self.assertEqual(find_browser(str(packaged.parents[1])), packaged.resolve())
 
     def test_worker_spec_prefers_portable_executable_when_present(self) -> None:
         executable = self.paths.root / "worker.exe"

@@ -65,6 +65,18 @@ def verify_manifest(package: Path, manifest_path: Path) -> dict[str, str]:
     return verified
 
 
+def packaged_browser(package: Path) -> Path | None:
+    root = package / "resources" / "browsers" / "chromium"
+    if not root.is_dir():
+        return None
+    matches = sorted(
+        path
+        for path in root.rglob("*.exe")
+        if path.name.casefold() in {"chrome.exe", "chromium.exe"}
+    )
+    return matches[0] if matches else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
@@ -75,6 +87,8 @@ def main() -> int:
     if not executable.exists() or not manifest.exists():
         raise SystemExit("portable package is missing Asterism.exe or SHA256SUMS.json")
     verify_manifest(package, manifest)
+    if packaged_browser(package) is None:
+        raise SystemExit("portable package is missing its bundled Chromium executable")
     for provider in ("chaoxing", "welearn", "uai", "cidaren"):
         worker = package / "resources" / "workers" / provider / "worker.exe"
         source = package / "resources" / "workers" / provider / "SOURCE.json"

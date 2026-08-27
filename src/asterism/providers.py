@@ -60,6 +60,9 @@ class ProviderRegistry:
         elif provider == "uai":
             upstream = upstream_root / "uai" / "配置我运行我.py"
             environment["ASTERISM_UAI_BROWSER_UPSTREAM"] = str(upstream_root / "uai-browser")
+            environment["ASTERISM_UAI_PACKAGED_BROWSER"] = str(
+                self.source_root / "browsers" / "chromium"
+            )
             environment["ASTERISM_UAI_BROWSER_SOURCE_METADATA"] = str(
                 worker / "BROWSER_SOURCE.json"
             )

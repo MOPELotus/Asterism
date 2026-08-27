@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -92,6 +93,7 @@ def stage_resources(stage: Path, notices: list[dict[str, str]]) -> Path:
     resources = stage / "resources"
     resources.mkdir(parents=True, exist_ok=True)
     copy_tree(ROOT / "upstreams", resources / "upstreams")
+    stage_browser_resources(resources)
     worker_resources = resources / "workers"
     for provider in ("chaoxing", "welearn", "uai", "cidaren"):
         source = ROOT / "workers" / provider
@@ -115,6 +117,30 @@ def stage_resources(stage: Path, notices: list[dict[str, str]]) -> Path:
         json.dumps(notices, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return resources
+
+
+def stage_browser_resources(resources: Path) -> bool:
+    """Copy a Playwright Chromium installation when the build environment has one."""
+    candidates: list[Path] = []
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if configured and configured != "0":
+        candidates.append(Path(configured).expanduser())
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "ms-playwright")
+    for root in candidates:
+        if not root.exists():
+            continue
+        for executable in sorted(root.glob("chromium-*/chrome-*/chrome.exe")):
+            browser_root = executable.parent.parent
+            destination = resources / "browsers" / "chromium"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            copy_tree(browser_root, destination)
+            return True
+    print(
+        "warning: Playwright Chromium not found; packaged UAI browser will fall back to system Edge"
+    )
+    return False
 
 
 def _stage_license_files(destination: Path) -> None:
