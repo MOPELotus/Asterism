@@ -25,6 +25,7 @@ try:  # qfluentwidgets is optional during headless development and CI.
     from qfluentwidgets import (
         BodyLabel,
         CardWidget,
+        CaptionLabel,
         FluentIcon,
         FluentWindow,
         MSFluentWindow,
@@ -34,7 +35,9 @@ try:  # qfluentwidgets is optional during headless development and CI.
         NavigationInterface,
         PrimaryPushButton,
         PushButton,
+        StrongBodyLabel,
         SubtitleLabel,
+        TitleLabel,
     )
 
     try:
@@ -44,6 +47,9 @@ try:  # qfluentwidgets is optional during headless development and CI.
     FLUENT_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised on minimal dev environments
     BodyLabel = QLabel
+    CaptionLabel = QLabel
+    StrongBodyLabel = QLabel
+    TitleLabel = QLabel
     SubtitleLabel = QLabel
     PrimaryPushButton = QPushButton
     PushButton = QPushButton

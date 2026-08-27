@@ -33,6 +33,8 @@ from .controller import DesktopController
 from .draft_editor import FormalDraftEditor
 from .fluent import (
     BodyLabel,
+    CaptionLabel,
+    CardWidget,
     ComboBox,
     FLUENT_AVAILABLE,
     FluentIcon,
@@ -42,9 +44,11 @@ from .fluent import (
     PrimaryPushButton,
     PushButton,
     SubtitleLabel,
+    StrongBodyLabel,
     TableWidget,
     TextEdit,
     ThemeMode,
+    TitleLabel,
     apply_theme,
     configure_table,
 )
@@ -80,8 +84,11 @@ class HomePage(QWidget):
         super().__init__()
         self.controller = controller
         layout = QVBoxLayout(self)
-        layout.addWidget(SubtitleLabel("Asterism"))
-        layout.addWidget(BodyLabel("本地桌面控制面：选择 Profile，读取课程，执行任务并管理题库。"))
+        layout.setContentsMargins(28, 24, 28, 28)
+        layout.setSpacing(12)
+        layout.addWidget(TitleLabel("Asterism"))
+        layout.addWidget(BodyLabel("本地桌面控制台"))
+        layout.addWidget(CaptionLabel("选择平台账号，完成认证后读取课程和任务。正式提交始终需要明确确认。"))
         self.summary = BodyLabel()
         layout.addWidget(self.summary)
         self.refresh = PrimaryPushButton("刷新本地状态")
@@ -115,55 +122,80 @@ class ProviderPage(QWidget):
         self.worker_thread: CallThread | None = None
         self.cancel_event: threading.Event | None = None
         root = QVBoxLayout(self)
+        root.setContentsMargins(28, 24, 28, 28)
+        root.setSpacing(14)
+        intro = CardWidget()
+        intro_layout = QVBoxLayout(intro)
+        intro_layout.setContentsMargins(20, 16, 20, 16)
+        intro_layout.setSpacing(6)
+        intro_layout.addWidget(TitleLabel(f"{provider} 账号"))
+        intro_layout.addWidget(
+            BodyLabel("先创建或选择一个本地 Profile，再点击认证。认证成功后即可读取课程和任务。")
+        )
+        intro_layout.addWidget(
+            CaptionLabel("账号凭据只保存在本机 Profile；当前页面的课程、任务和题目操作默认是只读的。")
+        )
+        root.addWidget(intro)
         header = QHBoxLayout()
-        header.addWidget(SubtitleLabel(provider))
+        header.addWidget(StrongBodyLabel("当前 Profile"))
         self.profile_combo = ComboBox()
+        self.profile_combo.setMinimumWidth(260)
+        self.profile_combo.currentIndexChanged.connect(self._profile_changed)
         header.addWidget(self.profile_combo, 1)
-        self.new_profile = PushButton("新建 Profile")
+        self.new_profile = PrimaryPushButton("新建账号")
         self.new_profile.clicked.connect(self.create_profile)
         header.addWidget(self.new_profile)
+        self.login_button = PrimaryPushButton("认证 / 登录")
+        self.login_button.clicked.connect(self.authenticate)
+        header.addWidget(self.login_button)
+        header.addStretch(1)
+        root.addLayout(header)
+        profile_actions = QHBoxLayout()
+        profile_actions.addWidget(CaptionLabel("Profile 管理"))
         self.edit_profile_button = PushButton("编辑 Profile")
         self.edit_profile_button.clicked.connect(self.edit_profile)
-        header.addWidget(self.edit_profile_button)
+        profile_actions.addWidget(self.edit_profile_button)
         self.delete_profile_button = PushButton("删除 Profile")
         self.delete_profile_button.clicked.connect(self.delete_profile)
-        header.addWidget(self.delete_profile_button)
-        root.addLayout(header)
+        profile_actions.addWidget(self.delete_profile_button)
+        profile_actions.addStretch(1)
+        root.addLayout(profile_actions)
+        self.profile_status = CaptionLabel("尚未选择 Profile")
+        root.addWidget(self.profile_status)
 
         actions = QGridLayout()
         action_items = [
-            ("health", self.health),
-            ("authenticate", self.authenticate),
-            ("courses", self.sync_courses),
-            ("tasks", self.sync_tasks),
-            ("questions", self.scan_questions),
-            ("task detail", self.show_task_detail),
-            ("run", self.run_selected),
-            ("batch run", self.run_batch),
+            ("连接检查", self.health),
+            ("读取课程", self.sync_courses),
+            ("读取任务", self.sync_tasks),
+            ("扫描题目", self.scan_questions),
+            ("任务详情", self.show_task_detail),
+            ("执行任务", self.run_selected),
+            ("批量执行", self.run_batch),
         ]
         if provider == "chaoxing":
             action_items.extend(
                 [
-                    ("scan all", self.scan_all),
-                    ("scan profiles", self.scan_profiles),
-                    ("scan status", self.scan_status),
+                    ("扫描全部", self.scan_all),
+                    ("扫描账号", self.scan_profiles),
+                    ("扫描状态", self.scan_status),
                 ]
             )
         if provider == "uai":
-            action_items.extend([("inspect", self.inspect_task), ("duration", self.read_duration)])
+            action_items.extend([("读取必做项", self.inspect_task), ("读取时长", self.read_duration)])
         elif provider == "welearn":
             action_items.extend(
-                [("duration", self.read_duration), ("install donor", self.install_donor)]
+                [("读取时长", self.read_duration), ("安装 donor", self.install_donor)]
             )
         if provider == "cidaren":
             action_items.extend(
-                [("oauth begin", self.oauth_begin), ("oauth exchange", self.oauth_exchange)]
+                [("开始授权", self.oauth_begin), ("完成授权", self.oauth_exchange)]
             )
         for index, (text, callback) in enumerate(action_items):
             button = PushButton(text)
             button.clicked.connect(callback)
             actions.addWidget(button, index // 5, index % 5)
-        self.cancel_button = PushButton("cancel")
+        self.cancel_button = PushButton("取消当前操作")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_current)
         cancel_index = len(action_items)
@@ -198,7 +230,7 @@ class ProviderPage(QWidget):
         self.course_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         configure_table(self.course_table)
         self.course_table.itemSelectionChanged.connect(self._course_selected)
-        root.addWidget(BodyLabel("courses"))
+        root.addWidget(StrongBodyLabel("课程"))
         root.addWidget(self.course_table)
         self.task_table = TableWidget()
         self.task_table.setColumnCount(4)
@@ -209,7 +241,7 @@ class ProviderPage(QWidget):
             lambda: self.formal_table.clearSelection() if self.task_table.selectedItems() else None
         )
         configure_table(self.task_table)
-        root.addWidget(BodyLabel("tasks"))
+        root.addWidget(StrongBodyLabel("任务"))
         root.addWidget(self.task_table)
         task_selection = QHBoxLayout()
         task_selection.addWidget(BodyLabel("批量选择"))
@@ -233,18 +265,18 @@ class ProviderPage(QWidget):
             lambda: self.task_table.clearSelection() if self.formal_table.selectedItems() else None
         )
         configure_table(self.formal_table)
-        root.addWidget(BodyLabel("formal work / exam"))
+        root.addWidget(StrongBodyLabel("作业与考试"))
         root.addWidget(self.formal_table)
         self.question_table = TableWidget()
         self.question_table.setColumnCount(4)
         self.question_table.setHorizontalHeaderLabels(["kind", "prompt", "options", "remote_id"])
         self.question_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         configure_table(self.question_table)
-        root.addWidget(BodyLabel("questions (read-only preview)"))
+        root.addWidget(StrongBodyLabel("题目预览（只读）"))
         root.addWidget(self.question_table)
         self.log = TextEdit()
         self.log.setReadOnly(True)
-        root.addWidget(BodyLabel("events / result"))
+        root.addWidget(StrongBodyLabel("运行日志与结果"))
         root.addWidget(self.log)
         self.reload_profiles()
 
@@ -256,6 +288,19 @@ class ProviderPage(QWidget):
             self.profile_combo.addItem(
                 f"{profile.label} [{profile.id[:8]}]{state}", profile.id
             )
+        self._profile_changed(self.profile_combo.currentIndex())
+
+    def _profile_changed(self, _index: int) -> None:
+        profile_id = self.profile_combo.currentData()
+        if not profile_id:
+            self.profile_status.setText("尚未选择 Profile · 请先点击“新建账号”")
+            return
+        try:
+            profile = self.controller.profiles.get(self.provider, str(profile_id))
+            state = "已启用" if profile.enabled else "已停用"
+            self.profile_status.setText(f"当前：{profile.label} · {state} · 可点击“认证 / 登录”")
+        except (OSError, ValueError):
+            self.profile_status.setText("当前 Profile 无法读取")
 
     def profile(self) -> Profile | None:
         profile_id = self.profile_combo.currentData()
