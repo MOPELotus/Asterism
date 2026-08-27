@@ -259,6 +259,57 @@ class LocalStoreTests(unittest.TestCase):
             [call[1].get("_challenge_retry_attempt") for call in calls[1:4]], [1, 2, 3]
         )
 
+    def test_controller_stops_challenge_retries_after_success(self) -> None:
+        calls = []
+        log_path = self.paths.root / "run.log"
+
+        class FakeService:
+            def run_task(
+                self,
+                profile,
+                task,
+                *,
+                answers=None,
+                settings=None,
+                cancel=None,
+                on_event=None,
+            ):
+                calls.append((answers, dict(settings or {})))
+                success = len(calls) >= 2
+                return ProviderOperationResult(
+                    "run",
+                    {"result": {"challenge_escalation_requested": not success}},
+                    SimpleNamespace(log_path=log_path),
+                )
+
+            def questions(self, profile, task, **_kwargs):
+                return SimpleNamespace(
+                    data={
+                        "questions": [
+                            {
+                                "remote_id": "q-1",
+                                "kind": "single_choice",
+                                "prompt": "p",
+                                "options": ["A"],
+                            }
+                        ]
+                    }
+                )
+
+        controller = object.__new__(DesktopController)
+        controller.service = FakeService()
+        controller.config = SimpleNamespace(ensure=lambda: {"providers": {}})
+        controller.bank = QuestionBank(self.paths.database)
+        controller.bank.initialize()
+        controller.answer_question = lambda *args, **kwargs: {"answer": {"answer": "A"}}
+        profile = ProfileStore(self.paths).create("chaoxing", "challenge-success")
+        task = {"remote_id": "point-1", "native": {"route_kind": "knowledge_point"}}
+
+        controller.run_task(profile, task, answers=[{"remote_id": "q-1", "value": "A"}])
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("_challenge_escalation", calls[-1][1])
+
     def test_draft_answers_accept_id_to_value_map(self) -> None:
         self.assertEqual(
             DesktopController._normalize_draft_answers({"q-1": "A", "q-2": ["B", "C"]}),
