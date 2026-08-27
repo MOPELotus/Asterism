@@ -188,9 +188,15 @@ class DesktopController:
         cancel: threading.Event | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderOperationResult:
+        merged_settings = self.provider_settings(profile, settings)
         if profile.provider != "cidaren":
             return self.service.run_task(
-                profile, task, answers=answers, settings=settings, cancel=cancel, on_event=on_event
+                profile,
+                task,
+                answers=answers,
+                settings=merged_settings,
+                cancel=cancel,
+                on_event=on_event,
             )
 
         bridge = CidarenAnswerBridge(
@@ -199,9 +205,6 @@ class DesktopController:
         )
         task_ref = str(task.get("remote_id") or uuid4())
         execution_id = str(uuid4())
-        merged_settings = dict(profile.settings)
-        if settings is not None:
-            merged_settings.update(settings)
         merged_settings["answer_bridge"] = bridge.settings(
             execution_id=execution_id, task_id=task_ref, remote_task_id=task_ref
         )
@@ -216,6 +219,16 @@ class DesktopController:
             )
         finally:
             bridge.close()
+
+    def provider_settings(
+        self, profile: Profile, overrides: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        configured = self.config.ensure().get("providers", {}).get(profile.provider, {})
+        result = dict(configured) if isinstance(configured, Mapping) else {}
+        result.update(profile.settings)
+        if overrides is not None:
+            result.update(overrides)
+        return result
 
     def _resolve_cidaren_answer(self, document: dict[str, Any]) -> dict[str, Any]:
         question = self._cidaren_question(document)
@@ -386,7 +399,7 @@ class DesktopController:
             settings=settings,
             answer_provider=answer_provider,
             cancel=cancel,
-            run_task=self.run_task if profile.provider == "cidaren" else None,
+            run_task=self.run_task,
         )
 
     def read_duration(

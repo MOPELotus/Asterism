@@ -63,7 +63,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "default": "economy",
         "gpt_only": "gpt_only",
     },
-    "providers": {},
+    "providers": {
+        "chaoxing": {
+            "speed": 2.0,
+            "verification_attempt_budget": 3,
+            "verification_time_budget_seconds": 90,
+            "challenge_retry_attempts": 3,
+            "challenge_escalation_route": "sol_xhigh",
+            "minimum_answer_coverage": 0.9,
+        },
+        "welearn": {"correctness": 100, "duration_seconds": 0},
+        "uai": {"duration_seconds": 60, "cooldown_count": 5, "cooldown_seconds": 120},
+        "cidaren": {
+            "instant_timeout_seconds": 8,
+            "instant_fallback_grace_seconds": 2,
+            "spend_min_time": 1,
+            "spend_max_time": 2,
+        },
+    },
 }
 
 

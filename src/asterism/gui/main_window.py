@@ -221,23 +221,53 @@ class ProviderPage(QWidget):
         username = LineEdit()
         password = LineEdit()
         password.setEchoMode(LineEdit.EchoMode.Password)
+        credentials_json = TextEdit()
+        credentials_json.setPlainText("{}")
+        credentials_json.setPlaceholderText('高级凭据 JSON，例如 {"cookie":"..."} 或 token')
+        settings_json = TextEdit()
+        settings_json.setPlainText("{}")
+        settings_json.setPlaceholderText("该 Profile 覆盖的 Provider 设置 JSON")
         form.addRow("label", label)
         form.addRow("username", username)
         form.addRow("password", password)
+        form.addRow("credentials", credentials_json)
+        form.addRow("settings", settings_json)
         save = PrimaryPushButton("保存")
         form.addRow(save)
         save.clicked.connect(
-            lambda: self._save_new_profile(dialog, label.text(), username.text(), password.text())
+            lambda: self._save_new_profile(
+                dialog,
+                label.text(),
+                username.text(),
+                password.text(),
+                credentials_json.toPlainText(),
+                settings_json.toPlainText(),
+            )
         )
-        dialog.resize(420, 180)
+        dialog.resize(640, 560)
         dialog.show()
 
-    def _save_new_profile(self, dialog, label: str, username: str, password: str) -> None:
+    def _save_new_profile(
+        self,
+        dialog,
+        label: str,
+        username: str,
+        password: str,
+        credentials_text: str,
+        settings_text: str,
+    ) -> None:
         try:
+            credentials = self._json_object(credentials_text, "credentials")
+            settings = self._json_object(settings_text, "settings")
+            if username.strip():
+                credentials["username"] = username.strip()
+            if password:
+                credentials["password"] = password
             self.controller.save_profile(
                 self.provider,
                 label,
-                {"username": username, "password": password} if username or password else {},
+                credentials,
+                settings=settings,
             )
             dialog.close()
             self.reload_profiles()
@@ -256,41 +286,82 @@ class ProviderPage(QWidget):
         password = LineEdit()
         password.setEchoMode(LineEdit.EchoMode.Password)
         password.setPlaceholderText("留空则保持现有密码")
+        advanced_credentials = {
+            key: value
+            for key, value in profile.credentials.items()
+            if key not in {"username", "password"}
+        }
+        credentials_json = TextEdit()
+        credentials_json.setPlainText(
+            json.dumps(advanced_credentials, ensure_ascii=False, indent=2)
+        )
+        settings_json = TextEdit()
+        settings_json.setPlainText(json.dumps(profile.settings, ensure_ascii=False, indent=2))
         form.addRow("label", label)
         form.addRow("username", username)
         form.addRow("password", password)
+        form.addRow("credentials", credentials_json)
+        form.addRow("settings", settings_json)
         save = PrimaryPushButton("保存")
         form.addRow(save)
         save.clicked.connect(
             lambda: self._save_profile_edit(
-                dialog, profile, label.text(), username.text(), password.text()
+                dialog,
+                profile,
+                label.text(),
+                username.text(),
+                password.text(),
+                credentials_json.toPlainText(),
+                settings_json.toPlainText(),
             )
         )
-        dialog.resize(460, 190)
+        dialog.resize(640, 560)
         dialog.show()
 
     def _save_profile_edit(
-        self, dialog, profile: Profile, label: str, username: str, password: str
+        self,
+        dialog,
+        profile: Profile,
+        label: str,
+        username: str,
+        password: str,
+        credentials_text: str,
+        settings_text: str,
     ) -> None:
         try:
             if not label.strip():
                 raise ValueError("Profile 名称不能为空")
-            credentials = dict(profile.credentials)
+            credentials = self._json_object(credentials_text, "credentials")
             if username.strip() or "username" in credentials:
                 credentials["username"] = username.strip()
+            elif profile.credentials.get("username"):
+                credentials["username"] = profile.credentials["username"]
             if password:
                 credentials["password"] = password
+            elif profile.credentials.get("password"):
+                credentials["password"] = profile.credentials["password"]
+            settings = self._json_object(settings_text, "settings")
             self.controller.save_profile(
                 profile.provider,
                 label,
                 credentials,
-                settings=profile.settings,
+                settings=settings,
                 profile_id=profile.id,
             )
             dialog.close()
             self.reload_profiles()
         except (OSError, ValueError) as error:
             QMessageBox.critical(self, self.provider, str(error))
+
+    @staticmethod
+    def _json_object(text: str, name: str) -> dict[str, Any]:
+        try:
+            value = json.loads(text or "{}")
+        except json.JSONDecodeError as error:
+            raise ValueError(f"{name} 必须是合法 JSON：{error}") from error
+        if not isinstance(value, dict):
+            raise ValueError(f"{name} 必须是 JSON object")
+        return dict(value)
 
     def delete_profile(self) -> None:
         profile = self.profile()
