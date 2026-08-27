@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 
@@ -45,6 +46,22 @@ class PortableValidationTests(unittest.TestCase):
                 self.assertTrue(builder.stage_browser_resources(resources))
             staged = resources / "browsers" / "chromium" / "chrome-win64" / "chrome.exe"
             self.assertEqual(staged.read_bytes(), b"browser")
+
+    def test_browser_smoke_requires_marker_and_zero_exit(self) -> None:
+        validator = load_validator()
+        executable = Path("chrome.exe")
+        with patch.object(
+            validator.subprocess,
+            "run",
+            return_value=CompletedProcess([], 0, "<body>asterism-browser-ok</body>", ""),
+        ):
+            validator.smoke_browser(executable)
+        with patch.object(
+            validator.subprocess,
+            "run",
+            return_value=CompletedProcess([], 1, "", "failed"),
+        ), self.assertRaises(SystemExit):
+            validator.smoke_browser(executable)
 
     def test_manifest_verification_rejects_tampering(self) -> None:
         validator = load_validator()

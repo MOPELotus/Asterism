@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -77,6 +78,37 @@ def packaged_browser(package: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def smoke_browser(executable: Path) -> None:
+    marker = "asterism-browser-ok"
+    with tempfile.TemporaryDirectory(prefix="asterism-browser-smoke-") as temporary:
+        try:
+            completed = subprocess.run(
+                [
+                    str(executable),
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    f"--user-data-dir={temporary}",
+                    "--dump-dom",
+                    f"data:text/html,<body>{marker}</body>",
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise SystemExit(f"bundled Chromium smoke failed: {error}") from error
+    if completed.returncode != 0 or marker not in completed.stdout:
+        raise SystemExit(
+            f"bundled Chromium smoke failed with exit code {completed.returncode}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
@@ -87,8 +119,10 @@ def main() -> int:
     if not executable.exists() or not manifest.exists():
         raise SystemExit("portable package is missing Asterism.exe or SHA256SUMS.json")
     verify_manifest(package, manifest)
-    if packaged_browser(package) is None:
+    browser = packaged_browser(package)
+    if browser is None:
         raise SystemExit("portable package is missing its bundled Chromium executable")
+    smoke_browser(browser)
     for provider in ("chaoxing", "welearn", "uai", "cidaren"):
         worker = package / "resources" / "workers" / provider / "worker.exe"
         source = package / "resources" / "workers" / provider / "SOURCE.json"

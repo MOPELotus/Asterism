@@ -50,6 +50,8 @@ SHA256SUMS.json          包内文件校验清单
 `packaging/validate_portable.py` 会先校验 SHA-256 manifest，再在含空格和中文的解压目录启动验证；
 manifest 路径穿越、文件缺失、哈希不匹配或包内出现未列出的文件会在启动前失败。Workflow 仅在手动触发
 或版本 tag 时运行，避免日常代码提交反复执行昂贵的双架构 Nuitka 构建。
+验证器会使用独立临时 profile 启动随包 Chromium 的 headless `--dump-dom` 烟测；进程非零退出、超时或
+未返回预期页面标记均会阻止产物上传。
 
 当前 `welearn` donor 的固定 revision 未提供可确认的再分发许可证，`SOURCE.json` 仍为
 `NOASSERTION`。按本计划的发布安全边界，便携构建会在实际编译前明确失败并列出阻断来源；
