@@ -9,6 +9,15 @@ import tempfile
 import time
 from pathlib import Path
 
+MUTABLE_RUNTIME_DIRECTORIES = {"accounts", "state", "drafts", "logs", "data"}
+MUTABLE_RUNTIME_FILES = {"config.local.json", ".asterism.lock"}
+WORKER_PROTOCOLS = {
+    "chaoxing": "asterism.chaoxing.worker.v1",
+    "welearn": "asterism.welearn.worker.v1",
+    "uai": "asterism.uai.worker.v1",
+    "cidaren": "asterism.cidaren.worker.v1",
+}
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -43,11 +52,16 @@ def verify_manifest(package: Path, manifest_path: Path) -> dict[str, str]:
         if str(expected).casefold() != actual:
             raise SystemExit(f"portable manifest hash mismatch: {name}")
         verified[name] = actual
-    actual_files = {
-        path.relative_to(package_root).as_posix()
-        for path in package_root.rglob("*")
-        if path.is_file() and not path.is_symlink() and path.resolve() != manifest_resolved
-    }
+    actual_files = set()
+    for path in package_root.rglob("*"):
+        if not path.is_file() or path.is_symlink() or path.resolve() == manifest_resolved:
+            continue
+        relative = path.relative_to(package_root)
+        if relative.parts[0] in MUTABLE_RUNTIME_DIRECTORIES:
+            continue
+        if len(relative.parts) == 1 and relative.name in MUTABLE_RUNTIME_FILES:
+            continue
+        actual_files.add(relative.as_posix())
     symlinks = [
         path.relative_to(package_root).as_posix()
         for path in package_root.rglob("*")
@@ -158,18 +172,26 @@ def smoke_worker_health(package: Path, provider: str) -> dict[str, object]:
             f"{provider} packaged Worker health smoke failed with exit code "
             f"{completed.returncode}"
         )
-    result: dict[str, object] | None = None
+    terminals: list[dict[str, object]] = []
     for line in completed.stdout.splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict) and event.get("type") == "result":
-            data = event.get("data")
-            if isinstance(data, dict):
-                result = data
-                break
-    if not result or result.get("status") != "ok":
+        if not isinstance(event, dict):
+            continue
+        if event.get("request_id") != request["request_id"]:
+            raise SystemExit(f"{provider} packaged Worker returned a mismatched request id")
+        if event.get("operation") != "health":
+            raise SystemExit(f"{provider} packaged Worker returned a mismatched operation")
+        if event.get("protocol") != WORKER_PROTOCOLS[provider]:
+            raise SystemExit(f"{provider} packaged Worker returned a mismatched protocol")
+        if event.get("type") in {"result", "error"}:
+            terminals.append(event)
+    if len(terminals) != 1 or terminals[0].get("type") != "result":
+        raise SystemExit(f"{provider} packaged Worker returned an invalid terminal event")
+    result = terminals[0].get("data")
+    if not isinstance(result, dict) or result.get("status") != "ok":
         raise SystemExit(f"{provider} packaged Worker returned no healthy result")
     return result
 

@@ -189,7 +189,9 @@ class PortableValidationTests(unittest.TestCase):
                 return CompletedProcess(
                     command,
                     0,
-                    '{"type":"result","data":{"status":"ok"}}\n',
+                    '{"protocol":"asterism.chaoxing.worker.v1",'
+                    '"request_id":"portable-health-chaoxing","operation":"health",'
+                    '"type":"result","data":{"status":"ok"}}\n',
                     "",
                 )
 
@@ -198,6 +200,50 @@ class PortableValidationTests(unittest.TestCase):
             self.assertEqual(result["status"], "ok")
             self.assertEqual(captured["command"][0], str(worker))
             self.assertNotIn("credentials", captured["input"])
+
+    def test_manifest_allows_known_runtime_state_but_rejects_other_extras(self) -> None:
+        validator = load_validator()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            payload = package / "Asterism.exe"
+            payload.write_bytes(b"portable")
+            digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            manifest = package / "SHA256SUMS.json"
+            manifest.write_text(
+                json.dumps({"files": {"Asterism.exe": digest}}), encoding="utf-8"
+            )
+            (package / "accounts" / "chaoxing").mkdir(parents=True)
+            (package / "accounts" / "chaoxing" / "profile.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            (package / "data").mkdir()
+            (package / "data" / "question-bank.sqlite").write_bytes(b"sqlite")
+            (package / "config.local.json").write_text("{}", encoding="utf-8")
+            validator.verify_manifest(package, manifest)
+            (package / "unexpected.dll").write_bytes(b"unlisted")
+            with self.assertRaises(SystemExit):
+                validator.verify_manifest(package, manifest)
+
+    def test_worker_health_smoke_rejects_protocol_identity_mismatch(self) -> None:
+        validator = load_validator()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            worker = package / "resources" / "workers" / "chaoxing" / "worker.exe"
+            worker.parent.mkdir(parents=True)
+            worker.write_bytes(b"worker")
+            (worker.parent / "SOURCE.json").write_text("{}", encoding="utf-8")
+            (package / "resources" / "upstreams" / "chaoxing").mkdir(parents=True)
+            output = (
+                '{"protocol":"wrong","request_id":"portable-health-chaoxing",'
+                '"operation":"health","type":"result","data":{"status":"ok"}}\n'
+            )
+            with patch.object(
+                validator.subprocess,
+                "run",
+                return_value=CompletedProcess([], 0, output, ""),
+            ), self.assertRaises(SystemExit):
+                validator.smoke_worker_health(package, "chaoxing")
+
     def test_validator_allows_system_browser_fallback(self) -> None:
         validator = load_validator()
         with tempfile.TemporaryDirectory() as temporary:
