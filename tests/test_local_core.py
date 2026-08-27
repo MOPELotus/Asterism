@@ -222,11 +222,7 @@ class LocalStoreTests(unittest.TestCase):
                 on_event=None,
             ):
                 calls.append((answers, dict(settings or {})))
-                details = (
-                    {"challenge_escalation_requested": len(calls) == 1}
-                    if len(calls) == 1
-                    else {"challenge_escalation_requested": False}
-                )
+                details = {"challenge_escalation_requested": True}
                 return ProviderOperationResult(
                     "run", {"result": details}, SimpleNamespace(log_path=log_path)
                 )
@@ -256,9 +252,12 @@ class LocalStoreTests(unittest.TestCase):
         profile = ProfileStore(self.paths).create("chaoxing", "challenge")
         task = {"remote_id": "point-1", "native": {"route_kind": "knowledge_point"}}
         controller.run_task(profile, task, answers=[{"remote_id": "q-1", "value": "A"}])
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1][1]["_challenge_escalation"], True)
-        self.assertEqual(calls[1][1]["challenge_escalation_route"], "sol_xhigh")
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(calls[-1][1]["_challenge_escalation"], True)
+        self.assertEqual(calls[-1][1]["challenge_escalation_route"], "sol_xhigh")
+        self.assertEqual(
+            [call[1].get("_challenge_retry_attempt") for call in calls[1:4]], [1, 2, 3]
+        )
 
     def test_draft_answers_accept_id_to_value_map(self) -> None:
         self.assertEqual(

@@ -210,6 +210,43 @@ class DesktopController:
                 on_event=on_event,
             )
             if self._needs_challenge_escalation(profile, task, result, merged_settings):
+                # The worker can report that a challenge point is still
+                # incomplete after its local state polling. Re-resolve the
+                # answer and replay the point a bounded number of times before
+                # consuming the expensive Sol xhigh escalation. The explicit
+                # marker keeps escalation and retry calls from recursing.
+                retry_attempts = merged_settings.get("challenge_retry_attempts", 3)
+                try:
+                    retry_attempts = max(0, min(3, int(retry_attempts)))
+                except (TypeError, ValueError):
+                    retry_attempts = 3
+                for attempt in range(1, retry_attempts + 1):
+                    retry_answers = self.prepare_answers(
+                        profile,
+                        task,
+                        combination=str(merged_settings.get("answer_combination") or "economy"),
+                        route="untimed",
+                        force_refresh=True,
+                        cancel=cancel,
+                        on_event=on_event,
+                    )
+                    if not retry_answers:
+                        break
+                    retry_settings = dict(merged_settings)
+                    retry_settings["_challenge_retry_attempt"] = attempt
+                    retry_settings["challenge_retry_attempts"] = 1
+                    result = self.service.run_task(
+                        profile,
+                        task,
+                        answers=retry_answers,
+                        settings=retry_settings,
+                        cancel=cancel,
+                        on_event=on_event,
+                    )
+                    if not self._needs_challenge_escalation(
+                        profile, task, result, retry_settings
+                    ):
+                        return result
                 escalation_answers = self.prepare_answers(
                     profile,
                     task,
