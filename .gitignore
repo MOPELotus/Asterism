@@ -1,6 +1,7 @@
 # Local application data and credentials
 /accounts/
 /state/
+/.asterism.lock
 /logs/
 /drafts/
 /data/
