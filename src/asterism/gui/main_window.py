@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
@@ -1248,6 +1251,7 @@ class MainWindow(QMainWindow):
     def __init__(self, data_root: Path | None = None, source_root: Path | None = None):
         super().__init__()
         self.controller = DesktopController.create(data_root, source_root)
+        self._show_first_run_wizard()
         apply_theme(
             QGuiApplication.instance(),
             str(self.controller.config.ensure().get("ui", {}).get("theme", ThemeMode.SYSTEM.value)),
@@ -1279,6 +1283,42 @@ class MainWindow(QMainWindow):
         self.add_page("settings", SettingsPage(self.controller))
         self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.navigation.setCurrentRow(0)
+
+    def _show_first_run_wizard(self) -> None:
+        """Give a local operator a safe first-run orientation without credentials."""
+        if os.environ.get("QT_QPA_PLATFORM", "").casefold() in {"offscreen", "minimal"}:
+            return
+        config = self.controller.config.ensure()
+        if config.get("onboarding_completed") is True:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Asterism 首次启动")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(SubtitleLabel("欢迎使用 Asterism 本地桌面版"))
+        layout.addWidget(
+            BodyLabel(
+                "这是单一可信操作者工具。账号 Profile、会话状态、日志、草稿和全局题库都保存在本机；"
+                "不会创建 Asterism 用户，也不会把平台凭据上传到云端。"
+            )
+        )
+        layout.addWidget(BodyLabel(f"当前数据目录：{self.controller.paths.root}"))
+        layout.addWidget(
+            BodyLabel(
+                "下一步：在左侧平台页新建 Profile，填写对应平台凭据；在设置页配置可选模型端点，"
+                "然后先执行 health、登录和课程只读刷新。正式作业/考试仍需在草稿页人工确认。"
+            )
+        )
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(620, 300)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            config["onboarding_completed"] = True
+            self.controller.config.save(config)
 
     def add_page(self, name: str, page: QWidget) -> None:
         self.navigation.addItem(QListWidgetItem(name))

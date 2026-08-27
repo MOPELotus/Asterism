@@ -23,6 +23,7 @@ Windows 便携构建骨架已经接入，但固定的 `welearn` donor 尚无可�
 - 保留课程、任务、题库、AI、复杂题、历史扫描、作业/考试草稿与提交前确认。
 - 移除用户管理、代操作、QQ 绑定、点数计费、Service Token、公开 API 和自动巡检。
 - 提供无需安装 Python、Node、Rust 或编译工具的 Windows x64/ARM64 便携 ZIP。
+- 首次启动会显示本地数据目录和安全边界向导；确认后即可在各平台页创建 Profile。
 
 ## 实施原则
 

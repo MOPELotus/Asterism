@@ -9,6 +9,7 @@ from .atomic import atomic_write_json, read_json_object
 CONFIG_VERSION = 1
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": CONFIG_VERSION,
+    "onboarding_completed": False,
     "ui": {"theme": "system", "language": "zh-CN"},
     "notifications": {"enabled": False, "command": ""},
     "models": {
