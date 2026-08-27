@@ -79,6 +79,7 @@ class RunnerManager:
             "operation": operation,
             "payload": request_payload,
         }
+        secret_values = self._secret_values(request_payload)
         provider_log_root = (
             self.logs_root / spec.provider / (profile.id if profile else "diagnostics")
         )
@@ -192,7 +193,7 @@ class RunnerManager:
             message = "worker exited without a terminal event"
             stderr = "".join(stderr_parts).strip()
             if stderr:
-                message += f": {stderr[-1000:]}"
+                message += f": {self._redact(stderr[-1000:], secret_values)}"
             raise RunnerError("worker_exited", message, tuple(events))
         if terminal.get("type") == "error":
             raise RunnerError(
@@ -212,6 +213,37 @@ class RunnerManager:
             if isinstance(session, dict):
                 self.state_store.save(profile, "session", session)
         return RunResult(request_id, spec.provider, operation, data, tuple(events), log_path)
+
+    @staticmethod
+    def _secret_values(payload: dict[str, Any]) -> tuple[str, ...]:
+        """Collect credential-like values for redacting donor stderr/errors."""
+        values: set[str] = set()
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str) and value:
+                values.add(value)
+            elif isinstance(value, dict):
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+
+        collect(payload.get("credentials"))
+        collect(payload.get("session"))
+        settings = payload.get("settings")
+        if isinstance(settings, dict):
+            for key, value in settings.items():
+                markers = ("password", "token", "cookie", "secret", "ticket", "api_key")
+                if any(marker in str(key).casefold() for marker in markers):
+                    collect(value)
+        return tuple(sorted(values, key=len, reverse=True))
+
+    @staticmethod
+    def _redact(value: str, secrets: tuple[str, ...]) -> str:
+        for secret in secrets:
+            value = value.replace(secret, "[REDACTED]")
+        return value
 
     @staticmethod
     def _event_for_log(event: dict[str, Any]) -> dict[str, Any]:

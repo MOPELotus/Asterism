@@ -1253,6 +1253,15 @@ class RunnerTests(unittest.TestCase):
             self.manager.invoke(self.spec, "fail", timeout=5)
         self.assertEqual(raised.exception.code, "expected")
 
+    def test_runner_redacts_credential_values_from_error_text(self) -> None:
+        secrets = self.manager._secret_values(
+            {"credentials": {"cookie": "fixture-cookie-secret"}, "settings": {}}
+        )
+        self.assertEqual(
+            self.manager._redact("cookie=fixture-cookie-secret", secrets),
+            "cookie=[REDACTED]",
+        )
+
     def test_timeout_stops_owned_process(self) -> None:
         with self.assertRaises(RunnerError) as raised:
             self.manager.invoke(self.spec, "sleep", timeout=0.1)
