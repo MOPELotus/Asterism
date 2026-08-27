@@ -35,6 +35,13 @@ def _notice(parent: QWidget, title: str, text: str) -> None:
     MessageBox(title, text, parent).exec()
 
 
+def _confirm(parent: QWidget, title: str, text: str) -> bool:
+    dialog = MessageBox(title, text, parent)
+    dialog.yesSignal.connect(dialog.accept)
+    dialog.cancelSignal.connect(dialog.reject)
+    return dialog.exec() == QDialog.DialogCode.Accepted
+
+
 def _models_url(base_url: str) -> str:
     base = base_url.rstrip("/")
     return base + "/models" if base.endswith("/v1") else base + "/v1/models"
@@ -272,7 +279,12 @@ class AISettingsPage(QWidget):
             self._current_combo_id = str(name) if name else None
             display_name = (combinations.get(name, {}) or {}).get("display_name") if name else None
             display_name = display_name or ({"economy": "默认", "gpt_only": "高级"}.get(str(name), str(name or "新组合")))
-        self.current_combo_label.setText(f"当前组合：{display_name}  ·  ID：{self._current_combo_id or '未创建'}")
+        if pending:
+            self.current_combo_label.setText(f"未保存组合草稿：{display_name}  ·  ID：{self._current_combo_id or '未填写'}")
+        elif self._current_combo_id:
+            self.current_combo_label.setText(f"当前组合：{display_name}  ·  ID：{self._current_combo_id}")
+        else:
+            self.current_combo_label.setText("尚未选择组合，请从上方选择或新建组合")
         for route, fields in self.route_cards.items():
             row = value.get(route, {}) if isinstance(value.get(route), dict) else {}
             for key, field in (("primary", "primary"), ("fallback", "fallback"), ("effort", "reasoning_effort")):
@@ -316,7 +328,14 @@ class AISettingsPage(QWidget):
         new, value = dialog.value(); value["models"] = endpoints.get(name, {}).get("models", []); endpoints.pop(name, None) if name and name != new else None; endpoints[new] = value; self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload(); self.site_choice.setCurrentText(new)
     def delete_site(self):
         name = self.site_choice.currentData()
-        if name: self._endpoints().pop(name, None); self.controller.config.save({**self.controller.config.ensure(), "models": self._models()}); self.reload()
+        if not name:
+            _notice(self, "删除站点", "当前没有可删除的站点。")
+            return
+        if not _confirm(self, "删除站点", f"确定删除站点“{name}”吗？组合中的引用不会自动改写。"):
+            return
+        self._endpoints().pop(name, None)
+        self.controller.config.save({**self.controller.config.ensure(), "models": self._models()})
+        self.reload()
     def scan_site(self):
         name = self.site_choice.currentData()
         if not name: _notice(self, "扫描模型", "请先选择站点。"); return
@@ -348,9 +367,15 @@ class AISettingsPage(QWidget):
         self.load_combo()
     def delete_combo(self):
         name = self.combo_choice.currentData()
-        if name:
-            self._models().setdefault("combinations", {}).pop(name, None)
-            if self._models().get("default") == name:
-                self._models()["default"] = next(iter(self._models()["combinations"]), "")
-            self.controller.config.save({**self.controller.config.ensure(), "models": self._models()})
-            self.reload()
+        if not name:
+            _notice(self, "删除组合", "当前没有可删除的组合。")
+            return
+        combinations = self._models().setdefault("combinations", {})
+        display_name = (combinations.get(name) or {}).get("display_name") or {"economy": "默认", "gpt_only": "高级"}.get(str(name), str(name))
+        if not _confirm(self, "删除组合", f"确定删除答案组合“{display_name}”吗？此操作不可撤销。"):
+            return
+        combinations.pop(name, None)
+        if self._models().get("default") == name:
+            self._models()["default"] = next(iter(combinations), "")
+        self.controller.config.save({**self.controller.config.ensure(), "models": self._models()})
+        self.reload()
