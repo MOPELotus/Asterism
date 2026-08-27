@@ -47,6 +47,13 @@ class PortableValidationTests(unittest.TestCase):
             staged = resources / "browsers" / "chromium" / "chrome-win64" / "chrome.exe"
             self.assertEqual(staged.read_bytes(), b"browser")
 
+    def test_builder_rejects_cross_architecture_label(self) -> None:
+        builder = load_builder()
+        with patch.object(builder.platform, "machine", return_value="AMD64"):
+            builder.validate_native_architecture("x64")
+            with self.assertRaises(SystemExit):
+                builder.validate_native_architecture("arm64")
+
     def test_browser_smoke_requires_marker_and_zero_exit(self) -> None:
         validator = load_validator()
         executable = Path("chrome.exe")

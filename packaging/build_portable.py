@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -12,6 +13,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_LICENSES = {"Apache-2.0", "GPL-3.0", "MIT", "BSD-2-Clause", "BSD-3-Clause"}
+
+
+def validate_native_architecture(architecture: str) -> None:
+    machine = platform.machine().casefold().replace("-", "_")
+    aliases = {
+        "x64": {"amd64", "x86_64", "x64"},
+        "arm64": {"arm64", "aarch64"},
+    }
+    if architecture not in aliases:
+        raise SystemExit(f"unsupported portable architecture: {architecture}")
+    if machine not in aliases[architecture]:
+        raise SystemExit(
+            f"portable {architecture} build requires a native {architecture} runner; "
+            f"detected {platform.machine() or 'unknown'}"
+        )
 
 
 def run(command: list[str], *, cwd: Path = ROOT) -> None:
@@ -220,6 +236,7 @@ def main() -> int:
     parser.add_argument("--version", default="dev")
     parser.add_argument("--output-root", type=Path, default=ROOT / "release")
     args = parser.parse_args()
+    validate_native_architecture(args.architecture)
     notices = validate_sources()
     stage = ROOT / "build" / "portable" / args.architecture
     if stage.exists():

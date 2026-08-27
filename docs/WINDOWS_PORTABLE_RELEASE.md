@@ -37,6 +37,8 @@ SHA256SUMS.json          包内文件校验清单
 
 - x64 在 `windows-2022` 使用 x64 Python 与 native MSVC 构建。
 - ARM64 在 `windows-11-arm` 使用 ARM64 Python 与 native ARM64 MSVC 构建。
+- 构建器会校验 runner 的 native machine 架构与产物标签一致；不会把 x64 runner 的产物伪标成 ARM64，
+  也不尝试未经验证的交叉编译。
 - 固定 Python、Nuitka 和运行依赖版本与 hash，禁止向 ARM64 包混入 x64 wheel。
 - 构建前执行 `python -m playwright install chromium`，并将对应架构的 Chromium 复制到
   `resources/browsers/chromium`；如果本地构建环境没有 Chromium，包仍可生成但运行时回退系统 Edge，
