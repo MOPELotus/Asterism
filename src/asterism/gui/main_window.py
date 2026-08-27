@@ -366,7 +366,7 @@ class ProviderPage(QWidget):
             return None
 
     def create_profile(self) -> None:
-        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog = QDialog(self)
         dialog.setWindowTitle(f"{self.provider} Profile")
         form = QFormLayout(dialog)
         label = LineEdit()
@@ -402,7 +402,7 @@ class ProviderPage(QWidget):
             )
         )
         dialog.resize(640, 560)
-        dialog.show()
+        dialog.exec()
 
     def _save_new_profile(
         self,
@@ -437,7 +437,7 @@ class ProviderPage(QWidget):
         profile = self.profile()
         if profile is None:
             return
-        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog = QDialog(self)
         dialog.setWindowTitle(f"{self.provider} Profile")
         form = QFormLayout(dialog)
         label = LineEdit(profile.label)
@@ -479,7 +479,7 @@ class ProviderPage(QWidget):
             )
         )
         dialog.resize(640, 560)
-        dialog.show()
+        dialog.exec()
 
     def _save_profile_edit(
         self,
