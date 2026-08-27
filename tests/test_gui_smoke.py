@@ -10,6 +10,7 @@ try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtWidgets import QApplication, QWidget
 
+    from asterism.gui.ai_settings import AISettingsPage
     from asterism.gui.app import acquire_instance_lock
     from asterism.gui.fluent import (
         LineEdit,
@@ -77,6 +78,16 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertGreater(window.height(), 0)
             window.close()
 
+    def test_ai_page_exposes_custom_sites_and_combinations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            page = next(item for item in window.pages if isinstance(item, AISettingsPage))
+            self.assertGreaterEqual(page.endpoint_table.columnCount(), 4)
+            self.assertGreaterEqual(page.combo_table.columnCount(), 3)
+            self.assertIn("economy", page.combination_names)
+            self.assertIn("gpt_only", page.combination_names)
+            window.close()
+
     def test_provider_progress_is_visible_on_home_activity_card(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
@@ -96,7 +107,7 @@ class GuiSmokeTests(unittest.TestCase):
                 "run",
                 {"type": "progress", "current": 2, "total": 7, "message": "章节 2"},
             )
-            self.assertIn("chaoxing", window.home_page.activity.text())
+            self.assertIn("Chaoxing", window.home_page.activity.text())
             self.assertIn("2/7", window.home_page.activity.text())
             self.assertIn("章节 2", window.home_page.activity.text())
             self.assertIn("第一章视频", window.home_page.activity.text())
@@ -244,7 +255,7 @@ class GuiSmokeTests(unittest.TestCase):
             dialog = next(
                 child
                 for child in page.findChildren(QWidget)
-                if child.windowTitle() == "chaoxing task detail"
+                if child.windowTitle() == "Chaoxing task detail"
             )
             viewer = dialog.findChildren(TextEdit)[0]
             self.assertTrue(viewer.isReadOnly())
@@ -282,7 +293,7 @@ class GuiSmokeTests(unittest.TestCase):
             dialog = next(
                 child
                 for child in page.findChildren(QWidget)
-                if child.windowTitle() == "chaoxing scan status"
+                if child.windowTitle() == "Chaoxing scan status"
             )
             self.assertIn("题目数", dialog.findChildren(TableWidget)[0].item(4, 0).text())
             self.assertTrue(dialog.findChildren(PushButton))
