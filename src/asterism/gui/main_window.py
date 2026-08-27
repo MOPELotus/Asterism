@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 from ..constants import PROVIDER_IDS
 from ..profiles import Profile
 from .controller import DesktopController
+from .draft_editor import FormalDraftEditor
 from .fluent import (
     BodyLabel,
     ComboBox,
@@ -1196,29 +1197,20 @@ class DraftPage(QWidget):
         draft = self._selected()
         if draft is None:
             return
-        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog = FormalDraftEditor(draft.payload, self)
         dialog.setWindowTitle(f"draft {draft.id[:8]}")
-        layout = QVBoxLayout(dialog)
-        editor = TextEdit()
-        editor.setPlainText(json.dumps(draft.payload, ensure_ascii=False, indent=2))
-        layout.addWidget(editor)
-        save = PrimaryPushButton("保存草稿")
-        layout.addWidget(save)
 
-        def save_payload() -> None:
+        def save_payload(payload: object) -> None:
             try:
-                payload = json.loads(editor.toPlainText())
                 if not isinstance(payload, dict):
                     raise ValueError("草稿内容必须是 JSON object")
                 self.controller.update_draft(draft, payload)
                 self.log.append(f"[draft] saved {draft.id}")
-                dialog.close()
                 self.reload()
-            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            except (OSError, TypeError, ValueError) as error:
                 QMessageBox.critical(dialog, "drafts", str(error))
 
-        save.clicked.connect(save_payload)
-        dialog.resize(760, 560)
+        dialog.saved.connect(save_payload)
         dialog.show()
 
     def submit_selected(self) -> None:
