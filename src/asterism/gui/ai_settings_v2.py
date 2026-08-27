@@ -158,11 +158,13 @@ class AISettingsPage(QWidget):
     def _models(self): return self.controller.config.ensure().setdefault("models", {})
     def _endpoints(self): return self._models().setdefault("endpoints", {})
     def reload(self):
+        self.endpoint_names = list(self._endpoints())
         self.site_choice.blockSignals(True); self.site_choice.clear()
         for name in self._endpoints(): self.site_choice.addItem(name, name)
         self.site_choice.blockSignals(False)
         self.combo_choice.blockSignals(True); self.combo_choice.clear(); combinations = self._models().setdefault("combinations", {})
-        for name in combinations: self.combo_choice.addItem(name, name)
+        self.combination_names = list(combinations)
+        for name in self.combination_names: self.combo_choice.addItem(name, name)
         self.combo_choice.blockSignals(False); self._refresh_route_endpoints(); self._refresh_condition_endpoints(); self._refresh_challenge_endpoints(); self.load_combo()
 
     def _refresh_route_endpoints(self):
