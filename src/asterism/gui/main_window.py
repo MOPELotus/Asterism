@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -31,15 +30,16 @@ from .controller import DesktopController
 from .draft_editor import FormalDraftEditor
 from .fluent import (
     FLUENT_AVAILABLE,
+    FLUENT_SURFACE_STYLE,
     BodyLabel,
     CaptionLabel,
     CardWidget,
     CheckBox,
     ComboBox,
     FluentIcon,
-    FluentWindow,
     LineEdit,
     MessageBox,
+    MSFluentWindow,
     NavigationItemPosition,
     PrimaryPushButton,
     PushButton,
@@ -1941,7 +1941,7 @@ class SettingsPage(QWidget):
         self.theme.setToolTip(f"配置暂不可解析：{message}")
 
 
-class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
+class MainWindow(MSFluentWindow if FLUENT_AVAILABLE else QMainWindow):
     def __init__(self, data_root: Path | None = None, source_root: Path | None = None):
         super().__init__()
         self.controller = DesktopController.create(data_root, source_root)
@@ -1954,6 +1954,8 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
             str(self.controller.config.ensure().get("ui", {}).get("theme", ThemeMode.SYSTEM.value)),
         )
         self.setWindowTitle("Asterism")
+        if FLUENT_AVAILABLE:
+            self.setStyleSheet(FLUENT_SURFACE_STYLE)
         screen = QGuiApplication.primaryScreen()
         available = screen.availableGeometry() if screen is not None else None
         if available is not None:
@@ -1989,10 +1991,8 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
         layout.addWidget(self.stack, 1)
 
     def _init_fluent_shell(self) -> None:
-        # Mica is optional and can crash on older Windows/remote desktop sessions.
-        # FluentWindow still provides the native title bar and navigation without it.
-        with suppress(AttributeError, RuntimeError):
-            self.setMicaEffectEnabled(False)
+        # MSFluentWindow follows the same effect lifecycle as the reference
+        # desktop implementation; do not reconfigure Mica after construction.
         self.navigation = None
         self.stack = None
         self.setMinimumSize(960, 640)

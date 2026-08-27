@@ -24,6 +24,29 @@ class ThemeMode(StrEnum):
     DARK = "dark"
 
 
+FLUENT_SURFACE_STYLE = """
+QScrollBar:vertical { background: transparent; width: 14px; margin: 6px 2px; }
+QScrollBar::handle:vertical {
+    min-height: 48px; background: rgba(96,104,118,0.36); border-radius: 5px;
+}
+QScrollBar::handle:vertical:hover { background: rgba(76,86,102,0.48); }
+QScrollBar::handle:vertical:pressed { background: rgba(57,67,82,0.60); }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { height: 0; background: transparent; }
+QScrollBar:horizontal { background: transparent; height: 14px; margin: 2px 6px; }
+QScrollBar::handle:horizontal {
+    min-width: 48px; background: rgba(96,104,118,0.36); border-radius: 5px;
+}
+QScrollBar::handle:horizontal:hover { background: rgba(76,86,102,0.48); }
+QScrollBar::handle:horizontal:pressed { background: rgba(57,67,82,0.60); }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    width: 0; background: transparent;
+}
+QSplitter::handle { background: transparent; }
+"""
+
+
 _HEADLESS_PLATFORM = os.environ.get("QT_QPA_PLATFORM", "").casefold() in {
     "offscreen",
     "minimal",
