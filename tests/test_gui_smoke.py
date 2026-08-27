@@ -102,6 +102,26 @@ class GuiSmokeTests(unittest.TestCase):
                 else:
                     os.environ["ASTERISM_NONINTERACTIVE"] = old
 
+    def test_english_preference_localizes_navigation_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "config.local.json"
+            config_path.write_text(
+                '{"version": 1, "onboarding_completed": true, '
+                '"ui": {"theme": "system", "language": "en-US"}, '
+                '"notifications": {"enabled": false, "command": ""}, '
+                '"models": {}, "providers": {}}',
+                encoding="utf-8",
+            )
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            self.assertEqual(window.language_code, "en-US")
+            if window.navigation is not None:
+                labels = [
+                    window.navigation.item(i).text()
+                    for i in range(window.navigation.count())
+                ]
+                self.assertIn("Home", labels)
+            window.close()
+
     def test_draft_page_reports_busy_while_submit_thread_is_running(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])

@@ -1782,6 +1782,7 @@ class SettingsPage(QWidget):
             value = json.loads(self.editor.toPlainText())
             value.setdefault("ui", {})["language"] = self.language.currentData()
             self.editor.setPlainText(json.dumps(value, ensure_ascii=False, indent=2))
+            self.controller.config.save(value)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             self.language.setToolTip(f"配置暂不可解析：{error}")
 
@@ -1794,6 +1795,9 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
     def __init__(self, data_root: Path | None = None, source_root: Path | None = None):
         super().__init__()
         self.controller = DesktopController.create(data_root, source_root)
+        self.language_code = str(
+            self.controller.config.ensure().get("ui", {}).get("language", "zh-CN")
+        )
         self._show_first_run_wizard()
         apply_theme(
             QGuiApplication.instance(),
@@ -1883,12 +1887,19 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
             self.controller.config.save(config)
 
     def add_page(self, name: str, page: QWidget) -> None:
-        label = {
+        labels = {
             "home": "主页",
             "drafts": "草稿",
             "question-bank": "题库",
             "settings": "设置",
-        }.get(name, name)
+        }
+        english_labels = {
+            "home": "Home",
+            "drafts": "Drafts",
+            "question-bank": "Question bank",
+            "settings": "Settings",
+        }
+        label = (english_labels if self.language_code == "en-US" else labels).get(name, name)
         if FLUENT_AVAILABLE:
             page.setObjectName(name.replace("-", "_"))
             icon = {
