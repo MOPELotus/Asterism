@@ -354,8 +354,7 @@ class ProviderPage(QWidget):
         execution_options = QHBoxLayout()
         execution_options.addWidget(BodyLabel("本次答案组合"))
         self.execution_combination = ComboBox()
-        self.execution_combination.addItem("economy", "economy")
-        self.execution_combination.addItem("gpt_only", "gpt_only")
+        self._reload_answer_combinations()
         execution_options.addWidget(self.execution_combination)
         execution_options.addWidget(
             BodyLabel("仅影响需要答案的执行；不需要答题的平台会沿用其原生路径。")
@@ -429,6 +428,18 @@ class ProviderPage(QWidget):
         root.addWidget(StrongBodyLabel("运行日志与结果"))
         root.addWidget(self.log)
         self.reload_profiles()
+
+    def _reload_answer_combinations(self) -> None:
+        self.execution_combination.clear()
+        models = self.controller.config.ensure().get("models", {})
+        combinations = models.get("combinations", {})
+        default = models.get("default", "economy")
+        for name in combinations:
+            self.execution_combination.addItem(
+                f"{name}{'（默认）' if name == default else ''}", name
+            )
+        if self.execution_combination.count() == 0:
+            self.execution_combination.addItem("省钱组合", "economy")
 
     def reload_profiles(self) -> None:
         self.profile_combo.clear()
