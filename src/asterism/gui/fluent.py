@@ -155,3 +155,20 @@ def configure_table(table: QTableWidget, *, minimum_row_height: int = 30) -> Non
     table.verticalHeader().setDefaultSectionSize(minimum_row_height)
     table.horizontalHeader().setStretchLastSection(True)
     table.horizontalHeader().setSectionsMovable(False)
+
+
+def configure_scroll_area(scroll: QScrollArea) -> None:
+    """Make a page scroll surface inherit the Fluent window background.
+
+    QScrollArea's native viewport is opaque by default, which produces the
+    grey Qt panel visible on every page after the first one.  qfluentwidgets
+    exposes the same setting as ``enableTransparentBackground``; keep a
+    compatible fallback for headless/native Qt runs.
+    """
+    if hasattr(scroll, "enableTransparentBackground"):
+        scroll.enableTransparentBackground()
+    else:
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.viewport().setStyleSheet("background: transparent;")
+    scroll.viewport().setAutoFillBackground(False)

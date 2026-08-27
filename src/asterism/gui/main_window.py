@@ -51,6 +51,7 @@ from .fluent import (
     ThemeMode,
     TitleLabel,
     apply_theme,
+    configure_scroll_area,
     configure_table,
 )
 
@@ -263,6 +264,7 @@ class ProviderPage(QWidget):
         scroll.setFrameShape(scroll.Shape.NoFrame)
         content = QWidget()
         scroll.setWidget(content)
+        configure_scroll_area(scroll)
         outer.addWidget(scroll)
         root = QVBoxLayout(content)
         root.setContentsMargins(28, 24, 28, 28)
@@ -1454,6 +1456,7 @@ class DraftPage(QWidget):
         scroll.setFrameShape(scroll.Shape.NoFrame)
         content = QWidget()
         scroll.setWidget(content)
+        configure_scroll_area(scroll)
         outer.addWidget(scroll)
         root = QVBoxLayout(content)
         root.setContentsMargins(28, 24, 28, 28)
@@ -1838,6 +1841,7 @@ class SettingsPage(QWidget):
         scroll.setFrameShape(scroll.Shape.NoFrame)
         content = QWidget()
         scroll.setWidget(content)
+        configure_scroll_area(scroll)
         outer.addWidget(scroll)
         root = QVBoxLayout(content)
         root.setContentsMargins(28, 24, 28, 28)
