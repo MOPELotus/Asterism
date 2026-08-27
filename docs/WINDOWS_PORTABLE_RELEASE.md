@@ -54,6 +54,9 @@ donor 只复制对应 revision 的 Git tracked 文件；ignored/untracked 的 Co
 `packaging/validate_portable.py` 会先校验 SHA-256 manifest，再在含空格和中文的解压目录启动验证；
 manifest 路径穿越、文件缺失、哈希不匹配或包内出现未列出的文件会在启动前失败。Workflow 仅在手动触发
 或版本 tag 时运行，避免日常代码提交反复执行昂贵的双架构 Nuitka 构建。
+验证器还会在不提供任何账号或会话数据的情况下，逐个启动四个平台的打包 Worker 并发送
+`health` JSONL 请求，确认冻结依赖、donor 资源路径和进程协议在解压后的实际目录中可用；该检查不执行
+登录、课程读取或任何平台写入。
 本地验证默认允许没有随包 Chromium（运行时回退系统 Edge）；CI 发布使用 `--require-browser`，并使用独立
 临时 profile 启动随包 Chromium 的 headless `--dump-dom` 烟测；进程非零退出、超时或未返回预期页面标记均会阻止产物上传。
 
