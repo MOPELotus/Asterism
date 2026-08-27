@@ -34,6 +34,10 @@ from .draft_editor import FormalDraftEditor
 from .fluent import (
     BodyLabel,
     ComboBox,
+    FLUENT_AVAILABLE,
+    FluentIcon,
+    FluentWindow,
+    NavigationItemPosition,
     LineEdit,
     PrimaryPushButton,
     PushButton,
@@ -1573,7 +1577,7 @@ class SettingsPage(QWidget):
         self.theme.setToolTip(f"配置暂不可解析：{message}")
 
 
-class MainWindow(QMainWindow):
+class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
     def __init__(self, data_root: Path | None = None, source_root: Path | None = None):
         super().__init__()
         self.controller = DesktopController.create(data_root, source_root)
@@ -1592,6 +1596,22 @@ class MainWindow(QMainWindow):
             )
         else:
             self.resize(1280, 820)
+        self.pages: list[QWidget] = []
+        if FLUENT_AVAILABLE:
+            self._init_fluent_shell()
+        else:
+            self._init_classic_shell()
+        self.add_page("home", HomePage(self.controller))
+        for provider in PROVIDER_IDS:
+            self.add_page(provider, ProviderPage(self.controller, provider))
+        self.add_page("drafts", DraftPage(self.controller))
+        self.add_page("question-bank", QuestionBankPage(self.controller))
+        self.add_page("settings", SettingsPage(self.controller))
+        if not FLUENT_AVAILABLE:
+            self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex)
+            self.navigation.setCurrentRow(0)
+
+    def _init_classic_shell(self) -> None:
         shell = QWidget()
         self.setCentralWidget(shell)
         layout = QHBoxLayout(shell)
@@ -1600,15 +1620,17 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         layout.addWidget(self.navigation)
         layout.addWidget(self.stack, 1)
-        self.pages: list[QWidget] = []
-        self.add_page("home", HomePage(self.controller))
-        for provider in PROVIDER_IDS:
-            self.add_page(provider, ProviderPage(self.controller, provider))
-        self.add_page("drafts", DraftPage(self.controller))
-        self.add_page("question-bank", QuestionBankPage(self.controller))
-        self.add_page("settings", SettingsPage(self.controller))
-        self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.navigation.setCurrentRow(0)
+
+    def _init_fluent_shell(self) -> None:
+        # Mica is optional and can crash on older Windows/remote desktop sessions.
+        # FluentWindow still provides the native title bar and navigation without it.
+        try:
+            self.setMicaEffectEnabled(False)
+        except (AttributeError, RuntimeError):
+            pass
+        self.navigation = None
+        self.stack = None
+        self.setMinimumSize(960, 640)
 
     def _show_first_run_wizard(self) -> None:
         """Give a local operator a safe first-run orientation without credentials."""
@@ -1650,6 +1672,20 @@ class MainWindow(QMainWindow):
             self.controller.config.save(config)
 
     def add_page(self, name: str, page: QWidget) -> None:
-        self.navigation.addItem(QListWidgetItem(name))
-        self.stack.addWidget(page)
+        if FLUENT_AVAILABLE:
+            page.setObjectName(name.replace("-", "_"))
+            icon = {
+                "home": FluentIcon.HOME,
+                "chaoxing": FluentIcon.BOOK_SHELF,
+                "welearn": FluentIcon.EDUCATION,
+                "uai": FluentIcon.LANGUAGE,
+                "cidaren": FluentIcon.CHAT,
+                "drafts": FluentIcon.EDIT,
+                "question-bank": FluentIcon.DICTIONARY,
+                "settings": FluentIcon.SETTING,
+            }.get(name, FluentIcon.APPLICATION)
+            self.addSubInterface(page, icon, name, NavigationItemPosition.TOP)
+        else:
+            self.navigation.addItem(QListWidgetItem(name))
+            self.stack.addWidget(page)
         self.pages.append(page)

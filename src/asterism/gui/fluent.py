@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton, QTableWidget, QTextEdit
+from PyQt6.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton, QTableWidget, QTextEdit, QWidget
 
 
 class ThemeMode(StrEnum):
@@ -22,7 +22,20 @@ _HEADLESS_PLATFORM = os.environ.get("QT_QPA_PLATFORM", "").casefold() in {
 try:  # qfluentwidgets is optional during headless development and CI.
     if _HEADLESS_PLATFORM:
         raise ImportError("use native Qt widgets with a headless platform plugin")
-    from qfluentwidgets import BodyLabel, PrimaryPushButton, PushButton, SubtitleLabel
+    from qfluentwidgets import (
+        BodyLabel,
+        CardWidget,
+        FluentIcon,
+        FluentWindow,
+        MSFluentWindow,
+        InfoBar,
+        MessageBox,
+        NavigationItemPosition,
+        NavigationInterface,
+        PrimaryPushButton,
+        PushButton,
+        SubtitleLabel,
+    )
 
     try:
         from qfluentwidgets import ComboBox, LineEdit, TableWidget, TextEdit
@@ -35,6 +48,11 @@ except ImportError:  # pragma: no cover - exercised on minimal dev environments
     PrimaryPushButton = QPushButton
     PushButton = QPushButton
     ComboBox, LineEdit, TableWidget, TextEdit = QComboBox, QLineEdit, QTableWidget, QTextEdit
+    CardWidget = QWidget
+    FluentIcon = None
+    FluentWindow = object
+    MSFluentWindow = object
+    InfoBar = MessageBox = NavigationInterface = NavigationItemPosition = None
     FLUENT_AVAILABLE = False
 
 
