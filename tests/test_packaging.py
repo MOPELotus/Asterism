@@ -31,6 +31,35 @@ def load_builder():
 
 
 class PortableValidationTests(unittest.TestCase):
+    def test_builder_verifies_pinned_donor_file_hashes(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            donor = root / "donor"
+            donor.mkdir()
+            (donor / "entry.py").write_bytes(b"pinned source")
+            (donor / "helper.py").write_bytes(b"pinned helper")
+            metadata = root / "SOURCE.json"
+            metadata.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "test/donor",
+                            "revision": "a" * 40,
+                            "files": {
+                                "entry.py": hashlib.sha256(b"pinned source").hexdigest(),
+                                "helper.py": hashlib.sha256(b"pinned helper").hexdigest(),
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            builder.validate_source_integrity(metadata, donor)
+            (donor / "helper.py").write_bytes(b"changed")
+            with self.assertRaises(SystemExit):
+                builder.validate_source_integrity(metadata, donor)
+
     def test_builder_stages_configured_playwright_chromium(self) -> None:
         builder = load_builder()
         with tempfile.TemporaryDirectory() as temporary:

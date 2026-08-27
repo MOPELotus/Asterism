@@ -59,7 +59,10 @@ manifest 路径穿越、文件缺失、哈希不匹配或包内出现未列出�
 `NOASSERTION`。按本计划的发布安全边界，便携构建会在实际编译前明确失败并列出阻断来源；
 在确认授权或替换为许可清晰的 donor 前，不生成一个暗中缺少 `welearn` 的“完整”发布包。
 构建同样会检查 `chaoxing` 的 CxKitty 辅助 donor 和 `uai` 的浏览器脚本 manifest，二者的
-许可证必须显式记录在 metadata 中。
+许可证必须显式记录在 metadata 中。所有主 donor 和辅助 donor 还必须通过入口文件 SHA-256
+校验；在 Git checkout 中同时校验 submodule `HEAD` 与固定 revision，源码归档没有 `.git`
+元数据时仍必须通过文件哈希校验。任一来源缺失、内容漂移或 revision 不一致都在 Nuitka
+编译前终止构建。
 
 ## 必须显式打包的资源
 

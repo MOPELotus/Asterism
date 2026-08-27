@@ -13,6 +13,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_LICENSES = {"Apache-2.0", "GPL-3.0", "MIT", "BSD-2-Clause", "BSD-3-Clause"}
+SOURCE_LOCATIONS = (
+    (Path("workers/chaoxing/SOURCE.json"), Path("upstreams/chaoxing")),
+    (Path("workers/chaoxing/AUXILIARY_SOURCES.json"), Path("upstreams/chaoxing-exam")),
+    (Path("workers/welearn/SOURCE.json"), Path("upstreams/welearn")),
+    (Path("workers/uai/SOURCE.json"), Path("upstreams/uai")),
+    (Path("workers/uai/BROWSER_SOURCE.json"), Path("upstreams/uai-browser")),
+    (Path("workers/cidaren/SOURCE.json"), Path("upstreams/cidaren")),
+)
 
 
 def validate_native_architecture(architecture: str) -> None:
@@ -37,11 +45,94 @@ def run(command: list[str], *, cwd: Path = ROOT) -> None:
         raise SystemExit(completed.returncode)
 
 
+def _source_records(metadata_path: Path) -> list[dict[str, object]]:
+    value = json.loads(metadata_path.read_text(encoding="utf-8"))
+    records = value if isinstance(value, list) else [value]
+    if not records or not all(isinstance(record, dict) for record in records):
+        raise SystemExit(f"invalid donor metadata records: {metadata_path}")
+    return records
+
+
+def _safe_source_file(donor_root: Path, relative_name: str) -> Path:
+    relative = Path(relative_name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SystemExit(f"unsafe donor entrypoint path: {relative_name}")
+    root = donor_root.resolve()
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as error:
+        raise SystemExit(f"donor entrypoint escapes source root: {relative_name}") from error
+    return candidate
+
+
+def validate_source_integrity(metadata_path: Path, donor_root: Path) -> None:
+    """Verify pinned donor files and, when available, the checkout revision."""
+    if not metadata_path.is_file():
+        raise SystemExit(f"missing donor metadata: {metadata_path}")
+    if not donor_root.is_dir():
+        raise SystemExit(f"missing donor source: {donor_root}")
+
+    records = _source_records(metadata_path)
+    expected_revisions: set[str] = set()
+    for record in records:
+        name = str(record.get("name") or metadata_path.stem)
+        revision = str(record.get("revision") or "").casefold()
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise SystemExit(f"invalid pinned revision for {name}: {revision or 'missing'}")
+        expected_revisions.add(revision)
+
+        declared_files = record.get("files")
+        if declared_files is None:
+            entrypoint = str(record.get("entrypoint") or "")
+            digest = str(record.get("entrypoint_sha256") or "").casefold()
+            files = {entrypoint: digest}
+        elif isinstance(declared_files, dict):
+            files = {str(path): str(digest).casefold() for path, digest in declared_files.items()}
+        else:
+            raise SystemExit(f"invalid donor file manifest for {name}")
+        if not files or any(not path for path in files):
+            raise SystemExit(f"missing donor entrypoint manifest for {name}")
+
+        for relative_name, expected_digest in files.items():
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+                raise SystemExit(f"invalid donor SHA-256 for {name}: {relative_name}")
+            source_file = _safe_source_file(donor_root, relative_name)
+            if not source_file.is_file():
+                raise SystemExit(f"missing pinned donor file for {name}: {relative_name}")
+            actual_digest = hashlib.sha256(source_file.read_bytes()).hexdigest()
+            if actual_digest != expected_digest:
+                raise SystemExit(
+                    f"pinned donor file hash mismatch for {name}: {relative_name}"
+                )
+
+    git_marker = donor_root / ".git"
+    if git_marker.exists():
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=donor_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise SystemExit(f"unable to read donor revision: {donor_root}")
+        actual_revision = completed.stdout.strip().casefold()
+        if expected_revisions != {actual_revision}:
+            expected = ", ".join(sorted(expected_revisions))
+            raise SystemExit(
+                f"pinned donor revision mismatch for {donor_root.name}: "
+                f"expected {expected}, found {actual_revision or 'unknown'}"
+            )
+
+
 def validate_sources() -> list[dict[str, str]]:
     blocked: list[dict[str, str]] = []
     notices: list[dict[str, str]] = []
+    for metadata_name, donor_name in SOURCE_LOCATIONS:
+        validate_source_integrity(ROOT / metadata_name, ROOT / donor_name)
     for metadata_path in sorted((ROOT / "workers").glob("*/SOURCE.json")):
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata = _source_records(metadata_path)[0]
         license_name = str(metadata.get("license") or "NOASSERTION")
         item = {
             "name": str(metadata.get("name") or metadata_path.parent.name),
@@ -58,9 +149,7 @@ def validate_sources() -> list[dict[str, str]]:
     ):
         if not metadata_path.exists():
             continue
-        value = json.loads(metadata_path.read_text(encoding="utf-8"))
-        records = value if isinstance(value, list) else [value]
-        for metadata in records:
+        for metadata in _source_records(metadata_path):
             license_name = str(metadata.get("license") or "NOASSERTION")
             item = {
                 "name": str(metadata.get("name") or metadata_path.stem),
