@@ -15,8 +15,17 @@ class WorkerSpec:
     upstream: Path
     source_metadata: Path
     environment: dict[str, str] = field(default_factory=dict)
+    executable: Path | None = None
 
     def command(self, python: str | Path | None = None) -> list[str]:
+        if self.executable is not None and self.executable.exists():
+            return [
+                str(self.executable),
+                "--upstream",
+                str(self.upstream),
+                "--source-metadata",
+                str(self.source_metadata),
+            ]
         return [
             str(python or sys.executable),
             str(self.script),
@@ -50,21 +59,24 @@ class ProviderRegistry:
             environment["ASTERISM_UAI_BROWSER_UPSTREAM"] = str(upstream_root / "uai-browser")
         else:
             upstream = upstream_root / "cidaren"
+        executable = worker / "worker.exe"
         return WorkerSpec(
             provider=provider,
             script=worker / "worker.py",
             upstream=upstream,
             source_metadata=worker / "SOURCE.json",
             environment=environment,
+            executable=executable if executable.exists() else None,
         )
 
     def all(self) -> tuple[WorkerSpec, ...]:
         return tuple(self.get(provider) for provider in PROVIDER_IDS)
 
     def validate(self, spec: WorkerSpec) -> list[str]:
+        executable = spec.executable if spec.executable is not None else spec.script
         missing = [
             str(path)
-            for path in (spec.script, spec.upstream, spec.source_metadata)
+            for path in (executable, spec.upstream, spec.source_metadata)
             if not path.exists()
         ]
         return missing

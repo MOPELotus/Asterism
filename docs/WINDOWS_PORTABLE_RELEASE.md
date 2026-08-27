@@ -43,6 +43,14 @@ README.txt               首次启动、数据目录和备份说明
 - Release Candidate 的两个架构及产物审计全部通过后才发布 GitHub Release。
 - 不复用旧 Rust/Web installer 的服务、任务计划程序或机器环境安装逻辑。
 
+实现入口为 `packaging/build_portable.py`，构建后使用
+`packaging/validate_portable.py` 在含空格和中文的解压目录启动验证。Workflow 仅在手动触发
+或版本 tag 时运行，避免日常代码提交反复执行昂贵的双架构 Nuitka 构建。
+
+当前 `welearn` donor 的固定 revision 未提供可确认的再分发许可证，`SOURCE.json` 仍为
+`NOASSERTION`。按本计划的发布安全边界，便携构建会在实际编译前明确失败并列出阻断来源；
+在确认授权或替换为许可清晰的 donor 前，不生成一个暗中缺少 `welearn` 的“完整”发布包。
+
 ## 必须显式打包的资源
 
 - PyQt6、Fluent 主题和图标资源。

@@ -176,6 +176,10 @@ Checkpoint：能够自动化读取的项目全部扫描；不能读取的项目�
 - 在干净 Windows runner 上验证解压即用、中文路径、SQLite、子进程、取消和浏览器。
 - 完成许可证、敏感信息和构建机路径审计。
 
+当前已实现双架构 Workflow、Nuitka standalone 构建入口、冻结 Worker 可执行入口、资源
+allowlist、SHA-256 manifest 与解压启动 smoke。由于固定 `welearn` donor 的许可仍为
+`NOASSERTION`，构建会在编译前明确阻断；这是发布合规阻断，不是平台功能接线缺失。
+
 Checkpoint：目标机器无需 Python、Node、Rust、管理员权限、服务注册或 PATH 修改即可
 启动；两个架构均通过 `WINDOWS_PORTABLE_RELEASE.md` 的验收。
 

@@ -77,6 +77,18 @@ class LocalStoreTests(unittest.TestCase):
         executable.write_bytes(b"fixture")
         self.assertEqual(find_browser(str(executable)), executable.resolve())
 
+    def test_worker_spec_prefers_portable_executable_when_present(self) -> None:
+        executable = self.paths.root / "worker.exe"
+        executable.write_bytes(b"fixture")
+        spec = WorkerSpec(
+            "chaoxing",
+            self.paths.root / "worker.py",
+            self.paths.root / "upstream",
+            self.paths.root / "SOURCE.json",
+            executable=executable,
+        )
+        self.assertEqual(spec.command("ignored-python")[0], str(executable))
+
     def test_cidaren_answer_bridge_is_loopback_scoped_and_dispatches_observations(self) -> None:
         resolved: list[dict] = []
         observed: list[dict] = []
