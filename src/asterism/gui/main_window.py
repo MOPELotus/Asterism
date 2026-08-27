@@ -527,9 +527,18 @@ class ProviderPage(QWidget):
         self.log.append(f"[{label}] {preview}")
         event = "success"
         summary: dict[str, Any] = {"status": "success"}
-        if label == "batch run" and isinstance(result, list):
-            failed = sum(1 for item in result if getattr(item, "error_code", None))
-            completed = len(result) - failed
+        batch_results = result
+        if label == "batch run" and isinstance(result, dict):
+            drafts = result.get("drafts")
+            if isinstance(drafts, list):
+                for draft in drafts:
+                    self.log.append(f"[draft] {getattr(draft, 'id', '')}")
+                batch_results = result.get("routine_results", [])
+            else:
+                batch_results = []
+        if label == "batch run" and isinstance(batch_results, list):
+            failed = sum(1 for item in batch_results if getattr(item, "error_code", None))
+            completed = len(batch_results) - failed
             event = "failure" if failed else "success"
             summary = {"status": event, "completed": completed, "failed": failed}
         elif label == "scan profiles" and isinstance(result, list):
@@ -537,6 +546,11 @@ class ProviderPage(QWidget):
             completed = len(result) - failed
             event = "failure" if failed else "success"
             summary = {"status": event, "completed": completed, "failed": failed}
+        if label == "batch run" and isinstance(summary, dict) and "completed" in summary:
+            self.log.append(
+                "[batch summary] "
+                + json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+            )
         if label in {"run", "batch run"}:
             self.controller.notify(
                 event,

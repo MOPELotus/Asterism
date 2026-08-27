@@ -67,3 +67,26 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertGreater(window.width(), 0)
             self.assertGreater(window.height(), 0)
             window.close()
+
+    def test_mixed_batch_result_counts_routine_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            page = next(
+                page
+                for page in window.pages
+                if isinstance(page, ProviderPage) and page.provider == "chaoxing"
+            )
+            page._success(
+                "batch run",
+                {
+                    "drafts": [SimpleNamespace(id="draft-1")],
+                    "routine_results": [
+                        SimpleNamespace(error_code=None),
+                        SimpleNamespace(error_code="network"),
+                    ],
+                },
+            )
+            text = page.log.toPlainText()
+            self.assertIn("[draft] draft-1", text)
+            self.assertIn('"failed":1', text)
+            window.close()
