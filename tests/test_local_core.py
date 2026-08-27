@@ -866,6 +866,21 @@ class LocalStoreTests(unittest.TestCase):
         repository.record_candidate(question_id, {"text": "B"}, "native", "incorrect")
         self.assertEqual(repository.resolve_exact("chaoxing", identity).status, "conflict")
 
+    def test_question_bank_lists_candidate_observations_for_operator_review(self) -> None:
+        bank = QuestionBank(self.paths.database)
+        bank.initialize()
+        repository = AnswerRepository(bank)
+        question_id, _identity = repository.ingest_question(
+            "chaoxing", {"kind": "single_choice", "prompt": "Review", "options": ["A", "B"]}
+        )
+        repository.record_candidate(
+            question_id, {"option": "A"}, "manual", "correct", source_ref="local_operator",
+            details={"reviewed": True},
+        )
+        evidence = bank.list_answer_evidence(question_id)
+        self.assertEqual(evidence[0]["source_kind"], "manual")
+        self.assertEqual(evidence[0]["observations"][0]["details"], {"reviewed": True})
+
 
 class RunnerTests(unittest.TestCase):
     def setUp(self) -> None:

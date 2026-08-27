@@ -668,6 +668,35 @@ class DesktopController:
     def list_questions(self, provider: str | None = None) -> list[dict[str, Any]]:
         return self.bank.list_questions(provider)
 
+    def question_evidence(self, question_id: int) -> dict[str, Any]:
+        rows = self.bank.list_answer_evidence(question_id)
+        return {
+            "question_id": question_id,
+            "candidates": rows,
+            "summary": {
+                "candidate_count": len(rows),
+                "correct_observations": sum(
+                    1 for c in rows for o in c["observations"] if o["outcome"] == "correct"
+                ),
+                "incorrect_observations": sum(
+                    1 for c in rows for o in c["observations"] if o["outcome"] == "incorrect"
+                ),
+            },
+        }
+
+    def save_manual_answer(self, question: Mapping[str, Any], answer: Any) -> int:
+        question_id = int(question.get("id") or 0)
+        content = question.get("content")
+        if question_id < 1 or not isinstance(content, Mapping):
+            raise ValueError("question row is incomplete")
+        return self.answer_repository().record_candidate(
+            question_id,
+            canonical_answer(answer, content.get("options")),
+            "manual",
+            "correct",
+            source_ref="local_operator",
+        )
+
     def answer_question(
         self,
         provider: str,

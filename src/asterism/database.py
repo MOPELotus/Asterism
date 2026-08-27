@@ -219,3 +219,44 @@ class QuestionBank:
                 }
                 for row in rows
             ]
+
+    def list_answer_evidence(self, question_id: int) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT candidate.id, candidate.answer_json, candidate.source_kind,
+                          candidate.source_ref, candidate.confidence, candidate.created_at,
+                          observation.id, observation.outcome, observation.task_ref,
+                          observation.details_json, observation.observed_at
+                   FROM answer_candidates candidate
+                   LEFT JOIN answer_observations observation
+                     ON observation.candidate_id=candidate.id
+                   WHERE candidate.question_id=?
+                   ORDER BY candidate.created_at DESC, observation.observed_at DESC""",
+                (question_id,),
+            ).fetchall()
+        candidates: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            candidate_id = int(row[0])
+            candidate = candidates.setdefault(
+                candidate_id,
+                {
+                    "id": candidate_id,
+                    "answer": json.loads(str(row[1])),
+                    "source_kind": str(row[2]),
+                    "source_ref": str(row[3]),
+                    "confidence": float(row[4]) if row[4] is not None else None,
+                    "created_at": str(row[5]),
+                    "observations": [],
+                },
+            )
+            if row[6] is not None:
+                candidate["observations"].append(
+                    {
+                        "id": int(row[6]),
+                        "outcome": str(row[7]),
+                        "task_ref": str(row[8] or ""),
+                        "details": json.loads(str(row[9] or "{}")),
+                        "observed_at": str(row[10]),
+                    }
+                )
+        return list(candidates.values())

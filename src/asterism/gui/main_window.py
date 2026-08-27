@@ -1226,6 +1226,12 @@ class QuestionBankPage(QWidget):
         answer = PrimaryPushButton("AI 解题并缓存")
         answer.clicked.connect(self.answer_selected)
         controls.addWidget(answer)
+        evidence = PushButton("查看候选与证据")
+        evidence.clicked.connect(self.show_evidence)
+        controls.addWidget(evidence)
+        manual = PushButton("保存人工答案")
+        manual.clicked.connect(self.save_manual_answer)
+        controls.addWidget(manual)
         root.addLayout(controls)
         self.table = TableWidget()
         self.table.setColumnCount(4)
@@ -1292,6 +1298,68 @@ class QuestionBankPage(QWidget):
         )
         self.worker_thread.failed.connect(lambda error: self.log.append(f"[ai] ERROR {error}"))
         self.worker_thread.start()
+
+    def _selected_question(self) -> dict[str, Any] | None:
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self.rows):
+            QMessageBox.warning(self, "question bank", "请先选择题目")
+            return None
+        return self.rows[row]
+
+    def show_evidence(self) -> None:
+        question = self._selected_question()
+        if question is None:
+            return
+        try:
+            value = self.controller.question_evidence(int(question["id"]))
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            QMessageBox.critical(self, "question bank", str(error))
+            return
+        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog.setWindowTitle("候选与证据")
+        layout = QVBoxLayout(dialog)
+        viewer = TextEdit()
+        viewer.setReadOnly(True)
+        viewer.setPlainText(json.dumps(value, ensure_ascii=False, indent=2))
+        layout.addWidget(viewer)
+        dialog.resize(760, 560)
+        dialog.show()
+
+    def save_manual_answer(self) -> None:
+        question = self._selected_question()
+        if question is None:
+            return
+        dialog = QWidget(self, flags=Qt.WindowType.Dialog)
+        dialog.setWindowTitle("保存人工答案")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(
+            BodyLabel("选择题填写选项完整内容；多选、连线、排序等结构化答案填写 JSON。")
+        )
+        editor = TextEdit()
+        editor.setPlaceholderText('例如：选项正文；或 ["选项一", "选项二"]')
+        layout.addWidget(editor)
+        save = PrimaryPushButton("确认为正确答案并保存")
+        layout.addWidget(save)
+
+        def persist() -> None:
+            text = editor.toPlainText().strip()
+            if not text:
+                QMessageBox.warning(dialog, "question bank", "答案不能为空")
+                return
+            try:
+                try:
+                    value = json.loads(text)
+                except json.JSONDecodeError:
+                    value = text
+                candidate_id = self.controller.save_manual_answer(question, value)
+                self.log.append(f"[manual] saved candidate {candidate_id}")
+                dialog.close()
+            except (OSError, TypeError, ValueError) as error:
+                QMessageBox.critical(dialog, "question bank", str(error))
+
+        save.clicked.connect(persist)
+        dialog.resize(620, 360)
+        dialog.show()
 
 
 class SettingsPage(QWidget):
