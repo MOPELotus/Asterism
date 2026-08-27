@@ -40,6 +40,7 @@ class DraftEditorTests(unittest.TestCase):
             ],
         )
         self.assertEqual(value["unresolved_question_ids"], [])
+        self.assertEqual(editor.answers["q2"], "plain text")
         editor.answers.pop("q1")
         self.assertEqual(editor.current_payload()["unresolved_question_ids"], ["q1"])
         editor.close()

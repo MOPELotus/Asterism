@@ -31,7 +31,8 @@ class FormalDraftEditor(QDialog):
         root = QVBoxLayout(self)
         root.addWidget(
             BodyLabel(
-                "逐题确认和补漏。答案使用 JSON 表达；普通文本请写成 JSON 字符串，例如 \"答案\"。"
+                "逐题确认和补漏。选择、连线、排序等结构化答案填写 JSON；"
+                "主观题可直接填写普通纯文本。"
             )
         )
         self.table = TableWidget()
@@ -114,17 +115,23 @@ class FormalDraftEditor(QDialog):
         layout = QVBoxLayout(dialog)
         editor = TextEdit()
         if remote_id in self.answers:
-            editor.setPlainText(json.dumps(self.answers[remote_id], ensure_ascii=False, indent=2))
+            value = self.answers[remote_id]
+            editor.setPlainText(
+                value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+            )
         layout.addWidget(editor)
         save = PrimaryPushButton("应用答案")
         layout.addWidget(save)
 
         def apply() -> None:
-            try:
-                value = json.loads(editor.toPlainText())
-            except json.JSONDecodeError as error:
-                QMessageBox.critical(dialog, "formal draft", f"答案必须是有效 JSON：{error}")
-                return
+            text = editor.toPlainText().strip()
+            if not text:
+                value = None
+            else:
+                try:
+                    value = json.loads(text)
+                except json.JSONDecodeError:
+                    value = text
             if value is None:
                 self.answers.pop(remote_id, None)
             else:
