@@ -752,6 +752,12 @@ class ProviderPage(QWidget):
             return None
         return concurrency
 
+    def _batch_concurrency(self) -> int | None:
+        """Only chaoxing exposes cross-task concurrency to the desktop operator."""
+        if self.provider != "chaoxing":
+            return 1
+        return self._ask_concurrency()
+
     @staticmethod
     def _preview_text(value: Any, *, limit: int = 500) -> str:
         if isinstance(value, (dict, list, tuple)):
@@ -1038,7 +1044,7 @@ class ProviderPage(QWidget):
         execution_settings = self._execution_settings(combination)
         concurrency = 1
         if routine:
-            concurrency = self._ask_concurrency()
+            concurrency = self._batch_concurrency()
             if concurrency is None:
                 return
         if formal:

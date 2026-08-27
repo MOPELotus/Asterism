@@ -99,6 +99,23 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn('"failed":1', text)
             window.close()
 
+    def test_only_chaoxing_exposes_batch_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
+            pages = {
+                page.provider: page
+                for page in window.pages
+                if isinstance(page, ProviderPage)
+            }
+            pages["chaoxing"]._ask_concurrency = lambda: 8
+            self.assertEqual(pages["chaoxing"]._batch_concurrency(), 8)
+            for provider in ("welearn", "uai", "cidaren"):
+                pages[provider]._ask_concurrency = lambda provider=provider: self.fail(
+                    f"{provider} must not ask for cross-task concurrency"
+                )
+                self.assertEqual(pages[provider]._batch_concurrency(), 1)
+            window.close()
+
     def test_cidaren_oauth_result_exposes_copyable_authorization_dialog(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             window = MainWindow(Path(temporary), Path(__file__).resolve().parents[1])
