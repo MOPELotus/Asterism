@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -135,7 +136,9 @@ def main() -> int:
         source = package / "resources" / "workers" / provider / "SOURCE.json"
         if not worker.exists() or not source.exists():
             raise SystemExit(f"portable package is missing {provider} worker resources")
-    process = subprocess.Popen([str(executable)], cwd=package)
+    environment = os.environ.copy()
+    environment["ASTERISM_NONINTERACTIVE"] = "1"
+    process = subprocess.Popen([str(executable)], cwd=package, env=environment)
     try:
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
@@ -146,6 +149,19 @@ def main() -> int:
             time.sleep(0.25)
         else:
             raise SystemExit("Asterism.exe did not initialize its local data directory")
+        second = subprocess.Popen([str(executable)], cwd=package, env=environment)
+        try:
+            second_code = second.wait(timeout=10)
+        except subprocess.TimeoutExpired as error:
+            second.kill()
+            second.wait(timeout=5)
+            raise SystemExit(
+                "second Asterism.exe instance did not reject the occupied data directory"
+            ) from error
+        if second_code != 2:
+            raise SystemExit(
+                f"second Asterism.exe instance returned unexpected code {second_code}"
+            )
     finally:
         process.terminate()
         try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,11 +35,12 @@ def main(argv: list[str] | None = None) -> int:
     application.setOrganizationName("Asterism")
     instance_lock = acquire_instance_lock(args.data_root)
     if instance_lock is None:
-        QMessageBox.critical(
-            None,
-            "Asterism",
-            "相同数据目录已有 Asterism 实例正在运行。",
-        )
+        if os.environ.get("ASTERISM_NONINTERACTIVE") != "1":
+            QMessageBox.critical(
+                None,
+                "Asterism",
+                "相同数据目录已有 Asterism 实例正在运行。",
+            )
         return 2
     try:
         window = MainWindow(args.data_root, args.source_root)
