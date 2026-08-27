@@ -511,11 +511,18 @@ class ProviderPage(QWidget):
         data = result.data if hasattr(result, "data") else result
         preview = json.dumps(self._safe_preview(data), ensure_ascii=False, default=str)
         self.log.append(f"[{label}] {preview}")
+        event = "success"
+        summary: dict[str, Any] = {"status": "success"}
+        if label == "batch run" and isinstance(result, list):
+            failed = sum(1 for item in result if getattr(item, "error_code", None))
+            completed = len(result) - failed
+            event = "failure" if failed else "success"
+            summary = {"status": event, "completed": completed, "failed": failed}
         self.controller.notify(
-            "success",
+            event,
             provider=self.provider,
             operation=label,
-            summary={"status": "success"},
+            summary=summary,
         )
         self.cancel_button.setEnabled(False)
         self.cancel_event = None
@@ -536,6 +543,19 @@ class ProviderPage(QWidget):
         """Keep the UI useful without echoing credentials or huge payloads."""
         if depth > 4:
             return "<truncated>"
+        if hasattr(value, "task_remote_id") and hasattr(value, "error_code"):
+            return {
+                "task_remote_id": str(getattr(value, "task_remote_id", "")),
+                "error_code": getattr(value, "error_code", None),
+                "error_message": ProviderPage._preview_text(
+                    getattr(value, "error_message", ""), limit=300
+                ),
+            }
+        if hasattr(value, "operation") and hasattr(value, "data"):
+            return {
+                "operation": str(getattr(value, "operation", "")),
+                "data": ProviderPage._safe_preview(getattr(value, "data", {}), depth=depth + 1),
+            }
         if isinstance(value, dict):
             result = {}
             for key, child in value.items():

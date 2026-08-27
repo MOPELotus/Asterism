@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -49,6 +50,18 @@ class GuiSmokeTests(unittest.TestCase):
                 "run", {"type": "progress", "current": 2, "total": 5, "message": "working"}
             )
             self.assertIn("progress 2/5 working", chaoxing_page.log.toPlainText())
+            safe = ProviderPage._safe_preview(
+                [
+                    SimpleNamespace(
+                        task_remote_id="task-1",
+                        error_code=None,
+                        result=SimpleNamespace(
+                            operation="run", data={"session": {"token": "secret-token"}}
+                        ),
+                    )
+                ]
+            )
+            self.assertNotIn("secret-token", str(safe))
             for mode in ThemeMode:
                 self.assertEqual(apply_theme(self.application, mode), mode)
             self.assertGreater(window.width(), 0)
