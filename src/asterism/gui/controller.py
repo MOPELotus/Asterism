@@ -23,6 +23,7 @@ from ..providers import ProviderRegistry
 from ..runner import RunnerError, RunnerManager
 from ..scan import ReadOnlyScanCoordinator, ScanStatus
 from ..service import ProviderOperationResult, ProviderService
+from ..upstreams import resolve as resolve_upstream
 
 
 @dataclass
@@ -45,7 +46,7 @@ class DesktopController:
         paths = DataPaths.resolve(data_root)
         paths.initialize()
         resources = Path(source_root).resolve() if source_root else application_root()
-        registry = ProviderRegistry(resources)
+        registry = ProviderRegistry(resources, data_root=paths.root)
         config_store = LocalConfigStore(paths.config)
         bank = QuestionBank(paths.database)
         bank.initialize()
@@ -86,6 +87,18 @@ class DesktopController:
         # A health call does not require a Profile or credentials.
         spec = self.service.registry.get(provider)
         return self.service.runner.invoke(spec, "health", timeout=30, on_event=on_event)
+
+    def install_external_upstream(self, provider: str) -> dict[str, str]:
+        """Install a pinned external donor after explicit UI confirmation."""
+        if provider != "welearn":
+            raise ValueError("only welearn supports an external donor in this release")
+        path = resolve_upstream(
+            self.service.registry.source_root,
+            self.paths.root,
+            provider,
+            allow_network=True,
+        )
+        return {"status": "ok", "provider": provider, "path": str(path)}
 
     def save_profile(
         self,

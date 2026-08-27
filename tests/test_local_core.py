@@ -37,6 +37,7 @@ from asterism.providers import ProviderRegistry, WorkerSpec
 from asterism.runner import RunnerError, RunnerManager
 from asterism.scan import ReadOnlyScanCoordinator
 from asterism.service import ProviderOperationResult, ProviderService
+from asterism.upstreams import UpstreamError, discover_local, load_spec
 from workers.common.runtime import payload_secrets
 from workers.uai.worker import find_browser
 
@@ -113,6 +114,27 @@ class LocalStoreTests(unittest.TestCase):
         uai = registry.get("uai")
         self.assertTrue(chaoxing.environment["ASTERISM_CHAOXING_AUXILIARY_SOURCES"].endswith("AUXILIARY_SOURCES.json"))
         self.assertTrue(uai.environment["ASTERISM_UAI_BROWSER_SOURCE_METADATA"].endswith("BROWSER_SOURCE.json"))
+
+    def test_welearn_upstream_prefers_pinned_bundled_checkout(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        registry = ProviderRegistry(source_root, data_root=self.paths.root)
+        spec = registry.get("welearn")
+        self.assertEqual(
+            spec.upstream,
+            source_root / "upstreams" / "welearn" / "welearn_decompiled.py",
+        )
+
+    def test_external_upstream_requires_explicit_network_permission(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        spec = load_spec(source_root, "welearn")
+        self.assertEqual(
+            discover_local(source_root, self.paths.root, spec),
+            source_root / "upstreams" / "welearn",
+        )
+        from asterism.upstreams import fetch_pinned
+
+        with self.assertRaises(UpstreamError):
+            fetch_pinned(spec, self.paths.root / "upstreams" / "welearn", allow_network=False)
 
     def test_provider_registry_validates_auxiliary_donors_before_start(self) -> None:
         registry = ProviderRegistry(Path(__file__).resolve().parents[1])

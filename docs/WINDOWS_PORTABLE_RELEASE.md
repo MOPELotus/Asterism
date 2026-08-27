@@ -13,7 +13,8 @@ asterism-windows-arm64-<version>.zip
 Build Tools 或项目依赖；程序不注册服务、不修改 PATH，也不要求管理员权限。
 
 默认使用 Nuitka `standalone`，不使用 onefile。Asterism 包含 Qt、现有 Provider Runner、
-donor、浏览器自动化和 native/OCR 资源；固定的解压路径和可诊断的启动过程比单文件更重要。
+许可允许携带的 donor、浏览器自动化和 native/OCR 资源；固定的解压路径和可诊断的启动过程比
+单文件更重要。对于许可证尚未确认的 donor，可构建外部 donor 模式，包内不携带该 donor。
 
 ## 包内结构
 
@@ -26,6 +27,11 @@ resources/licenses/      第三方许可证副本与 SOURCES.json
 README.txt               首次启动、数据目录和备份说明
 SHA256SUMS.json          包内文件校验清单
 ```
+
+外部 donor 模式不包含 `resources/upstreams/welearn`。首次使用 `welearn` 前，程序按
+`workers/welearn/SOURCE.json` 中的固定 revision 查找本地 donor；只有操作者显式允许网络时，
+才尝试系统 Git 的 detached checkout，随后回退到固定 commit ZIP。任何下载结果都必须通过入口
+文件 SHA-256 校验，并保存到可变数据目录 `data/upstreams/welearn`；不会自动跟踪 `main`/`master`。
 
 首次启动时在程序目录旁创建可写的 `accounts/`、`state/`、`drafts/`、`logs/`、`data/`
 和本地配置。构建时必须使用资源 allowlist，禁止递归打包仓库、开发缓存或本地数据。固定
@@ -65,8 +71,10 @@ manifest 路径穿越、文件缺失、哈希不匹配或包内出现未列出�
 临时 profile 启动随包 Chromium 的 headless `--dump-dom` 烟测；进程非零退出、超时或未返回预期页面标记均会阻止产物上传。
 
 当前 `welearn` donor 的固定 revision 未提供可确认的再分发许可证，`SOURCE.json` 仍为
-`NOASSERTION`。按本计划的发布安全边界，便携构建会在实际编译前明确失败并列出阻断来源；
-在确认授权或替换为许可清晰的 donor 前，不生成一个暗中缺少 `welearn` 的“完整”发布包。
+`NOASSERTION`。默认完整便携构建会在实际编译前明确失败并列出阻断来源；在确认授权或替换为
+许可清晰的 donor 前，不生成一个暗中缺少 `welearn` 的“完整”发布包。需要测试其他平台时可显式
+使用 `--external-welearn` 生成不携带该 donor 的外部模式包；此模式必须在首次使用前由操作者
+准备本地 donor。
 构建同样会检查 `chaoxing` 的 CxKitty 辅助 donor 和 `uai` 的浏览器脚本 manifest，二者的
 许可证必须显式记录在 metadata 中。所有主 donor 和辅助 donor 还必须通过入口文件 SHA-256
 校验；在 Git checkout 中同时校验 submodule `HEAD` 与固定 revision，源码归档没有 `.git`

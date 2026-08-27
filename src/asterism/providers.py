@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .constants import PROVIDER_IDS
+from .upstreams import UpstreamError
+from .upstreams import resolve as resolve_upstream
 
 
 @dataclass(frozen=True)
@@ -37,9 +39,16 @@ class WorkerSpec:
 
 
 class ProviderRegistry:
-    def __init__(self, source_root: Path, python: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        source_root: Path,
+        python: str | Path | None = None,
+        data_root: Path | None = None,
+    ) -> None:
         self.source_root = source_root.resolve()
         self.python = str(python or sys.executable)
+        self.data_root = (data_root or self.source_root).resolve()
+        self._welearn_resolution_error: UpstreamError | None = None
 
     def get(self, provider: str) -> WorkerSpec:
         if provider not in PROVIDER_IDS:
@@ -56,7 +65,21 @@ class ProviderRegistry:
                 worker / "AUXILIARY_SOURCES.json"
             )
         elif provider == "welearn":
-            upstream = upstream_root / "welearn" / "welearn_decompiled.py"
+            try:
+                resolved_root = resolve_upstream(
+                    self.source_root,
+                    self.data_root,
+                    provider,
+                    allow_network=os.environ.get("ASTERISM_ALLOW_UPSTREAM_DOWNLOAD") == "1",
+                )
+            except UpstreamError as error:
+                # Keep a deterministic path in the spec so validation reports
+                # the missing donor without ever downloading implicitly.
+                resolved_root = upstream_root / provider
+                if not resolved_root.exists():
+                    resolved_root = self.data_root / "data" / "upstreams" / provider
+                self._welearn_resolution_error = error
+            upstream = resolved_root / "welearn_decompiled.py"
         elif provider == "uai":
             upstream = upstream_root / "uai" / "配置我运行我.py"
             environment["ASTERISM_UAI_BROWSER_UPSTREAM"] = str(upstream_root / "uai-browser")
@@ -88,6 +111,13 @@ class ProviderRegistry:
             for path in (executable, spec.upstream, spec.source_metadata)
             if not path.exists()
         ]
+        resolution_error = getattr(self, "_welearn_resolution_error", None)
+        if (
+            spec.provider == "welearn"
+            and resolution_error is not None
+            and not spec.upstream.exists()
+        ):
+            required.append(str(resolution_error))
         if spec.provider == "chaoxing":
             required.extend(
                 str(path)

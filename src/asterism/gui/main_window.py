@@ -148,7 +148,9 @@ class ProviderPage(QWidget):
         if provider == "uai":
             action_items.extend([("inspect", self.inspect_task), ("duration", self.read_duration)])
         elif provider == "welearn":
-            action_items.append(("duration", self.read_duration))
+            action_items.extend(
+                [("duration", self.read_duration), ("install donor", self.install_donor)]
+            )
         if provider == "cidaren":
             action_items.extend(
                 [("oauth begin", self.oauth_begin), ("oauth exchange", self.oauth_exchange)]
@@ -701,6 +703,23 @@ class ProviderPage(QWidget):
     def health(self) -> None:
         self._call(
             lambda on_event: self.controller.health(self.provider, on_event=on_event), "health"
+        )
+
+    def install_donor(self) -> None:
+        if self.provider != "welearn":
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "welearn",
+                "将从固定 revision 获取外部 donor。是否允许使用系统 Git或联网下载？",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self._call(
+            lambda _on_event: self.controller.install_external_upstream(self.provider),
+            "install donor",
         )
 
     def authenticate(self) -> None:

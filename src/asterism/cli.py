@@ -12,6 +12,7 @@ from .paths import DataPaths, application_root
 from .profiles import ProfileStateStore, ProfileStore
 from .providers import ProviderRegistry
 from .runner import RunnerError, RunnerManager
+from .upstreams import resolve as resolve_upstream
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -33,13 +34,22 @@ def _parser() -> argparse.ArgumentParser:
     profile_new.add_argument("label")
     profile_list = profile_command.add_parser("list", help="list profiles without credentials")
     profile_list.add_argument("--provider", choices=PROVIDER_IDS)
+    upstream = command.add_parser("upstream", help="inspect or install a pinned upstream")
+    upstream_command = upstream.add_subparsers(dest="upstream_command", required=True)
+    upstream_install = upstream_command.add_parser(
+        "install", help="install a pinned provider donor"
+    )
+    upstream_install.add_argument("provider", choices=PROVIDER_IDS)
+    upstream_install.add_argument(
+        "--network", action="store_true", help="allow GitHub clone/archive download"
+    )
     return parser
 
 
 def _context(args: argparse.Namespace):
     paths = DataPaths.resolve(args.data_root)
     source_root = (args.source_root or application_root()).resolve()
-    registry = ProviderRegistry(source_root)
+    registry = ProviderRegistry(source_root, data_root=paths.root)
     profiles = ProfileStore(paths)
     states = ProfileStateStore(paths)
     runner = RunnerManager(registry, paths.logs, states)
@@ -87,6 +97,22 @@ def main(argv: list[str] | None = None) -> int:
             ]
             print(json.dumps(values, ensure_ascii=False))
             return 0
+        if args.command == "upstream":
+            _initialize(paths)
+            if args.upstream_command == "install":
+                resolved = resolve_upstream(
+                    registry.source_root,
+                    paths.root,
+                    args.provider,
+                    allow_network=args.network,
+                )
+                print(
+                    json.dumps(
+                        {"status": "ok", "provider": args.provider, "path": str(resolved)},
+                        ensure_ascii=False,
+                    )
+                )
+                return 0
         if args.command == "health":
             _initialize(paths)
             specs = registry.all() if args.provider == "all" else (registry.get(args.provider),)

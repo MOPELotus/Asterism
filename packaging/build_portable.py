@@ -173,10 +173,12 @@ def validate_source_integrity(metadata_path: Path, donor_root: Path) -> None:
             )
 
 
-def validate_sources() -> list[dict[str, str]]:
+def validate_sources(*, external_welearn: bool = False) -> list[dict[str, str]]:
     blocked: list[dict[str, str]] = []
     notices: list[dict[str, str]] = []
     for metadata_name, donor_name in SOURCE_LOCATIONS:
+        if external_welearn and donor_name == Path("upstreams/welearn"):
+            continue
         validate_source_integrity(ROOT / metadata_name, ROOT / donor_name)
     for metadata_path in sorted((ROOT / "workers").glob("*/SOURCE.json")):
         metadata = _source_records(metadata_path)[0]
@@ -187,7 +189,9 @@ def validate_sources() -> list[dict[str, str]]:
             "revision": str(metadata.get("revision") or ""),
             "license": license_name,
         }
-        if license_name not in ALLOWED_LICENSES:
+        if license_name not in ALLOWED_LICENSES and not (
+            external_welearn and metadata_path == ROOT / "workers" / "welearn" / "SOURCE.json"
+        ):
             blocked.append(item)
         notices.append(item)
     for metadata_path in (
@@ -279,11 +283,15 @@ def copy_git_tracked_tree(source: Path, destination: Path) -> None:
         shutil.copy2(path, target)
 
 
-def stage_resources(stage: Path, notices: list[dict[str, str]]) -> Path:
+def stage_resources(
+    stage: Path, notices: list[dict[str, str]], *, external_welearn: bool = False
+) -> Path:
     resources = stage / "resources"
     resources.mkdir(parents=True, exist_ok=True)
     copied_donors: set[Path] = set()
     for _metadata_name, donor_name in SOURCE_LOCATIONS:
+        if external_welearn and donor_name == Path("upstreams/welearn"):
+            continue
         if donor_name in copied_donors:
             continue
         copied_donors.add(donor_name)
@@ -429,13 +437,18 @@ def main() -> int:
     parser.add_argument("--architecture", choices=("x64", "arm64"), required=True)
     parser.add_argument("--version", default="dev")
     parser.add_argument("--output-root", type=Path, default=ROOT / "release")
+    parser.add_argument(
+        "--external-welearn",
+        action="store_true",
+        help="omit the unresolved welearn donor; acquire it locally before use",
+    )
     args = parser.parse_args()
     validate_native_architecture(args.architecture)
-    notices = validate_sources()
+    notices = validate_sources(external_welearn=args.external_welearn)
     stage = ROOT / "build" / "portable" / args.architecture
     if stage.exists():
         shutil.rmtree(stage)
-    resources = stage_resources(stage, notices)
+    resources = stage_resources(stage, notices, external_welearn=args.external_welearn)
     python = sys.executable
     gui_dist = build_executable(
         python,
@@ -462,7 +475,12 @@ def main() -> int:
         shutil.copytree(worker_dist.parent, destination, dirs_exist_ok=True)
     (package / "README.txt").write_text(
         "Asterism local desktop portable package. Double-click Asterism.exe.\n"
-        "Local accounts and data are created beside the executable.\n",
+        "Local accounts and data are created beside the executable.\n"
+        + (
+            "The welearn donor is external; install it from its pinned revision before use.\n"
+            if args.external_welearn
+            else ""
+        ),
         encoding="utf-8",
     )
     manifest = {

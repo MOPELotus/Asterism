@@ -142,6 +142,8 @@ def smoke_worker_health(package: Path, provider: str) -> dict[str, object]:
         if provider == "uai"
         else upstream_root / "cidaren"
     )
+    if provider == "welearn" and not upstream.exists():
+        return {"status": "external", "message": "welearn donor is acquired at runtime"}
     metadata = worker_root / "SOURCE.json"
     request = {
         "request_id": f"portable-health-{provider}",
