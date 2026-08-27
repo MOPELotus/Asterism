@@ -32,7 +32,7 @@ from asterism.gui.controller import DesktopController
 from asterism.inventory import InventoryStore
 from asterism.notifications import NotificationDispatcher
 from asterism.paths import DataPaths
-from asterism.profiles import ProfileStateStore, ProfileStore
+from asterism.profiles import Profile, ProfileStateStore, ProfileStore
 from asterism.providers import ProviderRegistry, WorkerSpec
 from asterism.runner import RunnerError, RunnerManager
 from asterism.scan import ReadOnlyScanCoordinator
@@ -1678,6 +1678,13 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(status.course_count, 0)
         self.assertEqual(status.completed_tasks, 0)
         self.assertEqual(status.completed_task_refs, [])
+
+    def test_profile_rejects_non_boolean_enabled_value(self) -> None:
+        profile = self.profiles.create("chaoxing", "strict-enabled")
+        value = profile.to_dict()
+        value["enabled"] = "false"
+        with self.assertRaisesRegex(ValueError, "profile.enabled"):
+            Profile.from_dict(value)
 
 
 if __name__ == "__main__":

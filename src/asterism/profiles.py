@@ -53,13 +53,19 @@ class Profile:
         settings = value.get("settings", {})
         if not isinstance(credentials, dict) or not isinstance(settings, dict):
             raise ValueError("credentials and settings must be JSON objects")
+        enabled = value.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError("profile.enabled must be a boolean")
+        label = str(value["label"]).strip()
+        if not label:
+            raise ValueError("profile label must not be empty")
         return cls(
             id=_profile_id(str(value["id"])),
             provider=_provider(str(value["provider"])),
-            label=str(value["label"]),
+            label=label,
             credentials=dict(credentials),
             settings=dict(settings),
-            enabled=bool(value.get("enabled", True)),
+            enabled=enabled,
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
             version=version,
