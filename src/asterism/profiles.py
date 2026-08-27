@@ -140,6 +140,9 @@ class ProfileStateStore:
     def save(self, profile: Profile, name: str, value: dict[str, Any]) -> None:
         atomic_write_json(self._path(profile, name), value)
 
+    def delete(self, profile: Profile, name: str) -> None:
+        self._path(profile, name).unlink(missing_ok=True)
+
     def delete_profile(self, profile: Profile) -> None:
         """Remove generated session/state for a profile, never the account file."""
         target = (self.paths.state / profile.provider / profile.id).resolve()

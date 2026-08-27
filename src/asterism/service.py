@@ -141,7 +141,7 @@ class ProviderService:
         binding = self.states.load(profile, "oauth-binding")
         if binding is None:
             raise ValueError("cidaren OAuth has not been started for this profile")
-        return self._invoke(
+        result = self._invoke(
             profile,
             "oauth_exchange",
             {
@@ -152,6 +152,8 @@ class ProviderService:
             retry_authentication=False,
             on_event=on_event,
         )
+        self.states.delete(profile, "oauth-binding")
+        return result
 
     def courses(
         self,

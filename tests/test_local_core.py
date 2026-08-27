@@ -636,6 +636,30 @@ class LocalStoreTests(unittest.TestCase):
         self.assertIs(calls[1][2]["profile"], profile)
         self.assertIs(calls[2][2]["profile"], profile)
 
+    def test_cidaren_oauth_exchange_consumes_successful_binding(self) -> None:
+        class FakeRegistry:
+            def get(self, provider):
+                return SimpleNamespace(provider=provider)
+
+        class FakeRunner:
+            def invoke(self, _spec, operation, payload, **_kwargs):
+                self.operation = operation
+                self.payload = payload
+                return SimpleNamespace(data={"session": {"token": "fresh"}})
+
+        profile = ProfileStore(self.paths).create("cidaren", "oauth")
+        states = ProfileStateStore(self.paths)
+        states.save(
+            profile,
+            "oauth-binding",
+            {"state_digest": "state", "marker_digest": "marker"},
+        )
+        runner = FakeRunner()
+        service = ProviderService(FakeRegistry(), runner, states, SimpleNamespace())
+        service.oauth_exchange(profile, "https://callback.test/?code=ok")
+        self.assertEqual(runner.operation, "oauth_exchange")
+        self.assertIsNone(states.load(profile, "oauth-binding"))
+
     def test_cidaren_answer_bridge_is_loopback_scoped_and_dispatches_observations(self) -> None:
         resolved: list[dict] = []
         observed: list[dict] = []
