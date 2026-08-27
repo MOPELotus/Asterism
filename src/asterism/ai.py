@@ -256,9 +256,8 @@ class AIAnswerService:
                 raise RuntimeError("AI subjective answer must be non-empty plain text")
             text = value.strip()
             marker_pattern = (
-                r"(?i)(?:^|[\s\[（(])"
-                r"(?:system|assistant|user|测试文本|自动化测试)"
-                r"(?:$|[\s\]）):：])"
+                r"(?im)^\s*(?:system|assistant|user|测试文本|自动化测试)"
+                r"\s*[:：]"
             )
             if re.search(marker_pattern, text):
                 raise RuntimeError("AI subjective answer contains system or test text")

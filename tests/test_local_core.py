@@ -703,6 +703,12 @@ class LocalStoreTests(unittest.TestCase):
             AIAnswerService._validate_answer(question, "A natural plain-text response."),
             "A natural plain-text response.",
         )
+        self.assertEqual(
+            AIAnswerService._validate_answer(
+                question, "The user should compare the result with the source."
+            ),
+            "The user should compare the result with the source.",
+        )
 
     def test_ai_cache_revalidates_subjective_answer_before_reuse(self) -> None:
         config = LocalConfigStore(self.paths.config)
