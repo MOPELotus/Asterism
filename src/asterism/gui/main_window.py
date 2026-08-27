@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -31,20 +32,20 @@ from ..profiles import Profile
 from .controller import DesktopController
 from .draft_editor import FormalDraftEditor
 from .fluent import (
+    FLUENT_AVAILABLE,
     BodyLabel,
     CaptionLabel,
     CardWidget,
     CheckBox,
     ComboBox,
-    FLUENT_AVAILABLE,
     FluentIcon,
     FluentWindow,
-    NavigationItemPosition,
     LineEdit,
+    NavigationItemPosition,
     PrimaryPushButton,
     PushButton,
-    SubtitleLabel,
     StrongBodyLabel,
+    SubtitleLabel,
     TableWidget,
     TextEdit,
     ThemeMode,
@@ -141,8 +142,15 @@ class HomePage(QWidget):
         tips_layout.setContentsMargins(20, 16, 20, 16)
         tips_layout.setSpacing(5)
         tips_layout.addWidget(StrongBodyLabel("开始使用"))
-        tips_layout.addWidget(CaptionLabel("1. 打开左侧平台页面；2. 新建账号 Profile；3. 点击认证 / 登录；4. 读取课程。"))
-        tips_layout.addWidget(CaptionLabel("课程、任务和题目读取不会提交平台数据；作业和考试需在草稿页人工确认后才能提交。"))
+        tips_layout.addWidget(
+            CaptionLabel(
+                "1. 打开左侧平台页面；2. 新建账号 Profile；"
+                "3. 点击认证 / 登录；4. 读取课程。"
+            )
+        )
+        tips_layout.addWidget(
+            CaptionLabel("课程、任务和题目读取不会提交平台数据；作业和考试需在草稿页人工确认后才能提交。")
+        )
         layout.addWidget(tips)
         layout.addStretch(1)
         self.update_summary()
@@ -185,7 +193,9 @@ class ProviderPage(QWidget):
             BodyLabel("先创建或选择一个本地 Profile，再点击认证。认证成功后即可读取课程和任务。")
         )
         intro_layout.addWidget(
-            CaptionLabel("账号凭据只保存在本机 Profile；当前页面的课程、任务和题目操作默认是只读的。")
+            CaptionLabel(
+                "账号凭据只保存在本机 Profile；当前页面的课程、任务和题目操作默认是只读的。"
+            )
         )
         root.addWidget(intro)
         header = QHBoxLayout()
@@ -234,7 +244,9 @@ class ProviderPage(QWidget):
                 ]
             )
         if provider == "uai":
-            action_items.extend([("读取必做项", self.inspect_task), ("读取时长", self.read_duration)])
+            action_items.extend(
+                [("读取必做项", self.inspect_task), ("读取时长", self.read_duration)]
+            )
         elif provider == "welearn":
             action_items.extend(
                 [("读取时长", self.read_duration), ("安装 donor", self.install_donor)]
@@ -1495,8 +1507,17 @@ class QuestionBankPage(QWidget):
         intro_layout.setContentsMargins(20, 16, 20, 16)
         intro_layout.setSpacing(5)
         intro_layout.addWidget(TitleLabel("全局题库"))
-        intro_layout.addWidget(BodyLabel("题目按题干、材料、选项内容和媒体语义匹配，平台题号和选项 ID 不作为唯一依据。"))
-        intro_layout.addWidget(CaptionLabel("AI 结果、平台返回的正误观察和人工答案都会写入本机缓存；当前页面不直接提交平台答案。"))
+        intro_layout.addWidget(
+            BodyLabel(
+                "题目按题干、材料、选项内容和媒体语义匹配，平台题号和选项 ID 不作为唯一依据。"
+            )
+        )
+        intro_layout.addWidget(
+            CaptionLabel(
+                "AI 结果、平台返回的正误观察和人工答案都会写入本机缓存；"
+                "当前页面不直接提交平台答案。"
+            )
+        )
         root.addWidget(intro)
         stats_card = CardWidget()
         stats_layout = QVBoxLayout(stats_card)
@@ -1704,7 +1725,12 @@ class SettingsPage(QWidget):
         editor_layout.setContentsMargins(20, 16, 20, 16)
         editor_layout.setSpacing(8)
         editor_layout.addWidget(StrongBodyLabel("高级配置"))
-        editor_layout.addWidget(CaptionLabel("需要精细调整模型或 Provider 参数时，可直接编辑 JSON。保存前请确认格式正确。"))
+        editor_layout.addWidget(
+            CaptionLabel(
+                "需要精细调整模型或 Provider 参数时，可直接编辑 JSON。"
+                "保存前请确认格式正确。"
+            )
+        )
         self.editor = TextEdit()
         self.editor.setPlainText(
             json.dumps(controller.config.ensure(), ensure_ascii=False, indent=2)
@@ -1785,10 +1811,8 @@ class MainWindow(FluentWindow if FLUENT_AVAILABLE else QMainWindow):
     def _init_fluent_shell(self) -> None:
         # Mica is optional and can crash on older Windows/remote desktop sessions.
         # FluentWindow still provides the native title bar and navigation without it.
-        try:
+        with suppress(AttributeError, RuntimeError):
             self.setMicaEffectEnabled(False)
-        except (AttributeError, RuntimeError):
-            pass
         self.navigation = None
         self.stack = None
         self.setMinimumSize(960, 640)
