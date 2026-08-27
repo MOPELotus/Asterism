@@ -41,14 +41,21 @@ jobs:
       - name: Run local and worker tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-CheckedNative([string] $name, [scriptblock] $command) {
+            & $command
+            if ($LASTEXITCODE -ne 0) {
+              throw "$name failed with exit code $LASTEXITCODE"
+            }
+          }
           # The full discovery includes GUI smoke tests; configure Qt before
           # importing any PyQt module so headless Windows runners do not try
           # to load the desktop platform plugin.
           $env:QT_QPA_PLATFORM = 'offscreen'
-          python -m ruff check src tests packaging workers/common/runtime.py
-          python -W error::ResourceWarning -m unittest discover -s tests
-          python workers/run_tests.py
-          python -m unittest tests.test_gui_smoke -v
+          Invoke-CheckedNative 'ruff' { python -m ruff check src tests packaging workers/common/runtime.py }
+          Invoke-CheckedNative 'local tests' { python -W error::ResourceWarning -m unittest discover -s tests }
+          Invoke-CheckedNative 'worker tests' { python workers/run_tests.py }
+          Invoke-CheckedNative 'GUI smoke tests' { python -m unittest tests.test_gui_smoke -v }
       - name: Build portable ZIP
         shell: pwsh
         run: >-
